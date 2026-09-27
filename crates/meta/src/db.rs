@@ -15,6 +15,12 @@ pub(crate) fn open(path: &Path, migrations: &[&str]) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
+    // On Apple systems fsync() doesn't reach the disk's platters or flash; F_FULLFSYNC
+    // does. Without these, a power cut can lose commits that were acknowledged.
+    if cfg!(target_vendor = "apple") {
+        conn.pragma_update(None, "fullfsync", true)?;
+        conn.pragma_update(None, "checkpoint_fullfsync", true)?;
+    }
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     let known = i64::try_from(migrations.len()).unwrap_or(i64::MAX);
@@ -59,6 +65,20 @@ mod tests {
             Err(MetaError::NewerSchema { found: 2, known: 1 }) => {}
             other => panic!("expected NewerSchema, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn commits_are_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("t.db"), V2).unwrap();
+        let sync: i64 = conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "synchronous=FULL");
+        let full: i64 = conn
+            .pragma_query_value(None, "fullfsync", |r| r.get(0))
+            .unwrap();
+        assert_eq!(full == 1, cfg!(target_vendor = "apple"));
     }
 
     #[test]

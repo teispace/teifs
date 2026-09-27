@@ -101,7 +101,8 @@ a bucket on another disk, copied to the bucket's `.teifs-tmp` first); the folder
 them is synced too. A write that may only create the object (`If-None-Match: *`) is put
 in place with a hard link, which the file system refuses if anything, even another
 program's file, appeared there meanwhile. Both databases commit with SQLite's
-`synchronous=FULL`. Every acknowledged write survives a power cut; a write in progress
+`synchronous=FULL` (plus `fullfsync` on macOS, where a plain `fsync` doesn't reach the
+disk). Every acknowledged write survives a power cut; a write in progress
 leaves nothing behind.
 
 ## Upgrades
