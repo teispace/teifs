@@ -54,6 +54,9 @@ complete.
   collides with an existing file or folder (a file and a folder with the same name, or
   names that differ only in letter case on a case-insensitive disk).
 - Symbolic links inside a bucket are never followed.
+- `.teifs-tmp` at the top of a bucket is reserved: writes to a bucket on another disk
+  than the drive stage there, so the last step is an atomic rename on that disk. It's
+  never listed and is emptied at every start.
 
 ### `index.db`
 
@@ -93,8 +96,11 @@ A bucket folder without a row is a plain bucket with default settings.
 
 ### Durability
 
-Object bytes are written to `.teifs/tmp/`, synced to disk, and renamed into place; the
-folder holding them is synced too. Both databases commit with SQLite's
+Object bytes are written to `.teifs/tmp/`, synced to disk, and renamed into place (for
+a bucket on another disk, copied to the bucket's `.teifs-tmp` first); the folder holding
+them is synced too. A write that may only create the object (`If-None-Match: *`) is put
+in place with a hard link, which the file system refuses if anything, even another
+program's file, appeared there meanwhile. Both databases commit with SQLite's
 `synchronous=FULL`. Every acknowledged write survives a power cut; a write in progress
 leaves nothing behind.
 

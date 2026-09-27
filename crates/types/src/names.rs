@@ -27,6 +27,9 @@ type Result<T> = std::result::Result<T, NameError>;
 pub const MAX_KEY_LEN: usize = 1024;
 /// The longest file name most file systems allow, in bytes.
 pub const MAX_SEGMENT_LEN: usize = 255;
+/// A folder at the top of a bucket that TeiFS may use to stage writes (for a bucket on
+/// another disk than the drive), so no key may start with it.
+pub const BUCKET_STAGING: &str = ".teifs-tmp";
 
 /// Checks a bucket name against S3's rules for new buckets.
 pub fn check_bucket(name: &str) -> Result<()> {
@@ -82,6 +85,11 @@ impl ObjectKey {
         }
         let folder = key.ends_with('/');
         let body = if folder { &key[..key.len() - 1] } else { key };
+        if body.split('/').next() == Some(BUCKET_STAGING) {
+            return Err(invalid(
+                "`.teifs-tmp` at the top of a bucket is reserved for TeiFS",
+            ));
+        }
         let mut rel = PathBuf::new();
         for segment in body.split('/') {
             match segment {
@@ -177,5 +185,9 @@ mod tests {
             assert!(ObjectKey::parse(bad).is_err(), "{bad:?}");
         }
         assert_eq!(ObjectKey::parse(&long_key), Err(NameError::KeyTooLong));
+        for reserved in [".teifs-tmp", ".teifs-tmp/", ".teifs-tmp/x"] {
+            assert!(ObjectKey::parse(reserved).is_err(), "{reserved}");
+        }
+        assert!(ObjectKey::parse("a/.teifs-tmp/x").is_ok());
     }
 }

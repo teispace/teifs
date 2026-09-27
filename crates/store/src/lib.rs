@@ -33,7 +33,7 @@ pub use teifs_meta::{Part, Upload};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
 use error::not_found_as;
-use staged::{TmpFile, sync_dir};
+use staged::{Publish, TmpFile, publish, sync_dir};
 use teifs_types::{Stamp, empty_etag, provisional_etag};
 
 /// The folder in a drive's root that holds TeiFS's own data.
@@ -76,6 +76,11 @@ impl Match {
 }
 
 impl Precondition {
+    /// Whether the write may only create the object (`If-None-Match: *`).
+    fn creates_only(&self) -> bool {
+        self.if_none_match == Some(Match::Any)
+    }
+
     fn check(&self, current: Option<&ObjectInfo>) -> Result<()> {
         let ok_match = self
             .if_match
@@ -141,6 +146,7 @@ impl Store {
         // Whatever was being written when the last run stopped is gone for good.
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
+        sweep_bucket_staging(&root);
         let format = format::prepare(&system)?;
         let db = Index::open(&system.join(format::INDEX_DB))?;
         let system_db = System::open(&system.join(format::SYSTEM_DB))?;
@@ -594,7 +600,19 @@ impl Inner {
         precondition.check(current.as_ref())?;
         let parent = Inner::make_parents(&dir, key)?;
         let path = dir.join(key.rel());
-        fs::rename(tmp, &path)?;
+        let how = if precondition.creates_only() {
+            Publish::CreateNew
+        } else {
+            Publish::Replace
+        };
+        publish(tmp, &path, &dir, how).map_err(|err| {
+            // Something appeared at the key since the check: another program's file.
+            if err.kind() == io::ErrorKind::AlreadyExists {
+                StoreError::PreconditionFailed
+            } else {
+                err.into()
+            }
+        })?;
         sync_dir(&parent)?;
         let meta = fs::metadata(&path)?;
         let stamp = Stamp::of(&meta);
@@ -757,6 +775,19 @@ impl Inner {
         )?;
         tmp.keep();
         Ok(info)
+    }
+}
+
+/// Removes what writes to buckets on other disks left staged when the last run stopped.
+fn sweep_bucket_staging(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let staging = entry.path().join(teifs_types::BUCKET_STAGING);
+        if staging.is_dir() {
+            let _ = fs::remove_dir_all(staging);
+        }
     }
 }
 

@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use teifs_types::MAX_SEGMENT_LEN;
+use teifs_types::{BUCKET_STAGING, MAX_SEGMENT_LEN};
 
 use crate::{Inner, ObjectInfo, Store, error::Result};
 
@@ -251,7 +251,7 @@ fn read_folder(dir: &Path, key_prefix: &str) -> Result<Vec<Entry>> {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.contains('\\') {
+        if name.contains('\\') || (key_prefix.is_empty() && name == BUCKET_STAGING) {
             continue;
         }
         let Ok(kind) = entry.file_type() else {
