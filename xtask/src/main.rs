@@ -16,7 +16,7 @@ fn main() -> ExitCode {
     let root = root();
     let result = match task.as_str() {
         "verify" => verify(&root),
-        "docs" => check_docs(&root),
+        "docs" => check_docs(&root).and_then(|()| check_planning_ids(&root)),
         _ => {
             eprintln!("usage: cargo xtask <verify|docs>");
             return ExitCode::from(2);
@@ -66,6 +66,7 @@ fn verify(root: &Path) -> Result<(), String> {
         return Err("cargo-deny isn't installed: cargo install cargo-deny --locked".into());
     }
     check_docs(root)?;
+    check_planning_ids(root)?;
     println!("verify: all checks passed");
     Ok(())
 }
@@ -206,9 +207,104 @@ fn referenced_paths(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Fails when a file git tracks (or would) names a private planning id: a milestone task (the letter
+/// F, a digit, a dash and two digits), a decision (F, dash, D, dash, digits) or a bare
+/// milestone in parentheses. The maintainer's plans stay out of the public tree.
+fn check_planning_ids(root: &Path) -> Result<(), String> {
+    let out = Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("can't run git: {e}"))?;
+    let mut found = Vec::new();
+    for file in out.stdout.split(|b| *b == 0).filter(|f| !f.is_empty()) {
+        let file = String::from_utf8_lossy(file);
+        // Binary files and the lockfile can't hold prose.
+        let Ok(text) = fs::read_to_string(root.join(file.as_ref())) else {
+            continue;
+        };
+        if file == "Cargo.lock" {
+            continue;
+        }
+        for (number, line) in text.lines().enumerate() {
+            if let Some(id) = planning_id(line) {
+                found.push(format!("{file}:{}: {id}", number + 1));
+            }
+        }
+    }
+    if found.is_empty() {
+        println!("ids: no planning ids in tracked files");
+        Ok(())
+    } else {
+        Err(format!(
+            "planning ids in tracked files:\n  {}",
+            found.join("\n  ")
+        ))
+    }
+}
+
+/// The first planning id in `line`, if any.
+fn planning_id(line: &str) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let digit = |i: usize| chars.get(i).is_some_and(char::is_ascii_digit);
+    let at = |i: usize, c: char| chars.get(i) == Some(&c);
+    let word_start = |i: usize| i == 0 || !chars[i - 1].is_alphanumeric();
+    for i in 0..chars.len() {
+        if !at(i, 'F') || !word_start(i) {
+            continue;
+        }
+        let task = digit(i + 1) && at(i + 2, '-') && digit(i + 3) && digit(i + 4);
+        let decision = at(i + 1, '-') && at(i + 2, 'D') && at(i + 3, '-') && digit(i + 4);
+        let milestone = i > 0 && at(i - 1, '(') && digit(i + 1) && at(i + 2, ')');
+        let end = if task || decision {
+            Some(i + 5)
+        } else if milestone {
+            Some(i + 2)
+        } else {
+            None
+        };
+        if let Some(end) = end
+            && !chars
+                .get(end)
+                .is_some_and(|c| c.is_ascii_digit() && !at(i + 1, '-'))
+        {
+            return Some(chars[i..end].iter().collect());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_planning_ids() {
+        let id = |parts: &[&str]| parts.concat();
+        let task = id(&["F", "1-04"]);
+        let decision = id(&["F-", "D-017"]);
+        let milestone = id(&["(F", "1)"]);
+        assert_eq!(planning_id(&format!("see {task} here")), Some(task.clone()));
+        assert_eq!(planning_id(&format!("{task}b")), Some(task));
+        assert!(planning_id(&format!("per {decision}.")).is_some());
+        assert!(planning_id(&format!("limits {milestone}, later")).is_some());
+        for fine in [
+            "CRC32 F1 key",
+            "0xF1-02",
+            "RFC1-23",
+            "F12",
+            "PF1-04",
+            "F1-2",
+        ] {
+            assert_eq!(planning_id(fine), None, "{fine}");
+        }
+    }
 
     #[test]
     fn finds_paths_in_code_spans() {

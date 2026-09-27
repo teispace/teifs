@@ -18,7 +18,7 @@ Files changed in the working tree:
 | An S3 operation (`crates/s3/src/drive.rs`) | `cargo test -p teifs-server --test sdk`, then a real client against `cargo run -p teifs -- serve <dir>` (see below) |
 | Anything in `.teifs/` or the file layout | `cargo test -p teifs-store --test format`; follow the `changing-on-disk-format` skill |
 | Key or bucket name rules (`crates/types/src/names.rs`) | `cargo test -p teifs-types` and `cargo test -p teifs-store` |
-| Docs | `cargo xtask docs` (every path named in the docs must exist) |
+| Docs | `cargo xtask docs` (every path named in the docs must exist, and no file names a maintainer's planning id) |
 
 Packages: `teifs-types`, `teifs-meta`, `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`,
 `xtask`.

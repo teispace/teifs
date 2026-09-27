@@ -53,7 +53,7 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRY
   before every commit.** Needs `cargo install cargo-nextest cargo-deny --locked`.
 - `cargo test --workspace`: every test, including the AWS SDK end-to-end suite
   (`crates/server/tests/sdk.rs`) and the format fixtures (`crates/store/tests/format.rs`).
-- `cargo xtask docs`: only the docs path check.
+- `cargo xtask docs`: only the docs checks (paths exist, no planning ids).
 - `tests/s3-tests/run.sh [--update]`: the S3 conformance suite against a fresh server
   (needs Python 3); `S3TESTS_K='<pattern>'` runs a subset. Nightly CI runs it in full.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
@@ -92,5 +92,6 @@ a new rule or a pitfall you had to discover. A recurring kind of change without 
 gets one in `.claude/skills/<gerund-name>/SKILL.md`, listed in the table above.
 
 `cargo xtask docs` (part of `cargo xtask verify`) fails when a doc or skill names a path
-that no longer exists, when a skill's frontmatter is invalid, or when a skill is missing
-from the table above.
+that no longer exists, when a skill's frontmatter is invalid, when a skill is missing
+from the table above, or when a file names one of the maintainer's private planning ids
+(milestone tasks and decision numbers stay out of the repository).
