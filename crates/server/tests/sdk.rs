@@ -43,6 +43,7 @@ async fn start() -> Server {
         }),
         default_layout: teifs_store::Layout::Folder,
         kms_keyring: Some(keys.path().join("keyring.json")),
+        kms_transit: None,
         allow_sse_c: true,
         plain_http_is_secure: None,
     })

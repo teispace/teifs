@@ -47,3 +47,24 @@ jobs:
             target/s3-tests/report.xml
             target/s3-tests/pytest.log
             target/s3-tests/server.log
+
+  transit-kms:
+    # Encryption with a real OpenBao transit engine as the KMS.
+    name: Transit KMS (OpenBao)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      openbao:
+        image: openbao/openbao:latest
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: dev-only-token
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports:
+          - 8200:8200
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked -p teifs-server --test transit -- --nocapture
+        env:
+          TEIFS_TEST_TRANSIT_ADDR: http://127.0.0.1:8200
+          VAULT_TOKEN: dev-only-token

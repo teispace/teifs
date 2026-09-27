@@ -31,6 +31,7 @@ SDKs, the Terraform S3 backend).
 | Conditional writes on PutObject, CompleteMultipartUpload and CopyObject (`If-None-Match: *`, `If-Match`) | Supported; atomic on one server |
 | Conditional deletes, RenameObject, GetObjectAttributes, reading one part (`partNumber`), tagging, CORS | Next |
 | Server-side encryption: SSE-S3 (`AES256`), SSE-KMS (`aws:kms`, named keys, encryption context), SSE-C (customer keys) on PutObject, GetObject, HeadObject, CopyObject (source and destination keys), multipart uploads and UploadPartCopy | Supported in object buckets, with AWS's rules: SSE-C only over a secure connection, ETags not MD5 for SSE-KMS and SSE-C |
+| KMS | A local keyring, or a Vault/OpenBao transit engine (tested nightly against OpenBao); `teifs key` lists, creates and rotates keys in either |
 | Get/Put/DeleteBucketEncryption, including `BlockedEncryptionTypes` | Supported. Object buckets default to SSE-S3 with SSE-C blocked, as AWS buckets do since April 2026 |
 | DSSE-KMS (`aws:kms:dsse`), UpdateObjectEncryption, S3 Bucket Keys caching | Not yet (Bucket Key settings are recorded and reported) |
 | Bucket policies, users, STS, ACLs, POST uploads | Planned |

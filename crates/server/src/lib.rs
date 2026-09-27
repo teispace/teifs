@@ -15,7 +15,9 @@ use std::{
 use std::sync::Arc;
 use teifs_s3::Options;
 
-use teifs_store::{BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions};
+use teifs_store::{
+    BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions, TransitKms,
+};
 use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
@@ -35,14 +37,43 @@ pub struct Config {
     /// The layout of buckets created without choosing one.
     pub default_layout: Layout,
     /// The KMS keyring; `None` for the default, `<config dir>/teifs/keys/<drive id>.json`,
-    /// kept off the drive so a copy of the drive alone can't be decrypted.
+    /// kept off the drive so a copy of the drive alone can't be decrypted. Unused with a
+    /// transit engine.
     pub kms_keyring: Option<PathBuf>,
+    /// A Vault or OpenBao transit engine to use as the KMS instead of a keyring. Its
+    /// token comes from `VAULT_TOKEN` (or `BAO_TOKEN`).
+    pub kms_transit: Option<Transit>,
     /// Allow SSE-C on buckets that don't set it themselves (AWS blocks it by default
     /// since April 2026).
     pub allow_sse_c: bool,
     /// Whether plain HTTP counts as secure for SSE-C keys; `None` decides by the listen
     /// address (secure only on loopback).
     pub plain_http_is_secure: Option<bool>,
+}
+
+/// A Vault or OpenBao transit engine.
+#[derive(Debug, Clone)]
+pub struct Transit {
+    /// Its address, such as `https://vault.example:8200`.
+    pub address: String,
+    /// Where the engine is mounted (usually `transit`).
+    pub mount: String,
+    /// A Vault Enterprise or OpenBao namespace.
+    pub namespace: Option<String>,
+}
+
+/// Where a server's KMS keys are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KmsLocation {
+    /// A keyring file; `created` when this start made it (a new key: back it up).
+    Keyring {
+        /// The file.
+        path: PathBuf,
+        /// Whether this start created it.
+        created: bool,
+    },
+    /// A transit engine.
+    Transit(String),
 }
 
 /// Why the server couldn't start.
@@ -78,6 +109,17 @@ pub enum ServerError {
         /// Why.
         source: teifs_store::CryptoError,
     },
+    /// A transit engine was asked for without a token.
+    #[error("set VAULT_TOKEN (or BAO_TOKEN) to use the transit engine at {0}")]
+    NoTransitToken(String),
+    /// The transit engine client couldn't be set up.
+    #[error("can't use the transit engine at {address}: {source}")]
+    Transit {
+        /// The engine.
+        address: String,
+        /// Why.
+        source: teifs_store::CryptoError,
+    },
     /// There's no default place for the keyring (no home folder).
     #[error("there's no config folder for the KMS keyring; give one with --kms-keyring")]
     NoKeyringHome,
@@ -98,8 +140,7 @@ pub struct Server {
     listener: TcpListener,
     access_key: String,
     created_credentials: bool,
-    keyring: PathBuf,
-    created_keyring: bool,
+    kms: KmsLocation,
 }
 
 impl std::fmt::Debug for Server {
@@ -109,6 +150,36 @@ impl std::fmt::Debug for Server {
             .field("access_key", &self.access_key)
             .finish_non_exhaustive()
     }
+}
+
+/// The KMS: a transit engine when one is given, else the keyring (the drive's default one
+/// unless `keyring` names another).
+fn open_kms(
+    transit: Option<Transit>,
+    keyring: Option<PathBuf>,
+    drive: &str,
+) -> Result<(Arc<dyn teifs_store::Kms>, KmsLocation), ServerError> {
+    if let Some(transit) = transit {
+        let token = std::env::var("VAULT_TOKEN")
+            .or_else(|_| std::env::var("BAO_TOKEN"))
+            .map_err(|_| ServerError::NoTransitToken(transit.address.clone()))?;
+        let kms = TransitKms::new(&transit.address, &transit.mount, token, transit.namespace)
+            .map_err(|source| ServerError::Transit {
+                address: transit.address.clone(),
+                source,
+            })?;
+        return Ok((Arc::new(kms), KmsLocation::Transit(transit.address)));
+    }
+    let path = match keyring {
+        Some(path) => path,
+        None => default_keyring(drive)?,
+    };
+    let created = !path.exists();
+    let kms = LocalKms::open(&path).map_err(|source| ServerError::Keyring {
+        path: path.clone(),
+        source,
+    })?;
+    Ok((Arc::new(kms), KmsLocation::Keyring { path, created }))
 }
 
 /// Where a drive's keyring goes by default: the user's config folder, not the drive.
@@ -139,21 +210,15 @@ impl Server {
             path: config.dir.clone(),
             source,
         })?;
-        let keyring = match config.kms_keyring {
-            Some(path) => path,
-            None => default_keyring(&store.format().drive)?,
-        };
-        let created_keyring = !keyring.exists();
-        let kms = LocalKms::open(&keyring).map_err(|source| ServerError::Keyring {
-            path: keyring.clone(),
+        let (kms, location) = open_kms(
+            config.kms_transit,
+            config.kms_keyring,
+            &store.format().drive,
+        )?;
+        store.attach_kms(kms).map_err(|source| ServerError::Open {
+            path: config.dir.clone(),
             source,
         })?;
-        store
-            .attach_kms(Arc::new(kms))
-            .map_err(|source| ServerError::Open {
-                path: config.dir.clone(),
-                source,
-            })?;
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
@@ -184,8 +249,7 @@ impl Server {
             listener,
             access_key,
             created_credentials,
-            keyring,
-            created_keyring,
+            kms: location,
         })
     }
 
@@ -206,16 +270,10 @@ impl Server {
         &self.access_key
     }
 
-    /// The KMS keyring the drive's encrypted objects need.
+    /// Where the KMS keys the drive's encrypted objects need are.
     #[must_use]
-    pub fn keyring(&self) -> &Path {
-        &self.keyring
-    }
-
-    /// Whether this start created the keyring (a new key: back it up).
-    #[must_use]
-    pub fn created_keyring(&self) -> bool {
-        self.created_keyring
+    pub fn kms(&self) -> &KmsLocation {
+        &self.kms
     }
 
     /// Whether this start generated the drive's credentials.

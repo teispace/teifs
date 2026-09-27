@@ -37,7 +37,7 @@ pub use multipart::{MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{BucketEncryption, DefaultEncryption};
 pub use sse::Encryption;
 pub use staged::Staged;
-pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms};
+pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};
 pub use teifs_meta::{Layout, Part, Upload};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 pub use teifs_types::{SseInfo, SseMode};

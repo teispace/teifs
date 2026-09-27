@@ -16,6 +16,7 @@ mod key;
 mod kms;
 mod package;
 mod seal;
+mod transit;
 
 pub use context::Context;
 pub use customer::CustomerKey;
@@ -27,6 +28,7 @@ pub use package::{
     plaintext_len,
 };
 pub use seal::{SealedKey, seal, unseal};
+pub use transit::{TRANSIT, TransitKms};
 
 /// A crypto result.
 pub type Result<T, E = CryptoError> = std::result::Result<T, E>;

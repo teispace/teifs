@@ -94,7 +94,8 @@ Objects in object buckets are encrypted by default (SSE-S3), as specified in
 key and bound to the object's drive, bucket and object ids; 64 KiB authenticated
 packages that can't be reordered, cut short or moved. The KMS keyring lives outside the
 drive (`<config dir>/teifs/keys/<drive id>.json`, mode `0600`), so a copy of the drive
-alone reveals nothing. SSE-C keys are never stored (only a salted HMAC to recognize
+alone reveals nothing; or the keys stay in a Vault or OpenBao transit engine, whose token
+comes only from the environment. SSE-C keys are never stored (only a salted HMAC to recognize
 them), are refused over plain HTTP except on loopback, and are blocked on buckets by
 default. Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
 disk and tampered data fails to decrypt (`crates/store/src/sse_tests.rs`).

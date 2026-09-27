@@ -16,6 +16,10 @@ const VERSION: u8 = 1;
 pub struct SealedKey {
     /// The sealed-key format version.
     pub version: u8,
+    /// Who sealed it: empty for TeiFS itself (a local keyring, or an SSE-C key),
+    /// `transit` for a Vault or OpenBao transit engine.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     /// The KMS key that sealed it (empty for SSE-C).
     pub kms_key: String,
     /// That key's version.
@@ -50,6 +54,7 @@ pub fn seal(
     .expect("sealing a buffer can't fail");
     SealedKey {
         version: VERSION,
+        provider: String::new(),
         kms_key: kms_key.to_owned(),
         kms_version,
         salt: salt.to_vec(),
@@ -61,6 +66,12 @@ pub fn seal(
 pub fn unseal(kek: &[u8; 32], context: &Context, sealed: &SealedKey) -> Result<DataKey> {
     if sealed.version != VERSION {
         return Err(CryptoError::UnknownVersion(sealed.version));
+    }
+    if !sealed.provider.is_empty() {
+        return Err(CryptoError::Kms(format!(
+            "the key was sealed by {}, not by TeiFS",
+            sealed.provider
+        )));
     }
     let canonical = context.canonical();
     let key = aead_key(&hkdf(kek, &sealed.salt, &[b"teifs seal v1", &canonical]));

@@ -18,10 +18,15 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
 
 [lints]
 workspace = true

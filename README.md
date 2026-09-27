@@ -73,8 +73,9 @@ process list.
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
-(`teifs key list|create|rotate`); **back it up**, because encrypted objects can't be read
-without it.
+(`teifs key list|create|rotate`), or in a Vault or OpenBao transit engine
+(`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
+objects can't be read without it.
 
 **Not yet:** users and policies, versioning, Object Lock, lifecycle rules, tagging,
 CORS, website hosting, event notifications, replication, several disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.

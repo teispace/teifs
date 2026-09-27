@@ -10,7 +10,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use teifs_server::{Config, Credentials, Server, credentials};
+use teifs_server::{Config, Credentials, KmsLocation, Server, Transit, credentials};
 use teifs_store::{Layout, ListQuery, Store};
 
 #[derive(Parser)]
@@ -49,6 +49,16 @@ enum Command {
         /// off the drive and back it up: encrypted objects can't be read without it.
         #[arg(long, env = "TEIFS_KMS_KEYRING")]
         kms_keyring: Option<PathBuf>,
+        /// Use a Vault or OpenBao transit engine as the KMS (e.g. `https://vault:8200`);
+        /// its token comes from `VAULT_TOKEN` or `BAO_TOKEN`.
+        #[arg(long, env = "TEIFS_KMS_TRANSIT", conflicts_with = "kms_keyring")]
+        kms_transit: Option<String>,
+        /// Where the transit engine is mounted.
+        #[arg(long, default_value = "transit", env = "TEIFS_KMS_TRANSIT_MOUNT")]
+        kms_transit_mount: String,
+        /// The transit engine's namespace (Vault Enterprise, OpenBao).
+        #[arg(long, env = "TEIFS_KMS_TRANSIT_NAMESPACE")]
+        kms_transit_namespace: Option<String>,
         /// Allow SSE-C (customer-provided keys) on buckets that don't set it themselves;
         /// AWS blocks it by default since April 2026.
         #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
@@ -102,6 +112,16 @@ struct KeyringArgs {
     /// The drive whose default keyring to use.
     #[arg(long, default_value = ".", env = "TEIFS_DIR")]
     dir: PathBuf,
+    /// A Vault or OpenBao transit engine instead of a keyring (token from `VAULT_TOKEN`
+    /// or `BAO_TOKEN`).
+    #[arg(long, env = "TEIFS_KMS_TRANSIT", conflicts_with = "kms_keyring")]
+    kms_transit: Option<String>,
+    /// Where the transit engine is mounted.
+    #[arg(long, default_value = "transit", env = "TEIFS_KMS_TRANSIT_MOUNT")]
+    kms_transit_mount: String,
+    /// The transit engine's namespace.
+    #[arg(long, env = "TEIFS_KMS_TRANSIT_NAMESPACE")]
+    kms_transit_namespace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -200,6 +220,9 @@ async fn run(command: Command) -> Result<(), String> {
             access_key,
             default_layout,
             kms_keyring,
+            kms_transit,
+            kms_transit_mount,
+            kms_transit_namespace,
             allow_sse_c,
             sse_c_over_http,
             ..
@@ -212,6 +235,11 @@ async fn run(command: Command) -> Result<(), String> {
                     domains,
                     default_layout: default_layout.into(),
                     kms_keyring,
+                    kms_transit: kms_transit.map(|address| Transit {
+                        address,
+                        mount: kms_transit_mount,
+                        namespace: kms_transit_namespace,
+                    }),
                     allow_sse_c,
                     sse_c_over_http,
                 },
@@ -245,6 +273,7 @@ struct Options {
     domains: Vec<String>,
     default_layout: Layout,
     kms_keyring: Option<PathBuf>,
+    kms_transit: Option<Transit>,
     allow_sse_c: bool,
     sse_c_over_http: bool,
 }
@@ -273,6 +302,7 @@ async fn serve(
         credentials,
         default_layout: options.default_layout,
         kms_keyring: options.kms_keyring,
+        kms_transit: options.kms_transit,
         allow_sse_c: options.allow_sse_c,
         plain_http_is_secure: options.sse_c_over_http.then_some(true),
     })
@@ -284,11 +314,18 @@ async fn serve(
             credentials::path(server.root()).display()
         );
     }
-    if server.created_keyring() {
-        eprintln!(
+    match server.kms() {
+        KmsLocation::Keyring {
+            path,
+            created: true,
+        } => eprintln!(
             "Created the encryption keyring for this drive in {}\n  Back it up: encrypted objects can't be read without it.",
-            server.keyring().display()
-        );
+            path.display()
+        ),
+        KmsLocation::Keyring { path, .. } => {
+            eprintln!("Encryption keys: {}", path.display());
+        }
+        KmsLocation::Transit(address) => eprintln!("Encryption keys: transit engine at {address}"),
     }
     let address = server.local_addr().map_err(|e| e.to_string())?;
     eprintln!(
@@ -305,18 +342,33 @@ async fn serve(
 }
 
 async fn key(action: KeyAction) -> Result<(), String> {
-    use teifs_store::{Kms, LocalKms};
+    use teifs_store::{Kms, LocalKms, TransitKms};
     let (KeyAction::List { keyring }
     | KeyAction::Create { keyring, .. }
     | KeyAction::Rotate { keyring, .. }) = &action;
-    let path = if let Some(path) = &keyring.kms_keyring {
-        path.clone()
+    let (kms, place): (Box<dyn Kms>, String) = if let Some(address) = &keyring.kms_transit {
+        let token = std::env::var("VAULT_TOKEN")
+            .or_else(|_| std::env::var("BAO_TOKEN"))
+            .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
+        let kms = TransitKms::new(
+            address,
+            &keyring.kms_transit_mount,
+            token,
+            keyring.kms_transit_namespace.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        (Box::new(kms), format!("the transit engine at {address}"))
     } else {
-        let store = open(&keyring.dir)?;
-        teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
+        let path = if let Some(path) = &keyring.kms_keyring {
+            path.clone()
+        } else {
+            let store = open(&keyring.dir)?;
+            teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
+        };
+        let kms = LocalKms::open(&path)
+            .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
+        (Box::new(kms), path.display().to_string())
     };
-    let kms = LocalKms::open(&path)
-        .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
     match action {
         KeyAction::List { .. } => {
             for key in kms.keys().await.map_err(|e| e.to_string())? {
@@ -330,7 +382,7 @@ async fn key(action: KeyAction) -> Result<(), String> {
         }
         KeyAction::Create { name, .. } => {
             kms.create_key(&name).await.map_err(|e| e.to_string())?;
-            println!("Created key {name} in {}", path.display());
+            println!("Created key {name} in {place}");
         }
         KeyAction::Rotate { name, .. } => {
             let info = kms.rotate_key(&name).await.map_err(|e| e.to_string())?;

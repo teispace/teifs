@@ -50,6 +50,17 @@ key):
 Stored: `version` (1), the KMS key name and version, `salt`, `sealed`. Unsealing redoes
 step 2 and authenticates with the tag; a different context, key or salt fails.
 
+### Sealing with a transit engine (Vault, OpenBao)
+
+When the KMS is a Vault or OpenBao transit engine, TeiFS still generates the data key; the
+engine seals it: `POST /v1/<mount>/encrypt/<key>` with the data key as `plaintext` and the
+canonical context as `associated_data` (AES-256-GCM keys, so the context is
+authenticated). Stored: `provider` = `transit`, the key name, the version from the
+engine's `vault:v<N>:` ciphertext, and that ciphertext as `sealed` (no salt). Unsealing
+sends the ciphertext and the same associated data to `/decrypt`. TeiFS checks a key exists
+before using it, because the engine's `encrypt` would otherwise create a missing key.
+A key sealed by one provider is never handed to another.
+
 ### SSE-C
 
 The customer's 256-bit key is checked with `HMAC-SHA256(key = check salt, message =
