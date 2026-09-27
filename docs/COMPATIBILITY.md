@@ -20,10 +20,10 @@ SDKs, the Terraform S3 backend).
 
 | Area | Status |
 |---|---|
-| ListBuckets, CreateBucket, HeadBucket, DeleteBucket, GetBucketLocation | Supported |
+| ListBuckets, CreateBucket, HeadBucket, DeleteBucket, GetBucketLocation | Supported; ListBuckets pages (`max-buckets`, continuation tokens) and filters (`prefix`, `bucket-region`) |
 | GetBucketVersioning | Supported (always "never enabled") |
 | PutObject, GetObject, HeadObject, DeleteObject, DeleteObjects, CopyObject | Supported, with ranges, `If-Match`/`If-None-Match`/`If-Modified-Since`/`If-Unmodified-Since` on reads, response header overrides, `COPY`/`REPLACE` metadata directives |
-| ListObjects, ListObjectsV2 | Supported: prefix, delimiter, marker/start-after, continuation tokens, max-keys, `encoding-type=url` |
+| ListObjects, ListObjectsV2 | Supported: prefix, delimiter, marker/start-after, continuation tokens, max-keys, `fetch-owner`, `encoding-type=url` (encoding the fields S3 encodes in each version) |
 | ListObjectVersions, and `versionId` on reads, copies and deletes | Supported for buckets without versioning: each object is its only version, `null`; any other version id is `InvalidArgument` |
 | Multipart: Create, UploadPart, UploadPartCopy, ListParts, ListMultipartUploads, Complete, Abort | Supported; 5 MiB minimum part size except the last, up to 10,000 parts |
 | Checksums: Content-MD5, CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, SHA-512, MD5, XXHASH64/3/128 | Supported, as headers or trailers; stored and returned with `x-amz-checksum-mode`; objects sent without one get CRC64NVME, as on AWS |

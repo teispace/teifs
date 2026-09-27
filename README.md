@@ -79,7 +79,7 @@ process list.
 |---|---|
 | Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning status (always off) |
 | Objects | put, get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
-| Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url` |
+| Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
 | Auth | Signature V4 (headers and presigned URLs); path-style and virtual-hosted-style |

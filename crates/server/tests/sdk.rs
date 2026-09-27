@@ -1752,3 +1752,63 @@ async fn cors_rules_answer_browsers() {
     let err = s3.get_bucket_cors().bucket("web").send().await.unwrap_err();
     assert_eq!(err.code(), Some("NoSuchCORSConfiguration"));
 }
+
+#[tokio::test]
+async fn bucket_lists_page_and_filter() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    for name in ["logs-b", "logs-a", "photos", "logs-c"] {
+        s3.create_bucket().bucket(name).send().await.unwrap();
+    }
+    let names = |out: &aws_sdk_s3::operation::list_buckets::ListBucketsOutput| {
+        out.buckets()
+            .iter()
+            .map(|b| b.name().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let all = s3.list_buckets().send().await.unwrap();
+    assert_eq!(names(&all), ["logs-a", "logs-b", "logs-c", "photos"]);
+    assert_eq!(all.continuation_token(), None);
+    assert_eq!(all.buckets()[0].bucket_region(), Some("us-east-1"));
+
+    // Pages of two with a prefix, until no token comes back.
+    let mut seen = Vec::new();
+    let mut token = None;
+    loop {
+        let page = s3
+            .list_buckets()
+            .prefix("logs-")
+            .max_buckets(2)
+            .set_continuation_token(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.prefix(), Some("logs-"));
+        seen.extend(names(&page));
+        token = page.continuation_token().map(str::to_owned);
+        if token.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, ["logs-a", "logs-b", "logs-c"]);
+
+    let other_region = s3
+        .list_buckets()
+        .bucket_region("eu-west-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(other_region.buckets().is_empty());
+    for bad in [0, 10_001] {
+        let err = s3.list_buckets().max_buckets(bad).send().await.unwrap_err();
+        assert_eq!(err.code(), Some("InvalidArgument"), "{bad}");
+    }
+    let err = s3
+        .list_buckets()
+        .continuation_token("not-a-token")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("InvalidArgument"));
+}

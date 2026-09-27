@@ -27,6 +27,10 @@ use crate::{
 
 /// How many keys a listing returns at most, and by default.
 const MAX_KEYS: i32 = 1000;
+/// The most buckets one `ListBuckets` page may ask for.
+const MAX_BUCKETS: usize = 10_000;
+/// The region every bucket is in (a drive has one).
+const REGION: &str = "us-east-1";
 /// How many keys one `DeleteObjects` may name.
 const MAX_DELETE: usize = 1000;
 /// Read buffer for object bodies.
@@ -707,24 +711,62 @@ fn copy_range(range: &str, size: u64) -> S3Result<(u64, u64)> {
 impl S3 for Drive {
     async fn list_buckets(
         &self,
-        _req: S3Request<dto::ListBucketsInput>,
+        req: S3Request<dto::ListBucketsInput>,
     ) -> S3Result<S3Response<dto::ListBucketsOutput>> {
-        let buckets = self
+        let input = req.input;
+        let max = match input.max_buckets {
+            None => usize::MAX,
+            Some(n) => usize::try_from(n)
+                .ok()
+                .filter(|n| (1..=MAX_BUCKETS).contains(n))
+                .ok_or_else(|| {
+                    s3_error!(InvalidArgument, "max-buckets must be between 1 and 10000")
+                })?,
+        };
+        let after = match input
+            .continuation_token
+            .as_deref()
+            .filter(|t| !t.is_empty())
+        {
+            Some(token) => match encode::parse_token(token) {
+                Some(After::Key(name)) => Some(name),
+                _ => return Err(s3_error!(InvalidArgument, "invalid continuation token")),
+            },
+            None => None,
+        };
+        let prefix = input.prefix.clone().unwrap_or_default();
+        // Every bucket lives in the drive's one region.
+        let in_region = input.bucket_region.as_deref().is_none_or(|r| r == REGION);
+        let mut buckets: Vec<_> = self
             .store
             .list_buckets()
             .await
             .s3()?
             .into_iter()
+            .filter(|b| in_region && b.name.starts_with(&prefix))
+            .filter(|b| after.as_ref().is_none_or(|a| b.name > *a))
+            .collect();
+        buckets.sort_by(|a, b| a.name.cmp(&b.name));
+        let truncated = buckets.len() > max;
+        buckets.truncate(max);
+        let continuation_token = buckets
+            .last()
+            .filter(|_| truncated)
+            .map(|b| encode::token(&After::Key(b.name.clone())));
+        let buckets = buckets
+            .into_iter()
             .map(|b| dto::Bucket {
                 name: Some(b.name),
                 creation_date: Some(b.created.into()),
+                bucket_region: Some(REGION.to_owned()),
                 ..Default::default()
             })
             .collect();
         Ok(S3Response::new(dto::ListBucketsOutput {
             buckets: Some(buckets),
             owner: Some(owner()),
-            ..Default::default()
+            continuation_token,
+            prefix: input.prefix,
         }))
     }
 
@@ -1539,7 +1581,12 @@ impl S3 for Drive {
         let mut input = req.input;
         // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
         input.delimiter = input.delimiter.filter(|d| !d.is_empty());
-        let after = match &input.continuation_token {
+        // An empty token is no token (S3 echoes it back).
+        let after = match input
+            .continuation_token
+            .as_deref()
+            .filter(|t| !t.is_empty())
+        {
             Some(token) => Some(
                 encode::parse_token(token)
                     .ok_or_else(|| s3_error!(InvalidArgument, "invalid continuation token"))?,
@@ -1668,7 +1715,8 @@ impl S3 for Drive {
             .collect();
         Ok(S3Response::new(dto::ListObjectsOutput {
             name: Some(input.bucket),
-            prefix: Some(enc(input.prefix.unwrap_or_default())),
+            // V1 answers with the prefix as sent; only V2 and versions encode it.
+            prefix: Some(input.prefix.unwrap_or_default()),
             delimiter: input.delimiter.map(enc),
             marker: Some(input.marker.map(enc).unwrap_or_default()),
             encoding_type: input.encoding_type,
