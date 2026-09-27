@@ -31,6 +31,8 @@ const MAX_DELETE: usize = 1000;
 const READ_CHUNK: usize = 256 * 1024;
 /// Who owns every bucket (a drive has one owner).
 const OWNER: &str = "teifs";
+/// The version id of every object in a bucket without versioning, as S3 names it.
+const NULL_VERSION: &str = "null";
 
 /// The S3 API over a drive.
 #[derive(Debug, Clone)]
@@ -67,6 +69,29 @@ fn owner() -> dto::Owner {
         display_name: Some(OWNER.to_owned()),
         id: Some(OWNER.to_owned()),
     }
+}
+
+/// Checks a request's `versionId`. Without versioning, an object's only version is
+/// `null` (the current one); any other id is invalid, as S3 answers.
+fn check_version(version_id: Option<&str>) -> S3Result<()> {
+    match version_id {
+        None | Some(NULL_VERSION) => Ok(()),
+        Some(_) => Err(s3_error!(InvalidArgument, "Invalid version id specified")),
+    }
+}
+
+/// Where a V1 listing (or a versions listing) resumes after `marker`. A marker ending in
+/// the delimiter (past the prefix) is a common prefix a previous page ended with: resume
+/// after everything under it.
+fn after_marker(marker: Option<String>, delimiter: Option<&str>, prefix: &str) -> Option<After> {
+    marker
+        .filter(|m| !m.is_empty())
+        .map(|marker| match delimiter {
+            Some(d) if !d.is_empty() && marker.ends_with(d) && marker.len() > prefix.len() => {
+                After::Prefix(marker)
+            }
+            _ => After::Key(marker),
+        })
 }
 
 fn etag(value: &str) -> ETag {
@@ -365,6 +390,7 @@ impl S3 for Drive {
         req: S3Request<dto::GetObjectInput>,
     ) -> S3Result<S3Response<dto::GetObjectOutput>> {
         let input = req.input;
+        check_version(input.version_id.as_deref())?;
         if input.part_number.is_some() {
             return Err(s3_error!(
                 NotImplemented,
@@ -452,6 +478,7 @@ impl S3 for Drive {
         req: S3Request<dto::HeadObjectInput>,
     ) -> S3Result<S3Response<dto::HeadObjectOutput>> {
         let input = req.input;
+        check_version(input.version_id.as_deref())?;
         let info = self.store.head(&input.bucket, &input.key).await.s3()?;
         check_read(
             &info,
@@ -489,12 +516,16 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::DeleteObjectInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectOutput>> {
+        check_version(req.input.version_id.as_deref())?;
         self.store.head_bucket(&req.input.bucket).await.s3()?;
         self.store
             .delete(&req.input.bucket, &req.input.key)
             .await
             .s3()?;
-        Ok(S3Response::new(dto::DeleteObjectOutput::default()))
+        Ok(S3Response::new(dto::DeleteObjectOutput {
+            version_id: req.input.version_id,
+            ..Default::default()
+        }))
     }
 
     async fn delete_objects(
@@ -512,21 +543,23 @@ impl S3 for Drive {
         let quiet = input.delete.quiet.unwrap_or(false);
         let (mut deleted, mut errors) = (Vec::new(), Vec::new());
         for object in input.delete.objects {
-            match self.store.delete(&input.bucket, &object.key).await {
+            let result = match check_version(object.version_id.as_deref()) {
+                Ok(()) => self.store.delete(&input.bucket, &object.key).await.s3(),
+                Err(err) => Err(err),
+            };
+            match result {
                 Ok(()) if quiet => {}
                 Ok(()) => deleted.push(dto::DeletedObject {
                     key: Some(object.key),
+                    version_id: object.version_id,
                     ..Default::default()
                 }),
-                Err(err) => {
-                    let err = crate::errors::from_store(err);
-                    errors.push(dto::Error {
-                        code: Some(err.code().as_str().to_owned()),
-                        message: err.message().map(str::to_owned),
-                        key: Some(object.key),
-                        version_id: None,
-                    });
-                }
+                Err(err) => errors.push(dto::Error {
+                    code: Some(err.code().as_str().to_owned()),
+                    message: err.message().map(str::to_owned),
+                    key: Some(object.key),
+                    version_id: object.version_id,
+                }),
             }
         }
         Ok(S3Response::new(dto::DeleteObjectsOutput {
@@ -544,7 +577,7 @@ impl S3 for Drive {
         let CopySource::Bucket {
             bucket: src_bucket,
             key: src_key,
-            ..
+            version_id: src_version,
         } = &input.copy_source
         else {
             return Err(s3_error!(
@@ -552,6 +585,7 @@ impl S3 for Drive {
                 "copying from an access point isn't supported"
             ));
         };
+        check_version(src_version.as_deref())?;
         let source = self.store.head(src_bucket, src_key).await.s3()?;
         check_read(
             &source,
@@ -666,22 +700,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::ListObjectsOutput>> {
         let input = req.input;
         let prefix = input.prefix.clone().unwrap_or_default();
-        // A marker ending in the delimiter (past the prefix) is a common prefix a
-        // previous page ended with: resume after everything under it.
-        let after = input
-            .marker
-            .clone()
-            .filter(|m| !m.is_empty())
-            .map(|marker| match &input.delimiter {
-                Some(d)
-                    if !d.is_empty()
-                        && marker.ends_with(d.as_str())
-                        && marker.len() > prefix.len() =>
-                {
-                    After::Prefix(marker)
-                }
-                _ => After::Key(marker),
-            });
+        let after = after_marker(input.marker.clone(), input.delimiter.as_deref(), &prefix);
         let max_keys = input.max_keys.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
         let listing = self
             .store
@@ -742,6 +761,96 @@ impl S3 for Drive {
             is_truncated: Some(listing.truncated),
             next_marker,
             contents: (!contents.is_empty()).then_some(contents),
+            common_prefixes: (!prefixes.is_empty()).then_some(prefixes),
+            ..Default::default()
+        }))
+    }
+
+    async fn list_object_versions(
+        &self,
+        req: S3Request<dto::ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<dto::ListObjectVersionsOutput>> {
+        // Without versioning each object has exactly one version, `null`, so this is the
+        // V1 listing with version fields: a page resumes after its key marker.
+        let input = req.input;
+        let prefix = input.prefix.clone().unwrap_or_default();
+        if input
+            .version_id_marker
+            .as_deref()
+            .is_some_and(|m| !m.is_empty())
+            && input.key_marker.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(s3_error!(
+                InvalidArgument,
+                "A version-id marker cannot be specified without a key marker."
+            ));
+        }
+        let after = after_marker(
+            input.key_marker.clone(),
+            input.delimiter.as_deref(),
+            &prefix,
+        );
+        let max_keys = input.max_keys.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
+        let listing = self
+            .store
+            .list(
+                &input.bucket,
+                ListQuery {
+                    prefix,
+                    delimiter: input.delimiter.clone(),
+                    after,
+                    max_keys: usize::try_from(max_keys).unwrap_or(0),
+                },
+            )
+            .await
+            .s3()?;
+        let url = input
+            .encoding_type
+            .as_ref()
+            .is_some_and(|e| e.as_str() == dto::EncodingType::URL);
+        let enc = |s: String| if url { encode::url(&s) } else { s };
+        let (next_key_marker, next_version_id_marker) = match &listing.next {
+            Some(After::Key(k) | After::Prefix(k)) => {
+                (Some(enc(k.clone())), Some(NULL_VERSION.to_owned()))
+            }
+            None => (None, None),
+        };
+        let versions: Vec<dto::ObjectVersion> = listing
+            .objects
+            .into_iter()
+            .map(|o| dto::ObjectVersion {
+                key: Some(enc(o.key)),
+                version_id: Some(NULL_VERSION.to_owned()),
+                is_latest: Some(true),
+                size: Some(i64::try_from(o.size).unwrap_or(i64::MAX)),
+                e_tag: Some(etag(&o.etag)),
+                last_modified: Some(o.modified.into()),
+                storage_class: Some(dto::ObjectVersionStorageClass::from_static(
+                    dto::ObjectVersionStorageClass::STANDARD,
+                )),
+                owner: Some(owner()),
+                ..Default::default()
+            })
+            .collect();
+        let prefixes: Vec<dto::CommonPrefix> = listing
+            .prefixes
+            .into_iter()
+            .map(|p| dto::CommonPrefix {
+                prefix: Some(enc(p)),
+            })
+            .collect();
+        Ok(S3Response::new(dto::ListObjectVersionsOutput {
+            name: Some(input.bucket),
+            prefix: Some(enc(input.prefix.unwrap_or_default())),
+            delimiter: input.delimiter.map(enc),
+            key_marker: Some(input.key_marker.map(enc).unwrap_or_default()),
+            version_id_marker: Some(input.version_id_marker.unwrap_or_default()),
+            encoding_type: input.encoding_type,
+            max_keys: Some(max_keys),
+            is_truncated: Some(listing.truncated),
+            next_key_marker,
+            next_version_id_marker,
+            versions: (!versions.is_empty()).then_some(versions),
             common_prefixes: (!prefixes.is_empty()).then_some(prefixes),
             ..Default::default()
         }))
@@ -812,7 +921,7 @@ impl S3 for Drive {
         let CopySource::Bucket {
             bucket: src_bucket,
             key: src_key,
-            ..
+            version_id: src_version,
         } = &input.copy_source
         else {
             return Err(s3_error!(
@@ -820,6 +929,7 @@ impl S3 for Drive {
                 "copying from an access point isn't supported"
             ));
         };
+        check_version(src_version.as_deref())?;
         let (source, file) = self.store.read(src_bucket, src_key).await.s3()?;
         check_read(
             &source,

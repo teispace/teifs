@@ -9,4 +9,5 @@ behaviour; the on-disk format is always upgraded automatically.
 
 First development version: S3 over plain folders (buckets, objects, listings,
 multipart uploads, copies, checksums, SigV4 and presigned URLs), a versioned on-disk
-format with automatic upgrades, and the `teifs` command.
+format with automatic upgrades, and the `teifs` command. ListObjectVersions and
+`versionId=null` work on buckets without versioning, as on AWS.

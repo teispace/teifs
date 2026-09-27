@@ -533,3 +533,96 @@ async fn files_added_by_hand_are_objects() {
         .unwrap();
     assert_eq!(body(got).await, b"%PDF");
 }
+
+#[tokio::test]
+async fn unversioned_buckets_have_null_versions() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("plain").send().await.unwrap();
+    for key in ["a", "dir/b", "dir/c", "z"] {
+        s3.put_object()
+            .bucket("plain")
+            .key(key)
+            .body(ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Every object is listed once, as the latest and only version, `null`.
+    let page = s3
+        .list_object_versions()
+        .bucket("plain")
+        .max_keys(2)
+        .send()
+        .await
+        .unwrap();
+    let keys: Vec<_> = page.versions().iter().map(|v| v.key().unwrap()).collect();
+    assert_eq!(keys, ["a", "dir/b"]);
+    assert!(
+        page.versions()
+            .iter()
+            .all(|v| v.version_id() == Some("null") && v.is_latest() == Some(true))
+    );
+    assert_eq!(page.is_truncated(), Some(true));
+    let rest = s3
+        .list_object_versions()
+        .bucket("plain")
+        .key_marker(page.next_key_marker().unwrap())
+        .version_id_marker(page.next_version_id_marker().unwrap())
+        .delimiter("/")
+        .send()
+        .await
+        .unwrap();
+    let keys: Vec<_> = rest.versions().iter().map(|v| v.key().unwrap()).collect();
+    assert_eq!(keys, ["z"]);
+    assert_eq!(rest.is_truncated(), Some(false));
+
+    // `null` names the current object; any other version id is invalid.
+    let got = s3
+        .get_object()
+        .bucket("plain")
+        .key("a")
+        .version_id("null")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(body(got).await, b"x");
+    let bad = s3
+        .get_object()
+        .bucket("plain")
+        .key("a")
+        .version_id("3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY")
+        .send()
+        .await;
+    assert_eq!(bad.unwrap_err().code(), Some("InvalidArgument"));
+
+    // Deleting everything by version, the way cleanup tools do, empties the bucket.
+    let all = s3
+        .list_object_versions()
+        .bucket("plain")
+        .send()
+        .await
+        .unwrap();
+    let ids: Vec<ObjectIdentifier> = all
+        .versions()
+        .iter()
+        .map(|v| {
+            ObjectIdentifier::builder()
+                .key(v.key().unwrap())
+                .version_id(v.version_id().unwrap())
+                .build()
+                .unwrap()
+        })
+        .collect();
+    let deleted = s3
+        .delete_objects()
+        .bucket("plain")
+        .delete(Delete::builder().set_objects(Some(ids)).build().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.deleted().len(), 4);
+    assert!(deleted.errors().is_empty());
+    s3.delete_bucket().bucket("plain").send().await.unwrap();
+}
