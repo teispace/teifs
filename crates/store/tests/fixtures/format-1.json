@@ -1,0 +1,73 @@
+{
+  "about": "A drive written by TeiFS format 1 (format.json, index.db, system.db). Made with the AWS CLI against commit 17ed737. mtimes restore the files as a faithful backup would.",
+  "mtimes_ns": {
+    ".teifs": 1790500595224891094,
+    "docs": 1790500592906350471,
+    "photos": 1790500594189322255,
+    ".teifs/uploads": 1790500594520181080,
+    ".teifs/tmp": 1790500595176522063,
+    ".teifs/index.db": 1790500595216815408,
+    ".teifs/system.db": 1790500595222003697,
+    ".teifs/format.json": 1790500591313467228,
+    ".teifs/uploads/6ad40899646e423d97b3d9193bc9ea53": 1790500594859945638,
+    ".teifs/uploads/6ad40899646e423d97b3d9193bc9ea53/1": 1790500594857688871,
+    "docs/empty-folder": 1790500592906336429,
+    "docs/notes": 1790500592591666352,
+    "docs/notes/hello world+ü.txt": 1790500592586910941,
+    "photos/2026": 1790500595176522022,
+    "photos/2026/cover.jpg": 1790500595174233004,
+    "photos/2026/video.bin": 1790500594185495726
+  },
+  "objects": [
+    {
+      "bucket": "docs",
+      "key": "empty-folder/",
+      "etag": "d41d8cd98f00b204e9800998ecf8427e",
+      "attrs": {
+        "checksums": {
+          "CRC64NVME": "AAAAAAAAAAA="
+        }
+      }
+    },
+    {
+      "bucket": "docs",
+      "key": "notes/hello world+ü.txt",
+      "etag": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+      "attrs": {
+        "contentType": "text/plain; charset=utf-8",
+        "user": {
+          "author": "krishna",
+          "topic": "fixtures"
+        },
+        "checksums": {
+          "CRC64NVME": "jSnVw/bqjr4="
+        }
+      }
+    },
+    {
+      "bucket": "photos",
+      "key": "2026/cover.jpg",
+      "etag": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+      "attrs": {
+        "checksums": {
+          "CRC64NVME": "jSnVw/bqjr4="
+        }
+      }
+    },
+    {
+      "bucket": "photos",
+      "key": "2026/video.bin",
+      "etag": "8bbba49d5767909c52e99239ecfaa7bc-2",
+      "attrs": {
+        "contentType": "video/mp4"
+      }
+    }
+  ],
+  "uploads": [
+    {
+      "id": "6ad40899646e423d97b3d9193bc9ea53",
+      "bucket": "docs",
+      "key": "unfinished.bin"
+    }
+  ]
+}

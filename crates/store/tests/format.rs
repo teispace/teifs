@@ -115,6 +115,16 @@ async fn format_0_drives_are_upgraded_intact() {
 }
 
 #[tokio::test]
+async fn every_released_format_opens_intact() {
+    for format in 0..=1 {
+        let (dir, manifest) = restore(format);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.format().format, FORMAT, "format {format}");
+        assert_intact(&store, &manifest).await;
+    }
+}
+
+#[tokio::test]
 async fn an_upgrade_that_stopped_halfway_is_redone() {
     let (dir, manifest) = restore(0);
     let system = system(dir.path());
