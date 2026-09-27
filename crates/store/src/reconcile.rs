@@ -141,7 +141,7 @@ impl IndexFolders {
                 max_keys: usize::MAX,
                 ..ListQuery::default()
             };
-            match FolderWalk::start(&dir, query)? {
+            match FolderWalk::start(&inner.folders, &dir, query)? {
                 Some(walk) => self.walk = Some(walk),
                 None => return Ok((0, true)),
             }
@@ -152,7 +152,7 @@ impl IndexFolders {
             let Some(walk) = self.walk.as_mut() else {
                 break;
             };
-            match walk.next()? {
+            match walk.next(&inner.folders)? {
                 None => self.walk = None,
                 Some(Next::Prefix(_)) => {}
                 Some(Next::Object(entry)) => entries.push(entry),

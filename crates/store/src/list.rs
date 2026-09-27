@@ -11,11 +11,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use teifs_types::{BUCKET_STAGING, MAX_SEGMENT_LEN};
+use teifs_types::MAX_SEGMENT_LEN;
 
 use teifs_meta::{Index, ListFrom};
 
-use crate::{Bucket, Inner, ObjectInfo, Store, error::Result, objects::to_info};
+use crate::{
+    Bucket, Inner, ObjectInfo, Store,
+    error::Result,
+    folders::{Children, FolderCache, start_at},
+    objects::to_info,
+};
 
 /// Where a page starts: after this key, or after every key under this common prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,8 +89,39 @@ pub(crate) enum Next {
 /// pause and carry on later (each folder is read when the walk reaches it).
 pub(crate) struct FolderWalk {
     query: ListQuery,
-    stack: Vec<std::vec::IntoIter<Entry>>,
+    stack: Vec<Frame>,
     last_prefix: Option<String>,
+}
+
+/// A folder being walked: its children, and the next one to look at.
+struct Frame {
+    dir: PathBuf,
+    key_prefix: String,
+    children: Children,
+    next: usize,
+}
+
+impl Frame {
+    /// A frame positioned for a walk resuming after `after`.
+    fn new(dir: PathBuf, key_prefix: String, children: Children, after: Option<&After>) -> Self {
+        let next = after.map_or(0, |a| start_at(&key_prefix, &children, a.marker()));
+        Self {
+            dir,
+            key_prefix,
+            children,
+            next,
+        }
+    }
+
+    fn next(&mut self) -> Option<Entry> {
+        let child = self.children.get(self.next)?;
+        self.next += 1;
+        Some(Entry {
+            key: format!("{}{}", self.key_prefix, child.suffix),
+            path: self.dir.join(child.name()),
+            folder: child.folder,
+        })
+    }
 }
 
 /// A listing's walk: a cursor, and the index to describe the objects it meets.
@@ -113,7 +149,7 @@ impl Store {
             if query.max_keys == 0 {
                 return Ok(listing);
             }
-            let Some(cursor) = FolderWalk::start(&dir, query.clone())? else {
+            let Some(cursor) = FolderWalk::start(&inner.folders, &dir, query.clone())? else {
                 return Ok(listing);
             };
             let mut walk = Walk {
@@ -150,7 +186,7 @@ impl Store {
 
 impl Walk<'_> {
     fn next_item(&mut self) -> Result<Option<Item>> {
-        Ok(match self.cursor.next()? {
+        Ok(match self.cursor.next(&self.inner.folders)? {
             None => None,
             Some(Next::Prefix(prefix)) => Some(Item::Prefix(prefix)),
             Some(Next::Object(entry)) => Some(self.object(&entry)?),
@@ -166,7 +202,7 @@ impl Walk<'_> {
 
 impl FolderWalk {
     /// Starts at the deepest folder the prefix names; `None` when it names none.
-    pub(crate) fn start(dir: &Path, query: ListQuery) -> Result<Option<Self>> {
+    pub(crate) fn start(cache: &FolderCache, dir: &Path, query: ListQuery) -> Result<Option<Self>> {
         let folder_part = query
             .prefix
             .rfind('/')
@@ -189,16 +225,22 @@ impl FolderWalk {
             Ok(real) if real == start && real.is_dir() => {}
             _ => return Ok(None),
         }
-        let entries = read_folder(&start, folder_part)?;
+        let children = cache.children(&start, folder_part.is_empty())?;
+        let frame = Frame::new(
+            start,
+            folder_part.to_owned(),
+            children,
+            query.after.as_ref(),
+        );
         Ok(Some(Self {
             query,
-            stack: vec![entries.into_iter()],
+            stack: vec![frame],
             last_prefix: None,
         }))
     }
 
     /// The next object entry or common prefix, in key order.
-    pub(crate) fn next(&mut self) -> Result<Option<Next>> {
+    pub(crate) fn next(&mut self, cache: &FolderCache) -> Result<Option<Next>> {
         let prefix = self.query.prefix.as_str();
         while let Some(frame) = self.stack.last_mut() {
             let Some(entry) = frame.next() else {
@@ -223,14 +265,16 @@ impl FolderWalk {
                 return Ok(Some(Next::Prefix(common)));
             }
             if entry.folder {
-                let children = read_folder(&entry.path, &entry.key)?;
+                let children = cache.children(&entry.path, false)?;
                 if children.is_empty() {
                     // An empty folder is the object `key/`.
                     if under_prefix && self.includes(&entry.key) {
                         return Ok(Some(Next::Object(entry)));
                     }
                 } else {
-                    self.stack.push(children.into_iter());
+                    let frame =
+                        Frame::new(entry.path, entry.key, children, self.query.after.as_ref());
+                    self.stack.push(frame);
                 }
                 continue;
             }
@@ -269,45 +313,6 @@ impl FolderWalk {
         let at = key[start..].find(delimiter)?;
         Some(key[..start + at + delimiter.len()].to_owned())
     }
-}
-
-/// A folder's files and subfolders in key order. Links, other kinds of files, and names
-/// that can't be keys are left out.
-fn read_folder(dir: &Path, key_prefix: &str) -> Result<Vec<Entry>> {
-    let reader = match fs::read_dir(dir) {
-        Ok(reader) => reader,
-        // Deleted while the listing ran: nothing in it.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err.into()),
-    };
-    let mut entries = Vec::new();
-    for entry in reader {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.contains('\\') || (key_prefix.is_empty() && name == BUCKET_STAGING) {
-            continue;
-        }
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let folder = kind.is_dir();
-        if !folder && !kind.is_file() {
-            continue;
-        }
-        let key = if folder {
-            format!("{key_prefix}{name}/")
-        } else {
-            format!("{key_prefix}{name}")
-        };
-        entries.push(Entry {
-            key,
-            path: entry.path(),
-            folder,
-        });
-    }
-    entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-    Ok(entries)
 }
 
 /// Lists an object bucket from the index: rows in key order, rolled up into common

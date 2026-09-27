@@ -765,3 +765,69 @@ async fn bucket_tags_are_kept_in_its_settings() {
         Err(StoreError::NoSuchBucket)
     ));
 }
+
+#[tokio::test]
+async fn large_folders_list_the_same_from_the_cache() {
+    let (dir, store) = drive();
+    store.create_bucket("big", Layout::Folder).await.unwrap();
+    let root = dir.path().join("big");
+    let mut expected = Vec::new();
+    for i in 0..1_500 {
+        let key = format!("f{i:05}");
+        fs::write(root.join(&key), b"x").unwrap();
+        expected.push(key);
+    }
+    fs::create_dir(root.join("m")).unwrap();
+    for name in ["a", "b"] {
+        fs::write(root.join("m").join(name), b"x").unwrap();
+        expected.push(format!("m/{name}"));
+    }
+    expected.sort();
+    // Settled folders are served from the cache.
+    let old = SystemTime::now() - std::time::Duration::from_secs(60);
+    fs::File::open(&root).unwrap().set_modified(old).unwrap();
+
+    let list_all = |delimiter: Option<&str>| {
+        let store = store.clone();
+        let delimiter = delimiter.map(str::to_owned);
+        async move {
+            let (mut keys, mut prefixes, mut after) = (Vec::new(), Vec::new(), None);
+            loop {
+                let page = store
+                    .list(
+                        "big",
+                        ListQuery {
+                            delimiter: delimiter.clone(),
+                            after,
+                            max_keys: 100,
+                            ..ListQuery::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                keys.extend(page.objects.into_iter().map(|o| o.key));
+                prefixes.extend(page.prefixes);
+                if !page.truncated {
+                    return (keys, prefixes);
+                }
+                after = page.next;
+            }
+        }
+    };
+    for _ in 0..2 {
+        assert_eq!(list_all(None).await.0, expected);
+    }
+    let (keys, prefixes) = list_all(Some("/")).await;
+    assert_eq!(keys.len(), 1_500);
+    assert_eq!(prefixes, ["m/"]);
+
+    // A file added later changes the folder's time: it's listed at once.
+    fs::write(root.join("f00000a"), b"x").unwrap();
+    let (keys, _) = list_all(None).await;
+    assert_eq!(keys.len(), expected.len() + 1);
+    assert_eq!(keys[1], "f00000a");
+    // So is a deletion.
+    fs::remove_file(root.join("f00001")).unwrap();
+    let (keys, _) = list_all(None).await;
+    assert!(!keys.contains(&"f00001".to_owned()));
+}

@@ -12,6 +12,7 @@
 mod body;
 mod error;
 mod folder;
+mod folders;
 mod format;
 mod jobs;
 mod list;
@@ -204,6 +205,8 @@ struct Inner {
     root: PathBuf,
     system_dir: PathBuf,
     tmp: PathBuf,
+    /// Large folders' sorted contents, for folder-bucket listings.
+    folders: folders::FolderCache,
     uploads: PathBuf,
     /// The index, also the commit lock: whoever changes a file holds it until the file
     /// and its row agree again.
@@ -261,6 +264,7 @@ impl Store {
             root,
             system_dir,
             tmp,
+            folders: folders::FolderCache::default(),
             uploads,
             db: Mutex::new(db),
             system: Mutex::new(system_db),

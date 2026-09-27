@@ -109,6 +109,10 @@ metadata returned belong together even if the object is replaced during the read
   files are forgotten.
 - Listing a folder bucket walks its folders in S3's byte order
   (`crates/store/src/list.rs`), so objects added outside TeiFS appear immediately.
+  Large folders' sorted contents are cached (`crates/store/src/folders.rs`) and used
+  only while the folder's modification time is unchanged, so paging through a folder of
+  a million files reads it once, not once per page; each page starts with a binary
+  search.
   Object buckets list from the index with range queries, jumping past rolled-up common
   prefixes.
 - Folders created on purpose (a `key/` object) stay when their last file is deleted;
