@@ -136,7 +136,7 @@ pub enum ServerError {
 /// A drive ready to serve: listening, but not yet accepting requests.
 pub struct Server {
     store: Store,
-    service: s3s::service::S3Service,
+    service: teifs_s3::Service,
     listener: TcpListener,
     access_key: String,
     created_credentials: bool,

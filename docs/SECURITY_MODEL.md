@@ -78,7 +78,7 @@ only when a rule names it.
 Request bodies stream to disk instead of memory; listings are paged (1000 keys at most);
 `DeleteObjects` takes at most 1000 keys. `unwrap` is denied outside tests, so malformed
 input produces an error, not a crash. *Planned:* header, idle and body-stall timeouts and
-connection limits (F1), fuzzing of every parser.
+connection limits before the first release, fuzzing of every parser.
 
 ### 12. Retention fails closed (*planned*)
 When Object Lock arrives, any error reading an object's retention denies the delete or
@@ -99,6 +99,12 @@ comes only from the environment. SSE-C keys are never stored (only a salted HMAC
 them), are refused over plain HTTP except on loopback, and are blocked on buckets by
 default. Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
 disk and tampered data fails to decrypt (`crates/store/src/sse_tests.rs`).
+
+### 15. Browsers get only what a bucket's CORS rules grant
+No bucket answers cross-origin requests until its owner adds CORS rules. A preflight is
+answered from the first rule whose origin, method and every requested header match, and
+refused otherwise. Credentials are allowed only for origins a rule names (not `*`), as
+S3 does. CORS never grants access by itself: requests are still signed and authorized.
 
 ## Data safety
 

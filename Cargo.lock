@@ -2558,6 +2558,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "hyper",
  "md-5",
  "s3s",
  "serde_json",

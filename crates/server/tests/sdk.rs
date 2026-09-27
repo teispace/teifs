@@ -1605,3 +1605,150 @@ async fn objects_and_buckets_take_tags() {
     let set = s3.get_bucket_tagging().bucket("tags").send().await.unwrap();
     assert_eq!(tag_keys(set.tag_set()), ["team"]);
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn cors_rules_answer_browsers() {
+    use aws_sdk_s3::types::{CorsConfiguration, CorsRule};
+
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("web").send().await.unwrap();
+    let http = reqwest::Client::new();
+    let url = format!("{}/web/page.html", server.endpoint);
+    let preflight = |origin: &'static str, method: &'static str, headers: Option<&'static str>| {
+        let mut request = http
+            .request(reqwest::Method::OPTIONS, &url)
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", method);
+        if let Some(headers) = headers {
+            request = request.header("Access-Control-Request-Headers", headers);
+        }
+        request.send()
+    };
+    let header = |r: &reqwest::Response, name: &str| {
+        r.headers()
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_owned())
+    };
+
+    // No rules yet: browsers are refused.
+    assert_eq!(
+        preflight("https://app.example", "GET", None)
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let no_method = http
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Origin", "https://app.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_method.status(), 400);
+
+    s3.put_bucket_cors()
+        .bucket("web")
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("https://*.example")
+                        .allowed_methods("GET")
+                        .allowed_methods("PUT")
+                        .allowed_headers("x-amz-*")
+                        .allowed_headers("Content-Type")
+                        .expose_headers("ETag")
+                        .max_age_seconds(600)
+                        .build()
+                        .unwrap(),
+                )
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("*")
+                        .allowed_methods("GET")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let rules = s3.get_bucket_cors().bucket("web").send().await.unwrap();
+    assert_eq!(rules.cors_rules().len(), 2);
+
+    let ok = preflight(
+        "https://app.example",
+        "PUT",
+        Some("content-type, x-amz-date"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok.status(), 200);
+    assert_eq!(
+        header(&ok, "access-control-allow-origin").as_deref(),
+        Some("https://app.example")
+    );
+    assert_eq!(
+        header(&ok, "access-control-allow-methods").as_deref(),
+        Some("GET, PUT")
+    );
+    assert_eq!(
+        header(&ok, "access-control-allow-headers").as_deref(),
+        Some("content-type, x-amz-date")
+    );
+    assert_eq!(
+        header(&ok, "access-control-max-age").as_deref(),
+        Some("600")
+    );
+    assert_eq!(
+        header(&ok, "access-control-allow-credentials").as_deref(),
+        Some("true")
+    );
+    // A header no rule allows, or a method: refused.
+    assert_eq!(
+        preflight("https://app.example", "PUT", Some("x-secret"))
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        preflight("https://other.site", "PUT", None)
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    // Any origin may GET, and gets `*`.
+    let any = preflight("https://other.site", "GET", None).await.unwrap();
+    assert_eq!(
+        header(&any, "access-control-allow-origin").as_deref(),
+        Some("*")
+    );
+    assert_eq!(header(&any, "access-control-allow-credentials"), None);
+
+    // Actual requests get the headers too, even when they fail (this one isn't signed).
+    let actual = http
+        .get(&url)
+        .header("Origin", "https://app.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(actual.status(), 403);
+    assert_eq!(
+        header(&actual, "access-control-allow-origin").as_deref(),
+        Some("https://app.example")
+    );
+    assert_eq!(
+        header(&actual, "access-control-expose-headers").as_deref(),
+        Some("ETag")
+    );
+
+    s3.delete_bucket_cors().bucket("web").send().await.unwrap();
+    let err = s3.get_bucket_cors().bucket("web").send().await.unwrap_err();
+    assert_eq!(err.code(), Some("NoSuchCORSConfiguration"));
+}

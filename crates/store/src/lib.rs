@@ -34,7 +34,7 @@ pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
 pub use list::{After, ListQuery, Listing};
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
-pub use settings::{BucketEncryption, DefaultEncryption};
+pub use settings::{BucketEncryption, CorsRule, DefaultEncryption};
 pub use sse::Encryption;
 pub use staged::Staged;
 pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};

@@ -6,7 +6,6 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::{conn::auto::Builder, graceful::GracefulShutdown},
 };
-use s3s::service::S3Service;
 use tokio::net::TcpListener;
 
 /// How long open requests may take to finish once shutdown starts.
@@ -14,7 +13,11 @@ pub const DRAIN: Duration = Duration::from_secs(10);
 
 /// Serves `service` on `listener` until `shutdown` resolves, then lets open requests
 /// finish for up to [`DRAIN`].
-pub async fn serve(listener: TcpListener, service: S3Service, shutdown: impl Future<Output = ()>) {
+pub async fn serve(
+    listener: TcpListener,
+    service: teifs_s3::Service,
+    shutdown: impl Future<Output = ()>,
+) {
     let http = Builder::new(TokioExecutor::new());
     let graceful = GracefulShutdown::new();
     let mut shutdown = std::pin::pin!(shutdown);

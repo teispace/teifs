@@ -16,6 +16,8 @@ struct BucketConfig {
     encryption: Option<BucketEncryption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tags: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cors: Option<Vec<CorsRule>>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -43,6 +45,29 @@ pub struct DefaultEncryption {
     /// S3 Bucket Keys (fewer KMS calls); recorded and reported.
     #[serde(default)]
     pub bucket_key: bool,
+}
+
+/// One rule of a bucket's CORS configuration; the first rule that matches a request
+/// applies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorsRule {
+    /// Its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Origins it applies to; each may hold one `*`.
+    pub allowed_origins: Vec<String>,
+    /// Methods it allows (`GET`, `PUT`, `POST`, `DELETE`, `HEAD`).
+    pub allowed_methods: Vec<String>,
+    /// Headers a preflight request may ask for; each may hold one `*`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_headers: Vec<String>,
+    /// Response headers scripts may read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<String>,
+    /// How long browsers may cache a preflight answer, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_seconds: Option<i32>,
 }
 
 impl BucketEncryption {
@@ -100,10 +125,29 @@ impl Store {
 
     /// A bucket's tags, if it has any.
     pub async fn bucket_tags(&self, bucket: &str) -> Result<Option<BTreeMap<String, String>>> {
+        Ok(self.config(bucket).await?.tags)
+    }
+
+    /// A bucket's CORS rules, if it has any.
+    pub async fn bucket_cors(&self, bucket: &str) -> Result<Option<Vec<CorsRule>>> {
+        Ok(self.config(bucket).await?.cors)
+    }
+
+    /// Replaces a bucket's CORS rules; `None` removes them.
+    pub async fn set_bucket_cors(&self, bucket: &str, rules: Option<Vec<CorsRule>>) -> Result<()> {
         let name = bucket.to_owned();
         self.blocking(move |inner| {
             inner.bucket(&name)?;
-            Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.tags)
+            inner.update_config(&name, |config| config.cors = rules)
+        })
+        .await
+    }
+
+    async fn config(&self, bucket: &str) -> Result<BucketConfig> {
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            read_config(inner.system().bucket_config(&name)?.as_deref())
         })
         .await
     }

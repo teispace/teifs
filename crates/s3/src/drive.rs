@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
-    encode,
+    cors, encode,
     errors::{StoreResultExt, from_body},
     sse::{self, set_sse},
     tagging,
@@ -1270,6 +1270,50 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteObjectTaggingOutput::default()))
+    }
+
+    async fn get_bucket_cors(
+        &self,
+        req: S3Request<dto::GetBucketCorsInput>,
+    ) -> S3Result<S3Response<dto::GetBucketCorsOutput>> {
+        let rules = self
+            .store
+            .bucket_cors(&req.input.bucket)
+            .await
+            .s3()?
+            .ok_or_else(|| {
+                s3_error!(
+                    NoSuchCORSConfiguration,
+                    "The CORS configuration does not exist"
+                )
+            })?;
+        Ok(S3Response::new(dto::GetBucketCorsOutput {
+            cors_rules: Some(cors::to_dto(rules)),
+        }))
+    }
+
+    async fn put_bucket_cors(
+        &self,
+        req: S3Request<dto::PutBucketCorsInput>,
+    ) -> S3Result<S3Response<dto::PutBucketCorsOutput>> {
+        let input = req.input;
+        let rules = cors::from_dto(input.cors_configuration)?;
+        self.store
+            .set_bucket_cors(&input.bucket, Some(rules))
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketCorsOutput::default()))
+    }
+
+    async fn delete_bucket_cors(
+        &self,
+        req: S3Request<dto::DeleteBucketCorsInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketCorsOutput>> {
+        self.store
+            .set_bucket_cors(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteBucketCorsOutput::default()))
     }
 
     async fn get_bucket_tagging(
