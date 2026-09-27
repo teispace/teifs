@@ -104,14 +104,23 @@ const DOCS: &[&str] = &[
 ];
 
 /// Top-level folders a path in the docs can start with.
-const TRACKED_ROOTS: &[&str] = &["crates/", "apps/", "docs/", "xtask/"];
+const TRACKED_ROOTS: &[&str] = &[
+    "crates/", "apps/", "docs/", "xtask/", ".claude/", ".github/",
+];
+
+/// Where skills live.
+const SKILLS: &str = ".claude/skills";
 
 /// Fails when a doc names a repository path (in backticks or a relative link) that
 /// doesn't exist, so the docs can't silently go stale when code moves.
 fn check_docs(root: &Path) -> Result<(), String> {
-    let mut missing = Vec::new();
+    let mut missing = check_skills(root)?;
     let mut checked = 0;
-    for doc in DOCS {
+    let skills = skill_names(root)?
+        .into_iter()
+        .map(|name| format!("{SKILLS}/{name}/SKILL.md"));
+    let docs: Vec<String> = DOCS.iter().map(|d| (*d).to_owned()).chain(skills).collect();
+    for doc in &docs {
         let text = fs::read_to_string(root.join(doc)).map_err(|e| format!("{doc}: {e}"))?;
         for path in referenced_paths(&text) {
             checked += 1;
@@ -121,14 +130,65 @@ fn check_docs(root: &Path) -> Result<(), String> {
         }
     }
     if missing.is_empty() {
-        println!("docs: all {checked} referenced paths exist");
+        println!("docs: all {checked} referenced paths exist, skills are valid");
         Ok(())
     } else {
         Err(format!(
-            "stale paths in the docs:\n  {}",
+            "docs and skills:\n  {}",
             missing.join("\n  ")
         ))
     }
+}
+
+fn skill_names(root: &Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root.join(SKILLS)).map_err(|e| format!("{SKILLS}: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Each skill has frontmatter whose `name` is its folder and a `description`, and is
+/// listed in AGENTS.md's skills table.
+fn check_skills(root: &Path) -> Result<Vec<String>, String> {
+    let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(|e| e.to_string())?;
+    let mut problems = Vec::new();
+    for name in skill_names(root)? {
+        let file = format!("{SKILLS}/{name}/SKILL.md");
+        let Ok(text) = fs::read_to_string(root.join(&file)) else {
+            problems.push(format!("{file} is missing"));
+            continue;
+        };
+        let Some(front) = text
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .map(|(front, _)| front)
+        else {
+            problems.push(format!("{file}: no frontmatter"));
+            continue;
+        };
+        if !front.lines().any(|l| l == format!("name: {name}")) {
+            problems.push(format!("{file}: `name` must be `{name}`"));
+        }
+        if !front.lines().any(|l| {
+            l.strip_prefix("description: ")
+                .is_some_and(|d| d.len() >= 40)
+        }) {
+            problems.push(format!(
+                "{file}: needs a `description` saying when to use it"
+            ));
+        }
+        if !agents.contains(&format!("| `{name}` |")) {
+            problems.push(format!(
+                "AGENTS.md: skill `{name}` is missing from the table"
+            ));
+        }
+    }
+    Ok(problems)
 }
 
 /// Paths inside backticks that start with a tracked folder, trimmed of anything that

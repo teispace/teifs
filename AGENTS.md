@@ -65,8 +65,24 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPA
    ARCHITECTURE when the structure changes, the README for commands.
 5. Run `cargo xtask verify` and fix everything it reports.
 
+Recipes for the common changes are skills in [`.claude/skills/`](.claude/skills): plain
+Markdown any agent or person can follow.
+
+| Skill | For |
+|---|---|
+| `adding-s3-operations` | An S3 API TeiFS implements or changes |
+| `changing-on-disk-format` | Anything written to `.teifs/`, a schema, or the file layout |
+| `verifying-changes` | Choosing and running the right checks before a commit |
+| `writing-docs` | README, contributor docs and the changelog |
+| `reviewing-pull-requests` | Reviewing a contribution against the project's bar |
+
 ## Keep this guidance current
 
-This file and the contributor docs describe how the code works now. Whoever changes the
-code updates them in the same pull request: a moved file, a renamed function, a new rule
-or a pitfall you had to discover.
+This file, the skills and the contributor docs describe how the code works now. Whoever
+changes the code updates them in the same pull request: a moved file, a renamed function,
+a new rule or a pitfall you had to discover. A recurring kind of change without a skill
+gets one in `.claude/skills/<gerund-name>/SKILL.md`, listed in the table above.
+
+`cargo xtask docs` (part of `cargo xtask verify`) fails when a doc or skill names a path
+that no longer exists, when a skill's frontmatter is invalid, or when a skill is missing
+from the table above.
