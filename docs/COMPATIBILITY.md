@@ -26,7 +26,8 @@ SDKs, the Terraform S3 backend).
 | ListObjects, ListObjectsV2 | Supported: prefix, delimiter, marker/start-after, continuation tokens, max-keys, `encoding-type=url` |
 | ListObjectVersions, and `versionId` on reads, copies and deletes | Supported for buckets without versioning: each object is its only version, `null`; any other version id is `InvalidArgument` |
 | Multipart: Create, UploadPart, UploadPartCopy, ListParts, ListMultipartUploads, Complete, Abort | Supported; 5 MiB minimum part size except the last, up to 10,000 parts |
-| Checksums: Content-MD5, CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256 | Supported, as headers or trailers; stored and returned with `x-amz-checksum-mode` |
+| Checksums: Content-MD5, CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, SHA-512, MD5, XXHASH64/3/128 | Supported, as headers or trailers; stored and returned with `x-amz-checksum-mode`; objects sent without one get CRC64NVME, as on AWS |
+| Multipart checksums: `x-amz-checksum-type` `FULL_OBJECT` (CRC32, CRC32C, CRC64NVME, combined from the parts) and `COMPOSITE` (checksum of the parts' checksums, `-N`), checked at Complete; `x-amz-mp-object-size`; a retried Complete answers again | Supported, with AWS's algorithm and type rules |
 | Signature V4 (headers, presigned, chunked, trailers); path-style and virtual-hosted-style | Supported |
 | Conditional writes on PutObject, CompleteMultipartUpload and CopyObject (`If-None-Match`, `If-Match`) | Supported; atomic on one server. `If-Match` on a missing object is `404 NoSuchKey`, as on AWS |
 | Conditional deletes: `If-Match` on DeleteObject, per-object ETag, size and modification time in DeleteObjects, `x-amz-if-match-size` and `x-amz-if-match-last-modified-time` | Supported; deleting a missing object succeeds whatever the condition, as on AWS |

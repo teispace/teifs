@@ -79,6 +79,117 @@ impl Drive {
         }
     }
 
+    /// The checksum a completed upload's object gets, worked out from its parts' and
+    /// checked against what the client sent (AWS's rules: a listed part's checksum must
+    /// match the stored one, the object's must match the sent one).
+    async fn object_checksum(
+        &self,
+        upload: &teifs_store::Upload,
+        input: &dto::CompleteMultipartUploadInput,
+        listed: &[(u32, String, Sums)],
+        customer: Option<&CustomerKey>,
+    ) -> S3Result<(Sums, Option<teifs_store::ChecksumType>)> {
+        let checksum = Store::upload_checksum(upload);
+        let sse_c = self
+            .store
+            .upload_encryption(upload)
+            .is_some_and(|i| i.mode == SseMode::Customer);
+        if sse_c && customer.is_none() && checksum.as_ref().is_some_and(|c| c.requested) {
+            return Err(s3_error!(
+                InvalidRequest,
+                "The upload has a checksum and SSE-C: completing it needs the SSE-C key"
+            ));
+        }
+        let stored: BTreeMap<u32, teifs_store::Part> = self
+            .store
+            .parts(
+                &upload.id,
+                0,
+                teifs_store::MAX_PART_NUMBER as usize,
+                customer,
+            )
+            .await
+            .s3()?
+            .into_iter()
+            .map(|p| (p.number, p))
+            .collect();
+        for (number, _, sent) in listed {
+            let Some(part) = stored.get(number) else {
+                continue; // The store refuses the missing part.
+            };
+            if sent
+                .iter()
+                .any(|(name, value)| part.checksums.get(name).is_some_and(|v| v != value))
+            {
+                return Err(s3_error!(
+                    InvalidPart,
+                    "part {number}'s checksum doesn't match the uploaded part"
+                ));
+            }
+        }
+        let parts: Option<Vec<&teifs_store::Part>> =
+            listed.iter().map(|(n, ..)| stored.get(n)).collect();
+        if let (Some(size), Some(parts)) = (input.mpu_object_size, &parts)
+            && u64::try_from(size).ok() != Some(parts.iter().map(|p| p.size).sum())
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "The provided 'x-amz-mp-object-size' header value does not match what was computed"
+            ));
+        }
+        let Some(checksum) = checksum else {
+            return Ok((Sums::new(), None));
+        };
+        if let Some(kind) = &input.checksum_type
+            && checksum.requested
+            && kind.as_str() != checksum.kind.as_str()
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "The upload was created with the {} checksum type",
+                checksum.kind.as_str()
+            ));
+        }
+        let computed = parts.and_then(|parts| {
+            let sums: Vec<(u64, Option<&str>)> = parts
+                .iter()
+                .map(|p| {
+                    (
+                        p.size,
+                        p.checksums.get(&checksum.algorithm).map(String::as_str),
+                    )
+                })
+                .collect();
+            checksums::of_parts(&checksum, &sums)
+        });
+        for (name, value) in &checksums::from_dto(&checksum_of!(input)) {
+            if *name == checksum.algorithm {
+                if computed
+                    .as_deref()
+                    .is_some_and(|c| !checksums::same_object_checksum(checksum.kind, value, c))
+                {
+                    return Err(s3_error!(
+                        BadDigest,
+                        "the {name} checksum doesn't match the parts"
+                    ));
+                }
+            } else if checksum.requested {
+                return Err(s3_error!(
+                    InvalidRequest,
+                    "The upload was created using the {} checksum algorithm",
+                    checksum.algorithm.to_ascii_lowercase()
+                ));
+            }
+        }
+        // Without the SSE-C key, S3's default checksum can't be sealed: it's left out.
+        match computed {
+            Some(value) if !(sse_c && customer.is_none()) => {
+                Ok(([(checksum.algorithm, value)].into(), Some(checksum.kind)))
+            }
+            _ => Ok((Sums::new(), None)),
+        }
+    }
+
     /// Decides a write's encryption from its SSE headers and the bucket's default.
     async fn write_encryption(
         &self,
@@ -291,6 +402,7 @@ impl NewAttrs {
                 .map(|m| m.into_iter().collect())
                 .unwrap_or_default(),
             checksums,
+            checksum_type: None,
         }
     }
 }
@@ -360,6 +472,8 @@ struct Slice<'a> {
     parts_count: Option<i32>,
     /// The checksums that describe exactly these bytes, if any do.
     checksums: Option<&'a Sums>,
+    /// What they cover, for the whole object.
+    checksum_type: Option<dto::ChecksumType>,
 }
 
 impl<'a> Slice<'a> {
@@ -374,6 +488,7 @@ impl<'a> Slice<'a> {
             content_range: None,
             parts_count: None,
             checksums: Some(&info.attrs.checksums),
+            checksum_type: checksum_type(&info.attrs.checksums, info.attrs.checksum_type),
         };
         let partial = |start: u64, len: u64| {
             (len > 0).then(|| format!("bytes {start}-{}/{}", start + len - 1, info.size))
@@ -393,6 +508,7 @@ impl<'a> Slice<'a> {
                     content_range: partial(r.start, r.end - r.start),
                     parts_count: None,
                     checksums: None,
+                    checksum_type: None,
                 })
             }
             (None, Some(number)) => {
@@ -420,6 +536,7 @@ impl<'a> Slice<'a> {
                     content_range: partial(start, part.size),
                     parts_count: Some(i32::try_from(info.parts.len()).unwrap_or(i32::MAX)),
                     checksums: Some(&part.checksums),
+                    checksum_type: None,
                 })
             }
             (None, None) => Ok(whole),
@@ -462,6 +579,60 @@ fn object_parts(
         total_parts_count: Some(i32::try_from(parts.len()).unwrap_or(i32::MAX)),
         parts: Some(page),
     }
+}
+
+/// What `CompleteMultipartUpload` answers.
+fn complete_output(
+    bucket: &str,
+    key: &str,
+    info: &ObjectInfo,
+    sums: &Sums,
+    kind: Option<teifs_store::ChecksumType>,
+) -> dto::CompleteMultipartUploadOutput {
+    let mut out = dto::CompleteMultipartUploadOutput {
+        bucket: Some(bucket.to_owned()),
+        key: Some(key.to_owned()),
+        location: Some(format!("/{bucket}/{key}")),
+        e_tag: Some(etag(&info.etag)),
+        checksum_type: checksum_type(sums, kind),
+        ..Default::default()
+    };
+    set_checksums!(out, sums);
+    out
+}
+
+/// The checksum algorithm and type an upload was created with, if the client chose them.
+fn upload_checksum_dto(
+    upload: &teifs_store::Upload,
+) -> (Option<dto::ChecksumAlgorithm>, Option<dto::ChecksumType>) {
+    match Store::upload_checksum(upload).filter(|c| c.requested) {
+        Some(c) => (
+            Some(dto::ChecksumAlgorithm::from(c.algorithm)),
+            Some(dto::ChecksumType::from_static(c.kind.as_str())),
+        ),
+        None => (None, None),
+    }
+}
+
+/// `x-amz-checksum-type` for these checksums: the recorded type, else full object.
+fn checksum_type(
+    sums: &Sums,
+    kind: Option<teifs_store::ChecksumType>,
+) -> Option<dto::ChecksumType> {
+    (!sums.is_empty()).then(|| {
+        dto::ChecksumType::from_static(
+            kind.unwrap_or(teifs_store::ChecksumType::FullObject)
+                .as_str(),
+        )
+    })
+}
+
+/// Whether a request's checksum comes as a trailer after its body.
+fn has_trailer(headers: &http::HeaderMap) -> bool {
+    headers
+        .get("x-amz-trailer")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().starts_with("x-amz-checksum-"))
 }
 
 fn checksum_mode_on(mode: Option<&ChecksumMode>) -> bool {
@@ -714,13 +885,16 @@ impl S3 for Drive {
         let mut input = req.input;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
-        let mut hasher = checksums::hasher(
-            &sent,
-            input
-                .checksum_algorithm
-                .as_ref()
-                .map(s3s::dto::ChecksumAlgorithm::as_str),
-        )?;
+        // Like S3, an object sent without a checksum gets CRC64NVME.
+        let algorithm = input
+            .checksum_algorithm
+            .as_ref()
+            .map(s3s::dto::ChecksumAlgorithm::as_str)
+            .or_else(|| {
+                (sent.is_empty() && !has_trailer(&req.headers))
+                    .then_some(checksums::DEFAULT_ALGORITHM)
+            });
+        let mut hasher = checksums::hasher(&sent, algorithm)?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -765,6 +939,7 @@ impl S3 for Drive {
             .s3()?;
         let mut out = dto::PutObjectOutput {
             e_tag: Some(etag(&info.etag)),
+            checksum_type: checksum_type(&computed, None),
             ..Default::default()
         };
         set_checksums!(out, &computed);
@@ -894,6 +1069,7 @@ impl S3 for Drive {
             && checksum_mode_on(input.checksum_mode.as_ref())
         {
             set_checksums!(out, sums);
+            out.checksum_type.clone_from(&slice.checksum_type);
         }
         set_sse!(out, info.sse.as_ref());
         Ok(S3Response::new(out))
@@ -947,6 +1123,7 @@ impl S3 for Drive {
             && checksum_mode_on(input.checksum_mode.as_ref())
         {
             set_checksums!(out, sums);
+            out.checksum_type.clone_from(&slice.checksum_type);
         }
         set_sse!(out, info.sse.as_ref());
         let mut response = S3Response::new(out);
@@ -995,7 +1172,9 @@ impl S3 for Drive {
             out.storage_class = Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD));
         }
         if wants(dto::ObjectAttributes::CHECKSUM) && !info.attrs.checksums.is_empty() {
-            out.checksum = Some(checksums::to_dto(&info.attrs.checksums));
+            let mut checksum = checksums::to_dto(&info.attrs.checksums);
+            checksum.checksum_type = checksum_type(&info.attrs.checksums, info.attrs.checksum_type);
+            out.checksum = Some(checksum);
         }
         if wants(dto::ObjectAttributes::OBJECT_PARTS) && !info.parts.is_empty() {
             out.object_parts = Some(object_parts(
@@ -1432,6 +1611,13 @@ impl S3 for Drive {
         let owner = access_key(&req).map(str::to_owned);
         let mut input = req.input;
         let attrs = new_attrs!(input).into_attrs(BTreeMap::new());
+        let checksum = checksums::for_upload(
+            input
+                .checksum_algorithm
+                .as_ref()
+                .map(dto::ChecksumAlgorithm::as_str),
+            input.checksum_type.as_ref().map(dto::ChecksumType::as_str),
+        )?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -1451,7 +1637,14 @@ impl S3 for Drive {
             .await?;
         let upload = self
             .store
-            .create_upload(&input.bucket, &input.key, attrs, owner, &encryption)
+            .create_upload(
+                &input.bucket,
+                &input.key,
+                attrs,
+                owner,
+                &encryption,
+                Some(&checksum),
+            )
             .await
             .s3()?;
         let mut out = dto::CreateMultipartUploadOutput {
@@ -1460,6 +1653,10 @@ impl S3 for Drive {
             upload_id: Some(upload.id.clone()),
             ..Default::default()
         };
+        if checksum.requested {
+            out.checksum_algorithm = Some(dto::ChecksumAlgorithm::from(checksum.algorithm));
+            out.checksum_type = Some(dto::ChecksumType::from_static(checksum.kind.as_str()));
+        }
         let info = self.store.upload_encryption(&upload);
         set_sse!(out, with_customer_md5(info, customer_md5).as_ref());
         Ok(S3Response::new(out))
@@ -1475,12 +1672,23 @@ impl S3 for Drive {
         let number = part_number(input.part_number)?;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
+        let asked = input
+            .checksum_algorithm
+            .as_ref()
+            .map(|a| a.as_str().to_owned());
+        // The part's checksum in the upload's algorithm is worked out whatever was sent.
+        let upload_checksum = Store::upload_checksum(&upload);
+        if let Some(checksum) = &upload_checksum {
+            let named: Sums = asked.iter().map(|a| (a.clone(), String::new())).collect();
+            checksums::check_part(checksum, &named)?;
+            checksums::check_part(checksum, &sent)?;
+        }
         let mut hasher = checksums::hasher(
             &sent,
-            input
-                .checksum_algorithm
-                .as_ref()
-                .map(s3s::dto::ChecksumAlgorithm::as_str),
+            asked
+                .as_deref()
+                .into_iter()
+                .chain(upload_checksum.as_ref().map(|c| c.algorithm.as_str())),
         )?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
@@ -1494,6 +1702,9 @@ impl S3 for Drive {
             .s3()?;
         let staged = self.stage(staged, body, &mut hasher).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
+        if let Some(checksum) = &upload_checksum {
+            checksums::check_part(checksum, &sent)?;
+        }
         let computed = checksums::from_dto(&hasher.finalize());
         checksums::verify(&sent, &computed)?;
         let part = self
@@ -1566,25 +1777,35 @@ impl S3 for Drive {
             .stage_part(&upload.id, number, customer.as_ref())
             .await
             .s3()?;
+        let upload_checksum = Store::upload_checksum(&upload);
+        let none = Sums::new();
+        let mut hasher = checksums::hasher(
+            &none,
+            upload_checksum.as_ref().map(|c| c.algorithm.as_str()),
+        )?;
         if let Some(body) = file {
             let reader = body.range(start, length).await.s3()?;
             let mut reader = ReaderStream::with_capacity(reader, READ_CHUNK);
             while let Some(chunk) = reader.next().await {
                 let chunk = chunk.map_err(|e| s3_error!(e, InternalError))?;
+                hasher.update(&chunk);
                 staged.write(&chunk).await.s3()?;
             }
         }
+        let computed = checksums::from_dto(&hasher.finalize());
         let part = self
             .store
-            .put_part(&upload.id, number, staged, BTreeMap::new())
+            .put_part(&upload.id, number, staged, computed.clone())
             .await
             .s3()?;
+        let mut result = dto::CopyPartResult {
+            e_tag: Some(etag(&part.etag)),
+            last_modified: Some(millis(part.modified_ms)),
+            ..Default::default()
+        };
+        set_checksums!(result, &computed);
         Ok(S3Response::new(dto::UploadPartCopyOutput {
-            copy_part_result: Some(dto::CopyPartResult {
-                e_tag: Some(etag(&part.etag)),
-                last_modified: Some(millis(part.modified_ms)),
-                ..Default::default()
-            }),
+            copy_part_result: Some(result),
             ..Default::default()
         }))
     }
@@ -1599,7 +1820,17 @@ impl S3 for Drive {
         let max_parts = input.max_parts.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
         let after = u32::try_from(input.part_number_marker.unwrap_or(0)).unwrap_or(0);
         let limit = usize::try_from(max_parts).unwrap_or(0);
-        let mut parts = self.store.parts(&upload.id, after, limit + 1).await.s3()?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let mut parts = self
+            .store
+            .parts(&upload.id, after, limit + 1, customer.as_ref())
+            .await
+            .s3()?;
+        let (checksum_algorithm, checksum_type) = upload_checksum_dto(&upload);
         let truncated = parts.len() > limit;
         parts.truncate(limit);
         let next = parts
@@ -1634,6 +1865,8 @@ impl S3 for Drive {
                 id: Some(OWNER.to_owned()),
             }),
             storage_class: Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD)),
+            checksum_algorithm,
+            checksum_type,
             ..Default::default()
         }))
     }
@@ -1660,17 +1893,23 @@ impl S3 for Drive {
         let next = uploads.last().map(|u| (u.key.clone(), u.id.clone()));
         let uploads = uploads
             .into_iter()
-            .map(|u| dto::MultipartUpload {
-                key: Some(u.key),
-                upload_id: Some(u.id),
-                initiated: Some(millis(u.created_ms)),
-                owner: Some(owner()),
-                initiator: Some(dto::Initiator {
-                    display_name: Some(OWNER.to_owned()),
-                    id: Some(OWNER.to_owned()),
-                }),
-                storage_class: Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD)),
-                ..Default::default()
+            .map(|u| {
+                let (checksum_algorithm, checksum_type) = upload_checksum_dto(&u);
+                dto::MultipartUpload {
+                    key: Some(u.key),
+                    upload_id: Some(u.id),
+                    checksum_algorithm,
+                    checksum_type,
+                    initiated: Some(millis(u.created_ms)),
+                    owner: Some(owner()),
+                    initiator: Some(dto::Initiator {
+                        display_name: Some(OWNER.to_owned()),
+                        id: Some(OWNER.to_owned()),
+                    }),
+                    storage_class: Some(dto::StorageClass::from_static(
+                        dto::StorageClass::STANDARD,
+                    )),
+                }
             })
             .collect();
         Ok(S3Response::new(dto::ListMultipartUploadsOutput {
@@ -1691,33 +1930,77 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<dto::CompleteMultipartUploadOutput>> {
-        let upload = self.store.upload(&req.input.upload_id).await.s3()?;
-        check_owner(&upload, &req.input.bucket, &req.input.key, access_key(&req))?;
+        let who = access_key(&req).map(str::to_owned);
         let input = req.input;
+        let upload = match self.store.upload(&input.upload_id).await {
+            // A retried Complete of a finished upload gets the same answer.
+            Err(teifs_store::StoreError::NoSuchUpload) => {
+                let done = self
+                    .store
+                    .completed(&input.upload_id, &input.bucket, &input.key)
+                    .await
+                    .s3()?
+                    .ok_or_else(|| s3_error!(NoSuchUpload))?;
+                let sums = done.attrs.checksums.clone();
+                let kind = done.attrs.checksum_type;
+                return Ok(S3Response::new(complete_output(
+                    &input.bucket,
+                    &input.key,
+                    &done,
+                    &sums,
+                    kind,
+                )));
+            }
+            other => other.s3()?,
+        };
+        check_owner(&upload, &input.bucket, &input.key, who.as_deref())?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
         let listed = input
             .multipart_upload
-            .and_then(|m| m.parts)
+            .as_ref()
+            .and_then(|m| m.parts.as_ref())
+            .map(Vec::as_slice)
             .unwrap_or_default()
-            .into_iter()
+            .iter()
             .map(|p| {
                 let number = part_number(p.part_number.ok_or_else(|| s3_error!(InvalidPart))?)?;
                 let etag = p
                     .e_tag
+                    .as_ref()
                     .ok_or_else(|| s3_error!(InvalidPart))?
                     .value()
                     .to_owned();
-                Ok((number, etag))
+                Ok((number, etag, checksums::from_dto(&checksum_of!(p))))
             })
             .collect::<S3Result<Vec<_>>>()?;
+        let (sums, kind) = self
+            .object_checksum(&upload, &input, &listed, customer.as_ref())
+            .await?;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
-        let info = self.store.complete(&upload.id, listed, pre).await.s3()?;
-        Ok(S3Response::new(dto::CompleteMultipartUploadOutput {
-            bucket: Some(input.bucket.clone()),
-            key: Some(input.key.clone()),
-            location: Some(format!("/{}/{}", input.bucket, input.key)),
-            e_tag: Some(etag(&info.etag)),
-            ..Default::default()
-        }))
+        let info = self
+            .store
+            .complete(
+                &upload.id,
+                listed.into_iter().map(|(n, e, _)| (n, e)).collect(),
+                pre,
+                teifs_store::CompleteWith {
+                    checksums: sums.clone(),
+                    checksum_type: kind,
+                    customer,
+                },
+            )
+            .await
+            .s3()?;
+        let mut out = complete_output(&input.bucket, &input.key, &info, &sums, kind);
+        // S3 reports SSE-S3 and SSE-KMS here, not SSE-C.
+        let headers = sse::headers(info.sse.as_ref());
+        out.server_side_encryption = headers.sse;
+        out.ssekms_key_id = headers.kms_key;
+        Ok(S3Response::new(out))
     }
 
     async fn abort_multipart_upload(

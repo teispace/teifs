@@ -499,6 +499,7 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
             ObjectAttrs::default(),
             Some("key1".into()),
             &Encryption::None,
+            None,
         )
         .await
         .unwrap();
@@ -516,14 +517,22 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
                 .etag,
         ));
     }
-    assert_eq!(store.parts(&upload.id, 0, 100).await.unwrap().len(), 2);
+    assert_eq!(
+        store.parts(&upload.id, 0, 100, None).await.unwrap().len(),
+        2
+    );
     assert_eq!(
         store.uploads("photos", "", None, 100).await.unwrap().len(),
         1
     );
 
     let info = store
-        .complete(&upload.id, etags.clone(), Precondition::default())
+        .complete(
+            &upload.id,
+            etags.clone(),
+            Precondition::default(),
+            CompleteWith::default(),
+        )
         .await
         .unwrap();
     let md5s: Vec<[u8; 16]> = etags
@@ -561,6 +570,7 @@ async fn multipart_rules_are_enforced() {
             ObjectAttrs::default(),
             None,
             &Encryption::None,
+            None,
         )
         .await
         .unwrap();
@@ -579,14 +589,24 @@ async fn multipart_rules_are_enforced() {
     }
     assert!(matches!(
         store
-            .complete(&upload.id, etags.clone(), Precondition::default())
+            .complete(
+                &upload.id,
+                etags.clone(),
+                Precondition::default(),
+                CompleteWith::default()
+            )
             .await,
         Err(StoreError::EntityTooSmall)
     ));
     let reversed = vec![etags[1].clone(), etags[0].clone()];
     assert!(matches!(
         store
-            .complete(&upload.id, reversed, Precondition::default())
+            .complete(
+                &upload.id,
+                reversed,
+                Precondition::default(),
+                CompleteWith::default()
+            )
             .await,
         Err(StoreError::InvalidPartOrder)
     ));
@@ -595,14 +615,20 @@ async fn multipart_rules_are_enforced() {
             .complete(
                 &upload.id,
                 vec![(1, "\"bad\"".into())],
-                Precondition::default()
+                Precondition::default(),
+                CompleteWith::default()
             )
             .await,
         Err(StoreError::InvalidPart)
     ));
     // Parts need not be numbered without gaps; one small last part is fine.
     store
-        .complete(&upload.id, vec![etags[1].clone()], Precondition::default())
+        .complete(
+            &upload.id,
+            vec![etags[1].clone()],
+            Precondition::default(),
+            CompleteWith::default(),
+        )
         .await
         .unwrap();
 
@@ -613,6 +639,7 @@ async fn multipart_rules_are_enforced() {
             ObjectAttrs::default(),
             None,
             &Encryption::None,
+            None,
         )
         .await
         .unwrap();
@@ -686,4 +713,35 @@ async fn reopening_keeps_metadata_and_clears_leftovers() {
             .next()
             .is_none()
     );
+}
+
+#[test]
+fn copies_keep_checksums_of_the_bytes_but_not_of_parts() {
+    let sums: BTreeMap<String, String> = [("SHA256".to_owned(), "abc=".to_owned())].into();
+    let full = ObjectAttrs {
+        checksums: sums.clone(),
+        ..ObjectAttrs::default()
+    };
+    let composite = ObjectAttrs {
+        checksums: [("SHA256".to_owned(), "abc=-3".to_owned())].into(),
+        checksum_type: Some(teifs_types::ChecksumType::Composite),
+        ..ObjectAttrs::default()
+    };
+    let replacement = ObjectAttrs {
+        content_type: Some("text/plain".into()),
+        ..ObjectAttrs::default()
+    };
+    // A copy shares the source's bytes: a full-object checksum still describes them.
+    assert_eq!(copied_attrs(full.clone(), None).checksums, sums);
+    let replaced = copied_attrs(full.clone(), Some(replacement.clone()));
+    assert_eq!(replaced.checksums, sums);
+    assert_eq!(replaced.content_type.as_deref(), Some("text/plain"));
+    // It has no parts, so a composite checksum doesn't carry over.
+    let copied = copied_attrs(composite.clone(), None);
+    assert!(copied.checksums.is_empty() && copied.checksum_type.is_none());
+    // Replacing metadata in place keeps the bytes and the parts, so every checksum.
+    let in_place = replaced_attrs(&composite, replacement);
+    assert_eq!(in_place.checksums, composite.checksums);
+    assert_eq!(in_place.checksum_type, composite.checksum_type);
+    assert_eq!(in_place.content_type.as_deref(), Some("text/plain"));
 }

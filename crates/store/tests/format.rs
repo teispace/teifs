@@ -84,7 +84,10 @@ async fn assert_intact(store: &Store, manifest: &Manifest) {
             (upload.bucket.as_str(), upload.key.as_str()),
             (expected.bucket.as_str(), expected.key.as_str())
         );
-        assert_eq!(store.parts(&expected.id, 0, 100).await.unwrap().len(), 1);
+        assert_eq!(
+            store.parts(&expected.id, 0, 100, None).await.unwrap().len(),
+            1
+        );
     }
 }
 

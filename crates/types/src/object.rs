@@ -36,6 +36,44 @@ pub struct ObjectAttrs {
     /// Whole-object checksums by algorithm (`CRC32`, `SHA256`, …), base64 as S3 sends them.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub checksums: BTreeMap<String, String>,
+    /// What the checksums cover: `None` is the whole object, like `FullObject`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum_type: Option<ChecksumType>,
+}
+
+/// What an object's checksum covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChecksumType {
+    /// The object's bytes.
+    FullObject,
+    /// Its parts' checksums, joined (a multipart object; the value ends in `-N`).
+    Composite,
+}
+
+impl ChecksumType {
+    /// S3's name for it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullObject => "FULL_OBJECT",
+            Self::Composite => "COMPOSITE",
+        }
+    }
+}
+
+/// The checksum a multipart upload's object gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadChecksum {
+    /// The algorithm (`CRC64NVME`, `SHA256`, …).
+    pub algorithm: String,
+    /// What it covers.
+    #[serde(rename = "type")]
+    pub kind: ChecksumType,
+    /// Whether the client asked for it (else it's S3's default, CRC64NVME).
+    #[serde(default)]
+    pub requested: bool,
 }
 
 /// How an object is encrypted at rest.

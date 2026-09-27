@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Multipart checksums as on AWS: full-object (CRC32, CRC32C, CRC64NVME combined from
+  the parts) and composite checksums, checked at Complete; CRC64NVME by default for
+  objects sent without a checksum; retried Completes answer again. Under SSE-KMS and
+  SSE-C, part checksums are sealed as soon as a part is stored.
 - GetObjectAttributes, GetObject and HeadObject by part number, and HeadObject with a
   range; completed multipart uploads remember each part's size and checksums.
 - RenameObject, with source and destination conditions and client tokens.

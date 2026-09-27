@@ -382,6 +382,7 @@ async fn multipart_uploads_complete_into_object_buckets() {
             attrs("video/mp4"),
             None,
             &Encryption::None,
+            None,
         )
         .await
         .unwrap();
@@ -400,7 +401,12 @@ async fn multipart_uploads_complete_into_object_buckets() {
         etags.push((number, stored.etag));
     }
     let info = store
-        .complete(&upload.id, etags, Precondition::default())
+        .complete(
+            &upload.id,
+            etags,
+            Precondition::default(),
+            CompleteWith::default(),
+        )
         .await
         .unwrap();
     assert!(info.etag.ends_with("-2"));
@@ -415,7 +421,7 @@ async fn completed_uploads_remember_their_parts() {
     for layout in LAYOUTS {
         let (dir, store) = bucket(layout).await;
         let upload = store
-            .create_upload("bkt", "f.bin", attrs("x/y"), None, &Encryption::None)
+            .create_upload("bkt", "f.bin", attrs("x/y"), None, &Encryption::None, None)
             .await
             .unwrap();
         let first = vec![1u8; usize::try_from(MIN_PART_SIZE).unwrap()];
@@ -434,7 +440,12 @@ async fn completed_uploads_remember_their_parts() {
             etags.push((number, part.etag));
         }
         let done = store
-            .complete(&upload.id, etags, Precondition::default())
+            .complete(
+                &upload.id,
+                etags,
+                Precondition::default(),
+                CompleteWith::default(),
+            )
             .await
             .unwrap();
         let expected = vec![

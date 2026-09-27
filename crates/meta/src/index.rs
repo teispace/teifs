@@ -77,6 +77,16 @@ const MIGRATIONS: &[&str] = &[
      ) WITHOUT ROWID;",
     // 5: folder buckets record the parts of multipart objects too.
     "ALTER TABLE objects ADD COLUMN parts TEXT;",
+    // 6: the checksum a multipart upload's object gets, and what completed uploads
+    // answered (a retried Complete gets the same answer).
+    "ALTER TABLE uploads ADD COLUMN checksum TEXT;
+     CREATE TABLE completed_uploads (
+        id           TEXT    PRIMARY KEY,
+        bucket       TEXT    NOT NULL,
+        key          TEXT    NOT NULL,
+        result       TEXT    NOT NULL,
+        completed_ms INTEGER NOT NULL
+     ) WITHOUT ROWID;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -135,6 +145,20 @@ pub struct Upload {
     pub created_ms: i64,
     /// How the object will be encrypted (JSON the store owns), if it will be.
     pub crypt: Option<String>,
+    /// The checksum the object will get (JSON the store owns), if any.
+    pub checksum: Option<String>,
+}
+
+/// A completed multipart upload, remembered for a while so a retried Complete gets the
+/// same answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedUpload {
+    /// The bucket it wrote to.
+    pub bucket: String,
+    /// The key it wrote to.
+    pub key: String,
+    /// What Complete answered (JSON the store owns).
+    pub result: String,
 }
 
 /// A part uploaded so far.
@@ -161,6 +185,7 @@ fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
         attrs: attrs_from_json(&r.get::<_, String>(4)?),
         created_ms: r.get(5)?,
         crypt: r.get(6)?,
+        checksum: r.get(7)?,
     })
 }
 
@@ -289,8 +314,8 @@ impl Index {
     /// Records a new multipart upload.
     pub fn insert_upload(&self, upload: &Upload) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt, checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 upload.id,
                 upload.bucket,
@@ -298,7 +323,8 @@ impl Index {
                 upload.owner,
                 attrs_to_json(&upload.attrs),
                 upload.created_ms,
-                upload.crypt
+                upload.crypt,
+                upload.checksum
             ],
         )?;
         Ok(())
@@ -309,7 +335,7 @@ impl Index {
         Ok(self
             .conn
             .prepare_cached(
-                "SELECT id, bucket, key, owner, attrs, created_ms, crypt FROM uploads WHERE id = ?1",
+                "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum FROM uploads WHERE id = ?1",
             )?
             .query_row([id], upload_from_row)
             .optional()?)
@@ -325,7 +351,7 @@ impl Index {
     ) -> Result<Vec<Upload>> {
         let (key_marker, id_marker) = after.unwrap_or(("", ""));
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, bucket, key, owner, attrs, created_ms, crypt FROM uploads
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum FROM uploads
              WHERE bucket = ?1 AND substr(key, 1, length(?2)) = ?2 AND (key > ?3 OR (key = ?3 AND id > ?4))
              ORDER BY key, id LIMIT ?5",
         )?;
@@ -340,6 +366,48 @@ impl Index {
             upload_from_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Remembers what completing upload `id` answered, and forgets completions older than
+    /// `expire_before_ms`.
+    pub fn record_completed(
+        &self,
+        id: &str,
+        completed: &CompletedUpload,
+        now_ms: i64,
+        expire_before_ms: i64,
+    ) -> Result<()> {
+        self.conn
+            .prepare_cached("DELETE FROM completed_uploads WHERE completed_ms < ?1")?
+            .execute([expire_before_ms])?;
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO completed_uploads (id, bucket, key, result, completed_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                id,
+                completed.bucket,
+                completed.key,
+                completed.result,
+                now_ms
+            ])?;
+        Ok(())
+    }
+
+    /// What completing upload `id` answered, if it completed recently.
+    pub fn completed_upload(&self, id: &str) -> Result<Option<CompletedUpload>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT bucket, key, result FROM completed_uploads WHERE id = ?1")?
+            .query_row([id], |r| {
+                Ok(CompletedUpload {
+                    bucket: r.get(0)?,
+                    key: r.get(1)?,
+                    result: r.get(2)?,
+                })
+            })
+            .optional()?)
     }
 
     /// Forgets a multipart upload and its parts.
@@ -389,5 +457,32 @@ impl Index {
             },
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_uploads_are_remembered_then_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let done = |key: &str| CompletedUpload {
+            bucket: "b".into(),
+            key: key.into(),
+            result: "{}".into(),
+        };
+        index
+            .record_completed("old", &done("k1"), 1_000, 0)
+            .unwrap();
+        assert_eq!(index.completed_upload("old").unwrap(), Some(done("k1")));
+        assert_eq!(index.completed_upload("other").unwrap(), None);
+        // Recording another forgets those older than the cutoff.
+        index
+            .record_completed("new", &done("k2"), 5_000, 2_000)
+            .unwrap();
+        assert_eq!(index.completed_upload("old").unwrap(), None);
+        assert_eq!(index.completed_upload("new").unwrap(), Some(done("k2")));
     }
 }

@@ -2,6 +2,7 @@
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
 mod checksums;
+mod crc_combine;
 mod drive;
 mod encode;
 mod errors;

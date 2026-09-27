@@ -231,7 +231,14 @@ async fn multipart_uploads_encrypt_each_part() {
         };
         let upload = drive
             .store
-            .create_upload("vault", "big", ObjectAttrs::default(), None, &encryption)
+            .create_upload(
+                "vault",
+                "big",
+                ObjectAttrs::default(),
+                None,
+                &encryption,
+                None,
+            )
             .await
             .unwrap();
         let first = pattern(usize::try_from(MIN_PART_SIZE).unwrap() + 3);
@@ -253,7 +260,12 @@ async fn multipart_uploads_encrypt_each_part() {
         }
         let info = drive
             .store
-            .complete(&upload.id, etags, Precondition::default())
+            .complete(
+                &upload.id,
+                etags,
+                Precondition::default(),
+                CompleteWith::default(),
+            )
             .await
             .unwrap();
         assert_eq!(info.size, (first.len() + second.len()) as u64);
@@ -277,6 +289,7 @@ async fn multipart_uploads_encrypt_each_part() {
             ObjectAttrs::default(),
             None,
             &Encryption::Customer(customer(4)),
+            None,
         )
         .await
         .unwrap();
@@ -431,4 +444,126 @@ async fn encrypted_objects_rename_without_re_encryption() {
         get(&drive.store, "after", None).await.unwrap(),
         b"sealed bytes"
     );
+}
+
+/// Every file under the drive, `.teifs` included (databases, logs, data files).
+fn all_files(drive: &Drive) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(drive.dir.path(), &mut out);
+    out
+}
+
+#[tokio::test]
+async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
+    let drive = drive().await;
+    let part_sum = "PART-CHECKSUM-IN-THE-CLEAR";
+    let whole_sum = "OBJECT-CHECKSUM-IN-THE-CLEAR-1";
+    let kms = Encryption::Kms {
+        key: None,
+        context: BTreeMap::new(),
+    };
+    for (name, encryption) in [("kms", kms), ("ssec", Encryption::Customer(customer(5)))] {
+        let key = match &encryption {
+            Encryption::Customer(k) => Some(k.clone()),
+            _ => None,
+        };
+        let upload = drive
+            .store
+            .create_upload(
+                "vault",
+                name,
+                ObjectAttrs::default(),
+                None,
+                &encryption,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut staged = drive
+            .store
+            .stage_part(&upload.id, 1, key.as_ref())
+            .await
+            .unwrap();
+        staged.write(b"one part").await.unwrap();
+        let sums: BTreeMap<String, String> = [("SHA256".to_owned(), part_sum.to_owned())].into();
+        let part = drive
+            .store
+            .put_part(&upload.id, 1, staged, sums.clone())
+            .await
+            .unwrap();
+        // Listing opens them with the key (SSE-KMS always; SSE-C only with it).
+        let listed = drive
+            .store
+            .parts(&upload.id, 0, 10, key.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(listed[0].checksums, sums, "{name}");
+        if key.is_some() {
+            let blind = drive.store.parts(&upload.id, 0, 10, None).await.unwrap();
+            assert!(blind[0].checksums.is_empty());
+            // Sealing the object's checksum needs the customer's key.
+            let without_key = drive
+                .store
+                .complete(
+                    &upload.id,
+                    vec![(1, part.etag.clone())],
+                    Precondition::default(),
+                    CompleteWith {
+                        checksums: [("SHA256".to_owned(), whole_sum.to_owned())].into(),
+                        ..CompleteWith::default()
+                    },
+                )
+                .await;
+            assert!(matches!(without_key, Err(StoreError::CustomerKeyRequired)));
+        }
+        let object_sums: BTreeMap<String, String> =
+            [("SHA256".to_owned(), whole_sum.to_owned())].into();
+        drive
+            .store
+            .complete(
+                &upload.id,
+                vec![(1, part.etag)],
+                Precondition::default(),
+                CompleteWith {
+                    checksums: object_sums.clone(),
+                    checksum_type: Some(teifs_types::ChecksumType::Composite),
+                    customer: key.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Reading with the key shows them; describing without it doesn't.
+        let (info, _) = drive
+            .store
+            .read_with("vault", name, key.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(info.attrs.checksums, object_sums, "{name}");
+        assert_eq!(info.parts[0].checksums, sums);
+        let head = drive.store.head("vault", name).await.unwrap();
+        assert!(head.attrs.checksums.is_empty());
+        assert!(head.parts[0].checksums.is_empty());
+    }
+    // Nothing on the disk holds either checksum in the clear.
+    for file in all_files(&drive) {
+        let bytes = fs::read(&file).unwrap();
+        for secret in [part_sum, whole_sum] {
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{secret} in {}",
+                file.display()
+            );
+        }
+    }
 }

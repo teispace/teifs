@@ -405,7 +405,7 @@ impl Inner {
                     src_key.as_str(),
                     &fs::metadata(src_dir.join(src_key.rel()))?,
                 )?;
-                let attrs = attrs.unwrap_or(source.attrs);
+                let attrs = crate::copied_attrs(source.attrs, attrs);
                 return if dst_key.is_folder() {
                     self.make_folder(&conn, dst_bucket, dst_key, attrs, precondition)
                 } else {
@@ -431,6 +431,7 @@ impl Inner {
             let conn = self.lock();
             let source = Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta)?;
             precondition.check(Some(&source))?;
+            let attrs = crate::replaced_attrs(&source.attrs, attrs);
             // A recorded ETag (plain or multipart) stays; a file changed outside gets its MD5.
             let recorded = conn
                 .get(src_bucket, src_key.as_str())?
@@ -468,7 +469,7 @@ impl Inner {
             ),
             None => (teifs_types::hex(&md5_file(&tmp.path)?), None),
         };
-        let attrs = attrs.unwrap_or(source.attrs);
+        let attrs = crate::copied_attrs(source.attrs, attrs);
         let conn = self.lock();
         let info = self.commit_file(
             &conn,

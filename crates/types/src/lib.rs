@@ -9,6 +9,6 @@ pub use names::{
     check_object_key,
 };
 pub use object::{
-    ObjectAttrs, ObjectInfo, PartInfo, SseInfo, SseMode, Stamp, empty_etag, hex, md5_of_etag,
-    multipart_etag, provisional_etag,
+    ChecksumType, ObjectAttrs, ObjectInfo, PartInfo, SseInfo, SseMode, Stamp, UploadChecksum,
+    empty_etag, hex, md5_of_etag, multipart_etag, provisional_etag,
 };

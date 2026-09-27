@@ -1281,3 +1281,217 @@ async fn parts_and_ranges_can_be_read_and_described() {
         Some("STANDARD")
     );
 }
+
+/// A checksum of `bytes` as S3 sends it (base64).
+fn checksum(algorithm: &str, bytes: &[u8]) -> String {
+    let mut hasher = s3s::checksum::ChecksumHasher::default();
+    match algorithm {
+        "CRC32" => hasher.crc32 = Some(s3s::crypto::Crc32::default()),
+        "CRC64NVME" => hasher.crc64nvme = Some(s3s::crypto::Crc64Nvme::default()),
+        _ => hasher.sha256 = Some(s3s::crypto::Sha256::default()),
+    }
+    hasher.update(bytes);
+    let sums = hasher.finalize();
+    sums.checksum_crc32
+        .or(sums.checksum_crc64nvme)
+        .or(sums.checksum_sha256)
+        .unwrap()
+}
+
+/// Uploads `parts` to a new upload of `key` with the given checksum settings, and returns
+/// its id and the completed parts (with their checksums, as SDKs send them).
+async fn upload_parts(
+    s3: &Client,
+    bucket: &str,
+    key: &str,
+    algorithm: Option<aws_sdk_s3::types::ChecksumAlgorithm>,
+    kind: Option<aws_sdk_s3::types::ChecksumType>,
+    parts: &[Vec<u8>],
+) -> (String, Vec<CompletedPart>) {
+    let created = s3
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .set_checksum_algorithm(algorithm.clone())
+        .set_checksum_type(kind.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.checksum_algorithm(), algorithm.as_ref());
+    if kind.is_some() {
+        assert_eq!(created.checksum_type(), kind.as_ref());
+    }
+    let id = created.upload_id().unwrap().to_owned();
+    let mut done = Vec::new();
+    for (index, bytes) in parts.iter().enumerate() {
+        let number = i32::try_from(index + 1).unwrap();
+        let part = s3
+            .upload_part()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&id)
+            .part_number(number)
+            .set_checksum_algorithm(algorithm.clone())
+            .body(ByteStream::from(bytes.clone()))
+            .send()
+            .await
+            .unwrap();
+        done.push(
+            CompletedPart::builder()
+                .part_number(number)
+                .e_tag(part.e_tag().unwrap())
+                .set_checksum_crc32(part.checksum_crc32().map(str::to_owned))
+                .set_checksum_sha256(part.checksum_sha256().map(str::to_owned))
+                .build(),
+        );
+    }
+    (id, done)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn multipart_objects_get_full_object_and_composite_checksums() {
+    use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, ChecksumType};
+
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "sums").await;
+    let parts = vec![vec![b'x'; 5 * 1024 * 1024], b"and the rest".to_vec()];
+    let whole = parts.concat();
+
+    // Full object: the CRC32 of all the bytes, combined from the parts'.
+    let (id, done) = upload_parts(
+        &s3,
+        "sums",
+        "full",
+        Some(ChecksumAlgorithm::Crc32),
+        Some(ChecksumType::FullObject),
+        &parts,
+    )
+    .await;
+    let complete = |checksum: &str| {
+        s3.complete_multipart_upload()
+            .bucket("sums")
+            .key("full")
+            .upload_id(&id)
+            .checksum_crc32(checksum)
+            .checksum_type(ChecksumType::FullObject)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(done.clone()))
+                    .build(),
+            )
+            .send()
+    };
+    let err = complete("AAAAAA==").await.unwrap_err();
+    assert_eq!(err.code(), Some("BadDigest"));
+    let full = checksum("CRC32", &whole);
+    let finished = complete(&full).await.unwrap();
+    assert_eq!(finished.checksum_crc32(), Some(full.as_str()));
+    assert_eq!(finished.checksum_type(), Some(&ChecksumType::FullObject));
+    // A retried Complete gets the same answer.
+    let again = complete(&full).await.unwrap();
+    assert_eq!(again.e_tag(), finished.e_tag());
+    assert_eq!(again.checksum_crc32(), finished.checksum_crc32());
+    let head = s3
+        .head_object()
+        .bucket("sums")
+        .key("full")
+        .checksum_mode(ChecksumMode::Enabled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.checksum_crc32(), Some(full.as_str()));
+    assert_eq!(head.checksum_type(), Some(&ChecksumType::FullObject));
+
+    // Composite: the checksum of the parts' checksums, with `-N`; each part keeps its own.
+    let (id, done) = upload_parts(
+        &s3,
+        "sums",
+        "composite",
+        Some(ChecksumAlgorithm::Sha256),
+        None,
+        &parts,
+    )
+    .await;
+    let finished = s3
+        .complete_multipart_upload()
+        .bucket("sums")
+        .key("composite")
+        .upload_id(&id)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .set_parts(Some(done.clone()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let composite = finished.checksum_sha256().unwrap().to_owned();
+    assert!(composite.ends_with("-2"), "{composite}");
+    assert_eq!(finished.checksum_type(), Some(&ChecksumType::Composite));
+    let part = s3
+        .get_object()
+        .bucket("sums")
+        .key("composite")
+        .part_number(2)
+        .checksum_mode(ChecksumMode::Enabled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        part.checksum_sha256(),
+        Some(checksum("SHA256", &parts[1]).as_str())
+    );
+
+    // A part checksum of another algorithm than the upload's is refused.
+    let err = s3
+        .upload_part()
+        .bucket("sums")
+        .key("composite2")
+        .upload_id(
+            s3.create_multipart_upload()
+                .bucket("sums")
+                .key("composite2")
+                .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                .send()
+                .await
+                .unwrap()
+                .upload_id()
+                .unwrap(),
+        )
+        .part_number(1)
+        .checksum_algorithm(ChecksumAlgorithm::Crc32)
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("InvalidRequest"));
+
+    // Without a choice, the object gets S3's default: CRC64NVME of the whole object.
+    let (id, done) = upload_parts(&s3, "sums", "default", None, None, &parts).await;
+    s3.complete_multipart_upload()
+        .bucket("sums")
+        .key("default")
+        .upload_id(&id)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .set_parts(Some(done))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let head = s3
+        .head_object()
+        .bucket("sums")
+        .key("default")
+        .checksum_mode(ChecksumMode::Enabled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.checksum_crc64_nvme(),
+        Some(checksum("CRC64NVME", &whole).as_str())
+    );
+}

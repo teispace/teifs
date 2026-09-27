@@ -182,3 +182,45 @@ pub(crate) async fn data_key(
         }
     }
 }
+
+/// The entry that holds sealed checksums in a checksum map (never an algorithm's name).
+pub(crate) const SEALED: &str = "sealed";
+
+/// Checksums say something about the plaintext: under SSE-KMS and SSE-C they're kept
+/// sealed with the object's data key, base64.
+pub(crate) fn seal_sums(key: &DataKey, sums: &BTreeMap<String, String>) -> String {
+    let json = serde_json::to_vec(sums).expect("checksums serialize");
+    STANDARD.encode(key.seal_metadata(&json))
+}
+
+/// Opens what [`seal_sums`] sealed.
+pub(crate) fn open_sums(key: &DataKey, sealed: &str) -> Result<BTreeMap<String, String>> {
+    let bytes = STANDARD
+        .decode(sealed)
+        .map_err(|_| StoreError::CorruptMetadata)?;
+    let json = key.open_metadata(&bytes)?;
+    serde_json::from_slice(&json).map_err(|_| StoreError::CorruptMetadata)
+}
+
+/// A part's checksums as stored: sealed into the [`SEALED`] entry when `key` is given.
+pub(crate) fn part_sums(
+    key: Option<&DataKey>,
+    sums: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    match key {
+        Some(key) if !sums.is_empty() => [(SEALED.to_owned(), seal_sums(key, &sums))].into(),
+        _ => sums,
+    }
+}
+
+/// A part's checksums as reported: opened with `key` when sealed and a key is given,
+/// else without the sealed entry.
+pub(crate) fn open_part_sums(
+    key: Option<&DataKey>,
+    mut sums: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    match (sums.remove(SEALED), key) {
+        (Some(sealed), Some(key)) => open_sums(key, &sealed),
+        _ => Ok(sums),
+    }
+}

@@ -33,14 +33,14 @@ pub use body::{BodyReader, ObjectBody};
 pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
 pub use list::{After, ListQuery, Listing};
-pub use multipart::{MAX_PART_NUMBER, MIN_PART_SIZE};
+pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{BucketEncryption, DefaultEncryption};
 pub use sse::Encryption;
 pub use staged::Staged;
 pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};
 pub use teifs_meta::{Layout, Part, Upload};
+pub use teifs_types::{ChecksumType, PartInfo, SseInfo, SseMode, UploadChecksum};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
-pub use teifs_types::{PartInfo, SseInfo, SseMode};
 
 use error::not_found_as;
 use folder::Found;
@@ -514,12 +514,7 @@ impl Store {
                     } else {
                         // Checksums would say something about the plaintext.
                         if !attrs.checksums.is_empty() {
-                            let json =
-                                serde_json::to_vec(&attrs.checksums).expect("checksums serialize");
-                            crypt.checksums = Some(base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                key.seal_metadata(&json),
-                            ));
+                            crypt.checksums = Some(sse::seal_sums(key, &attrs.checksums));
                             attrs.checksums.clear();
                         }
                         teifs_types::hex(&key.etag_for(&md5))
@@ -565,6 +560,9 @@ impl Store {
         let (mut info, _, sealed) = self.locate(bucket, key).await?;
         if let Some((crypt, ..)) = sealed {
             info.sse = Some(crypt.info(None));
+            for part in &mut info.parts {
+                part.checksums = sse::open_part_sums(None, std::mem::take(&mut part.checksums))?;
+            }
         }
         Ok(info)
     }
@@ -620,11 +618,11 @@ impl Store {
         )
         .await?;
         if let Some(sealed) = &crypt.checksums {
-            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, sealed)
-                .map_err(|_| StoreError::CorruptMetadata)?;
-            let json = data_key.open_metadata(&bytes)?;
-            info.attrs.checksums =
-                serde_json::from_slice(&json).map_err(|_| StoreError::CorruptMetadata)?;
+            info.attrs.checksums = sse::open_sums(&data_key, sealed)?;
+        }
+        for part in &mut info.parts {
+            part.checksums =
+                sse::open_part_sums(Some(&data_key), std::mem::take(&mut part.checksums))?;
         }
         info.sse = Some(crypt.info(customer.map(CustomerKey::md5_base64)));
         let body = file.map(|file| {
@@ -841,8 +839,33 @@ impl Store {
                 staged.write(&buf[..n]).await?;
             }
         }
-        let attrs = attrs.unwrap_or(source.attrs);
+        let attrs = copied_attrs(source.attrs, attrs);
         self.commit(to.0, to.1, staged, attrs, precondition).await
+    }
+}
+
+/// The attributes a copy gets: `replacement`, or the source's. The source's checksums
+/// carry over when they describe its bytes, which the copy shares; a composite checksum
+/// describes its parts, which a copy doesn't have.
+pub(crate) fn copied_attrs(source: ObjectAttrs, replacement: Option<ObjectAttrs>) -> ObjectAttrs {
+    let (checksums, checksum_type) = match source.checksum_type {
+        Some(teifs_types::ChecksumType::Composite) => (std::collections::BTreeMap::new(), None),
+        _ => (source.checksums.clone(), None),
+    };
+    ObjectAttrs {
+        checksums,
+        checksum_type,
+        ..replacement.unwrap_or(source)
+    }
+}
+
+/// The attributes an object gets when its metadata is replaced in place: its bytes and
+/// parts don't change, so its checksums stay.
+pub(crate) fn replaced_attrs(current: &ObjectAttrs, replacement: ObjectAttrs) -> ObjectAttrs {
+    ObjectAttrs {
+        checksums: current.checksums.clone(),
+        checksum_type: current.checksum_type,
+        ..replacement
     }
 }
 
@@ -989,7 +1012,7 @@ impl Inner {
             Some(_) => source.etag.clone(),
             None => teifs_types::hex(&md5_file(&tmp.path)?),
         };
-        let attrs = attrs.unwrap_or(source.attrs);
+        let attrs = copied_attrs(source.attrs, attrs);
         let conn = self.lock();
         let finished = Finished::plain(&tmp.path, source.size, etag, attrs);
         let info = self.commit_to(&conn, dst, dst_key, finished, precondition)?;

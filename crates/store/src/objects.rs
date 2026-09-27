@@ -316,10 +316,11 @@ impl Inner {
     ) -> Result<ObjectInfo> {
         let row = Inner::object_row(conn, bucket, key)?.ok_or(StoreError::NoSuchKey)?;
         precondition.check(Some(&to_info(&row)))?;
+        let attrs = crate::replaced_attrs(&row.attrs, attrs.clone());
         let now = now_ms();
-        conn.set_version_attrs(&bucket.id, key, attrs, now)?;
+        conn.set_version_attrs(&bucket.id, key, &attrs, now)?;
         Ok(ObjectInfo {
-            attrs: attrs.clone(),
+            attrs,
             modified: SystemTime::UNIX_EPOCH
                 + Duration::from_millis(u64::try_from(now).unwrap_or(0)),
             ..to_info(&row)

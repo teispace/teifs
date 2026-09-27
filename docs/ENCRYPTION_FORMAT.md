@@ -95,6 +95,12 @@ A range read decrypts only the packages that hold the range.
 | SSE-KMS, SSE-C | `HMAC-SHA256(data key, "teifs etag v1" ‖ MD5 of the plaintext)`, first 16 bytes, hex (not the MD5, as AWS) | Sealed with the data key |
 
 Multipart objects follow the same rule per part, then the usual `-N` multipart ETag.
+Under SSE-KMS and SSE-C each part's checksums are sealed too, from the moment the part
+is stored: the checksum map then holds a single `sealed` entry (base64 of the sealed
+JSON map), in the upload's `parts` rows and, after Complete, in the object's `parts`.
+Listing parts opens them with the data key (SSE-C: only when the request carries the
+customer's key). A completed upload's remembered answer keeps no checksums for these
+modes.
 
 "Sealed with the data key" means AES-256-GCM with the key HKDF-SHA256(ikm = data key,
 salt = none, info = `"teifs meta v1"`), a random 12-byte nonce stored in front, and no
