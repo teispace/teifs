@@ -17,7 +17,7 @@ use crate::{
     error::{Result, not_found_as},
     md5_file,
     objects::PartsRecord,
-    staged::{Publish, TmpFile, publish, sync_dir},
+    staged::{Publish, TmpFile, publish},
 };
 
 /// What's at an object's path.
@@ -59,6 +59,7 @@ impl Inner {
     /// it. Holds the commit lock (`conn`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn rename_folder_object(
+        &self,
         conn: &Index,
         bucket: &str,
         dir: &Path,
@@ -87,7 +88,7 @@ impl Inner {
         if src == dst {
             return Ok(());
         }
-        let parent = Inner::make_parents(dir, dst)?;
+        let parent = self.make_parents(dir, dst)?;
         let how = if destination.creates_only() {
             Publish::CreateNew
         } else {
@@ -100,9 +101,9 @@ impl Inner {
                 err.into()
             }
         })?;
-        sync_dir(&parent)?;
+        self.sync_folder(&parent)?;
         if let Some(src_parent) = src_path.parent() {
-            sync_dir(src_parent)?;
+            self.sync_folder(src_parent)?;
         }
         conn.rename(bucket, src.as_str(), dst.as_str())?;
         Inner::prune(conn, bucket, dir, src.as_str())
@@ -232,7 +233,7 @@ impl Inner {
 
     /// Creates the folders above `key`, refusing to go through a file, a link, or a
     /// folder whose name differs in letter case. Returns the folder the object goes in.
-    pub(crate) fn make_parents(dir: &Path, key: &ObjectKey) -> Result<PathBuf> {
+    pub(crate) fn make_parents(&self, dir: &Path, key: &ObjectKey) -> Result<PathBuf> {
         let Some(parent) = key.rel().parent().filter(|p| !p.as_os_str().is_empty()) else {
             return Ok(dir.to_owned());
         };
@@ -272,7 +273,7 @@ impl Inner {
             ));
         }
         for path in &created {
-            sync_dir(path.parent().unwrap_or(dir))?;
+            self.sync_folder(path.parent().unwrap_or(dir))?;
         }
         Ok(current)
     }
@@ -294,8 +295,8 @@ impl Inner {
         let current = Inner::current_for_write(conn, bucket, &dir, key)?;
         precondition.check(current.as_ref())?;
         // Flushing needs write access on Windows.
-        fs::OpenOptions::new().write(true).open(tmp)?.sync_all()?;
-        let parent = Inner::make_parents(&dir, key)?;
+        self.sync_file(tmp)?;
+        let parent = self.make_parents(&dir, key)?;
         let path = dir.join(key.rel());
         let how = if precondition.creates_only() {
             Publish::CreateNew
@@ -310,7 +311,7 @@ impl Inner {
                 err.into()
             }
         })?;
-        sync_dir(&parent)?;
+        self.sync_folder(&parent)?;
         let meta = fs::metadata(&path)?;
         let stamp = Stamp::of(&meta);
         let part_infos = parts
@@ -351,13 +352,13 @@ impl Inner {
         let dir = self.bucket_dir(bucket)?;
         let current = Inner::current_for_write(conn, bucket, &dir, key)?;
         precondition.check(current.as_ref())?;
-        let parent = Inner::make_parents(&dir, key)?;
+        let parent = self.make_parents(&dir, key)?;
         let path = dir.join(key.rel());
         match fs::create_dir(&path) {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             other => other?,
         }
-        sync_dir(&parent)?;
+        self.sync_folder(&parent)?;
         let meta = fs::metadata(&path)?;
         let row = Row {
             stamp: Stamp::of(&meta),

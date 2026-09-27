@@ -15,6 +15,7 @@ teifs-meta.workspace = true
 teifs-crypto.workspace = true
 base64.workspace = true
 tokio.workspace = true
+fs4.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
 bytes.workspace = true

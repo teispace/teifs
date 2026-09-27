@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use teifs_meta::{Index, NULL_VERSION, VersionRow};
 
 use crate::{
-    Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
+    Durability, Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
     error::Result,
     now_ms,
     sse::Crypt,
-    staged::{Publish, publish, sync_dir},
+    staged::{Publish, publish},
 };
 
 /// Where object buckets keep their data, inside `.teifs`.
@@ -188,7 +188,7 @@ pub(crate) fn part_sizes(row: &VersionRow) -> Result<Vec<u64>> {
 }
 
 /// Appends the footer: JSON, its length (u32 BE), the footer version, and the magic.
-fn append_footer(path: &Path, footer: &Footer<'_>) -> io::Result<()> {
+fn append_footer(path: &Path, footer: &Footer<'_>, sync: bool) -> io::Result<()> {
     let json = serde_json::to_vec(footer).expect("the footer serializes");
     let len = u32::try_from(json.len()).map_err(io::Error::other)?;
     let mut file = fs::OpenOptions::new().append(true).open(path)?;
@@ -197,7 +197,7 @@ fn append_footer(path: &Path, footer: &Footer<'_>) -> io::Result<()> {
     file.write_all(&[FOOTER_VERSION])?;
     file.write_all(MAGIC)?;
     // One sync covers the bytes and the footer.
-    file.sync_all()
+    if sync { file.sync_all() } else { Ok(()) }
 }
 
 impl Inner {
@@ -214,6 +214,7 @@ impl Inner {
 
     /// Makes the finished bytes the object `key`. Holds the commit lock (`conn`).
     pub(crate) fn commit_object(
+        &self,
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
@@ -257,12 +258,13 @@ impl Inner {
                 crypt: crypt.as_ref(),
                 parts: parts.as_ref(),
             },
+            self.durability != Durability::None,
         )?;
         let path = bucket.data_path(&object_id);
         let parent = path.parent().unwrap_or(&bucket.dir);
         fs::create_dir_all(parent)?;
         publish(tmp, &path, &bucket.dir, Publish::Replace)?;
-        sync_dir(parent)?;
+        self.sync_folder(parent)?;
 
         let row = VersionRow {
             bucket_id: bucket.id.clone(),

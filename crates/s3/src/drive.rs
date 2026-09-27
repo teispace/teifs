@@ -195,6 +195,15 @@ impl Drive {
         }
     }
 
+    /// Refuses a write of `len` bytes (when the request says how long) that wouldn't
+    /// leave the room kept free for deletes.
+    async fn ensure_space(&self, bucket: &str, len: Option<i64>) -> S3Result<()> {
+        match len.and_then(|len| u64::try_from(len).ok()) {
+            Some(len) => self.store.ensure_space(bucket, len).await.s3(),
+            None => Ok(()),
+        }
+    }
+
     /// Decides a write's encryption from its SSE headers and the bucket's default.
     async fn write_encryption(
         &self,
@@ -997,6 +1006,8 @@ impl S3 for Drive {
                 },
             )
             .await?;
+        self.ensure_space(&input.bucket, input.content_length)
+            .await?;
         let staged = self
             .store
             .stage_for(&input.bucket, &encryption)
@@ -1549,6 +1560,8 @@ impl S3 for Drive {
             ));
         }
         let attrs = copy_attrs(&mut input, &source.attrs, replace)?;
+        self.ensure_space(&input.bucket, i64::try_from(source.size).ok())
+            .await?;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
@@ -1913,6 +1926,8 @@ impl S3 for Drive {
             input.sse_customer_key.as_deref(),
             input.sse_customer_key_md5.as_deref(),
         )?;
+        self.ensure_space(&upload.bucket, input.content_length)
+            .await?;
         let staged = self
             .store
             .stage_part(&upload.id, number, customer.as_ref())
@@ -1990,6 +2005,8 @@ impl S3 for Drive {
             Some(range) => copy_range(range, source.size)?,
             None => (0, source.size),
         };
+        self.ensure_space(&upload.bucket, i64::try_from(length).ok())
+            .await?;
         let mut staged = self
             .store
             .stage_part(&upload.id, number, customer.as_ref())

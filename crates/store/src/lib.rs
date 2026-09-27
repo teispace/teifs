@@ -20,6 +20,7 @@ mod multipart;
 mod objects;
 mod reconcile;
 mod settings;
+mod space;
 mod sse;
 mod staged;
 
@@ -205,6 +206,10 @@ struct Inner {
     root: PathBuf,
     system_dir: PathBuf,
     tmp: PathBuf,
+    /// How hard writes are made to survive a power cut.
+    durability: Durability,
+    /// The drive's lock: one process at a time.
+    _lock: fs::File,
     /// Large folders' sorted contents, for folder-bucket listings.
     folders: folders::FolderCache,
     uploads: PathBuf,
@@ -220,6 +225,21 @@ struct Inner {
     default_encryption: BucketEncryption,
 }
 
+/// How hard a write is made to survive a power cut before it's acknowledged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// File data, folder entries and the index are synced before a write is
+    /// acknowledged: nothing acknowledged is lost.
+    #[default]
+    Strict,
+    /// File data is synced; folder entries and the index are left to the operating
+    /// system. A power cut can lose the last moments' writes, and never corrupts.
+    Relaxed,
+    /// Nothing is synced (scratch data): a power cut can lose recent writes, and still
+    /// never corrupts.
+    None,
+}
+
 /// How to open a drive.
 #[derive(Debug, Clone, Default)]
 pub struct StoreOptions {
@@ -229,6 +249,8 @@ pub struct StoreOptions {
     /// The encryption settings of object buckets that have none of their own; `None`
     /// means AWS's default ([`BucketEncryption::aws_default`]).
     pub default_encryption: Option<BucketEncryption>,
+    /// How hard writes are made to survive a power cut.
+    pub durability: Durability,
 }
 
 impl Store {
@@ -249,6 +271,9 @@ impl Store {
             )));
         }
         let system_dir = root.join(SYSTEM_DIR);
+        fs::create_dir_all(&system_dir)?;
+        // One process per drive, before touching anything another might be using.
+        let lock = lock_drive(&system_dir)?;
         let tmp = system_dir.join("tmp");
         let uploads = system_dir.join("uploads");
         fs::create_dir_all(&uploads)?;
@@ -259,11 +284,18 @@ impl Store {
         sweep_bucket_staging(&root);
         let format = format::prepare(&system_dir)?;
         let db = Index::open(&system_dir.join(format::INDEX_DB))?;
+        db.set_synchronous(match options.durability {
+            Durability::Strict => "FULL",
+            Durability::Relaxed => "NORMAL",
+            Durability::None => "OFF",
+        })?;
         let system_db = System::open(&system_dir.join(format::SYSTEM_DB))?;
         let inner = Inner {
             root,
             system_dir,
             tmp,
+            durability: options.durability,
+            _lock: lock,
             folders: folders::FolderCache::default(),
             uploads,
             db: Mutex::new(db),
@@ -700,7 +732,7 @@ impl Store {
                 Bucket::Folder(name, dir) => {
                     let src = ObjectKey::parse(&from).map_err(|_| StoreError::NoSuchKey)?;
                     let dst = ObjectKey::parse(&to)?;
-                    Inner::rename_folder_object(
+                    inner.rename_folder_object(
                         &conn,
                         &name,
                         &dir,
@@ -858,6 +890,24 @@ pub(crate) fn replaced_attrs(current: &ObjectAttrs, replacement: ObjectAttrs) ->
 }
 
 impl Inner {
+    /// Syncs a written file's data, unless durability is off.
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        if self.durability == Durability::None {
+            return Ok(());
+        }
+        // Flushing needs write access on Windows.
+        fs::OpenOptions::new().write(true).open(path)?.sync_all()
+    }
+
+    /// Syncs a folder so a new entry in it survives a power cut, in strict mode.
+    fn sync_folder(&self, dir: &Path) -> io::Result<()> {
+        if self.durability == Durability::Strict {
+            sync_dir(dir)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Every bucket, by name: object buckets from their records, folder buckets from the
     /// drive's folders.
     pub(crate) fn buckets(&self) -> Result<Vec<BucketInfo>> {
@@ -997,9 +1047,7 @@ impl Inner {
                     precondition,
                 )
             }
-            Bucket::Object(bucket) => {
-                Inner::commit_object(conn, bucket, key, finished, precondition)
-            }
+            Bucket::Object(bucket) => self.commit_object(conn, bucket, key, finished, precondition),
         }
     }
 
@@ -1059,6 +1107,20 @@ impl Inner {
 /// A time in milliseconds since the Unix epoch.
 fn from_ms(ms: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+}
+
+/// Takes the drive's lock, held until the store is dropped (or the process ends).
+fn lock_drive(system_dir: &Path) -> Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(system_dir.join("lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(StoreError::DriveInUse),
+        Err(fs::TryLockError::Error(err)) => Err(err.into()),
+    }
 }
 
 /// Removes what writes to buckets on other disks left staged when the last run stopped.

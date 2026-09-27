@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Durability modes (`serve --durability strict|relaxed|none`), one process per drive
+  (`.teifs/lock`), and a full disk answers `507 XTeiFSStorageFull` before deletes stop
+  working.
 - Listing a large folder bucket page by page reads each folder once instead of once
   per page (a full listing of 50,000 files in one folder: 2.6 s → 0.2–0.4 s).
 - Folder buckets are indexed in the background: files added or changed outside TeiFS

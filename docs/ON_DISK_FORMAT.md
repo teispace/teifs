@@ -11,6 +11,7 @@ it against a drive written by each released format.
 <drive>/
 ├── .teifs/                   TeiFS's own data
 │   ├── format.json           which format this drive is in
+│   ├── lock                  held by the one process that has the drive open
 │   ├── index.db              the object index (SQLite, WAL mode)
 │   ├── system.db             bucket settings (SQLite, WAL mode)
 │   ├── backups/              copies made before upgrades
@@ -143,7 +144,28 @@ in place with a hard link, which the file system refuses if anything, even anoth
 program's file, appeared there meanwhile. Both databases commit with SQLite's
 `synchronous=FULL` (plus `fullfsync` on macOS, where a plain `fsync` doesn't reach the
 disk). Every acknowledged write survives a power cut; a write in progress
-leaves nothing behind.
+leaves nothing behind. That's the default, `strict` durability; `serve --durability`
+can relax it:
+
+| Mode | Synced before a write is acknowledged | After a power cut |
+|---|---|---|
+| `strict` (default) | The file's data, its folder entry, the index | Nothing acknowledged is lost |
+| `relaxed` | The file's data (index `synchronous=NORMAL`) | The last moments' writes may be lost |
+| `none` | Nothing | Recent writes may be lost |
+
+No mode can corrupt the drive: files still appear by atomic rename, and the index is
+still a write-ahead-logged SQLite database. `system.db` and format upgrades are always
+synced.
+
+Only one process opens a drive at a time: it holds an exclusive lock on `.teifs/lock`,
+released when it exits (even by a crash), and a second one is refused before it touches
+anything.
+
+When the disk is nearly full, writes whose size is known are refused up front with
+`507 XTeiFSStorageFull` once they'd leave less than 0.1 % of the disk free (at least
+64 MiB, at most 1 GiB), so deletes, which need a little room themselves, keep working.
+A disk that fills up during a write gives the same answer, and the staged bytes are
+removed.
 
 ## Upgrades
 

@@ -211,6 +211,15 @@ impl Index {
         })
     }
 
+    /// How far commits are synced before they return: `FULL` (every commit survives a
+    /// power cut), `NORMAL` (the last commits may be lost, the database never breaks), or
+    /// `OFF` (the operating system decides).
+    pub fn set_synchronous(&self, level: &str) -> Result<()> {
+        debug_assert!(matches!(level, "FULL" | "NORMAL" | "OFF"));
+        self.conn.pragma_update(None, "synchronous", level)?;
+        Ok(())
+    }
+
     /// Runs `change` in one transaction: its writes are committed and synced together,
     /// or not at all. Many small writes cost one sync instead of one each.
     pub fn batch<T>(&self, change: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
@@ -534,6 +543,23 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sync_level_can_be_relaxed() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let level = |index: &Index| -> i64 {
+            index
+                .conn
+                .pragma_query_value(None, "synchronous", |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(level(&index), 2, "FULL by default");
+        index.set_synchronous("NORMAL").unwrap();
+        assert_eq!(level(&index), 1);
+        index.set_synchronous("OFF").unwrap();
+        assert_eq!(level(&index), 0);
+    }
 
     #[test]
     fn completed_uploads_are_remembered_then_expire() {

@@ -109,7 +109,11 @@ S3 does. CORS never grants access by itself: requests are still signed and autho
 ## Data safety
 
 - Writes are atomic (stage, sync, rename, sync the folder), so a crash never leaves a
-  half-written object. The metadata databases commit with `synchronous=FULL`.
+  half-written object. The metadata databases commit with `synchronous=FULL` (relaxable
+  with `--durability`, never to the point of corruption).
+- One process at a time opens a drive (`.teifs/lock`), so two servers can't break each
+  other's atomic steps.
+- A nearly full disk refuses new data before deletes stop working.
 - The on-disk format is versioned; upgrades back up the metadata first
   ([ON_DISK_FORMAT.md](ON_DISK_FORMAT.md)).
 

@@ -472,8 +472,10 @@ async fn completed_uploads_remember_their_parts() {
             .await
             .unwrap();
         assert_eq!(copied.parts, expected, "{layout:?}");
-        let reopened = Store::open(dir.path()).unwrap();
-        assert_eq!(reopened.head("bkt", "f.bin").await.unwrap().parts, expected);
+        // The parts survive closing and reopening the drive.
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.head("bkt", "f.bin").await.unwrap().parts, expected);
         let plain = store
             .put_bytes("bkt", "f.bin", b"one piece", ObjectAttrs::default())
             .await
@@ -481,6 +483,21 @@ async fn completed_uploads_remember_their_parts() {
         assert!(plain.parts.is_empty());
         assert!(store.head("bkt", "f.bin").await.unwrap().parts.is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_drive_is_opened_by_one_store_at_a_time() {
+    let (dir, store) = bucket(Layout::Object).await;
+    // A second open would clear the first one's staged writes: it's refused, untouched.
+    let staged = store.inner.tmp.join("in-flight");
+    fs::write(&staged, b"half an upload").unwrap();
+    assert!(matches!(
+        Store::open(dir.path()),
+        Err(StoreError::DriveInUse)
+    ));
+    assert!(staged.exists());
+    drop(store);
+    assert!(Store::open(dir.path()).is_ok());
 }
 
 #[tokio::test]

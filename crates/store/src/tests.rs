@@ -831,3 +831,42 @@ async fn large_folders_list_the_same_from_the_cache() {
     let (keys, _) = list_all(None).await;
     assert!(!keys.contains(&"f00001".to_owned()));
 }
+
+#[tokio::test]
+async fn every_durability_mode_keeps_what_it_wrote() {
+    for durability in [Durability::Strict, Durability::Relaxed, Durability::None] {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            Store::open_with(
+                dir.path(),
+                StoreOptions {
+                    durability,
+                    ..StoreOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let store = open();
+        for layout in [Layout::Folder, Layout::Object] {
+            let name = format!("{layout:?}").to_lowercase();
+            store.create_bucket(&name, layout).await.unwrap();
+            store
+                .put_bytes(&name, "a/b", b"kept", ObjectAttrs::default())
+                .await
+                .unwrap();
+        }
+        drop(store);
+        let store = open();
+        for name in ["folder", "object"] {
+            let (_, body) = store.read(name, "a/b").await.unwrap();
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(
+                &mut body.unwrap().all().await.unwrap(),
+                &mut bytes,
+            )
+            .await
+            .unwrap();
+            assert_eq!(bytes, b"kept", "{durability:?} {name}");
+        }
+    }
+}

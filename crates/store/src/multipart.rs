@@ -16,7 +16,7 @@ use crate::{
     now_ms,
     objects::Finished,
     sse::{self, Crypt, Keyed},
-    staged::{TmpFile, sync_dir},
+    staged::TmpFile,
 };
 
 /// The highest part number S3 allows.
@@ -223,13 +223,10 @@ impl Store {
             let dir = inner.uploads.join(&id);
             let size = staged.size();
             // An acknowledged part must survive a power cut.
-            fs::OpenOptions::new()
-                .write(true)
-                .open(staged.path())?
-                .sync_all()?;
+            inner.sync_file(staged.path())?;
             fs::rename(staged.path(), dir.join(number.to_string()))?;
             staged.keep();
-            sync_dir(&dir)?;
+            inner.sync_folder(&dir)?;
             let part = Part {
                 number,
                 size,
@@ -372,39 +369,7 @@ impl Store {
             if listed.windows(2).any(|w| w[0].0 >= w[1].0) {
                 return Err(StoreError::InvalidPartOrder);
             }
-            let stored: BTreeMap<u32, Part> = inner
-                .lock()
-                .list_parts(&id, 0, usize::MAX)?
-                .into_iter()
-                .map(|part| (part.number, part))
-                .collect();
-
-            let dir = inner.uploads.join(&id);
-            let tmp = TmpFile::new(&inner.tmp);
-            let mut out = fs::File::create(&tmp.path)?;
-            let mut md5s = Vec::with_capacity(listed.len());
-            let mut parts = Vec::with_capacity(listed.len());
-            for (index, (number, etag)) in listed.iter().enumerate() {
-                let part = stored
-                    .get(number)
-                    .filter(|p| p.etag == etag.trim_matches('"'))
-                    .ok_or(StoreError::InvalidPart)?;
-                if index + 1 < listed.len() && part.size < MIN_PART_SIZE {
-                    return Err(StoreError::EntityTooSmall);
-                }
-                md5s.push(md5_of_etag(&part.etag).ok_or(StoreError::InvalidPart)?);
-                parts.push(PartInfo {
-                    size: part.size,
-                    checksums: part.checksums.clone(),
-                });
-                let mut source =
-                    fs::File::open(dir.join(number.to_string())).map_err(|e| match e.kind() {
-                        io::ErrorKind::NotFound => StoreError::InvalidPart,
-                        _ => e.into(),
-                    })?;
-                io::copy(&mut source, &mut out)?;
-            }
-            drop(out);
+            let (tmp, parts, md5s) = inner.join_parts(&id, &upload.bucket, &listed)?;
 
             let conn = inner.lock();
             // Aborted while the parts were being joined: the upload no longer exists.
@@ -450,7 +415,7 @@ impl Store {
             )?;
             conn.delete_upload(&id)?;
             drop(conn);
-            let _ = fs::remove_dir_all(&dir);
+            let _ = fs::remove_dir_all(inner.uploads.join(&id));
             Ok(info)
         })
         .await
@@ -493,6 +458,56 @@ impl Store {
 }
 
 impl Inner {
+    /// Joins an upload's listed parts, in order, into one staged file: it, the parts, and
+    /// their MD5s (for the multipart ETag). Checks each part is there with its ETag and,
+    /// but for the last, big enough, and that the object fits on the disk.
+    fn join_parts(
+        &self,
+        id: &str,
+        bucket: &str,
+        listed: &[(u32, String)],
+    ) -> Result<(TmpFile, Vec<PartInfo>, Vec<[u8; 16]>)> {
+        let stored: BTreeMap<u32, Part> = self
+            .lock()
+            .list_parts(id, 0, usize::MAX)?
+            .into_iter()
+            .map(|part| (part.number, part))
+            .collect();
+        // Joining the parts writes the object again: it must fit.
+        let total = listed
+            .iter()
+            .filter_map(|(number, _)| stored.get(number))
+            .map(|part| part.size)
+            .sum();
+        self.ensure_space(bucket, total)?;
+        let dir = self.uploads.join(id);
+        let tmp = TmpFile::new(&self.tmp);
+        let mut out = fs::File::create(&tmp.path)?;
+        let mut md5s = Vec::with_capacity(listed.len());
+        let mut parts = Vec::with_capacity(listed.len());
+        for (index, (number, etag)) in listed.iter().enumerate() {
+            let part = stored
+                .get(number)
+                .filter(|p| p.etag == etag.trim_matches('"'))
+                .ok_or(StoreError::InvalidPart)?;
+            if index + 1 < listed.len() && part.size < MIN_PART_SIZE {
+                return Err(StoreError::EntityTooSmall);
+            }
+            md5s.push(md5_of_etag(&part.etag).ok_or(StoreError::InvalidPart)?);
+            parts.push(PartInfo {
+                size: part.size,
+                checksums: part.checksums.clone(),
+            });
+            let mut source =
+                fs::File::open(dir.join(number.to_string())).map_err(|e| match e.kind() {
+                    io::ErrorKind::NotFound => StoreError::InvalidPart,
+                    _ => e.into(),
+                })?;
+            io::copy(&mut source, &mut out)?;
+        }
+        Ok((tmp, parts, md5s))
+    }
+
     /// Forgets an upload, then removes its parts.
     pub(crate) fn abort_upload(&self, id: &str) -> Result<()> {
         let conn = self.lock();

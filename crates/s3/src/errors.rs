@@ -5,6 +5,15 @@ use teifs_store::{NameError, StoreError};
 
 /// Maps a store error to the S3 error a client expects.
 pub(crate) fn from_store(err: StoreError) -> S3Error {
+    if err.is_storage_full() {
+        tracing::warn!(error = %err, "the disk is full; writes are refused until space is freed");
+        let mut full = S3Error::with_message(
+            S3ErrorCode::Custom("XTeiFSStorageFull".into()),
+            "The disk is full. Delete objects or free space on the drive, then retry.",
+        );
+        full.set_status_code(http::StatusCode::INSUFFICIENT_STORAGE);
+        return full;
+    }
     match err {
         StoreError::NoSuchBucket => s3_error!(NoSuchBucket),
         StoreError::NoSuchKey => s3_error!(NoSuchKey),
@@ -63,6 +72,8 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         }
         err @ (StoreError::Io(_)
         | StoreError::Meta(_)
+        | StoreError::StorageFull
+        | StoreError::DriveInUse
         | StoreError::Crypto(_)
         | StoreError::CorruptMetadata
         | StoreError::NewerFormat { .. }
@@ -96,5 +107,28 @@ pub(crate) trait StoreResultExt<T> {
 impl<T> StoreResultExt<T> for Result<T, StoreError> {
     fn s3(self) -> s3s::S3Result<T> {
         self.map_err(from_store)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_disk_is_507_whatever_noticed_it() {
+        for err in [
+            StoreError::StorageFull,
+            StoreError::Io(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+            StoreError::Io(std::io::Error::from(std::io::ErrorKind::QuotaExceeded)),
+        ] {
+            let s3 = from_store(err);
+            assert_eq!(s3.code().as_str(), "XTeiFSStorageFull");
+            assert_eq!(
+                s3.status_code(),
+                Some(http::StatusCode::INSUFFICIENT_STORAGE)
+            );
+        }
+        let other = from_store(StoreError::Io(std::io::Error::other("broken")));
+        assert_eq!(other.code().as_str(), "InternalError");
     }
 }

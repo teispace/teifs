@@ -38,5 +38,17 @@ pub enum MetaError {
     },
 }
 
+impl MetaError {
+    /// Whether the disk (or the user's quota) is full.
+    #[must_use]
+    pub fn is_storage_full(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DiskFull
+        )
+    }
+}
+
 /// A metadata result.
 pub type Result<T, E = MetaError> = std::result::Result<T, E>;

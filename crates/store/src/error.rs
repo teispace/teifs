@@ -70,6 +70,13 @@ pub enum StoreError {
     /// Encryption was asked for but no KMS is configured.
     #[error("encryption needs a KMS, and none is configured")]
     NoKms,
+    /// Another process has the drive open (a running `teifs serve`, say).
+    #[error("the drive is in use by another TeiFS process")]
+    DriveInUse,
+    /// The disk is too full for the write (TeiFS keeps a little room free so deletes
+    /// keep working).
+    #[error("the disk is full")]
+    StorageFull,
     /// Recorded metadata can't be read (damaged or from a newer TeiFS).
     #[error("the object's recorded metadata is damaged")]
     CorruptMetadata,
@@ -82,6 +89,23 @@ pub enum StoreError {
     /// The metadata index failed.
     #[error(transparent)]
     Meta(#[from] MetaError),
+}
+
+impl StoreError {
+    /// Whether the write failed for want of space: the disk, the user's quota, or the
+    /// room TeiFS keeps free.
+    #[must_use]
+    pub fn is_storage_full(&self) -> bool {
+        match self {
+            Self::StorageFull => true,
+            Self::Io(err) => matches!(
+                err.kind(),
+                io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+            ),
+            Self::Meta(err) => err.is_storage_full(),
+            _ => false,
+        }
+    }
 }
 
 /// A storage result.

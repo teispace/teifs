@@ -10,7 +10,9 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use teifs_server::{Config, Credentials, JobOptions, KmsLocation, Server, Transit, credentials};
+use teifs_server::{
+    Config, Credentials, Durability, JobOptions, KmsLocation, Server, Transit, credentials,
+};
 use teifs_store::{Layout, ListQuery, Store};
 
 #[derive(Parser)]
@@ -72,6 +74,11 @@ enum Command {
         /// `never`.
         #[arg(long, default_value = "7d", value_parser = parse_expiry, env = "TEIFS_UPLOAD_EXPIRY")]
         upload_expiry: Expiry,
+        /// How hard writes are made to survive a power cut: `strict` (nothing
+        /// acknowledged is lost), `relaxed` (file data synced; the last moments' writes
+        /// may be lost) or `none` (scratch data). None of them can corrupt the drive.
+        #[arg(long, value_enum, default_value = "strict", env = "TEIFS_DURABILITY")]
+        durability: DurabilityArg,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
         secret_key: Option<String>,
@@ -213,7 +220,13 @@ fn main() -> ExitCode {
 }
 
 fn open(dir: &PathBuf) -> Result<Store, String> {
-    Store::open(dir).map_err(|e| format!("can't open the drive at {}: {e}", dir.display()))
+    Store::open(dir).map_err(|e| match e {
+        teifs_store::StoreError::DriveInUse => format!(
+            "the drive at {} is open in another TeiFS process (a running `teifs serve`?); stop it, or use an S3 client against it",
+            dir.display()
+        ),
+        e => format!("can't open the drive at {}: {e}", dir.display()),
+    })
 }
 
 async fn run(command: Command) -> Result<(), String> {
@@ -231,6 +244,7 @@ async fn run(command: Command) -> Result<(), String> {
             allow_sse_c,
             sse_c_over_http,
             upload_expiry,
+            durability,
             ..
         } => {
             serve(
@@ -249,6 +263,7 @@ async fn run(command: Command) -> Result<(), String> {
                     allow_sse_c,
                     sse_c_over_http,
                     upload_expiry: upload_expiry.0,
+                    durability: durability.into(),
                 },
             )
             .await
@@ -284,6 +299,24 @@ struct Options {
     allow_sse_c: bool,
     sse_c_over_http: bool,
     upload_expiry: Option<Duration>,
+    durability: Durability,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DurabilityArg {
+    Strict,
+    Relaxed,
+    None,
+}
+
+impl From<DurabilityArg> for Durability {
+    fn from(arg: DurabilityArg) -> Self {
+        match arg {
+            DurabilityArg::Strict => Self::Strict,
+            DurabilityArg::Relaxed => Self::Relaxed,
+            DurabilityArg::None => Self::None,
+        }
+    }
 }
 
 /// How long unfinished uploads are kept; `None` for ever.
@@ -341,6 +374,7 @@ async fn serve(
         }
         None => None,
     };
+    let options_durability = options.durability;
     let server = Server::bind(Config {
         dir: dir.to_owned(),
         listen,
@@ -355,6 +389,7 @@ async fn serve(
             upload_expiry: options.upload_expiry,
             ..JobOptions::default()
         },
+        durability: options.durability,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -376,6 +411,15 @@ async fn serve(
             eprintln!("Encryption keys: {}", path.display());
         }
         KmsLocation::Transit(address) => eprintln!("Encryption keys: transit engine at {address}"),
+    }
+    match options_durability {
+        Durability::Strict => {}
+        Durability::Relaxed => eprintln!(
+            "Durability: relaxed. A power cut can lose the last moments' writes (never corrupt the drive)."
+        ),
+        Durability::None => {
+            eprintln!("Durability: none. Nothing is synced to disk; use only for scratch data.");
+        }
     }
     let address = server.local_addr().map_err(|e| e.to_string())?;
     eprintln!(
