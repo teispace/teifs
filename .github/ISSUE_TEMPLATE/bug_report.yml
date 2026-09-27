@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in TeiFS doesn't work as it should.
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search [existing issues](https://github.com/teispace/teifs/issues) first.
+        **Security issues go to [private reporting](https://github.com/teispace/teifs/security/advisories/new), never here.**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead? Include error messages and S3 error codes exactly.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands help most (for example the `aws s3 …` or `rclone …` line).
+      placeholder: |
+        1. teifs serve ~/Drive
+        2. aws s3 cp …
+        3. See …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TeiFS version
+      description: Run `teifs --version`, or give the commit if you built from source.
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: S3 client and version
+      placeholder: e.g. aws-cli 2.31, rclone 1.72, boto3 1.40, restic 0.19
+  - type: input
+    id: system
+    attributes:
+      label: Operating system, architecture and file system
+      placeholder: e.g. Ubuntu 24.04 (x64, ext4), macOS 27 (Apple silicon, APFS), Windows 11 (NTFS)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Server output around the problem (`TEIFS_LOG=debug teifs serve …`). Remove anything private first.
+      render: text

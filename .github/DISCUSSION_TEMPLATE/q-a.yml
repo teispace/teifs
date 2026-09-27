@@ -1,0 +1,13 @@
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, what did you try, and what happened?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TeiFS version and operating system
+      placeholder: e.g. 0.3.0 on Windows 11

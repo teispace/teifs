@@ -1,0 +1,21 @@
+title: "[Idea]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: Who has it, and when? What makes it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: How could TeiFS help? Sketches and examples are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Other tools that do this well, constraints, or questions.

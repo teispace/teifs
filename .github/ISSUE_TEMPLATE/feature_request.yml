@@ -1,0 +1,21 @@
+name: Feature request
+description: Something TeiFS should do, such as an S3 feature it doesn't support yet.
+title: "[Feature]: "
+labels: ["enhancement", "needs triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The problem or the S3 feature (with a link to the AWS docs if it's an S3 API), and what you use it for.
+    validations:
+      required: true
+  - type: textarea
+    id: clients
+    attributes:
+      label: Which clients or apps need it?
+      placeholder: e.g. restic with Object Lock, Nextcloud, Terraform's S3 backend
+  - type: textarea
+    id: ideas
+    attributes:
+      label: Ideas or alternatives

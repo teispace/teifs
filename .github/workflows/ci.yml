@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to a pull request replaces its run; every commit on main is tested in full.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  verify:
+    # Everything `cargo xtask verify` checks: rustfmt, clippy, tests, doc tests,
+    # cargo-deny and the docs path check.
+    name: Verify (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-nextest,cargo-deny
+      - run: cargo xtask verify
+        env:
+          NEXTEST_PROFILE: ci
+
+  test:
+    # Case-insensitive disks (APFS, NTFS), other path rules and other file systems.
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --workspace --locked --profile ci
+
+  release-build:
+    # The optimized binary builds and serves: a quick end-to-end check with the AWS CLI.
+    name: Release build smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo build --release --locked -p teifs
+      - name: Serve a drive and use it with the AWS CLI
+        env:
+          TEIFS_ACCESS_KEY: ci-access-key
+          TEIFS_SECRET_KEY: ci-secret-key-not-real
+          AWS_ACCESS_KEY_ID: ci-access-key
+          AWS_SECRET_ACCESS_KEY: ci-secret-key-not-real
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ENDPOINT_URL: http://127.0.0.1:9000
+        run: |
+          set -euo pipefail
+          ./target/release/teifs serve "$RUNNER_TEMP/drive" &
+          server=$!
+          for _ in $(seq 50); do curl -s -o /dev/null http://127.0.0.1:9000 && break; sleep 0.1; done
+          head -c 20000000 /dev/urandom > "$RUNNER_TEMP/big.bin"
+          aws s3 mb s3://smoke
+          aws s3 cp "$RUNNER_TEMP/big.bin" s3://smoke/dir/big.bin
+          aws s3 cp s3://smoke/dir/big.bin "$RUNNER_TEMP/back.bin"
+          cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/back.bin"
+          cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/drive/smoke/dir/big.bin"
+          aws s3 ls s3://smoke --recursive
+          aws s3 rm s3://smoke --recursive
+          aws s3 rb s3://smoke
+          kill "$server"
