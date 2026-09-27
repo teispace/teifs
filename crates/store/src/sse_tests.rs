@@ -556,7 +556,11 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
         assert!(head.parts[0].checksums.is_empty());
     }
     // Nothing on the disk holds either checksum in the clear.
-    for file in all_files(&drive) {
+    // (The drive's lock file is empty, and Windows won't read it while it's locked.)
+    for file in all_files(&drive)
+        .into_iter()
+        .filter(|f| !f.ends_with("lock"))
+    {
         let bytes = fs::read(&file).unwrap();
         for secret in [part_sum, whole_sum] {
             assert!(
