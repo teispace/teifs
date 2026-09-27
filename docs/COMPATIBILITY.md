@@ -41,10 +41,10 @@ SDKs, the Terraform S3 backend).
 
 ## Bucket layouts
 
-A bucket is either an **object bucket** (objects stored by id, every key S3 allows) or a
-**folder bucket** (a folder of plain files). Choose when creating it: the
-`x-teifs-bucket-layout: object|folder` header on CreateBucket, `teifs bucket create
---layout`, or the server's `--default-layout`. The differences below apply to folder
+A bucket is either an **object bucket** (the default: objects stored by id, every key S3
+allows, encrypted at rest) or a **folder bucket** (a folder of plain files). Choose when
+creating it: the `x-teifs-bucket-layout: object|folder` header on CreateBucket, `teifs
+bucket create --layout`, or the server's `--default-layout`. The differences below apply to folder
 buckets only; object buckets have none of them. Folder buckets also can't be encrypted:
 their objects are plain files by design.
 

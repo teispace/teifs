@@ -1,29 +1,33 @@
 # TeiFS
 
-**S3 for your own disks.** Plain files, one binary, open source.
+**S3 for your own disks.** AWS-compatible object storage in one binary, open source.
 
-TeiFS serves folders over the S3 API. Every folder in a drive is a bucket and every object
-is a plain file at the path its key names, so the same data is a normal folder in Finder,
-Explorer or `ls`, and a bucket for the AWS CLI, rclone, restic, boto3 and every other S3
-client. Back it up with anything. Stop using TeiFS and your files are still just files.
+TeiFS is an S3 server for your own machines. By default it behaves like AWS S3: any key
+S3 allows, and every object encrypted at rest (SSE-S3), with SSE-KMS (a local keyring,
+Vault or OpenBao) and SSE-C when you want them. When you'd rather keep plain files, a
+bucket can instead be a **folder bucket**: a normal folder in Finder, Explorer or `ls`
+that is also a bucket for the AWS CLI, rclone, restic, boto3 and every other S3 client.
 
-> **Early development.** The S3 core works and is tested with the official AWS SDK and
-> CLI. Users and policies, versioning, Object Lock, encryption and a compatibility report
-> from the standard S3 test suite are next. Don't store data you can't afford to lose
-> with it yet.
+> **Early development.** The S3 core, encryption and both bucket kinds work and are
+> tested with the official AWS SDK, the AWS CLI and the ceph/s3-tests suite. Users and
+> policies, versioning, Object Lock and lifecycle rules are next. Don't store data you
+> can't afford to lose with it yet.
 
 ## Why
 
-MinIO used to have a mode that served plain folders over S3. It was removed in 2022, and
-the project has since been archived. The alternatives store objects in their own formats,
-need a cluster, or leave out large parts of S3. TeiFS aims to be:
+MinIO, the usual self-hosted S3, dropped its admin console and binaries and was archived
+in 2026; it had already removed the mode that served plain folders. The alternatives need
+a cluster, leave out large parts of S3, or keep objects in formats you can't open. TeiFS
+aims to be:
 
-- **Files first.** Your data stays in plain files you can open, back up and move. The
-  metadata TeiFS keeps can be rebuilt from them.
-- **Correct.** S3 behaviour is proven by tests, not claimed. The on-disk format is
-  versioned, and every release opens every drive an earlier release wrote.
-- **Secure by construction.** No default secrets, no secrets in logs, strict key-to-path
-  rules. See the [security model](docs/SECURITY_MODEL.md).
+- **AWS-compatible by default.** S3's behaviour and defaults, proven by tests, not
+  claimed: encryption at rest on, SSE-C blocked until you allow it, AWS's error codes.
+- **Plain files when you want them.** Folder buckets keep your data as files you can
+  open, back up and move; the metadata TeiFS keeps can be rebuilt from them.
+- **Secure by construction.** No default secrets, no secrets in logs, keys kept off the
+  drive, authenticated encryption. See the [security model](docs/SECURITY_MODEL.md).
+- **Durable and upgradeable.** Atomic writes, synced before they're acknowledged; a
+  versioned on-disk format, and every release opens every drive an earlier one wrote.
 - **One binary.** Server and command line in one program, for Linux, macOS and Windows.
 
 ## Quick start
@@ -34,7 +38,8 @@ cargo build --release
 ```
 
 The first run creates credentials in `~/Drive/.teifs/credentials.json` (readable only by
-you) and prints the access key. Then use any S3 client:
+you) and an encryption keyring in your config folder (back it up), and prints the access
+key. Then use any S3 client:
 
 ```sh
 export AWS_ENDPOINT_URL=http://127.0.0.1:9000
@@ -44,7 +49,15 @@ aws s3 mb s3://photos
 aws s3 sync ~/Pictures s3://photos/
 ```
 
-`photos` is now the folder `~/Drive/photos`, with your pictures in it as plain files.
+`photos` is an object bucket: your pictures are stored encrypted under `~/Drive/.teifs/`.
+For a folder of plain files instead:
+
+```sh
+teifs bucket create pictures --layout folder --dir ~/Drive   # or serve --default-layout folder
+aws s3 sync ~/Pictures s3://pictures/                          # now ~/Drive/pictures/…
+```
+
+Any folder already in the drive is a folder bucket too.
 
 To set the keys yourself (on servers and in containers), use `TEIFS_ACCESS_KEY` and
 `TEIFS_SECRET_KEY`. The secret is only read from the environment, so it never shows in a
@@ -80,10 +93,11 @@ objects can't be read without it.
 **Not yet:** users and policies, versioning, Object Lock, lifecycle rules, tagging,
 CORS, website hosting, event notifications, replication, several disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
-**Two kinds of bucket.** An *object bucket* stores objects by id under `.teifs/` and
-takes every key S3 allows. A *folder bucket* is a folder of plain files you can open
-anywhere, with the limits below. Choose per bucket (`--layout`, or the
-`x-teifs-bucket-layout` header on CreateBucket).
+**Two kinds of bucket.** An *object bucket* (the default) stores objects by id under
+`.teifs/` and takes every key S3 allows. A *folder bucket* is a folder of plain files you
+can open anywhere, with the limits below. Choose per bucket (`--layout`, or the
+`x-teifs-bucket-layout` header on CreateBucket), or change the default
+(`--default-layout`).
 
 **Limits of folder buckets:**
 - On a case-insensitive disk (the default on macOS and Windows), two keys that differ

@@ -36,12 +36,13 @@ enum Command {
         /// The access key (else one is generated and kept in the drive).
         #[arg(long, env = "TEIFS_ACCESS_KEY")]
         access_key: Option<String>,
-        /// How buckets created over S3 store objects, unless the request says:
-        /// `object` (any key S3 allows) or `folder` (plain files).
+        /// How buckets created over S3 store objects, unless the request says: `object`
+        /// (any key S3 allows, encrypted at rest by default, as on AWS) or `folder`
+        /// (plain files you can open anywhere).
         #[arg(
             long,
             value_enum,
-            default_value = "folder",
+            default_value = "object",
             env = "TEIFS_DEFAULT_LAYOUT"
         )]
         default_layout: LayoutArg,
@@ -157,7 +158,7 @@ enum BucketAction {
     Create {
         name: String,
         /// How it stores objects: `object` (any key S3 allows) or `folder` (plain files).
-        #[arg(long, value_enum, default_value = "folder")]
+        #[arg(long, value_enum, default_value = "object")]
         layout: LayoutArg,
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,

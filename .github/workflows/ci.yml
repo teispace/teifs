@@ -72,16 +72,25 @@ jobs:
           AWS_ENDPOINT_URL: http://127.0.0.1:9000
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/drive"
+          ./target/release/teifs bucket create files --layout folder --dir "$RUNNER_TEMP/drive"
           ./target/release/teifs serve "$RUNNER_TEMP/drive" &
           server=$!
           for _ in $(seq 50); do curl -s -o /dev/null http://127.0.0.1:9000 && break; sleep 0.1; done
-          head -c 20000000 /dev/urandom > "$RUNNER_TEMP/big.bin"
+          # An object bucket (the default): encrypted at rest, nothing readable on disk.
+          { head -c 10000000 /dev/urandom; printf 'PLAINTEXT-MARKER%.0s' $(seq 1000); } > "$RUNNER_TEMP/big.bin"
           aws s3 mb s3://smoke
           aws s3 cp "$RUNNER_TEMP/big.bin" s3://smoke/dir/big.bin
+          aws s3api head-object --bucket smoke --key dir/big.bin --query ServerSideEncryption --output text | grep -qx AES256
           aws s3 cp s3://smoke/dir/big.bin "$RUNNER_TEMP/back.bin"
           cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/back.bin"
-          cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/drive/smoke/dir/big.bin"
+          if grep -rq PLAINTEXT-MARKER "$RUNNER_TEMP/drive/.teifs/buckets"; then
+            echo "plaintext found on disk"; exit 1
+          fi
           aws s3 ls s3://smoke --recursive
           aws s3 rm s3://smoke --recursive
           aws s3 rb s3://smoke
+          # A folder bucket: plain files, byte for byte.
+          aws s3 cp "$RUNNER_TEMP/big.bin" s3://files/dir/big.bin
+          cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/drive/files/dir/big.bin"
           kill "$server"
