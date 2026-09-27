@@ -157,6 +157,45 @@ fn timestamp_seconds(timestamp: &Timestamp) -> i64 {
     time::OffsetDateTime::from(timestamp.clone()).unix_timestamp()
 }
 
+/// The key `x-amz-rename-source` names, URL-decoded: `/bucket/key`, `bucket/key` or
+/// `/key` (the bucket must be the request's: renames stay in one bucket).
+fn rename_source(source: &str, bucket: &str) -> S3Result<String> {
+    let decoded = urlencoding_decode(source)?;
+    let trimmed = decoded.strip_prefix('/').unwrap_or(&decoded);
+    let key = match trimmed.split_once('/') {
+        Some((first, rest)) if first == bucket && !rest.is_empty() => rest,
+        _ => trimmed,
+    };
+    if key.is_empty() {
+        return Err(s3_error!(
+            InvalidArgument,
+            "x-amz-rename-source names no object"
+        ));
+    }
+    Ok(key.to_owned())
+}
+
+/// Percent-decodes a header value.
+fn urlencoding_decode(value: &str) -> S3Result<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = value
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| s3_error!(InvalidArgument, "invalid percent-encoding"))?;
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| s3_error!(InvalidArgument, "the key isn't UTF-8"))
+}
+
 /// A timestamp as a time, to the second (S3's conditional headers carry seconds).
 fn to_system_time(timestamp: &Timestamp) -> SystemTime {
     SystemTime::UNIX_EPOCH
@@ -593,6 +632,56 @@ impl S3 for Drive {
         set_checksums!(out, &computed);
         set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
         Ok(S3Response::new(out))
+    }
+
+    async fn rename_object(
+        &self,
+        req: S3Request<dto::RenameObjectInput>,
+    ) -> S3Result<S3Response<dto::RenameObjectOutput>> {
+        let input = req.input;
+        let source_key = rename_source(&input.rename_source, &input.bucket)?;
+        let time = |t: Option<&Timestamp>| t.map(to_system_time);
+        let text_condition = |value: Option<&String>| {
+            value.map(|v| match v.trim() {
+                "*" => Match::Any,
+                etag => Match::ETag(etag.trim_matches('"').to_owned()),
+            })
+        };
+        let source = Precondition {
+            if_match: text_condition(input.source_if_match.as_ref()),
+            if_none_match: text_condition(input.source_if_none_match.as_ref()),
+            if_modified_since: time(input.source_if_modified_since.as_ref()),
+            if_unmodified_since: time(input.source_if_unmodified_since.as_ref()),
+            ..Precondition::default()
+        };
+        let destination = Precondition {
+            if_modified_since: time(input.destination_if_modified_since.as_ref()),
+            if_unmodified_since: time(input.destination_if_unmodified_since.as_ref()),
+            ..precondition(
+                input.destination_if_match.as_ref(),
+                input.destination_if_none_match.as_ref(),
+            )
+        };
+        if let Some(token) = &input.client_token
+            && !(1..=64).contains(&token.len())
+        {
+            return Err(s3_error!(
+                InvalidArgument,
+                "x-amz-client-token is 1 to 64 characters"
+            ));
+        }
+        self.store
+            .rename(
+                &input.bucket,
+                &source_key,
+                &input.key,
+                source,
+                destination,
+                input.client_token,
+            )
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::RenameObjectOutput::default()))
     }
 
     async fn get_object(

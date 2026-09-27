@@ -82,6 +82,10 @@ pub struct Precondition {
     /// Deletes only: the object must have been modified at this second
     /// (`x-amz-if-match-last-modified-time`).
     pub if_modified_at: Option<SystemTime>,
+    /// Renames only: the object must exist and have changed after this time.
+    pub if_modified_since: Option<SystemTime>,
+    /// Renames only: the object must exist and not have changed after this time.
+    pub if_unmodified_since: Option<SystemTime>,
 }
 
 /// An `If-Match` / `If-None-Match` value.
@@ -126,6 +130,32 @@ impl Precondition {
             Ok(())
         } else {
             Err(StoreError::PreconditionFailed)
+        }
+    }
+
+    /// Whether a rename's source or destination meets these conditions. Any condition
+    /// but `If-None-Match` needs the object to exist; `If-None-Match: *` needs it not to.
+    fn holds(&self, current: Option<&ObjectInfo>) -> bool {
+        let seconds = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        };
+        let needs_existing = self.if_match.is_some()
+            || self.if_modified_since.is_some()
+            || self.if_unmodified_since.is_some();
+        match current {
+            // Nothing there: only conditions that need an object fail.
+            None => !needs_existing,
+            Some(info) => {
+                self.if_match.as_ref().is_none_or(|m| m.matches(info))
+                    && self.if_none_match.as_ref().is_none_or(|m| !m.matches(info))
+                    && self
+                        .if_modified_since
+                        .is_none_or(|t| seconds(info.modified) > seconds(t))
+                    && self
+                        .if_unmodified_since
+                        .is_none_or(|t| seconds(info.modified) <= seconds(t))
+            }
         }
     }
 
@@ -233,6 +263,10 @@ impl Store {
             let _ = inner.kms.set(kms);
         }
         inner.sweep_garbage(&inner.lock())?;
+        // Retries come within minutes; a day of tokens is plenty.
+        inner
+            .lock()
+            .expire_client_tokens(now_ms() - 24 * 60 * 60 * 1000)?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -630,6 +664,70 @@ impl Store {
                     Ok(())
                 }
             }
+        })
+        .await
+    }
+
+    /// Renames `from` to `to` in one bucket, keeping the bytes, metadata and encryption:
+    /// a rename of the file in a folder bucket, of the row in an object bucket. The
+    /// source must meet `source`, the destination `destination` (412 otherwise). A
+    /// repeated request with the same `client_token` does nothing more; the same token
+    /// with other parameters is refused.
+    pub async fn rename(
+        &self,
+        bucket: &str,
+        from: &str,
+        to: &str,
+        source: Precondition,
+        destination: Precondition,
+        client_token: Option<String>,
+    ) -> Result<()> {
+        let (bucket, from, to) = (bucket.to_owned(), from.to_owned(), to.to_owned());
+        self.blocking(move |inner| {
+            let conn = inner.lock();
+            let request = format!("rename\n{bucket}\n{from}\n{to}");
+            if let Some(token) = &client_token {
+                match conn.client_token(token)? {
+                    Some(done) if done == request => return Ok(()),
+                    Some(_) => return Err(StoreError::IdempotencyMismatch),
+                    None => {}
+                }
+            }
+            match inner.bucket(&bucket)? {
+                Bucket::Folder(name, dir) => {
+                    let src = ObjectKey::parse(&from).map_err(|_| StoreError::NoSuchKey)?;
+                    let dst = ObjectKey::parse(&to)?;
+                    Inner::rename_folder_object(
+                        &conn,
+                        &name,
+                        &dir,
+                        &src,
+                        &dst,
+                        &source,
+                        &destination,
+                    )?;
+                }
+                Bucket::Object(bucket) => {
+                    teifs_types::check_object_key(&to)?;
+                    let current =
+                        Inner::object_row(&conn, &bucket, &from)?.ok_or(StoreError::NoSuchKey)?;
+                    let target = Inner::object_row(&conn, &bucket, &to)?;
+                    if !source.holds(Some(&objects::to_info(&current)))
+                        || !destination.holds(target.as_ref().map(objects::to_info).as_ref())
+                    {
+                        return Err(StoreError::PreconditionFailed);
+                    }
+                    if from != to {
+                        let replaced =
+                            conn.rename_null_version(&bucket.id, &from, &to, now_ms())?;
+                        Inner::remove_data_files(&conn, &bucket, &replaced);
+                    }
+                }
+            }
+            if let Some(token) = &client_token {
+                conn.record_client_token(token, &request, now_ms())?;
+            }
+            Ok(())
         })
         .await
     }

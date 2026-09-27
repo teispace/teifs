@@ -54,6 +54,59 @@ impl Inner {
         }
     }
 
+    /// Renames the file at `src` to `dst` (atomic; the bytes don't move) and its row with
+    /// it. Holds the commit lock (`conn`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rename_folder_object(
+        conn: &Index,
+        bucket: &str,
+        dir: &Path,
+        src: &ObjectKey,
+        dst: &ObjectKey,
+        source: &Precondition,
+        destination: &Precondition,
+    ) -> Result<()> {
+        let (src_path, src_meta) = match Inner::find(dir, src)? {
+            Found::File(path, meta) => (path, meta),
+            Found::Folder(..) => {
+                return Err(StoreError::InvalidRequest("a folder can't be renamed"));
+            }
+            Found::Missing | Found::Other => return Err(StoreError::NoSuchKey),
+        };
+        if dst.is_folder() {
+            return Err(StoreError::InvalidRequest(
+                "an object can't be renamed to a folder key",
+            ));
+        }
+        let current = Inner::info(conn, bucket, src.as_str(), &src_meta)?;
+        let target = Inner::current_for_write(conn, bucket, dir, dst)?;
+        if !source.holds(Some(&current)) || !destination.holds(target.as_ref()) {
+            return Err(StoreError::PreconditionFailed);
+        }
+        if src == dst {
+            return Ok(());
+        }
+        let parent = Inner::make_parents(dir, dst)?;
+        let how = if destination.creates_only() {
+            Publish::CreateNew
+        } else {
+            Publish::Replace
+        };
+        publish(&src_path, &dir.join(dst.rel()), dir, how).map_err(|err| {
+            if err.kind() == io::ErrorKind::AlreadyExists {
+                StoreError::PreconditionFailed
+            } else {
+                err.into()
+            }
+        })?;
+        sync_dir(&parent)?;
+        if let Some(src_parent) = src_path.parent() {
+            sync_dir(src_parent)?;
+        }
+        conn.rename(bucket, src.as_str(), dst.as_str())?;
+        Inner::prune(conn, bucket, dir, src.as_str())
+    }
+
     /// Deletes the object at `key`. Folders left empty by it go too, unless they were
     /// created on purpose. Holds the commit lock (`conn`).
     pub(crate) fn delete_folder_object(

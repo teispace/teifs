@@ -1,6 +1,8 @@
 //! S3 behaviour both bucket layouts share, run against each, and what only object
 //! buckets can do.
 
+#![allow(clippy::too_many_lines, reason = "scenario tests read top to bottom")]
+
 use std::fs;
 
 use tempfile::TempDir;
@@ -500,5 +502,150 @@ async fn conditional_writes_and_deletes_follow_aws() {
         store.delete_if("bkt", "k", if_match(&etag)).await.unwrap();
         assert!(store.head("bkt", "k").await.is_err());
         store.delete_if("bkt", "k", if_match("nope")).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn renames_keep_the_object_and_honour_conditions() {
+    for layout in LAYOUTS {
+        let (_dir, store) = bucket(layout).await;
+        let info = store
+            .put_bytes("bkt", "a/one.txt", b"payload", attrs("text/plain"))
+            .await
+            .unwrap();
+        store
+            .rename(
+                "bkt",
+                "a/one.txt",
+                "b/two.txt",
+                Precondition::default(),
+                Precondition::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.head("bkt", "a/one.txt").await,
+            Err(StoreError::NoSuchKey)
+        ));
+        let moved = store.head("bkt", "b/two.txt").await.unwrap();
+        assert_eq!(
+            (moved.etag.as_str(), moved.attrs.content_type.as_deref()),
+            (info.etag.as_str(), Some("text/plain")),
+            "{layout:?}"
+        );
+        assert_eq!(get(&store, "b/two.txt").await, b"payload");
+
+        // Not over an existing object when the destination must not exist.
+        store
+            .put_bytes("bkt", "c", b"other", ObjectAttrs::default())
+            .await
+            .unwrap();
+        let only_new = Precondition {
+            if_none_match: Some(Match::Any),
+            ..Precondition::default()
+        };
+        assert!(matches!(
+            store
+                .rename(
+                    "bkt",
+                    "b/two.txt",
+                    "c",
+                    Precondition::default(),
+                    only_new,
+                    None
+                )
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        // …and when it doesn't exist, the rename goes ahead.
+        let only_new = Precondition {
+            if_none_match: Some(Match::Any),
+            ..Precondition::default()
+        };
+        store
+            .rename("bkt", "c", "fresh", Precondition::default(), only_new, None)
+            .await
+            .unwrap();
+        store
+            .rename(
+                "bkt",
+                "fresh",
+                "c",
+                Precondition::default(),
+                Precondition::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        // A source that doesn't match.
+        let wrong = Precondition {
+            if_match: Some(Match::ETag("nope".into())),
+            ..Precondition::default()
+        };
+        assert!(matches!(
+            store
+                .rename(
+                    "bkt",
+                    "b/two.txt",
+                    "d",
+                    wrong,
+                    Precondition::default(),
+                    None
+                )
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        // Over an existing object by default; retried with the same token, nothing more.
+        let token = Some("retry-1".to_owned());
+        store
+            .rename(
+                "bkt",
+                "b/two.txt",
+                "c",
+                Precondition::default(),
+                Precondition::default(),
+                token.clone(),
+            )
+            .await
+            .unwrap();
+        store
+            .rename(
+                "bkt",
+                "b/two.txt",
+                "c",
+                Precondition::default(),
+                Precondition::default(),
+                token.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get(&store, "c").await, b"payload");
+        assert!(matches!(
+            store
+                .rename(
+                    "bkt",
+                    "c",
+                    "e",
+                    Precondition::default(),
+                    Precondition::default(),
+                    token
+                )
+                .await,
+            Err(StoreError::IdempotencyMismatch)
+        ));
+        assert!(matches!(
+            store
+                .rename(
+                    "bkt",
+                    "missing",
+                    "f",
+                    Precondition::default(),
+                    Precondition::default(),
+                    None
+                )
+                .await,
+            Err(StoreError::NoSuchKey)
+        ));
     }
 }

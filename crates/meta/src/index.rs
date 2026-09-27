@@ -69,6 +69,12 @@ const MIGRATIONS: &[&str] = &[
      ) WITHOUT ROWID;",
     // 3: multipart uploads to encrypted objects keep their sealed data key.
     "ALTER TABLE uploads ADD COLUMN crypt TEXT;",
+    // 4: client tokens of idempotent requests (RenameObject), and what they asked for.
+    "CREATE TABLE client_tokens (
+        token      TEXT    PRIMARY KEY,
+        request    TEXT    NOT NULL,
+        created_ms INTEGER NOT NULL
+     ) WITHOUT ROWID;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -217,6 +223,48 @@ impl Index {
     /// last file is deleted.
     pub fn is_kept_folder(&self, bucket: &str, key: &str) -> Result<bool> {
         Ok(self.get(bucket, key)?.is_some())
+    }
+
+    /// What an idempotent request with `token` asked for, if one was done.
+    pub fn client_token(&self, token: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT request FROM client_tokens WHERE token = ?1")?
+            .query_row([token], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Records that the request `request` with `token` was done.
+    pub fn record_client_token(&self, token: &str, request: &str, now_ms: i64) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO client_tokens (token, request, created_ms) VALUES (?1, ?2, ?3)",
+            )?
+            .execute(params![token, request, now_ms])?;
+        Ok(())
+    }
+
+    /// Forgets client tokens recorded before `before_ms`.
+    pub fn expire_client_tokens(&self, before_ms: i64) -> Result<()> {
+        self.conn
+            .prepare_cached("DELETE FROM client_tokens WHERE created_ms < ?1")?
+            .execute([before_ms])?;
+        Ok(())
+    }
+
+    /// Moves a folder bucket's row from one key to another (a rename keeps the file).
+    pub fn rename(&self, bucket: &str, from: &str, to: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM objects WHERE bucket = ?1 AND key = ?2",
+            params![bucket, to],
+        )?;
+        tx.execute(
+            "UPDATE objects SET key = ?3 WHERE bucket = ?1 AND key = ?2",
+            params![bucket, from, to],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Forgets everything recorded about a bucket.

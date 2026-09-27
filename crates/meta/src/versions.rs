@@ -147,6 +147,45 @@ impl Index {
         Ok(replaced)
     }
 
+    /// Renames the current `null` version of `from` to `to` (same bucket), replacing
+    /// `to`'s `null` version, whose data file is queued as garbage (returned). The data
+    /// stays where it is: files are named by object id, not key.
+    pub fn rename_null_version(
+        &self,
+        bucket_id: &str,
+        from: &str,
+        to: &str,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let replaced = replaced_files(&tx, bucket_id, to.as_bytes())?;
+        tx.execute(
+            "DELETE FROM object_versions WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3",
+            params![bucket_id, to.as_bytes(), NULL_VERSION],
+        )?;
+        tx.execute(
+            "UPDATE object_versions SET latest = 0 WHERE bucket_id = ?1 AND key = ?2",
+            params![bucket_id, to.as_bytes()],
+        )?;
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM object_versions
+             WHERE bucket_id = ?1 AND key = ?2",
+            params![bucket_id, to.as_bytes()],
+            |r| r.get(0),
+        )?;
+        let moved = tx.execute(
+            "UPDATE object_versions SET key = ?3, seq = ?4, latest = 1
+             WHERE bucket_id = ?1 AND key = ?2 AND version_id = 'null'",
+            params![bucket_id, from.as_bytes(), to.as_bytes(), seq],
+        )?;
+        if moved == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        queue_garbage(&tx, bucket_id, &replaced, now_ms)?;
+        tx.commit()?;
+        Ok(replaced)
+    }
+
     /// Removes the `null` version of `key`, queuing its data file as garbage (returned).
     pub fn delete_null_version(
         &self,
@@ -374,8 +413,18 @@ mod tests {
         index.drop_garbage("o1").unwrap();
         assert!(index.garbage(10).unwrap().is_empty());
 
-        assert_eq!(index.delete_null_version("b1", "a", 3).unwrap(), ["o2"]);
+        index.put_null_version(&row("b", "o3"), 3).unwrap();
+        assert_eq!(
+            index.rename_null_version("b1", "a", "b", 4).unwrap(),
+            ["o3"]
+        );
         assert!(index.latest_version("b1", "a").unwrap().is_none());
+        let renamed = index.latest_version("b1", "b").unwrap().unwrap();
+        assert_eq!(renamed.object_id.as_deref(), Some("o2"));
+        assert!(index.rename_null_version("b1", "missing", "c", 5).is_err());
+        assert_eq!(index.delete_null_version("b1", "b", 3).unwrap(), ["o2"]);
+        assert!(index.latest_version("b1", "b").unwrap().is_none());
+        index.drop_garbage("o3").unwrap();
         assert!(!index.bucket_has_versions("b1").unwrap());
     }
 

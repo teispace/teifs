@@ -41,6 +41,14 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
             InvalidRequest,
             "The encryption parameters are not applicable to this object."
         ),
+        StoreError::IdempotencyMismatch => {
+            let mut err = S3Error::with_message(
+                S3ErrorCode::Custom("IdempotencyParameterMismatch".into()),
+                "Parameters on this idempotent request are inconsistent with parameters used in previous request(s).",
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            err
+        }
         StoreError::NoKms => s3_error!(
             NotImplemented,
             "encryption at rest needs a KMS, and none is configured"

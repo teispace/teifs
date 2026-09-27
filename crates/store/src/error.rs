@@ -64,6 +64,9 @@ pub enum StoreError {
     /// A customer key was sent for an object that isn't encrypted with one.
     #[error("the object isn't encrypted with a customer-provided key")]
     CustomerKeyNotApplicable,
+    /// A client token was reused for a different request.
+    #[error("the client token was already used for a different request")]
+    IdempotencyMismatch,
     /// Encryption was asked for but no KMS is configured.
     #[error("encryption needs a KMS, and none is configured")]
     NoKms,

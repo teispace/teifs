@@ -407,3 +407,28 @@ async fn another_keyring_cant_read_the_drive() {
     .unwrap();
     assert!(get(&store, "k", None).await.is_err());
 }
+
+#[tokio::test]
+async fn encrypted_objects_rename_without_re_encryption() {
+    let drive = drive().await;
+    put(&drive.store, "before", b"sealed bytes", &Encryption::S3).await;
+    let files = data_files(&drive);
+    drive
+        .store
+        .rename(
+            "vault",
+            "before",
+            "after",
+            Precondition::default(),
+            Precondition::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // The same data file, still readable: the key is bound to the object id, not its key.
+    assert_eq!(data_files(&drive), files);
+    assert_eq!(
+        get(&drive.store, "after", None).await.unwrap(),
+        b"sealed bytes"
+    );
+}

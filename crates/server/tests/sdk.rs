@@ -1064,3 +1064,53 @@ async fn conditional_deletes_and_writes_on_missing_objects() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn objects_can_be_renamed() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    for (bucket, object) in [("renamefolder", false), ("renameobject", true)] {
+        if object {
+            object_bucket(&s3, bucket).await;
+        } else {
+            s3.create_bucket().bucket(bucket).send().await.unwrap();
+        }
+        s3.put_object()
+            .bucket(bucket)
+            .key("old name.txt")
+            .body(ByteStream::from_static(b"moved"))
+            .send()
+            .await
+            .unwrap();
+        s3.rename_object()
+            .bucket(bucket)
+            .key("new/name.txt")
+            .rename_source(format!("{bucket}/old%20name.txt"))
+            .destination_if_none_match("*")
+            .send()
+            .await
+            .unwrap();
+        let got = s3
+            .get_object()
+            .bucket(bucket)
+            .key("new/name.txt")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(body(got).await, b"moved");
+        let gone = s3
+            .head_object()
+            .bucket(bucket)
+            .key("old name.txt")
+            .send()
+            .await;
+        assert!(gone.is_err());
+    }
+    assert!(
+        server
+            .dir
+            .path()
+            .join("renamefolder/new/name.txt")
+            .is_file()
+    );
+}

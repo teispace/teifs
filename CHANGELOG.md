@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- RenameObject, with source and destination conditions and client tokens.
+- Conditional deletes; `If-Match` on a missing object answers `NoSuchKey`, as on AWS.
+
 - Object buckets, the default: every key S3 allows, stored by id and encrypted at rest;
   folder buckets keep plain files and are chosen per bucket.
 - Encryption at rest in object buckets: SSE-S3 by default, SSE-KMS, SSE-C, bucket
