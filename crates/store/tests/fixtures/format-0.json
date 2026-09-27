@@ -1,0 +1,73 @@
+{
+  "about": "A drive written by TeiFS before the on-disk format was versioned (format 0): .teifs/meta.db only. Made with the AWS CLI against commit 02f3d6c. mtimes restore the files as a faithful backup would.",
+  "mtimes_ns": {
+    ".teifs": 1790496508705590296,
+    "docs": 1790496488929466791,
+    "photos": 1790496489535383402,
+    ".teifs/uploads": 1790496508240588498,
+    ".teifs/tmp": 1790496508629121261,
+    ".teifs/meta.db": 1790496508680447481,
+    ".teifs/meta.db-shm": 1790496508705700172,
+    ".teifs/meta.db-wal": 1790496508705497212,
+    ".teifs/uploads/d8174c500bae495586bc3d48e09d0826": 1790496508629121219,
+    ".teifs/uploads/d8174c500bae495586bc3d48e09d0826/1": 1790496508624832020,
+    "docs/empty-folder": 1790496488929449166,
+    "docs/notes": 1790496488361984719,
+    "docs/notes/hello world+ü.txt": 1790496488353921658,
+    "photos/2026": 1790496507851560356,
+    "photos/2026/cover.jpg": 1790496490130331138,
+    "photos/2026/video.bin": 1790496507846558402
+  },
+  "objects": [
+    {
+      "bucket": "docs",
+      "key": "empty-folder/",
+      "etag": "d41d8cd98f00b204e9800998ecf8427e",
+      "attrs": {
+        "checksums": {
+          "CRC64NVME": "AAAAAAAAAAA="
+        }
+      }
+    },
+    {
+      "bucket": "docs",
+      "key": "notes/hello world+ü.txt",
+      "etag": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+      "attrs": {
+        "contentType": "text/plain; charset=utf-8",
+        "user": {
+          "author": "krishna",
+          "topic": "fixtures"
+        },
+        "checksums": {
+          "CRC64NVME": "jSnVw/bqjr4="
+        }
+      }
+    },
+    {
+      "bucket": "photos",
+      "key": "2026/cover.jpg",
+      "etag": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+      "attrs": {
+        "checksums": {
+          "CRC64NVME": "jSnVw/bqjr4="
+        }
+      }
+    },
+    {
+      "bucket": "photos",
+      "key": "2026/video.bin",
+      "etag": "8bbba49d5767909c52e99239ecfaa7bc-2",
+      "attrs": {
+        "contentType": "video/mp4"
+      }
+    }
+  ],
+  "uploads": [
+    {
+      "id": "d8174c500bae495586bc3d48e09d0826",
+      "bucket": "docs",
+      "key": "unfinished.bin"
+    }
+  ]
+}

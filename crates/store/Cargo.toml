@@ -16,12 +16,17 @@ tokio.workspace = true
 futures.workspace = true
 bytes.workspace = true
 md-5.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tar = "0.4"
+flate2 = "1"
 
 [lints]
 workspace = true

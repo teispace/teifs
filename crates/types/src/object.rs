@@ -70,10 +70,14 @@ impl ObjectInfo {
     }
 }
 
-/// Identifies a file's current contents without reading them: when any part changes, the
-/// file was written again (by TeiFS or by anything else) and what was stored about it
-/// no longer applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Identifies a file's current contents without reading them: when its size or
+/// modification time changes, the file was written again (by TeiFS or by anything else)
+/// and what was stored about it no longer applies.
+///
+/// The inode is recorded but not compared: backups, restores and moves to another disk
+/// keep sizes and modification times but not inodes, and must keep their metadata.
+/// Deliberately not `PartialEq`: compare with [`Stamp::matches`].
+#[derive(Debug, Clone, Copy)]
 pub struct Stamp {
     /// Size in bytes.
     pub size: u64,
@@ -97,6 +101,12 @@ impl Stamp {
             mtime_ns,
             ino: inode(meta),
         }
+    }
+
+    /// Whether both describe the same contents: same size and modification time.
+    #[must_use]
+    pub fn matches(&self, other: &Stamp) -> bool {
+        self.size == other.size && self.mtime_ns == other.mtime_ns
     }
 }
 
@@ -192,6 +202,18 @@ mod tests {
             md5_of_etag("\"d41d8cd98f00b204e9800998ecf8427e\""),
             Some(Md5::digest([]).into())
         );
+    }
+
+    #[test]
+    fn stamps_ignore_the_inode() {
+        let a = Stamp {
+            size: 3,
+            mtime_ns: 1,
+            ino: 2,
+        };
+        assert!(a.matches(&Stamp { ino: 9, ..a }));
+        assert!(!a.matches(&Stamp { size: 4, ..a }));
+        assert!(!a.matches(&Stamp { mtime_ns: 2, ..a }));
     }
 
     #[test]

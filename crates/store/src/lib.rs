@@ -1,7 +1,7 @@
 //! TeiFS's storage: a drive is a folder, each folder in it is a bucket, and each object
 //! is a plain file at the path its key names. What S3 needs beyond the bytes (ETags,
 //! content types, user metadata, checksums, multipart uploads) lives in
-//! `.teifs/meta.db` (the `teifs-meta` index) beside the buckets, so the files stay usable by anything else and
+//! `.teifs/index.db` (the `teifs-meta` index) beside the buckets, so the files stay usable by anything else and
 //! a drive can be opened, backed up or left without TeiFS.
 //!
 //! Writes go to `.teifs/tmp` first, are synced, and are renamed into place under one
@@ -9,6 +9,7 @@
 //! always belongs to the bytes on disk.
 
 mod error;
+mod format;
 mod list;
 mod multipart;
 mod staged;
@@ -21,9 +22,10 @@ use std::{
     time::SystemTime,
 };
 
-use teifs_meta::{Index, Row};
+use teifs_meta::{BucketRecord, Index, Layout, Row, System};
 
 pub use error::{Result, StoreError};
+pub use format::{DriveFormat, FORMAT};
 pub use list::{After, ListQuery, Listing};
 pub use multipart::{MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use staged::Staged;
@@ -102,9 +104,12 @@ struct Inner {
     root: PathBuf,
     tmp: PathBuf,
     uploads: PathBuf,
-    /// The database, also the commit lock: whoever changes a file holds it until the file
+    /// The index, also the commit lock: whoever changes a file holds it until the file
     /// and its row agree again.
     db: Mutex<Index>,
+    /// The system database. Taken after `db` when both are needed.
+    system: Mutex<System>,
+    format: DriveFormat,
 }
 
 /// What's at an object's path.
@@ -119,7 +124,8 @@ enum Found {
 }
 
 impl Store {
-    /// Opens the drive at `root` (which must exist), creating `.teifs` inside it.
+    /// Opens the drive at `root` (which must exist), creating `.teifs` inside it, and
+    /// upgrading the drive's format first if an older TeiFS wrote it.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = fs::canonicalize(root.as_ref())?;
         if !root.is_dir() {
@@ -135,15 +141,25 @@ impl Store {
         // Whatever was being written when the last run stopped is gone for good.
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let db = Index::open(&system.join("meta.db"))?;
+        let format = format::prepare(&system)?;
+        let db = Index::open(&system.join(format::INDEX_DB))?;
+        let system_db = System::open(&system.join(format::SYSTEM_DB))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 root,
                 tmp,
                 uploads,
                 db: Mutex::new(db),
+                system: Mutex::new(system_db),
+                format,
             }),
         })
+    }
+
+    /// The drive's format record: its format version and permanent id.
+    #[must_use]
+    pub fn format(&self) -> &DriveFormat {
+        &self.inner.format
     }
 
     /// The drive's folder.
@@ -179,9 +195,15 @@ impl Store {
                     continue;
                 };
                 if meta.is_dir() {
-                    let created = meta
-                        .created()
-                        .or_else(|_| meta.modified())
+                    let recorded = inner.system().bucket(&name)?.map(|r| {
+                        SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_millis(
+                                u64::try_from(r.created_ms).unwrap_or(0),
+                            )
+                    });
+                    let created = recorded
+                        .or_else(|| meta.created().ok())
+                        .or_else(|| meta.modified().ok())
                         .unwrap_or(SystemTime::UNIX_EPOCH);
                     buckets.push(BucketInfo { name, created });
                 }
@@ -205,6 +227,11 @@ impl Store {
                 other => {
                     other?;
                     sync_dir(&inner.root)?;
+                    inner.system().record_bucket(&BucketRecord {
+                        name,
+                        layout: Layout::Plain,
+                        created_ms: now_ms(),
+                    })?;
                     Ok(())
                 }
             }
@@ -236,6 +263,7 @@ impl Store {
                 fs::remove_dir(&dir)?;
             }
             conn.forget_bucket(&name)?;
+            inner.system().forget_bucket(&name)?;
             drop(conn);
             for upload in unfinished {
                 let _ = fs::remove_dir_all(inner.uploads.join(&upload.id));
@@ -395,6 +423,12 @@ impl Store {
 }
 
 impl Inner {
+    fn system(&self) -> MutexGuard<'_, System> {
+        self.system
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Index> {
         // A panic while holding it can't leave a half-applied change: every change is one
         // statement or one rename.
@@ -458,7 +492,7 @@ impl Inner {
         }
         let stamp = Stamp::of(meta);
         let (etag, attrs) = match row {
-            Some(row) if row.stamp == stamp => (row.etag, row.attrs),
+            Some(row) if row.stamp.matches(&stamp) => (row.etag, row.attrs),
             _ => (provisional_etag(stamp), ObjectAttrs::default()),
         };
         Ok(ObjectInfo {
@@ -676,7 +710,7 @@ impl Inner {
             // A recorded ETag (plain or multipart) stays; a file changed outside gets its MD5.
             let recorded = conn
                 .get(src_bucket, src_key.as_str())?
-                .filter(|r| r.stamp == Stamp::of(&src_meta));
+                .filter(|r| r.stamp.matches(&Stamp::of(&src_meta)));
             let etag = match recorded {
                 Some(row) => row.etag,
                 None => teifs_types::hex(&md5_file(&src_path)?),
@@ -696,7 +730,7 @@ impl Inner {
         fs::copy(&src_path, &tmp.path)?;
         fs::File::open(&tmp.path)?.sync_all()?;
         let after = fs::metadata(&src_path)?;
-        if Stamp::of(&after) != Stamp::of(&src_meta) {
+        if !Stamp::of(&after).matches(&Stamp::of(&src_meta)) {
             return Err(StoreError::InvalidRequest(
                 "the source changed while it was being copied",
             ));

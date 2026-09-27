@@ -29,7 +29,10 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
-        err @ (StoreError::Io(_) | StoreError::Meta(_)) => {
+        err @ (StoreError::Io(_)
+        | StoreError::Meta(_)
+        | StoreError::NewerFormat { .. }
+        | StoreError::CorruptFormat(_)) => {
             tracing::error!(error = %err, "storage failed");
             S3Error::with_source(S3ErrorCode::InternalError, Box::new(err))
         }

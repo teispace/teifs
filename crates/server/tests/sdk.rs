@@ -1,7 +1,10 @@
 //! TeiFS as the official AWS SDK sees it: a real server on a local port, signed
 //! requests, default SDK behaviour (CRC32 checksums in trailers, chunked bodies).
 
-#![allow(clippy::unwrap_used, reason = "test helpers fail the test on any error")]
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers fail the test on any error"
+)]
 
 use std::time::Duration;
 

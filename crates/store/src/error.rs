@@ -44,6 +44,17 @@ pub enum StoreError {
     /// An `If-Match` / `If-None-Match` condition wasn't met.
     #[error("the precondition wasn't met")]
     PreconditionFailed,
+    /// The drive was formatted by a newer TeiFS.
+    #[error(
+        "this drive was formatted by a newer TeiFS (format {found}); upgrade TeiFS, or restore a backup made by this version"
+    )]
+    NewerFormat {
+        /// The drive's format.
+        found: u32,
+    },
+    /// `.teifs/format.json` can't be read.
+    #[error("the drive's format file (.teifs/format.json) is damaged: {0}")]
+    CorruptFormat(String),
     /// The disk failed.
     #[error(transparent)]
     Io(#[from] io::Error),
