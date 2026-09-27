@@ -785,7 +785,7 @@ async fn large_folders_list_the_same_from_the_cache() {
     expected.sort();
     // Settled folders are served from the cache.
     let old = SystemTime::now() - std::time::Duration::from_secs(60);
-    fs::File::open(&root).unwrap().set_modified(old).unwrap();
+    crate::test_util::set_folder_modified(&root, old);
 
     let list_all = |delimiter: Option<&str>| {
         let store = store.clone();

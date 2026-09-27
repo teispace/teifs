@@ -23,6 +23,8 @@ mod settings;
 mod space;
 mod sse;
 mod staged;
+#[cfg(test)]
+mod test_util;
 
 use std::{
     fs, io,

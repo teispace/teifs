@@ -244,10 +244,7 @@ mod tests {
         }
         // Settle the folder: a copy read just after a change isn't kept.
         let old = SystemTime::now() - Duration::from_secs(60);
-        fs::File::open(dir.path())
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
+        crate::test_util::set_folder_modified(dir.path(), old);
         let cache = FolderCache::default();
         let first = cache.children(dir.path(), false).unwrap();
         assert_eq!(first.len(), MIN_CACHED);
