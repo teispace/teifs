@@ -39,14 +39,16 @@ jobs:
       - run: tests/s3-tests/run.sh
         env:
           S3TESTS_LAYOUT: ${{ matrix.layout }}
+          # Outside target/, which the Rust cache saves and restores.
+          S3TESTS_WORK: ${{ runner.temp }}/s3-tests
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: s3-tests-report-${{ matrix.layout }}
           path: |
-            target/s3-tests/report.xml
-            target/s3-tests/pytest.log
-            target/s3-tests/server.log
+            ${{ runner.temp }}/s3-tests/report.xml
+            ${{ runner.temp }}/s3-tests/pytest.log
+            ${{ runner.temp }}/s3-tests/server.log
 
   transit-kms:
     # Encryption with a real OpenBao transit engine as the KMS.

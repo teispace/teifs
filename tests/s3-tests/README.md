@@ -23,7 +23,8 @@ S3TESTS_LAYOUT=folder tests/s3-tests/run.sh    # buckets are folder buckets (def
 tests/s3-tests/run.sh --update                 # also move newly passing tests to implemented.txt
 ```
 
-It clones the suite at a pinned commit into `target/s3-tests/src`, builds `teifs`, serves
+It clones the suite at a pinned commit into `target/s3-tests/src` (`S3TESTS_WORK` moves
+the whole work folder), builds `teifs`, serves
 an empty drive on port 9312 (`S3TESTS_PORT` to change it), and writes the pytest output to
 `target/s3-tests/pytest.log` and a JUnit report to `target/s3-tests/report.xml`.
 

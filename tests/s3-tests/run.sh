@@ -11,7 +11,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-WORK="$ROOT/target/s3-tests"
+WORK="${S3TESTS_WORK:-$ROOT/target/s3-tests}"
 # The ceph/s3-tests commit the lists are written against. Moving it is a change of its
 # own: run with --update, look at every new failure, and commit the lists with it.
 COMMIT=5522d1c351f75bc00ae0f64f742f3f095f5939d9
@@ -22,11 +22,16 @@ LAYOUT="${S3TESTS_LAYOUT:-object}"
 
 mkdir -p "$WORK"
 
-if [ ! -d "$WORK/src/.git" ]; then
+checkout() {
+  git -C "$WORK/src" fetch --quiet origin "$COMMIT" 2>/dev/null || true
+  git -C "$WORK/src" checkout --quiet --force "$COMMIT"
+}
+if [ ! -d "$WORK/src/.git" ] || ! checkout 2>/dev/null; then
+  # Missing, or damaged (a restored cache): clone again.
+  rm -rf "$WORK/src"
   git clone --quiet https://github.com/ceph/s3-tests "$WORK/src"
+  checkout
 fi
-git -C "$WORK/src" fetch --quiet origin "$COMMIT" 2>/dev/null || true
-git -C "$WORK/src" checkout --quiet "$COMMIT"
 
 if [ ! -x "$WORK/venv/bin/python" ]; then
   python3 -m venv "$WORK/venv"
