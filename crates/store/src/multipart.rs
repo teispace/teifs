@@ -10,7 +10,7 @@ use teifs_types::{ChecksumType, PartInfo, UploadChecksum, md5_of_etag, multipart
 use teifs_types::SseMode;
 
 use crate::{
-    Bucket, CustomerKey, Encryption, ObjectInfo, ObjectKey, Precondition, Staged, Store,
+    Bucket, CustomerKey, Encryption, Inner, ObjectInfo, ObjectKey, Precondition, Staged, Store,
     StoreError,
     error::Result,
     now_ms,
@@ -488,18 +488,22 @@ impl Store {
     /// Abandons an upload and its parts.
     pub async fn abort(&self, id: &str) -> Result<()> {
         let id = id.to_owned();
-        self.blocking(move |inner| {
-            let conn = inner.lock();
-            if conn.get_upload(&id)?.is_none() {
-                return Err(StoreError::NoSuchUpload);
-            }
-            conn.delete_upload(&id)?;
-            drop(conn);
-            match fs::remove_dir_all(inner.uploads.join(&id)) {
-                Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.into()),
-                _ => Ok(()),
-            }
-        })
-        .await
+        self.blocking(move |inner| inner.abort_upload(&id)).await
+    }
+}
+
+impl Inner {
+    /// Forgets an upload, then removes its parts.
+    pub(crate) fn abort_upload(&self, id: &str) -> Result<()> {
+        let conn = self.lock();
+        if conn.get_upload(id)?.is_none() {
+            return Err(StoreError::NoSuchUpload);
+        }
+        conn.delete_upload(id)?;
+        drop(conn);
+        match fs::remove_dir_all(self.uploads.join(id)) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.into()),
+            _ => Ok(()),
+        }
     }
 }

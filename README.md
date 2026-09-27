@@ -67,7 +67,7 @@ process list.
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
 | `teifs ls BUCKET [PREFIX] [-r]` | List objects |

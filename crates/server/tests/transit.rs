@@ -59,6 +59,7 @@ async fn objects_are_sealed_by_the_transit_engine() {
         }),
         allow_sse_c: false,
         plain_http_is_secure: None,
+        jobs: teifs_server::JobOptions::default(),
     })
     .await
     .unwrap();

@@ -6,11 +6,11 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use clap::{Parser, Subcommand};
-use teifs_server::{Config, Credentials, KmsLocation, Server, Transit, credentials};
+use teifs_server::{Config, Credentials, JobOptions, KmsLocation, Server, Transit, credentials};
 use teifs_store::{Layout, ListQuery, Store};
 
 #[derive(Parser)]
@@ -68,6 +68,10 @@ enum Command {
         /// a server listening on this machine only accepts them anyway.
         #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
         sse_c_over_http: bool,
+        /// Abort multipart uploads left unfinished this long (`30m`, `12h`, `7d`), or
+        /// `never`.
+        #[arg(long, default_value = "7d", value_parser = parse_expiry, env = "TEIFS_UPLOAD_EXPIRY")]
+        upload_expiry: Expiry,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
         secret_key: Option<String>,
@@ -226,6 +230,7 @@ async fn run(command: Command) -> Result<(), String> {
             kms_transit_namespace,
             allow_sse_c,
             sse_c_over_http,
+            upload_expiry,
             ..
         } => {
             serve(
@@ -243,6 +248,7 @@ async fn run(command: Command) -> Result<(), String> {
                     }),
                     allow_sse_c,
                     sse_c_over_http,
+                    upload_expiry: upload_expiry.0,
                 },
             )
             .await
@@ -277,6 +283,45 @@ struct Options {
     kms_transit: Option<Transit>,
     allow_sse_c: bool,
     sse_c_over_http: bool,
+    upload_expiry: Option<Duration>,
+}
+
+/// How long unfinished uploads are kept; `None` for ever.
+#[derive(Debug, Clone, Copy)]
+struct Expiry(Option<Duration>);
+
+/// Parses `never`, or a number with a unit: `s`, `m`, `h` or `d`.
+fn parse_expiry(text: &str) -> Result<Expiry, String> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("never") {
+        return Ok(Expiry(None));
+    }
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| format!("`{text}` isn't a duration like 30m, 12h or 7d, or never"))?;
+    let seconds = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => {
+            return Err(format!(
+                "`{text}` needs a unit: s, m, h or d (or say never)"
+            ));
+        }
+    };
+    let duration = number
+        .checked_mul(seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(|| format!("`{text}` is too long"))?;
+    if duration.is_zero() {
+        return Err("an expiry of zero would abort every upload; say never to keep them".into());
+    }
+    Ok(Expiry(Some(duration)))
 }
 
 async fn serve(
@@ -306,6 +351,10 @@ async fn serve(
         kms_transit: options.kms_transit,
         allow_sse_c: options.allow_sse_c,
         plain_http_is_secure: options.sse_c_over_http.then_some(true),
+        jobs: JobOptions {
+            upload_expiry: options.upload_expiry,
+            ..JobOptions::default()
+        },
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -512,6 +561,30 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expiries_parse_with_units_or_never() {
+        let hours = |h: u64| Some(Duration::from_hours(h));
+        assert_eq!(parse_expiry("7d").unwrap().0, hours(7 * 24));
+        assert_eq!(parse_expiry("12h").unwrap().0, hours(12));
+        assert_eq!(
+            parse_expiry("30m").unwrap().0,
+            Some(Duration::from_mins(30))
+        );
+        assert_eq!(parse_expiry("NEVER").unwrap().0, None);
+        for bad in [
+            "",
+            "7",
+            "d",
+            "0d",
+            "7w",
+            "-1h",
+            "1.5h",
+            "99999999999999999999d",
+        ] {
+            assert!(parse_expiry(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn dates_are_utc_calendar_dates() {

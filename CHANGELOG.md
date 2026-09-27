@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Background jobs on a running server: unfinished multipart uploads are aborted after
+  7 days (`--upload-expiry`), abandoned staged files are swept, and the garbage queue
+  is retried without waiting for a restart.
 - ListBuckets pages and filters (`max-buckets`, continuation tokens, `prefix`,
   `bucket-region`); an empty ListObjectsV2 continuation token starts from the top.
 - CORS: bucket rules, preflight requests and `Access-Control-*` headers, as on S3.

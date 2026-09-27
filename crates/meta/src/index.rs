@@ -377,9 +377,7 @@ impl Index {
         now_ms: i64,
         expire_before_ms: i64,
     ) -> Result<()> {
-        self.conn
-            .prepare_cached("DELETE FROM completed_uploads WHERE completed_ms < ?1")?
-            .execute([expire_before_ms])?;
+        self.expire_completed(expire_before_ms)?;
         self.conn
             .prepare_cached(
                 "INSERT OR REPLACE INTO completed_uploads (id, bucket, key, result, completed_ms)
@@ -393,6 +391,26 @@ impl Index {
                 now_ms
             ])?;
         Ok(())
+    }
+
+    /// Forgets completed uploads' answers older than `before_ms`.
+    pub fn expire_completed(&self, before_ms: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .prepare_cached("DELETE FROM completed_uploads WHERE completed_ms < ?1")?
+            .execute([before_ms])?)
+    }
+
+    /// Ids of uploads started before `before_ms`, oldest first, at most `limit`.
+    pub fn stale_uploads(&self, before_ms: i64, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM uploads WHERE created_ms < ?1 ORDER BY created_ms LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![before_ms, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// What completing upload `id` answered, if it completed recently.

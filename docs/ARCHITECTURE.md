@@ -117,6 +117,23 @@ metadata returned belong together even if the object is replaced during the read
 (`crates/store/src/format.rs`), then opens `index.db` and `system.db`. A drive from a
 newer release is refused.
 
+## Background jobs
+
+A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), started by
+`Server::run` and stopped at shutdown:
+
+| Job | Does |
+|---|---|
+| `expire-uploads` | Aborts multipart uploads unfinished after `--upload-expiry` (7 days by default) |
+| `sweep-staging` | Removes staged files no write has touched for an hour (a crashed client's leftovers) |
+| `housekeeping` | Retries data files the garbage queue holds; forgets retry answers older than a day |
+
+Each job works in bounded steps on the blocking pool. After a step that did something it
+sleeps for as long as the step took (so it uses at most half a core), and after a step
+with nothing to do it waits for its idle interval. A job never loops without progress:
+work that can't be done yet (a file still open on Windows) doesn't count. Each job's
+steps, items and last error are kept for `teifs status`.
+
 ## Concurrency
 
 - Blocking file and database work runs on Tokio's blocking pool (`Store::blocking`).

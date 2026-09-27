@@ -46,6 +46,7 @@ async fn start() -> Server {
         kms_transit: None,
         allow_sse_c: true,
         plain_http_is_secure: None,
+        jobs: teifs_server::JobOptions::default(),
     })
     .await
     .unwrap();

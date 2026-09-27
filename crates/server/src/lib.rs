@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
 pub use serve::{DRAIN, serve};
+pub use teifs_store::JobOptions;
 
 /// How to serve a drive.
 #[derive(Debug, Clone)]
@@ -49,6 +50,8 @@ pub struct Config {
     /// Whether plain HTTP counts as secure for SSE-C keys; `None` decides by the listen
     /// address (secure only on loopback).
     pub plain_http_is_secure: Option<bool>,
+    /// How the background jobs (upload expiry, cleanup) run.
+    pub jobs: JobOptions,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -136,6 +139,7 @@ pub enum ServerError {
 /// A drive ready to serve: listening, but not yet accepting requests.
 pub struct Server {
     store: Store,
+    jobs: JobOptions,
     service: teifs_s3::Service,
     listener: TcpListener,
     access_key: String,
@@ -245,6 +249,7 @@ impl Server {
                 })?;
         Ok(Self {
             store,
+            jobs: config.jobs,
             service,
             listener,
             access_key,
@@ -282,9 +287,11 @@ impl Server {
         self.created_credentials
     }
 
-    /// Serves requests until `shutdown` resolves, then lets open requests finish for up to
-    /// [`DRAIN`].
+    /// Serves requests, and runs the background jobs, until `shutdown` resolves; then
+    /// lets open requests finish for up to [`DRAIN`] and stops the jobs.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
+        let jobs = self.store.start_jobs(&self.jobs);
         serve(self.listener, self.service, shutdown).await;
+        jobs.stop().await;
     }
 }

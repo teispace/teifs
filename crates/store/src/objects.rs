@@ -329,31 +329,41 @@ impl Inner {
 
     /// Removes data files no version refers to any more, and their garbage entries. A
     /// file that can't be removed now (open on Windows) stays queued for the sweeper.
-    pub(crate) fn remove_data_files(conn: &Index, bucket: &ObjectBucket, object_ids: &[String]) {
+    /// How many it removed (or found gone); the others stay queued.
+    pub(crate) fn remove_data_files(
+        conn: &Index,
+        bucket: &ObjectBucket,
+        object_ids: &[String],
+    ) -> usize {
+        let mut removed = 0;
         for id in object_ids {
             let gone = match fs::remove_file(bucket.data_path(id)) {
                 Ok(()) => true,
                 Err(err) => err.kind() == io::ErrorKind::NotFound,
             };
-            if gone {
-                let _ = conn.drop_garbage(id);
+            if gone && conn.drop_garbage(id).is_ok() {
+                removed += 1;
             }
         }
+        removed
     }
 
-    /// Removes queued garbage files (left by a crash, or open when first removed).
-    pub(crate) fn sweep_garbage(&self, conn: &Index) -> Result<()> {
-        for (bucket_id, object_id) in conn.garbage(10_000)? {
+    /// Removes data files the garbage queue holds (left by a crash, or open when first
+    /// removed), at most `limit`; how many left the queue.
+    pub(crate) fn sweep_garbage(&self, conn: &Index, limit: usize) -> Result<usize> {
+        let mut done = 0;
+        for (bucket_id, object_id) in conn.garbage(limit)? {
             if conn.object_in_use(&object_id)? {
                 conn.drop_garbage(&object_id)?;
+                done += 1;
                 continue;
             }
             let bucket = ObjectBucket {
                 dir: self.system_dir().join(BUCKETS_DIR).join(&bucket_id),
                 id: bucket_id,
             };
-            Inner::remove_data_files(conn, &bucket, std::slice::from_ref(&object_id));
+            done += Inner::remove_data_files(conn, &bucket, std::slice::from_ref(&object_id));
         }
-        Ok(())
+        Ok(done)
     }
 }
