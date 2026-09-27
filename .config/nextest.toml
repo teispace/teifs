@@ -1,5 +1,8 @@
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
+# A test's output pipes must close within 1 s of it exiting. The default 100 ms is missed
+# under a full parallel run on macOS; a real leak (a child process left running) fails.
+leak-timeout = { period = "1s", result = "fail" }
 
 [profile.ci]
 fail-fast = false

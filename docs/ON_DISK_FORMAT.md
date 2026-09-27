@@ -84,7 +84,7 @@ size before encryption), then a footer:
 | Part | Bytes |
 |---|---|
 | The object's bytes | `size` |
-| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes) | variable |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS and SSE-C) | variable |
 | Footer JSON length | 4, big-endian |
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
@@ -98,7 +98,7 @@ garbage is removed at the next start.
 
 | Table | Holds |
 |---|---|
-| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, and `attrs` (JSON: content headers, user metadata, checksums). Rebuildable from the files |
+| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums), and for multipart objects `parts` (JSON: each part's size and checksums). Rebuildable from the files, except the parts |
 | `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq`, `version_id` (`null` without versioning), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
 | `garbage` | Data files waiting to be removed |
 | `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt` |

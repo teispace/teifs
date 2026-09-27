@@ -78,7 +78,7 @@ process list.
 | Area | Supported |
 |---|---|
 | Buckets | list, create, head, delete, location, versioning status (always off) |
-| Objects | put, get (ranges, conditional requests, response overrides), head, delete, delete many, copy (keep or replace metadata) |
+| Objects | put, get and head (ranges, by part number, conditional requests, response overrides), attributes, rename, delete (conditional), delete many, copy (keep or replace metadata) |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url` |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5, and CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256 (also as trailers), returned with checksum mode |

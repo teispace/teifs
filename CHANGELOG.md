@@ -7,6 +7,8 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- GetObjectAttributes, GetObject and HeadObject by part number, and HeadObject with a
+  range; completed multipart uploads remember each part's size and checksums.
 - RenameObject, with source and destination conditions and client tokens.
 - Conditional deletes; `If-Match` on a missing object answers `NoSuchKey`, as on AWS.
 

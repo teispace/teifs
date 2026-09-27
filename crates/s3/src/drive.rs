@@ -59,6 +59,26 @@ impl Drive {
         }
     }
 
+    /// Reads an object. As in S3, a part number the object doesn't have is reported
+    /// before a missing SSE-C key.
+    async fn read(
+        &self,
+        bucket: &str,
+        key: &str,
+        customer: Option<&CustomerKey>,
+        part_number: Option<i32>,
+    ) -> S3Result<(ObjectInfo, Option<teifs_store::ObjectBody>)> {
+        match self.store.read_with(bucket, key, customer).await {
+            Err(err @ teifs_store::StoreError::CustomerKeyRequired) if part_number.is_some() => {
+                if let Ok(info) = self.store.head(bucket, key).await {
+                    Slice::of(&info, None, part_number)?;
+                }
+                Err(err).s3()
+            }
+            other => other.s3(),
+        }
+    }
+
     /// Decides a write's encryption from its SSE headers and the bucket's default.
     async fn write_encryption(
         &self,
@@ -328,6 +348,124 @@ fn millis(ms: i64) -> Timestamp {
     Timestamp::from(
         SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
     )
+}
+
+/// The bytes a read returns: a range, one part (`partNumber`), or the whole object.
+struct Slice<'a> {
+    start: u64,
+    len: u64,
+    /// `Content-Range`, for anything but the whole object.
+    content_range: Option<String>,
+    /// How many parts the object has, when one of a multipart object's parts was asked for.
+    parts_count: Option<i32>,
+    /// The checksums that describe exactly these bytes, if any do.
+    checksums: Option<&'a Sums>,
+}
+
+impl<'a> Slice<'a> {
+    fn of(
+        info: &'a ObjectInfo,
+        range: Option<&dto::Range>,
+        part_number: Option<i32>,
+    ) -> S3Result<Self> {
+        let whole = Self {
+            start: 0,
+            len: info.size,
+            content_range: None,
+            parts_count: None,
+            checksums: Some(&info.attrs.checksums),
+        };
+        let partial = |start: u64, len: u64| {
+            (len > 0).then(|| format!("bytes {start}-{}/{}", start + len - 1, info.size))
+        };
+        match (range, part_number) {
+            (Some(_), Some(_)) => Err(s3_error!(
+                InvalidRequest,
+                "Cannot specify both Range header and partNumber query parameter"
+            )),
+            (Some(range), None) => {
+                let r = range
+                    .check(info.size)
+                    .map_err(|_| s3_error!(InvalidRange))?;
+                Ok(Self {
+                    start: r.start,
+                    len: r.end - r.start,
+                    content_range: partial(r.start, r.end - r.start),
+                    parts_count: None,
+                    checksums: None,
+                })
+            }
+            (None, Some(number)) => {
+                let invalid = || s3_error!(InvalidPart, "the object has no such part");
+                let index = usize::try_from(number)
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .ok_or_else(invalid)?;
+                if info.parts.is_empty() {
+                    // An object put in one piece is its own part 1.
+                    return if index == 0 {
+                        Ok(Self {
+                            content_range: partial(0, info.size),
+                            ..whole
+                        })
+                    } else {
+                        Err(invalid())
+                    };
+                }
+                let part = info.parts.get(index).ok_or_else(invalid)?;
+                let start = info.parts[..index].iter().map(|p| p.size).sum();
+                Ok(Self {
+                    start,
+                    len: part.size,
+                    content_range: partial(start, part.size),
+                    parts_count: Some(i32::try_from(info.parts.len()).unwrap_or(i32::MAX)),
+                    checksums: Some(&part.checksums),
+                })
+            }
+            (None, None) => Ok(whole),
+        }
+    }
+}
+
+/// One page of a multipart object's parts, for `GetObjectAttributes`.
+fn object_parts(
+    parts: &[teifs_store::PartInfo],
+    marker: Option<i32>,
+    max_parts: Option<i32>,
+) -> dto::GetObjectAttributesParts {
+    let after = usize::try_from(marker.unwrap_or(0)).unwrap_or(0);
+    let max = usize::try_from(max_parts.unwrap_or(1000))
+        .unwrap_or(0)
+        .min(1000);
+    let page: Vec<dto::ObjectPart> = parts
+        .iter()
+        .enumerate()
+        .skip(after)
+        .take(max)
+        .map(|(index, part)| {
+            let mut out = dto::ObjectPart {
+                part_number: Some(i32::try_from(index + 1).unwrap_or(i32::MAX)),
+                size: Some(i64::try_from(part.size).unwrap_or(i64::MAX)),
+                ..Default::default()
+            };
+            set_checksums!(out, &part.checksums);
+            out
+        })
+        .collect();
+    let truncated = after.saturating_add(page.len()) < parts.len();
+    let last = page.last().and_then(|p| p.part_number);
+    dto::GetObjectAttributesParts {
+        is_truncated: Some(truncated),
+        max_parts: max_parts.or(Some(1000)),
+        part_number_marker: marker,
+        next_part_number_marker: truncated.then_some(last).flatten(),
+        total_parts_count: Some(i32::try_from(parts.len()).unwrap_or(i32::MAX)),
+        parts: Some(page),
+    }
+}
+
+fn checksum_mode_on(mode: Option<&ChecksumMode>) -> bool {
+    mode.is_some_and(|m| m.as_str() == ChecksumMode::ENABLED)
 }
 
 /// Parses `bytes=first-last` (inclusive) for a part copy.
@@ -690,22 +828,19 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::GetObjectOutput>> {
         let input = req.input;
         check_version(input.version_id.as_deref())?;
-        if input.part_number.is_some() {
-            return Err(s3_error!(
-                NotImplemented,
-                "reading one part of an object isn't supported"
-            ));
-        }
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
             input.sse_customer_key_md5.as_deref(),
         )?;
         let (info, file) = self
-            .store
-            .read_with(&input.bucket, &input.key, customer.as_ref())
-            .await
-            .s3()?;
+            .read(
+                &input.bucket,
+                &input.key,
+                customer.as_ref(),
+                input.part_number,
+            )
+            .await?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -713,31 +848,19 @@ impl S3 for Drive {
             input.if_modified_since.as_ref(),
             input.if_unmodified_since.as_ref(),
         )?;
-        let range = match &input.range {
-            Some(range) => Some(
-                range
-                    .check(info.size)
-                    .map_err(|_| s3_error!(InvalidRange))?,
-            ),
-            None => None,
-        };
-        let (start, length) = range
-            .as_ref()
-            .map_or((0, info.size), |r| (r.start, r.end - r.start));
+        let slice = Slice::of(&info, input.range.as_ref(), input.part_number)?;
         let body = match file {
             Some(body) => {
-                let reader = body.range(start, length).await.s3()?;
+                let reader = body.range(slice.start, slice.len).await.s3()?;
                 StreamingBlob::wrap(ReaderStream::with_capacity(reader, READ_CHUNK))
             }
             None => StreamingBlob::from(s3s::Body::empty()),
         };
-        let whole = range.is_none();
         let mut out = dto::GetObjectOutput {
             body: Some(body),
-            content_length: Some(i64::try_from(length).unwrap_or(i64::MAX)),
-            content_range: range
-                .as_ref()
-                .map(|r| format!("bytes {}-{}/{}", r.start, r.end - 1, info.size)),
+            content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
+            content_range: slice.content_range.clone(),
+            parts_count: slice.parts_count,
             accept_ranges: Some("bytes".to_owned()),
             last_modified: Some(info.modified.into()),
             e_tag: Some(etag(&info.etag)),
@@ -767,12 +890,10 @@ impl S3 for Drive {
             metadata: user_metadata(&info.attrs),
             ..Default::default()
         };
-        let asked = input
-            .checksum_mode
-            .as_ref()
-            .is_some_and(|m| m.as_str() == ChecksumMode::ENABLED);
-        if asked && whole {
-            set_checksums!(out, &info.attrs.checksums);
+        if let Some(sums) = slice.checksums
+            && checksum_mode_on(input.checksum_mode.as_ref())
+        {
+            set_checksums!(out, sums);
         }
         set_sse!(out, info.sse.as_ref());
         Ok(S3Response::new(out))
@@ -790,10 +911,13 @@ impl S3 for Drive {
             input.sse_customer_key_md5.as_deref(),
         )?;
         let (info, _) = self
-            .store
-            .read_with(&input.bucket, &input.key, customer.as_ref())
-            .await
-            .s3()?;
+            .read(
+                &input.bucket,
+                &input.key,
+                customer.as_ref(),
+                input.part_number,
+            )
+            .await?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -801,8 +925,11 @@ impl S3 for Drive {
             input.if_modified_since.as_ref(),
             input.if_unmodified_since.as_ref(),
         )?;
+        let slice = Slice::of(&info, input.range.as_ref(), input.part_number)?;
         let mut out = dto::HeadObjectOutput {
-            content_length: Some(i64::try_from(info.size).unwrap_or(i64::MAX)),
+            content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
+            content_range: slice.content_range.clone(),
+            parts_count: slice.parts_count,
             accept_ranges: Some("bytes".to_owned()),
             last_modified: Some(info.modified.into()),
             e_tag: Some(etag(&info.etag)),
@@ -816,14 +943,67 @@ impl S3 for Drive {
             metadata: user_metadata(&info.attrs),
             ..Default::default()
         };
-        if input
-            .checksum_mode
-            .as_ref()
-            .is_some_and(|m| m.as_str() == ChecksumMode::ENABLED)
+        if let Some(sums) = slice.checksums
+            && checksum_mode_on(input.checksum_mode.as_ref())
         {
-            set_checksums!(out, &info.attrs.checksums);
+            set_checksums!(out, sums);
         }
         set_sse!(out, info.sse.as_ref());
+        let mut response = S3Response::new(out);
+        if slice.content_range.is_some() {
+            // s3s answers every HEAD with 200; a partial one is 206, as for GET.
+            response.status = Some(http::StatusCode::PARTIAL_CONTENT);
+        }
+        Ok(response)
+    }
+
+    async fn get_object_attributes(
+        &self,
+        req: S3Request<dto::GetObjectAttributesInput>,
+    ) -> S3Result<S3Response<dto::GetObjectAttributesOutput>> {
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let (info, _) = self
+            .store
+            .read_with(&input.bucket, &input.key, customer.as_ref())
+            .await
+            .s3()?;
+        // SDKs send the list as one comma-separated header.
+        let wants = |name: &str| {
+            input
+                .object_attributes
+                .iter()
+                .flat_map(|a| a.as_str().split(','))
+                .any(|a| a.trim() == name)
+        };
+        let mut out = dto::GetObjectAttributesOutput {
+            last_modified: Some(info.modified.into()),
+            ..Default::default()
+        };
+        if wants(dto::ObjectAttributes::ETAG) {
+            out.e_tag = Some(etag(&info.etag));
+        }
+        if wants(dto::ObjectAttributes::OBJECT_SIZE) {
+            out.object_size = Some(i64::try_from(info.size).unwrap_or(i64::MAX));
+        }
+        if wants(dto::ObjectAttributes::STORAGE_CLASS) {
+            out.storage_class = Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD));
+        }
+        if wants(dto::ObjectAttributes::CHECKSUM) && !info.attrs.checksums.is_empty() {
+            out.checksum = Some(checksums::to_dto(&info.attrs.checksums));
+        }
+        if wants(dto::ObjectAttributes::OBJECT_PARTS) && !info.parts.is_empty() {
+            out.object_parts = Some(object_parts(
+                &info.parts,
+                input.part_number_marker,
+                input.max_parts,
+            ));
+        }
         Ok(S3Response::new(out))
     }
 

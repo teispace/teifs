@@ -8,6 +8,7 @@
 //! which the sweeper removes.
 
 use std::{
+    collections::BTreeMap,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use teifs_meta::{Index, NULL_VERSION, VersionRow};
 
 use crate::{
-    Inner, ObjectAttrs, ObjectInfo, Precondition, StoreError,
+    Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
     error::Result,
     now_ms,
     sse::Crypt,
@@ -58,11 +59,47 @@ struct Footer<'a> {
     parts: Option<&'a PartsRecord>,
 }
 
-/// A multipart object's parts (the row's `parts` column, JSON).
+/// A multipart object's parts (the row's `parts` column, JSON), in both layouts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PartsRecord {
     /// Each part's size in bytes, in order (before encryption).
     pub sizes: Vec<u64>,
+    /// Each part's checksums, in the same order; empty when no part had any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checksums: Vec<BTreeMap<String, String>>,
+}
+
+impl PartsRecord {
+    pub(crate) fn new(parts: &[PartInfo]) -> Self {
+        let checksums = if parts.iter().all(|p| p.checksums.is_empty()) {
+            Vec::new()
+        } else {
+            parts.iter().map(|p| p.checksums.clone()).collect()
+        };
+        Self {
+            sizes: parts.iter().map(|p| p.size).collect(),
+            checksums,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("parts serialize")
+    }
+
+    pub(crate) fn parse(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata)
+    }
+
+    pub(crate) fn infos(&self) -> Vec<PartInfo> {
+        self.sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &size)| PartInfo {
+                size,
+                checksums: self.checksums.get(i).cloned().unwrap_or_default(),
+            })
+            .collect()
+    }
 }
 
 /// Finished bytes about to become an object.
@@ -81,8 +118,8 @@ pub(crate) struct Finished<'a> {
     pub attrs: ObjectAttrs,
     /// When encrypted: the object id its data key is bound to, and the record.
     pub sealed: Option<(String, Crypt)>,
-    /// When uploaded in parts: their sizes.
-    pub parts: Option<Vec<u64>>,
+    /// When uploaded in parts: the parts.
+    pub parts: Option<Vec<PartInfo>>,
 }
 
 impl<'a> Finished<'a> {
@@ -116,6 +153,12 @@ pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
         .as_deref()
         .and_then(|json| serde_json::from_str::<Crypt>(json).ok())
         .map(|crypt| crypt.info(None));
+    let parts = row
+        .parts
+        .as_deref()
+        .and_then(|json| PartsRecord::parse(json).ok())
+        .map(|p| p.infos())
+        .unwrap_or_default();
     ObjectInfo {
         key: row.key.clone(),
         size: row.size,
@@ -124,6 +167,7 @@ pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
         etag: row.etag.clone(),
         attrs: row.attrs.clone(),
         sse,
+        parts,
     }
 }
 
@@ -139,9 +183,7 @@ pub(crate) fn crypt_of(row: &VersionRow) -> Result<Option<Crypt>> {
 pub(crate) fn part_sizes(row: &VersionRow) -> Result<Vec<u64>> {
     match row.parts.as_deref() {
         None => Ok(vec![row.size]),
-        Some(json) => serde_json::from_str::<PartsRecord>(json)
-            .map(|p| p.sizes)
-            .map_err(|_| StoreError::CorruptMetadata),
+        Some(json) => PartsRecord::parse(json).map(|p| p.sizes),
     }
 }
 
@@ -195,7 +237,7 @@ impl Inner {
             Some((object_id, crypt)) => (object_id, Some(crypt)),
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
         };
-        let parts = parts.map(|sizes| PartsRecord { sizes });
+        let parts = parts.as_deref().map(PartsRecord::new);
         let created_ms = now_ms();
         // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()
@@ -233,7 +275,7 @@ impl Inner {
             modified_ms: created_ms,
             attrs,
             crypt: crypt.map(|c| serde_json::to_string(&c).expect("crypt serializes")),
-            parts: parts.map(|p| serde_json::to_string(&p).expect("parts serialize")),
+            parts: parts.map(|p| p.to_json()),
             inline: None,
         };
         let replaced = conn.put_null_version(&row, created_ms)?;

@@ -75,6 +75,8 @@ const MIGRATIONS: &[&str] = &[
         request    TEXT    NOT NULL,
         created_ms INTEGER NOT NULL
      ) WITHOUT ROWID;",
+    // 5: folder buckets record the parts of multipart objects too.
+    "ALTER TABLE objects ADD COLUMN parts TEXT;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -92,6 +94,8 @@ pub struct Row {
     pub etag: String,
     /// Its attributes.
     pub attrs: ObjectAttrs,
+    /// Its parts, when it was uploaded in parts (JSON the store owns).
+    pub parts: Option<String>,
 }
 
 #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
@@ -171,7 +175,7 @@ impl Index {
     /// The row for an object, if any.
     pub fn get(&self, bucket: &str, key: &str) -> Result<Option<Row>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT size, mtime_ns, ino, etag, attrs FROM objects WHERE bucket = ?1 AND key = ?2",
+            "SELECT size, mtime_ns, ino, etag, attrs, parts FROM objects WHERE bucket = ?1 AND key = ?2",
         )?;
         let row = stmt
             .query_row(params![bucket, key], |r| {
@@ -183,6 +187,7 @@ impl Index {
                     },
                     etag: r.get(3)?,
                     attrs: attrs_from_json(&r.get::<_, String>(4)?),
+                    parts: r.get(5)?,
                 })
             })
             .optional()?;
@@ -193,11 +198,11 @@ impl Index {
     pub fn put(&self, bucket: &str, key: &str, row: &Row) -> Result<()> {
         self.conn
             .prepare_cached(
-                "INSERT INTO objects (bucket, key, size, mtime_ns, ino, etag, attrs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO objects (bucket, key, size, mtime_ns, ino, etag, attrs, parts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (bucket, key) DO UPDATE SET
                size = excluded.size, mtime_ns = excluded.mtime_ns, ino = excluded.ino,
-               etag = excluded.etag, attrs = excluded.attrs",
+               etag = excluded.etag, attrs = excluded.attrs, parts = excluded.parts",
             )?
             .execute(params![
                 bucket,
@@ -207,6 +212,7 @@ impl Index {
                 to_db(row.stamp.ino),
                 row.etag,
                 attrs_to_json(&row.attrs),
+                row.parts,
             ])?;
         Ok(())
     }

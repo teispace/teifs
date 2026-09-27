@@ -40,7 +40,7 @@ pub use staged::Staged;
 pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};
 pub use teifs_meta::{Layout, Part, Upload};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
-pub use teifs_types::{SseInfo, SseMode};
+pub use teifs_types::{PartInfo, SseInfo, SseMode};
 
 use error::not_found_as;
 use folder::Found;
@@ -49,6 +49,14 @@ use staged::{TmpFile, sync_dir};
 
 /// The folder in a drive's root that holds TeiFS's own data.
 pub const SYSTEM_DIR: &str = ".teifs";
+
+/// An object found for reading: what's known, its file (`None` for a folder), and for an
+/// encrypted one how, its bucket's id and its part sizes.
+type Located = (
+    ObjectInfo,
+    Option<fs::File>,
+    Option<(sse::Crypt, String, Vec<u64>)>,
+);
 
 /// A bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,9 +559,35 @@ impl Store {
             .await
     }
 
-    /// What's known about an object.
+    /// What's known about an object without opening its encryption: no key is needed,
+    /// and checksums sealed under SSE-KMS or SSE-C are left out.
     pub async fn head(&self, bucket: &str, key: &str) -> Result<ObjectInfo> {
-        Ok(self.read(bucket, key).await?.0)
+        let (mut info, _, sealed) = self.locate(bucket, key).await?;
+        if let Some((crypt, ..)) = sealed {
+            info.sse = Some(crypt.info(None));
+        }
+        Ok(info)
+    }
+
+    /// Finds an object for reading.
+    async fn locate(&self, bucket: &str, key: &str) -> Result<Located> {
+        let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        self.blocking(move |inner| match inner.bucket(&bucket)? {
+            Bucket::Folder(name, dir) => {
+                let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
+                let (info, file) = inner.open_folder_object(&name, &dir, &key)?;
+                Ok((info, file, None))
+            }
+            Bucket::Object(bucket) => {
+                let (row, file) = Inner::open_object(&inner.lock(), &bucket, &key)?;
+                let sealed = match objects::crypt_of(&row)? {
+                    Some(crypt) => Some((crypt, bucket.id, objects::part_sizes(&row)?)),
+                    None => None,
+                };
+                Ok((objects::to_info(&row), file, sealed))
+            }
+        })
+        .await
     }
 
     /// An object and its bytes (`None` for a folder). The bytes are the ones `ObjectInfo`
@@ -569,24 +603,7 @@ impl Store {
         key: &str,
         customer: Option<&CustomerKey>,
     ) -> Result<(ObjectInfo, Option<ObjectBody>)> {
-        let (bucket, key) = (bucket.to_owned(), key.to_owned());
-        let (mut info, file, sealed) = self
-            .blocking(move |inner| match inner.bucket(&bucket)? {
-                Bucket::Folder(name, dir) => {
-                    let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
-                    let (info, file) = inner.open_folder_object(&name, &dir, &key)?;
-                    Ok((info, file, None))
-                }
-                Bucket::Object(bucket) => {
-                    let (row, file) = Inner::open_object(&inner.lock(), &bucket, &key)?;
-                    let sealed = match objects::crypt_of(&row)? {
-                        Some(crypt) => Some((crypt, bucket.id, objects::part_sizes(&row)?)),
-                        None => None,
-                    };
-                    Ok((objects::to_info(&row), file, sealed))
-                }
-            })
-            .await?;
+        let (mut info, file, sealed) = self.locate(bucket, key).await?;
         let Some((crypt, bucket_id, parts)) = sealed else {
             if customer.is_some() {
                 return Err(StoreError::CustomerKeyNotApplicable);
@@ -907,6 +924,10 @@ impl Inner {
                     .write(true)
                     .open(finished.tmp)?
                     .set_len(finished.stored_len)?;
+                let parts = finished
+                    .parts
+                    .as_deref()
+                    .map(|p| objects::PartsRecord::new(p).to_json());
                 self.commit_file(
                     conn,
                     name,
@@ -914,6 +935,7 @@ impl Inner {
                     finished.tmp,
                     finished.etag,
                     finished.attrs,
+                    parts,
                     precondition,
                 )
             }

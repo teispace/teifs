@@ -60,6 +60,17 @@ pub struct SseInfo {
     pub customer_key_md5: Option<String>,
 }
 
+/// One part of an object uploaded in parts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PartInfo {
+    /// Its size in bytes.
+    pub size: u64,
+    /// Its checksums by algorithm, as S3 sent them.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub checksums: BTreeMap<String, String>,
+}
+
 /// An object as listed or read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectInfo {
@@ -75,6 +86,8 @@ pub struct ObjectInfo {
     pub attrs: ObjectAttrs,
     /// How it's encrypted at rest, if it is.
     pub sse: Option<SseInfo>,
+    /// Its parts, when it was uploaded in parts (empty otherwise).
+    pub parts: Vec<PartInfo>,
 }
 
 impl ObjectInfo {
@@ -307,6 +320,7 @@ mod tests {
             etag: empty_etag(),
             attrs: ObjectAttrs::default(),
             sse: None,
+            parts: Vec::new(),
         };
         assert_eq!(info.content_type(), "image/jpeg");
         info.attrs.content_type = Some("text/plain".into());

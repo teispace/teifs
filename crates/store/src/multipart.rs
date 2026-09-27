@@ -4,7 +4,7 @@
 use std::{collections::BTreeMap, fs, io};
 
 use teifs_meta::{Part, Upload};
-use teifs_types::{md5_of_etag, multipart_etag};
+use teifs_types::{PartInfo, md5_of_etag, multipart_etag};
 
 use teifs_types::SseMode;
 
@@ -261,7 +261,7 @@ impl Store {
             let tmp = TmpFile::new(&inner.tmp);
             let mut out = fs::File::create(&tmp.path)?;
             let mut md5s = Vec::with_capacity(listed.len());
-            let mut sizes = Vec::with_capacity(listed.len());
+            let mut parts = Vec::with_capacity(listed.len());
             for (index, (number, etag)) in listed.iter().enumerate() {
                 let part = stored
                     .get(number)
@@ -271,7 +271,10 @@ impl Store {
                     return Err(StoreError::EntityTooSmall);
                 }
                 md5s.push(md5_of_etag(&part.etag).ok_or(StoreError::InvalidPart)?);
-                sizes.push(part.size);
+                parts.push(PartInfo {
+                    size: part.size,
+                    checksums: part.checksums.clone(),
+                });
                 let mut source =
                     fs::File::open(dir.join(number.to_string())).map_err(|e| match e.kind() {
                         io::ErrorKind::NotFound => StoreError::InvalidPart,
@@ -288,7 +291,7 @@ impl Store {
             }
             let bucket = inner.bucket(&upload.bucket)?;
             let stored_len = fs::metadata(&tmp.path)?.len();
-            let size = sizes.iter().sum();
+            let size = parts.iter().map(|p| p.size).sum();
             let sealed = match upload.crypt.as_deref() {
                 Some(json) => {
                     let crypt: Crypt =
@@ -297,10 +300,20 @@ impl Store {
                 }
                 None => None,
             };
+            // A part's checksums say something about its plaintext: under SSE-KMS and
+            // SSE-C they aren't kept in the clear.
+            if sealed
+                .as_ref()
+                .is_some_and(|(_, crypt)| crypt.mode != SseMode::S3)
+            {
+                for part in &mut parts {
+                    part.checksums.clear();
+                }
+            }
             let finished = Finished {
                 stored_len,
                 sealed,
-                parts: Some(sizes),
+                parts: Some(parts),
                 ..Finished::plain(&tmp.path, size, multipart_etag(&md5s), upload.attrs.clone())
             };
             let info = inner.commit_to(&conn, &bucket, &upload.key, finished, &precondition)?;

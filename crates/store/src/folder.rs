@@ -16,6 +16,7 @@ use crate::{
     Inner, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, StoreError,
     error::{Result, not_found_as},
     md5_file,
+    objects::PartsRecord,
     staged::{Publish, TmpFile, publish, sync_dir},
 };
 
@@ -179,13 +180,19 @@ impl Inner {
                 etag: empty_etag(),
                 attrs,
                 sse: None,
+                parts: Vec::new(),
             });
         }
         let stamp = Stamp::of(meta);
-        let (etag, attrs) = match row {
-            Some(row) if row.stamp.matches(&stamp) => (row.etag, row.attrs),
-            _ => (provisional_etag(stamp), ObjectAttrs::default()),
+        let (etag, attrs, parts) = match row {
+            Some(row) if row.stamp.matches(&stamp) => (row.etag, row.attrs, row.parts),
+            _ => (provisional_etag(stamp), ObjectAttrs::default(), None),
         };
+        let parts = parts
+            .as_deref()
+            .and_then(|json| PartsRecord::parse(json).ok())
+            .map(|p| p.infos())
+            .unwrap_or_default();
         Ok(ObjectInfo {
             key: key.to_owned(),
             size: stamp.size,
@@ -193,6 +200,7 @@ impl Inner {
             etag,
             attrs,
             sse: None,
+            parts,
         })
     }
 
@@ -279,6 +287,7 @@ impl Inner {
         tmp: &Path,
         etag: String,
         attrs: ObjectAttrs,
+        parts: Option<String>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         let dir = self.bucket_dir(bucket)?;
@@ -304,6 +313,11 @@ impl Inner {
         sync_dir(&parent)?;
         let meta = fs::metadata(&path)?;
         let stamp = Stamp::of(&meta);
+        let part_infos = parts
+            .as_deref()
+            .and_then(|json| PartsRecord::parse(json).ok())
+            .map(|p| p.infos())
+            .unwrap_or_default();
         conn.put(
             bucket,
             key.as_str(),
@@ -311,6 +325,7 @@ impl Inner {
                 stamp,
                 etag: etag.clone(),
                 attrs: attrs.clone(),
+                parts,
             },
         )?;
         Ok(ObjectInfo {
@@ -320,6 +335,7 @@ impl Inner {
             etag,
             attrs,
             sse: None,
+            parts: part_infos,
         })
     }
 
@@ -347,6 +363,7 @@ impl Inner {
             stamp: Stamp::of(&meta),
             etag: empty_etag(),
             attrs,
+            parts: None,
         };
         conn.put(bucket, key.as_str(), &row)?;
         Inner::info(conn, bucket, key.as_str(), &meta)
@@ -418,14 +435,15 @@ impl Inner {
             let recorded = conn
                 .get(src_bucket, src_key.as_str())?
                 .filter(|r| r.stamp.matches(&Stamp::of(&src_meta)));
-            let etag = match recorded {
-                Some(row) => row.etag,
-                None => teifs_types::hex(&md5_file(&src_path)?),
+            let (etag, parts) = match recorded {
+                Some(row) => (row.etag, row.parts),
+                None => (teifs_types::hex(&md5_file(&src_path)?), None),
             };
             let row = Row {
                 stamp: Stamp::of(&src_meta),
                 etag,
                 attrs,
+                parts,
             };
             conn.put(src_bucket, src_key.as_str(), &row)?;
             return Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta);
@@ -441,10 +459,14 @@ impl Inner {
                 "the source changed while it was being copied",
             ));
         }
-        // A copy's ETag is its MD5; a known one carries over, else it's worked out now.
-        let etag = match teifs_types::md5_of_etag(&source.etag) {
-            Some(_) => source.etag,
-            None => teifs_types::hex(&md5_file(&tmp.path)?),
+        // A copy's ETag is its MD5; a known one (and its parts) carries over, else it's
+        // worked out now.
+        let (etag, parts) = match teifs_types::md5_of_etag(&source.etag) {
+            Some(_) => (
+                source.etag,
+                (!source.parts.is_empty()).then(|| PartsRecord::new(&source.parts).to_json()),
+            ),
+            None => (teifs_types::hex(&md5_file(&tmp.path)?), None),
         };
         let attrs = attrs.unwrap_or(source.attrs);
         let conn = self.lock();
@@ -455,6 +477,7 @@ impl Inner {
             &tmp.path,
             etag,
             attrs,
+            parts,
             precondition,
         )?;
         tmp.keep();

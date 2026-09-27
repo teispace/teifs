@@ -1114,3 +1114,170 @@ async fn objects_can_be_renamed() {
             .is_file()
     );
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn parts_and_ranges_can_be_read_and_described() {
+    use aws_sdk_s3::types::ObjectAttributes;
+
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("files").send().await.unwrap();
+    object_bucket(&s3, "objects").await;
+    let first = vec![b'a'; 5 * 1024 * 1024];
+    for bucket in ["files", "objects"] {
+        let upload = s3
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key("two")
+            .send()
+            .await
+            .unwrap();
+        let id = upload.upload_id().unwrap();
+        let mut parts = Vec::new();
+        for (number, bytes) in [(1, first.clone()), (2, b"the end".to_vec())] {
+            let part = s3
+                .upload_part()
+                .bucket(bucket)
+                .key("two")
+                .upload_id(id)
+                .part_number(number)
+                .body(ByteStream::from(bytes))
+                .send()
+                .await
+                .unwrap();
+            parts.push(
+                CompletedPart::builder()
+                    .part_number(number)
+                    .e_tag(part.e_tag().unwrap())
+                    .build(),
+            );
+        }
+        let done = s3
+            .complete_multipart_upload()
+            .bucket(bucket)
+            .key("two")
+            .upload_id(id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        // One part, by number: its bytes, the object's ETag and how many parts it has.
+        let part = s3
+            .get_object()
+            .bucket(bucket)
+            .key("two")
+            .part_number(2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(part.parts_count(), Some(2), "{bucket}");
+        assert_eq!(part.e_tag(), done.e_tag());
+        assert_eq!(part.content_range(), Some("bytes 5242880-5242886/5242887"));
+        assert_eq!(body(part).await, b"the end");
+        let head = s3
+            .head_object()
+            .bucket(bucket)
+            .key("two")
+            .part_number(1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(head.content_length(), Some(5 * 1024 * 1024));
+        assert_eq!(head.parts_count(), Some(2));
+        let err = s3
+            .get_object()
+            .bucket(bucket)
+            .key("two")
+            .part_number(3)
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some("InvalidPart"));
+        let err = s3
+            .get_object()
+            .bucket(bucket)
+            .key("two")
+            .part_number(1)
+            .range("bytes=0-1")
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some("InvalidRequest"));
+
+        // HEAD takes a range, as GET does.
+        let head = s3
+            .head_object()
+            .bucket(bucket)
+            .key("two")
+            .range("bytes=-3")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(head.content_length(), Some(3));
+        assert_eq!(head.content_range(), Some("bytes 5242884-5242886/5242887"));
+
+        let attributes = s3
+            .get_object_attributes()
+            .bucket(bucket)
+            .key("two")
+            .object_attributes(ObjectAttributes::ObjectParts)
+            .object_attributes(ObjectAttributes::ObjectSize)
+            .object_attributes(ObjectAttributes::Etag)
+            .max_parts(1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(attributes.object_size(), Some(5 * 1024 * 1024 + 7));
+        assert_eq!(
+            attributes.e_tag(),
+            done.e_tag().map(|e| e.trim_matches('"'))
+        );
+        let listed = attributes.object_parts().unwrap();
+        assert_eq!(listed.total_parts_count(), Some(2));
+        assert_eq!(listed.is_truncated(), Some(true));
+        assert_eq!(listed.next_part_number_marker(), Some("1"));
+        assert_eq!(listed.parts().len(), 1);
+        assert_eq!(listed.parts()[0].size(), Some(5 * 1024 * 1024));
+    }
+
+    // An object put in one piece is its own part 1, and has no parts to describe.
+    s3.put_object()
+        .bucket("objects")
+        .key("one")
+        .body(ByteStream::from_static(b"body"))
+        .send()
+        .await
+        .unwrap();
+    let whole = s3
+        .get_object()
+        .bucket("objects")
+        .key("one")
+        .part_number(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(whole.parts_count(), None);
+    assert_eq!(body(whole).await, b"body");
+    let attributes = s3
+        .get_object_attributes()
+        .bucket("objects")
+        .key("one")
+        .object_attributes(ObjectAttributes::ObjectParts)
+        .object_attributes(ObjectAttributes::StorageClass)
+        .send()
+        .await
+        .unwrap();
+    assert!(attributes.object_parts().is_none());
+    assert_eq!(
+        attributes
+            .storage_class()
+            .map(aws_sdk_s3::types::StorageClass::as_str),
+        Some("STANDARD")
+    );
+}

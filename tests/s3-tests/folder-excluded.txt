@@ -74,3 +74,6 @@ test_encrypted_transfer_13b  # encryption at rest: folder buckets store plain fi
 test_encrypted_transfer_1MB  # encryption at rest: folder buckets store plain files
 test_encrypted_transfer_1b  # encryption at rest: folder buckets store plain files
 test_encrypted_transfer_1kb  # encryption at rest: folder buckets store plain files
+test_get_sse_c_encrypted_object_attributes  # encryption at rest: folder buckets store plain files
+test_multipart_sse_c_get_part  # encryption at rest: folder buckets store plain files
+test_non_multipart_sse_c_get_part  # encryption at rest: folder buckets store plain files

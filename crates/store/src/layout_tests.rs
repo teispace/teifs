@@ -411,6 +411,68 @@ async fn multipart_uploads_complete_into_object_buckets() {
 }
 
 #[tokio::test]
+async fn completed_uploads_remember_their_parts() {
+    for layout in LAYOUTS {
+        let (dir, store) = bucket(layout).await;
+        let upload = store
+            .create_upload("bkt", "f.bin", attrs("x/y"), None, &Encryption::None)
+            .await
+            .unwrap();
+        let first = vec![1u8; usize::try_from(MIN_PART_SIZE).unwrap()];
+        let sums: BTreeMap<String, String> = [("CRC32".to_owned(), "abc=".to_owned())].into();
+        let mut etags = Vec::new();
+        for (number, bytes, checksums) in [
+            (1, first.as_slice(), sums.clone()),
+            (2, b"end".as_slice(), BTreeMap::new()),
+        ] {
+            let mut staged = store.stage().await.unwrap();
+            staged.write(bytes).await.unwrap();
+            let part = store
+                .put_part(&upload.id, number, staged, checksums)
+                .await
+                .unwrap();
+            etags.push((number, part.etag));
+        }
+        let done = store
+            .complete(&upload.id, etags, Precondition::default())
+            .await
+            .unwrap();
+        let expected = vec![
+            PartInfo {
+                size: MIN_PART_SIZE,
+                checksums: sums.clone(),
+            },
+            PartInfo {
+                size: 3,
+                checksums: BTreeMap::new(),
+            },
+        ];
+        assert_eq!(done.parts, expected, "{layout:?}");
+        assert_eq!(store.head("bkt", "f.bin").await.unwrap().parts, expected);
+
+        // Replacing metadata in place keeps the parts; a fresh put has none.
+        let copied = store
+            .copy(
+                ("bkt", "f.bin"),
+                ("bkt", "f.bin"),
+                Some(attrs("a/b")),
+                Precondition::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(copied.parts, expected, "{layout:?}");
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(reopened.head("bkt", "f.bin").await.unwrap().parts, expected);
+        let plain = store
+            .put_bytes("bkt", "f.bin", b"one piece", ObjectAttrs::default())
+            .await
+            .unwrap();
+        assert!(plain.parts.is_empty());
+        assert!(store.head("bkt", "f.bin").await.unwrap().parts.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn orphan_files_from_a_crash_are_swept() {
     let dir = tempfile::tempdir().unwrap();
     let data_file;
