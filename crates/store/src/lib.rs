@@ -728,7 +728,11 @@ impl Inner {
         let tmp = TmpFile::new(&self.tmp);
         // Clones the file where the disk can (APFS, Btrfs, XFS), else copies it.
         fs::copy(&src_path, &tmp.path)?;
-        fs::File::open(&tmp.path)?.sync_all()?;
+        // Flushing needs write access on Windows.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp.path)?
+            .sync_all()?;
         let after = fs::metadata(&src_path)?;
         if !Stamp::of(&after).matches(&Stamp::of(&src_meta)) {
             return Err(StoreError::InvalidRequest(

@@ -104,10 +104,31 @@ impl Stamp {
     }
 
     /// Whether both describe the same contents: same size and modification time.
+    ///
+    /// File systems keep modification times at different precisions (nanoseconds on most
+    /// Unix file systems, 100 ns on NTFS, 10 ms on exFAT, 1 s on HFS+ and ext3), and a copy
+    /// to a coarser one truncates them. So the times are compared at the coarser of the two
+    /// precisions they show. FAT's 2-second times aren't matched (a 2 s unit would hide a
+    /// same-size change one second later on 1-second file systems): such copies look
+    /// changed and are read again, which is safe.
     #[must_use]
     pub fn matches(&self, other: &Stamp) -> bool {
-        self.size == other.size && self.mtime_ns == other.mtime_ns
+        if self.size != other.size {
+            return false;
+        }
+        let unit = precision(self.mtime_ns).max(precision(other.mtime_ns));
+        self.mtime_ns.div_euclid(unit) == other.mtime_ns.div_euclid(unit)
     }
+}
+
+/// The coarsest time unit, among those file systems use, that a modification time is a
+/// whole multiple of.
+fn precision(mtime_ns: i64) -> i64 {
+    const UNITS: [i64; 5] = [1_000_000_000, 10_000_000, 1_000, 100, 1];
+    UNITS
+        .into_iter()
+        .find(|unit| mtime_ns % unit == 0)
+        .unwrap_or(1)
 }
 
 #[cfg(unix)]
@@ -214,6 +235,43 @@ mod tests {
         assert!(a.matches(&Stamp { ino: 9, ..a }));
         assert!(!a.matches(&Stamp { size: 4, ..a }));
         assert!(!a.matches(&Stamp { mtime_ns: 2, ..a }));
+    }
+
+    #[test]
+    fn stamps_survive_coarser_file_systems() {
+        let unix = Stamp {
+            size: 5,
+            mtime_ns: 1_790_496_488_353_921_658,
+            ino: 1,
+        };
+        // Copied to NTFS (100 ns), exFAT (10 ms) and a 1-second file system: truncated,
+        // still the same.
+        for mtime_ns in [
+            1_790_496_488_353_921_600,
+            1_790_496_488_350_000_000,
+            1_790_496_488_000_000_000,
+        ] {
+            let copy = Stamp { mtime_ns, ..unix };
+            assert!(unix.matches(&copy), "{mtime_ns}");
+            assert!(copy.matches(&unix), "{mtime_ns}");
+        }
+        // On a 1-second file system, a write one second later is a change, even from an
+        // even second.
+        let even = Stamp {
+            mtime_ns: 1_790_496_488_000_000_000,
+            ..unix
+        };
+        let next = Stamp {
+            mtime_ns: 1_790_496_489_000_000_000,
+            ..unix
+        };
+        assert!(!even.matches(&next));
+        assert!(!unix.matches(&next));
+        // Exact nanoseconds on both sides must be equal.
+        assert!(!unix.matches(&Stamp {
+            mtime_ns: unix.mtime_ns + 1,
+            ..unix
+        }));
     }
 
     #[test]

@@ -69,7 +69,10 @@ from the files**; losing it loses only what's listed as "attributes" below.
 A row describes a file only while the file's **size and modification time** match what
 the row recorded. The inode is recorded but not compared, so a drive copied or restored
 with modification times preserved (`rsync -a`, `cp -p`, `tar`, most backup tools) keeps
-all of its metadata. A file changed by anything other than TeiFS no longer matches its
+all of its metadata. Times are compared at the coarser precision of the two values
+(nanoseconds, 100 ns on NTFS, 10 ms on exFAT, 1 s on HFS+ and ext3), so a drive moved to
+a file system that keeps coarser times keeps its metadata too; FAT's 2-second times are
+the exception, and files copied to FAT are treated as changed. A file changed by anything other than TeiFS no longer matches its
 row: until TeiFS reads it again, its ETag is a stable provisional one shaped like a
 multipart ETag (`<hex>-1`), so clients never mistake it for the file's MD5, and its
 content type is guessed from its name.
