@@ -77,8 +77,8 @@ process list.
 
 | Area | Supported |
 |---|---|
-| Buckets | list, create, head, delete, location, versioning status (always off) |
-| Objects | put, get and head (ranges, by part number, conditional requests, response overrides), attributes, rename, delete (conditional), delete many, copy (keep or replace metadata) |
+| Buckets | list, create, head, delete, location, tags, encryption settings, versioning status (always off) |
+| Objects | put, get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url` |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
@@ -90,8 +90,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** users and policies, versioning, Object Lock, lifecycle rules, tagging,
-CORS, website hosting, event notifications, replication, several disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
+**Not yet:** users and policies, versioning, Object Lock, lifecycle rules, CORS, website hosting, event notifications, replication, several disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
 **Two kinds of bucket.** An *object bucket* (the default) stores objects by id under
 `.teifs/` and takes every key S3 allows. A *folder bucket* is a folder of plain files you

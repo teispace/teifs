@@ -638,6 +638,31 @@ impl Store {
         Ok((info, body))
     }
 
+    /// Replaces an object's tags. Its bytes, ETag and modification time don't change.
+    pub async fn set_tags(
+        &self,
+        bucket: &str,
+        key: &str,
+        tags: std::collections::BTreeMap<String, String>,
+    ) -> Result<ObjectInfo> {
+        let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        self.blocking(move |inner| match inner.bucket(&bucket)? {
+            Bucket::Folder(name, dir) => {
+                let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
+                inner.set_folder_tags(&name, &dir, &key, tags)
+            }
+            Bucket::Object(bucket) => {
+                let conn = inner.lock();
+                let mut row =
+                    Inner::object_row(&conn, &bucket, &key)?.ok_or(StoreError::NoSuchKey)?;
+                row.attrs.tags = tags;
+                conn.set_version_attrs(&bucket.id, &key, &row.attrs, None)?;
+                Ok(objects::to_info(&row))
+            }
+        })
+        .await
+    }
+
     /// Deletes an object. Deleting one that doesn't exist succeeds, as in S3.
     pub async fn delete(&self, bucket: &str, key: &str) -> Result<()> {
         self.delete_if(bucket, key, Precondition::default()).await

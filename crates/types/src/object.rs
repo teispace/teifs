@@ -39,6 +39,9 @@ pub struct ObjectAttrs {
     /// What the checksums cover: `None` is the whole object, like `FullObject`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum_type: Option<ChecksumType>,
+    /// Tags, by key.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// What an object's checksum covers.

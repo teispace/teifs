@@ -7,6 +7,7 @@ mod drive;
 mod encode;
 mod errors;
 mod sse;
+mod tagging;
 
 use s3s::{
     auth::SimpleAuth,

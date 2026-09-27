@@ -1495,3 +1495,113 @@ async fn multipart_objects_get_full_object_and_composite_checksums() {
         Some(checksum("CRC64NVME", &whole).as_str())
     );
 }
+
+#[tokio::test]
+async fn objects_and_buckets_take_tags() {
+    use aws_sdk_s3::types::{Tag, Tagging, TaggingDirective};
+
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "tags").await;
+    let tag_keys = |set: &[Tag]| set.iter().map(|t| t.key().to_owned()).collect::<Vec<_>>();
+
+    s3.put_object()
+        .bucket("tags")
+        .key("a")
+        .tagging("project=blue&classified")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    let head = s3
+        .head_object()
+        .bucket("tags")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.tag_count(), Some(2));
+    let get = s3
+        .get_object()
+        .bucket("tags")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.tag_count(), Some(2));
+    let set = s3
+        .get_object_tagging()
+        .bucket("tags")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tag_keys(set.tag_set()), ["classified", "project"]);
+
+    // Copies keep the source's tags unless the request replaces them.
+    s3.copy_object()
+        .bucket("tags")
+        .key("kept")
+        .copy_source("tags/a")
+        .send()
+        .await
+        .unwrap();
+    s3.copy_object()
+        .bucket("tags")
+        .key("replaced")
+        .copy_source("tags/a")
+        .tagging_directive(TaggingDirective::Replace)
+        .tagging("new=1")
+        .send()
+        .await
+        .unwrap();
+    for (key, expected) in [
+        ("kept", vec!["classified", "project"]),
+        ("replaced", vec!["new"]),
+    ] {
+        let set = s3
+            .get_object_tagging()
+            .bucket("tags")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tag_keys(set.tag_set()), expected);
+    }
+
+    let err = s3
+        .put_object_tagging()
+        .bucket("tags")
+        .key("a")
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("aws:mine").value("v").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("InvalidTag"));
+
+    let err = s3
+        .get_bucket_tagging()
+        .bucket("tags")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("NoSuchTagSet"));
+    s3.put_bucket_tagging()
+        .bucket("tags")
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("team").value("storage").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let set = s3.get_bucket_tagging().bucket("tags").send().await.unwrap();
+    assert_eq!(tag_keys(set.tag_set()), ["team"]);
+}

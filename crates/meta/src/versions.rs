@@ -204,25 +204,25 @@ impl Index {
         Ok(replaced)
     }
 
-    /// Replaces the attributes of the current version of `key` and marks it modified now
-    /// (a copy onto itself, as S3 does).
+    /// Replaces the attributes of the current version of `key`; with `modified_ms`, also
+    /// when it was last modified (a copy onto itself does, as in S3; tagging doesn't).
     pub fn set_version_attrs(
         &self,
         bucket_id: &str,
         key: &str,
         attrs: &ObjectAttrs,
-        now_ms: i64,
+        modified_ms: Option<i64>,
     ) -> Result<()> {
         self.conn
             .prepare_cached(
-                "UPDATE object_versions SET attrs = ?3, modified_ms = ?4
+                "UPDATE object_versions SET attrs = ?3, modified_ms = COALESCE(?4, modified_ms)
                  WHERE bucket_id = ?1 AND key = ?2 AND latest = 1",
             )?
             .execute(params![
                 bucket_id,
                 key.as_bytes(),
                 attrs_to_json(attrs),
-                now_ms
+                modified_ms
             ])?;
         Ok(())
     }

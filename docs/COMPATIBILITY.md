@@ -33,7 +33,8 @@ SDKs, the Terraform S3 backend).
 | Conditional deletes: `If-Match` on DeleteObject, per-object ETag, size and modification time in DeleteObjects, `x-amz-if-match-size` and `x-amz-if-match-last-modified-time` | Supported; deleting a missing object succeeds whatever the condition, as on AWS |
 | RenameObject | Supported in both bucket kinds (AWS offers it in directory buckets): source and destination conditions, `x-amz-client-token` idempotency (remembered for a day). A real rename in folder buckets; encrypted objects rename without being re-encrypted |
 | GetObjectAttributes (ETag, size, storage class, checksum, parts with pagination); GetObject and HeadObject by part (`partNumber`); HeadObject with `Range` | Supported |
-| Tagging, CORS | Next |
+| Object tagging (Put/Get/DeleteObjectTagging, `x-amz-tagging` on PutObject, CopyObject and CreateMultipartUpload, `x-amz-tagging-directive`, `x-amz-tagging-count`) and bucket tagging | Supported, with S3's limits (10 per object, 50 per bucket, key and value lengths, characters); a tag change keeps Last-Modified and the ETag |
+| CORS | Next |
 | Server-side encryption: SSE-S3 (`AES256`), SSE-KMS (`aws:kms`, named keys, encryption context), SSE-C (customer keys) on PutObject, GetObject, HeadObject, CopyObject (source and destination keys), multipart uploads and UploadPartCopy | Supported in object buckets, with AWS's rules: SSE-C only over a secure connection, ETags not MD5 for SSE-KMS and SSE-C |
 | KMS | A local keyring, or a Vault/OpenBao transit engine (tested nightly against OpenBao); `teifs key` lists, creates and rotates keys in either |
 | Get/Put/DeleteBucketEncryption, including `BlockedEncryptionTypes` | Supported. Object buckets default to SSE-S3 with SSE-C blocked, as AWS buckets do since April 2026 |

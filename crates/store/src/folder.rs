@@ -485,3 +485,43 @@ impl Inner {
         Ok(info)
     }
 }
+
+impl Inner {
+    /// Replaces the tags of the folder-bucket object `key`. The file isn't touched, so
+    /// its modification time and ETag stay (a file changed outside TeiFS gets its MD5).
+    pub(crate) fn set_folder_tags(
+        &self,
+        bucket: &str,
+        dir: &Path,
+        key: &ObjectKey,
+        tags: std::collections::BTreeMap<String, String>,
+    ) -> Result<ObjectInfo> {
+        let (path, meta) = match Inner::find(dir, key)? {
+            Found::File(path, meta) | Found::Folder(path, meta) => (path, meta),
+            Found::Missing | Found::Other => return Err(StoreError::NoSuchKey),
+        };
+        let conn = self.lock();
+        let stamp = Stamp::of(&meta);
+        let row = match conn.get(bucket, key.as_str())? {
+            Some(mut row) if row.stamp.matches(&stamp) => {
+                row.attrs.tags = tags;
+                row
+            }
+            _ => Row {
+                stamp,
+                etag: if meta.is_dir() {
+                    empty_etag()
+                } else {
+                    teifs_types::hex(&md5_file(&path)?)
+                },
+                attrs: ObjectAttrs {
+                    tags,
+                    ..ObjectAttrs::default()
+                },
+                parts: None,
+            },
+        };
+        conn.put(bucket, key.as_str(), &row)?;
+        Inner::info(&conn, bucket, key.as_str(), &meta)
+    }
+}

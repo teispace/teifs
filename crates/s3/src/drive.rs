@@ -22,6 +22,7 @@ use crate::{
     encode,
     errors::{StoreResultExt, from_body},
     sse::{self, set_sse},
+    tagging,
 };
 
 /// How many keys a listing returns at most, and by default.
@@ -403,6 +404,7 @@ impl NewAttrs {
                 .unwrap_or_default(),
             checksums,
             checksum_type: None,
+            tags: BTreeMap::new(),
         }
     }
 }
@@ -579,6 +581,46 @@ fn object_parts(
         total_parts_count: Some(i32::try_from(parts.len()).unwrap_or(i32::MAX)),
         parts: Some(page),
     }
+}
+
+/// The attributes a copy gets when the request replaces its metadata or its tags (each
+/// has its own directive); `None` keeps the source's.
+fn copy_attrs(
+    input: &mut dto::CopyObjectInput,
+    source: &ObjectAttrs,
+    replace_metadata: bool,
+) -> S3Result<Option<ObjectAttrs>> {
+    let replace_tags = input
+        .tagging_directive
+        .as_ref()
+        .is_some_and(|d| d.as_str() == dto::TaggingDirective::REPLACE);
+    if !replace_metadata && !replace_tags {
+        return Ok(None);
+    }
+    let mut attrs = if replace_metadata {
+        new_attrs!(input).into_attrs(BTreeMap::new())
+    } else {
+        source.clone()
+    };
+    attrs.tags = if replace_tags {
+        header_tags(input.tagging.as_deref())?
+    } else {
+        source.tags.clone()
+    };
+    Ok(Some(attrs))
+}
+
+/// Tags from an `x-amz-tagging` header, checked.
+fn header_tags(value: Option<&str>) -> S3Result<tagging::Tags> {
+    match value {
+        Some(value) => tagging::check(tagging::from_header(value)?, tagging::MAX_OBJECT_TAGS),
+        None => Ok(tagging::Tags::new()),
+    }
+}
+
+/// `x-amz-tagging-count`, when the object has tags.
+fn tag_count(attrs: &ObjectAttrs) -> Option<i32> {
+    (!attrs.tags.is_empty()).then(|| i32::try_from(attrs.tags.len()).unwrap_or(i32::MAX))
 }
 
 /// What `CompleteMultipartUpload` answers.
@@ -884,6 +926,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutObjectOutput>> {
         let mut input = req.input;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
+        let tags = header_tags(input.tagging.as_deref())?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
         // Like S3, an object sent without a checksum gets CRC64NVME.
         let algorithm = input
@@ -930,7 +973,8 @@ impl S3 for Drive {
                 return Err(s3_error!(BadDigest, "Content-MD5 doesn't match the data"));
             }
         }
-        let attrs = new_attrs!(input).into_attrs(computed.clone());
+        let mut attrs = new_attrs!(input).into_attrs(computed.clone());
+        attrs.tags = tags;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
@@ -1063,6 +1107,7 @@ impl S3 for Drive {
                 .or_else(|| info.attrs.expires.clone()),
             website_redirect_location: info.attrs.website_redirect_location.clone(),
             metadata: user_metadata(&info.attrs),
+            tag_count: tag_count(&info.attrs),
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1117,6 +1162,7 @@ impl S3 for Drive {
             expires: info.attrs.expires.clone(),
             website_redirect_location: info.attrs.website_redirect_location.clone(),
             metadata: user_metadata(&info.attrs),
+            tag_count: tag_count(&info.attrs),
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1184,6 +1230,85 @@ impl S3 for Drive {
             ));
         }
         Ok(S3Response::new(out))
+    }
+
+    async fn get_object_tagging(
+        &self,
+        req: S3Request<dto::GetObjectTaggingInput>,
+    ) -> S3Result<S3Response<dto::GetObjectTaggingOutput>> {
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        let info = self.store.head(&input.bucket, &input.key).await.s3()?;
+        Ok(S3Response::new(dto::GetObjectTaggingOutput {
+            tag_set: tagging::to_dto(&info.attrs.tags),
+            version_id: None,
+        }))
+    }
+
+    async fn put_object_tagging(
+        &self,
+        req: S3Request<dto::PutObjectTaggingInput>,
+    ) -> S3Result<S3Response<dto::PutObjectTaggingOutput>> {
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        let tags = tagging::check(tagging::from_dto(input.tagging), tagging::MAX_OBJECT_TAGS)?;
+        self.store
+            .set_tags(&input.bucket, &input.key, tags)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutObjectTaggingOutput::default()))
+    }
+
+    async fn delete_object_tagging(
+        &self,
+        req: S3Request<dto::DeleteObjectTaggingInput>,
+    ) -> S3Result<S3Response<dto::DeleteObjectTaggingOutput>> {
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        self.store
+            .set_tags(&input.bucket, &input.key, tagging::Tags::new())
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteObjectTaggingOutput::default()))
+    }
+
+    async fn get_bucket_tagging(
+        &self,
+        req: S3Request<dto::GetBucketTaggingInput>,
+    ) -> S3Result<S3Response<dto::GetBucketTaggingOutput>> {
+        let tags = self
+            .store
+            .bucket_tags(&req.input.bucket)
+            .await
+            .s3()?
+            .ok_or_else(|| s3_error!(NoSuchTagSet, "The TagSet does not exist"))?;
+        Ok(S3Response::new(dto::GetBucketTaggingOutput {
+            tag_set: tagging::to_dto(&tags),
+        }))
+    }
+
+    async fn put_bucket_tagging(
+        &self,
+        req: S3Request<dto::PutBucketTaggingInput>,
+    ) -> S3Result<S3Response<dto::PutBucketTaggingOutput>> {
+        let input = req.input;
+        let tags = tagging::check(tagging::from_dto(input.tagging), tagging::MAX_BUCKET_TAGS)?;
+        self.store
+            .set_bucket_tags(&input.bucket, Some(tags))
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketTaggingOutput::default()))
+    }
+
+    async fn delete_bucket_tagging(
+        &self,
+        req: S3Request<dto::DeleteBucketTaggingInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketTaggingOutput>> {
+        self.store
+            .set_bucket_tags(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteBucketTaggingOutput::default()))
     }
 
     async fn delete_object(
@@ -1286,6 +1411,7 @@ impl S3 for Drive {
             ));
         };
         check_version(src_version.as_deref())?;
+        let (src_bucket, src_key) = (src_bucket.to_string(), src_key.to_string());
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),
             input.copy_source_sse_customer_key.as_deref(),
@@ -1293,7 +1419,7 @@ impl S3 for Drive {
         )?;
         let (source, _) = self
             .store
-            .read_with(src_bucket, src_key, source_key.as_ref())
+            .read_with(&src_bucket, &src_key, source_key.as_ref())
             .await
             .s3()?;
         check_read(
@@ -1330,19 +1456,18 @@ impl S3 for Drive {
         let asks_encryption = input.server_side_encryption.is_some()
             || input.sse_customer_algorithm.is_some()
             || input.ssekms_key_id.is_some();
-        if **src_bucket == *input.bucket && **src_key == *input.key && !replace && !asks_encryption
-        {
+        if *src_bucket == *input.bucket && *src_key == *input.key && !replace && !asks_encryption {
             return Err(s3_error!(
                 InvalidRequest,
                 "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes."
             ));
         }
-        let attrs = replace.then(|| new_attrs!(input).into_attrs(BTreeMap::new()));
+        let attrs = copy_attrs(&mut input, &source.attrs, replace)?;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
             .copy_with(
-                (src_bucket, src_key),
+                (&src_bucket, &src_key),
                 (&input.bucket, &input.key),
                 attrs,
                 pre,
@@ -1610,7 +1735,8 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::CreateMultipartUploadOutput>> {
         let owner = access_key(&req).map(str::to_owned);
         let mut input = req.input;
-        let attrs = new_attrs!(input).into_attrs(BTreeMap::new());
+        let mut attrs = new_attrs!(input).into_attrs(BTreeMap::new());
+        attrs.tags = header_tags(input.tagging.as_deref())?;
         let checksum = checksums::for_upload(
             input
                 .checksum_algorithm

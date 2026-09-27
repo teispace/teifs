@@ -318,7 +318,7 @@ impl Inner {
         precondition.check(Some(&to_info(&row)))?;
         let attrs = crate::replaced_attrs(&row.attrs, attrs.clone());
         let now = now_ms();
-        conn.set_version_attrs(&bucket.id, key, &attrs, now)?;
+        conn.set_version_attrs(&bucket.id, key, &attrs, Some(now))?;
         Ok(ObjectInfo {
             attrs,
             modified: SystemTime::UNIX_EPOCH

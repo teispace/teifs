@@ -1,9 +1,12 @@
 //! Bucket settings kept in `system.db` (the `config` JSON of a bucket's record).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use teifs_meta::{BucketRecord, Layout};
 use teifs_types::SseMode;
 
-use crate::{Bucket, Store, StoreError, error::Result};
+use crate::{Bucket, Inner, Store, StoreError, error::Result, now_ms};
 
 /// A bucket's settings. Unknown fields from a newer TeiFS are kept.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -11,6 +14,8 @@ use crate::{Bucket, Store, StoreError, error::Result};
 struct BucketConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<BucketEncryption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tags: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -87,17 +92,56 @@ impl Store {
                 "encryption at rest needs an object bucket",
             )),
             Bucket::Object(_) => {
-                let system = inner.system();
-                let mut config = read_config(system.bucket_config(&name)?.as_deref())?;
-                config.encryption = encryption;
-                let json = serde_json::to_string(&config).expect("the config serializes");
-                if !system.set_bucket_config(&name, &json)? {
-                    return Err(StoreError::NoSuchBucket);
-                }
-                Ok(())
+                inner.update_config(&name, |config| config.encryption = encryption)
             }
         })
         .await
+    }
+
+    /// A bucket's tags, if it has any.
+    pub async fn bucket_tags(&self, bucket: &str) -> Result<Option<BTreeMap<String, String>>> {
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.tags)
+        })
+        .await
+    }
+
+    /// Replaces a bucket's tags; `None` removes them.
+    pub async fn set_bucket_tags(
+        &self,
+        bucket: &str,
+        tags: Option<BTreeMap<String, String>>,
+    ) -> Result<()> {
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            inner.update_config(&name, |config| config.tags = tags)
+        })
+        .await
+    }
+}
+
+impl Inner {
+    /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.
+    fn update_config(&self, name: &str, change: impl FnOnce(&mut BucketConfig)) -> Result<()> {
+        let system = self.system();
+        if system.bucket(name)?.is_none() {
+            system.record_bucket(&BucketRecord {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                name: name.to_owned(),
+                layout: Layout::Folder,
+                created_ms: now_ms(),
+            })?;
+        }
+        let mut config = read_config(system.bucket_config(name)?.as_deref())?;
+        change(&mut config);
+        let json = serde_json::to_string(&config).expect("the config serializes");
+        if !system.set_bucket_config(name, &json)? {
+            return Err(StoreError::NoSuchBucket);
+        }
+        Ok(())
     }
 }
 

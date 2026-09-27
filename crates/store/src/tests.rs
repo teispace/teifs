@@ -745,3 +745,23 @@ fn copies_keep_checksums_of_the_bytes_but_not_of_parts() {
     assert_eq!(in_place.checksum_type, composite.checksum_type);
     assert_eq!(in_place.content_type.as_deref(), Some("text/plain"));
 }
+
+#[tokio::test]
+async fn bucket_tags_are_kept_in_its_settings() {
+    let (dir, store) = drive();
+    // A folder made by hand is a bucket too, and can be tagged.
+    fs::create_dir(dir.path().join("by-hand")).unwrap();
+    assert_eq!(store.bucket_tags("by-hand").await.unwrap(), None);
+    let tags: BTreeMap<String, String> = [("team".to_owned(), "a".to_owned())].into();
+    store
+        .set_bucket_tags("by-hand", Some(tags.clone()))
+        .await
+        .unwrap();
+    assert_eq!(store.bucket_tags("by-hand").await.unwrap(), Some(tags));
+    store.set_bucket_tags("by-hand", None).await.unwrap();
+    assert_eq!(store.bucket_tags("by-hand").await.unwrap(), None);
+    assert!(matches!(
+        store.bucket_tags("nope").await,
+        Err(StoreError::NoSuchBucket)
+    ));
+}

@@ -7,6 +7,7 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Object and bucket tagging, with S3's limits; copies keep or replace tags.
 - Multipart checksums as on AWS: full-object (CRC32, CRC32C, CRC64NVME combined from
   the parts) and composite checksums, checked at Complete; CRC64NVME by default for
   objects sent without a checksum; retried Completes answer again. Under SSE-KMS and

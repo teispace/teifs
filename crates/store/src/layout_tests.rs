@@ -484,6 +484,57 @@ async fn completed_uploads_remember_their_parts() {
 }
 
 #[tokio::test]
+async fn tags_change_without_touching_the_object() {
+    for layout in LAYOUTS {
+        let (_dir, store) = bucket(layout).await;
+        let put = store
+            .put_bytes("bkt", "t.txt", b"tagged", attrs("text/plain"))
+            .await
+            .unwrap();
+        let tags: BTreeMap<String, String> = [("k".to_owned(), "v".to_owned())].into();
+        let tagged = store.set_tags("bkt", "t.txt", tags.clone()).await.unwrap();
+        let head = store.head("bkt", "t.txt").await.unwrap();
+        assert_eq!(head.attrs.tags, tags, "{layout:?}");
+        assert_eq!(head.etag, put.etag);
+        assert_eq!(head.modified, put.modified);
+        assert_eq!(tagged.etag, put.etag);
+        assert_eq!(head.attrs.content_type.as_deref(), Some("text/plain"));
+        store
+            .set_tags("bkt", "t.txt", BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(
+            store
+                .head("bkt", "t.txt")
+                .await
+                .unwrap()
+                .attrs
+                .tags
+                .is_empty()
+        );
+        assert!(matches!(
+            store.set_tags("bkt", "missing", tags).await,
+            Err(StoreError::NoSuchKey)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn files_changed_outside_can_be_tagged() {
+    let (dir, store) = bucket(Layout::Folder).await;
+    fs::write(dir.path().join("bkt/by-hand.txt"), b"hello").unwrap();
+    let tags: BTreeMap<String, String> = [("k".to_owned(), "v".to_owned())].into();
+    store
+        .set_tags("bkt", "by-hand.txt", tags.clone())
+        .await
+        .unwrap();
+    let head = store.head("bkt", "by-hand.txt").await.unwrap();
+    assert_eq!(head.attrs.tags, tags);
+    // Its ETag is the real MD5, not a provisional one.
+    assert_eq!(head.etag, "5d41402abc4b2a76b9719d911017c592");
+}
+
+#[tokio::test]
 async fn orphan_files_from_a_crash_are_swept() {
     let dir = tempfile::tempdir().unwrap();
     let data_file;
