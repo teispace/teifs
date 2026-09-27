@@ -133,10 +133,7 @@ fn check_docs(root: &Path) -> Result<(), String> {
         println!("docs: all {checked} referenced paths exist, skills are valid");
         Ok(())
     } else {
-        Err(format!(
-            "docs and skills:\n  {}",
-            missing.join("\n  ")
-        ))
+        Err(format!("docs and skills:\n  {}", missing.join("\n  ")))
     }
 }
 
