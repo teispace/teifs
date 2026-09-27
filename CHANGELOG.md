@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Object buckets: every key S3 allows, stored by id; folder buckets keep plain files.
+- Encryption at rest in object buckets: SSE-S3 by default, SSE-KMS, SSE-C, bucket
+  encryption settings with SSE-C blocked by default, and `teifs key` to manage KMS keys.
+
 First development version: S3 over plain folders (buckets, objects, listings,
 multipart uploads, copies, checksums, SigV4 and presigned URLs), a versioned on-disk
 format with automatic upgrades, and the `teifs` command. ListObjectVersions and

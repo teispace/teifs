@@ -125,6 +125,7 @@ impl Inner {
                 modified,
                 etag: empty_etag(),
                 attrs,
+                sse: None,
             });
         }
         let stamp = Stamp::of(meta);
@@ -138,6 +139,7 @@ impl Inner {
             modified,
             etag,
             attrs,
+            sse: None,
         })
     }
 
@@ -264,6 +266,7 @@ impl Inner {
             modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             etag,
             attrs,
+            sse: None,
         })
     }
 

@@ -67,6 +67,8 @@ const MIGRATIONS: &[&str] = &[
         bucket_id TEXT    NOT NULL,
         queued_ms INTEGER NOT NULL
      ) WITHOUT ROWID;",
+    // 3: multipart uploads to encrypted objects keep their sealed data key.
+    "ALTER TABLE uploads ADD COLUMN crypt TEXT;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -121,6 +123,8 @@ pub struct Upload {
     pub attrs: ObjectAttrs,
     /// When it started, in milliseconds since the Unix epoch.
     pub created_ms: i64,
+    /// How the object will be encrypted (JSON the store owns), if it will be.
+    pub crypt: Option<String>,
 }
 
 /// A part uploaded so far.
@@ -146,6 +150,7 @@ fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
         owner: r.get(3)?,
         attrs: attrs_from_json(&r.get::<_, String>(4)?),
         created_ms: r.get(5)?,
+        crypt: r.get(6)?,
     })
 }
 
@@ -230,8 +235,17 @@ impl Index {
     /// Records a new multipart upload.
     pub fn insert_upload(&self, upload: &Upload) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![upload.id, upload.bucket, upload.key, upload.owner, attrs_to_json(&upload.attrs), upload.created_ms],
+            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                upload.id,
+                upload.bucket,
+                upload.key,
+                upload.owner,
+                attrs_to_json(&upload.attrs),
+                upload.created_ms,
+                upload.crypt
+            ],
         )?;
         Ok(())
     }
@@ -241,7 +255,7 @@ impl Index {
         Ok(self
             .conn
             .prepare_cached(
-                "SELECT id, bucket, key, owner, attrs, created_ms FROM uploads WHERE id = ?1",
+                "SELECT id, bucket, key, owner, attrs, created_ms, crypt FROM uploads WHERE id = ?1",
             )?
             .query_row([id], upload_from_row)
             .optional()?)
@@ -257,7 +271,7 @@ impl Index {
     ) -> Result<Vec<Upload>> {
         let (key_marker, id_marker) = after.unwrap_or(("", ""));
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, bucket, key, owner, attrs, created_ms FROM uploads
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt FROM uploads
              WHERE bucket = ?1 AND substr(key, 1, length(?2)) = ?2 AND (key > ?3 OR (key = ?3 AND id > ?4))
              ORDER BY key, id LIMIT ?5",
         )?;

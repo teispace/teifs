@@ -5,6 +5,7 @@ mod checksums;
 mod drive;
 mod encode;
 mod errors;
+mod sse;
 
 use s3s::{
     auth::SimpleAuth,
@@ -26,11 +27,18 @@ pub struct Options {
     pub domains: Vec<String>,
     /// The layout of buckets created without choosing one.
     pub default_layout: Layout,
+    /// Whether plain HTTP counts as a secure connection for SSE-C keys: true for a server
+    /// that only listens on this machine, or behind a proxy that terminates TLS.
+    pub plain_http_is_secure: bool,
 }
 
 /// Builds the S3 service for a store.
 pub fn service(store: Store, options: Options) -> Result<S3Service, s3s::host::DomainError> {
-    let mut builder = S3ServiceBuilder::new(Drive::new(store, options.default_layout));
+    let mut builder = S3ServiceBuilder::new(Drive::new(
+        store,
+        options.default_layout,
+        options.plain_http_is_secure,
+    ));
     if let Some((access_key, secret_key)) = options.credentials {
         builder.set_auth(SimpleAuth::from_single(access_key, secret_key));
     }

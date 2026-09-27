@@ -31,6 +31,14 @@ pub use seal::{SealedKey, seal, unseal};
 /// A crypto result.
 pub type Result<T, E = CryptoError> = std::result::Result<T, E>;
 
+/// 32 random bytes from the operating system (salts).
+#[must_use]
+pub fn random_salt() -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    random(&mut salt);
+    salt
+}
+
 /// Fills `out` with random bytes from the operating system.
 pub(crate) fn random(out: &mut [u8]) {
     aws_lc_rs::rand::fill(out).expect("the operating system provides randomness");

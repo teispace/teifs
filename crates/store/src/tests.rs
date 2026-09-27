@@ -498,6 +498,7 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
             "big.bin",
             ObjectAttrs::default(),
             Some("key1".into()),
+            &Encryption::None,
         )
         .await
         .unwrap();
@@ -554,7 +555,13 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
 async fn multipart_rules_are_enforced() {
     let (_dir, store) = with_bucket().await;
     let upload = store
-        .create_upload("photos", "k", ObjectAttrs::default(), None)
+        .create_upload(
+            "photos",
+            "k",
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+        )
         .await
         .unwrap();
     let mut etags = Vec::new();
@@ -600,7 +607,13 @@ async fn multipart_rules_are_enforced() {
         .unwrap();
 
     let other = store
-        .create_upload("photos", "k2", ObjectAttrs::default(), None)
+        .create_upload(
+            "photos",
+            "k2",
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+        )
         .await
         .unwrap();
     store.abort(&other.id).await.unwrap();

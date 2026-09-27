@@ -12,8 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use std::sync::Arc;
 use teifs_s3::Options;
-use teifs_store::{Layout, Store, StoreError};
+
+use teifs_store::{BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
@@ -32,6 +34,15 @@ pub struct Config {
     pub credentials: Option<Credentials>,
     /// The layout of buckets created without choosing one.
     pub default_layout: Layout,
+    /// The KMS keyring; `None` for the default, `<config dir>/teifs/keys/<drive id>.json`,
+    /// kept off the drive so a copy of the drive alone can't be decrypted.
+    pub kms_keyring: Option<PathBuf>,
+    /// Allow SSE-C on buckets that don't set it themselves (AWS blocks it by default
+    /// since April 2026).
+    pub allow_sse_c: bool,
+    /// Whether plain HTTP counts as secure for SSE-C keys; `None` decides by the listen
+    /// address (secure only on loopback).
+    pub plain_http_is_secure: Option<bool>,
 }
 
 /// Why the server couldn't start.
@@ -59,6 +70,17 @@ pub enum ServerError {
     /// A domain for virtual-hosted-style requests is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
+    /// The KMS keyring couldn't be opened or created.
+    #[error("can't open the KMS keyring at {}: {source}", path.display())]
+    Keyring {
+        /// The keyring.
+        path: PathBuf,
+        /// Why.
+        source: teifs_store::CryptoError,
+    },
+    /// There's no default place for the keyring (no home folder).
+    #[error("there's no config folder for the KMS keyring; give one with --kms-keyring")]
+    NoKeyringHome,
     /// The address couldn't be listened on.
     #[error("can't listen on {address}: {source}")]
     Listen {
@@ -76,6 +98,8 @@ pub struct Server {
     listener: TcpListener,
     access_key: String,
     created_credentials: bool,
+    keyring: PathBuf,
+    created_keyring: bool,
 }
 
 impl std::fmt::Debug for Server {
@@ -87,6 +111,12 @@ impl std::fmt::Debug for Server {
     }
 }
 
+/// Where a drive's keyring goes by default: the user's config folder, not the drive.
+pub fn default_keyring(drive: &str) -> Result<PathBuf, ServerError> {
+    let dir = dirs::config_dir().ok_or(ServerError::NoKeyringHome)?;
+    Ok(dir.join("teifs").join("keys").join(format!("{drive}.json")))
+}
+
 impl Server {
     /// Opens the drive and starts listening.
     pub async fn bind(config: Config) -> Result<Self, ServerError> {
@@ -94,10 +124,36 @@ impl Server {
             path: config.dir.clone(),
             source,
         })?;
-        let store = Store::open(&config.dir).map_err(|source| ServerError::Open {
+        let default_encryption = config.allow_sse_c.then(|| BucketEncryption {
+            block_customer_keys: false,
+            ..BucketEncryption::aws_default()
+        });
+        let store = Store::open_with(
+            &config.dir,
+            StoreOptions {
+                kms: None,
+                default_encryption,
+            },
+        )
+        .map_err(|source| ServerError::Open {
             path: config.dir.clone(),
             source,
         })?;
+        let keyring = match config.kms_keyring {
+            Some(path) => path,
+            None => default_keyring(&store.format().drive)?,
+        };
+        let created_keyring = !keyring.exists();
+        let kms = LocalKms::open(&keyring).map_err(|source| ServerError::Keyring {
+            path: keyring.clone(),
+            source,
+        })?;
+        store
+            .attach_kms(Arc::new(kms))
+            .map_err(|source| ServerError::Open {
+                path: config.dir.clone(),
+                source,
+            })?;
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
@@ -109,6 +165,9 @@ impl Server {
                 credentials: Some((credentials.access_key, credentials.secret_key)),
                 domains: config.domains,
                 default_layout: config.default_layout,
+                plain_http_is_secure: config
+                    .plain_http_is_secure
+                    .unwrap_or_else(|| config.listen.ip().is_loopback()),
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
@@ -125,6 +184,8 @@ impl Server {
             listener,
             access_key,
             created_credentials,
+            keyring,
+            created_keyring,
         })
     }
 
@@ -143,6 +204,18 @@ impl Server {
     #[must_use]
     pub fn access_key(&self) -> &str {
         &self.access_key
+    }
+
+    /// The KMS keyring the drive's encrypted objects need.
+    #[must_use]
+    pub fn keyring(&self) -> &Path {
+        &self.keyring
+    }
+
+    /// Whether this start created the keyring (a new key: back it up).
+    #[must_use]
+    pub fn created_keyring(&self) -> bool {
+        self.created_keyring
     }
 
     /// Whether this start generated the drive's credentials.

@@ -29,8 +29,34 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
+        StoreError::CustomerKeyRequired => s3_error!(
+            InvalidRequest,
+            "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."
+        ),
+        StoreError::WrongCustomerKey => s3_error!(
+            InvalidRequest,
+            "The provided encryption parameters did not match the ones used originally to encrypt the object."
+        ),
+        StoreError::CustomerKeyNotApplicable => s3_error!(
+            InvalidRequest,
+            "The encryption parameters are not applicable to this object."
+        ),
+        StoreError::NoKms => s3_error!(
+            NotImplemented,
+            "encryption at rest needs a KMS, and none is configured"
+        ),
+        StoreError::Crypto(teifs_store::CryptoError::NoSuchKey(key)) => {
+            let mut err = S3Error::with_message(
+                S3ErrorCode::Custom("KMS.NotFoundException".into()),
+                format!("KMS key {key} doesn't exist"),
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            err
+        }
         err @ (StoreError::Io(_)
         | StoreError::Meta(_)
+        | StoreError::Crypto(_)
+        | StoreError::CorruptMetadata
         | StoreError::NewerFormat { .. }
         | StoreError::CorruptFormat(_)) => {
             tracing::error!(error = %err, "storage failed");

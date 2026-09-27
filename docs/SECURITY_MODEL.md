@@ -88,6 +88,17 @@ overwrite.
 *Planned with policies:* a caller without access learns nothing about whether an object
 exists, including through conditional requests.
 
+### 14. Encryption at rest keeps its keys away from the data
+Objects in object buckets are encrypted by default (SSE-S3), as specified in
+[ENCRYPTION_FORMAT.md](ENCRYPTION_FORMAT.md): a random key per object, sealed by a KMS
+key and bound to the object's drive, bucket and object ids; 64 KiB authenticated
+packages that can't be reordered, cut short or moved. The KMS keyring lives outside the
+drive (`<config dir>/teifs/keys/<drive id>.json`, mode `0600`), so a copy of the drive
+alone reveals nothing. SSE-C keys are never stored (only a salted HMAC to recognize
+them), are refused over plain HTTP except on loopback, and are blocked on buckets by
+default. Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
+disk and tampered data fails to decrypt (`crates/store/src/sse_tests.rs`).
+
 ## Data safety
 
 - Writes are atomic (stage, sync, rename, sync the folder), so a crash never leaves a

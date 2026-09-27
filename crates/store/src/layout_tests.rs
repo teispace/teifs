@@ -374,7 +374,13 @@ async fn buckets_of_both_layouts_list_together_and_names_stay_unique() {
 async fn multipart_uploads_complete_into_object_buckets() {
     let (_dir, store) = bucket(Layout::Object).await;
     let upload = store
-        .create_upload("bkt", "big/../file", attrs("video/mp4"), None)
+        .create_upload(
+            "bkt",
+            "big/../file",
+            attrs("video/mp4"),
+            None,
+            &Encryption::None,
+        )
         .await
         .unwrap();
     let listed = store.uploads("bkt", "", None, 10).await.unwrap();

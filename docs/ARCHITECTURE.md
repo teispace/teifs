@@ -68,6 +68,18 @@ object's own bytes (whole or a range). Copies between layouts clone the bytes wh
 the disk can. The tests in `crates/store/src/layout_tests.rs` run the same S3 behaviour
 against both layouts.
 
+## Encryption
+
+`crates/store/src/sse.rs` turns what a write asks for (`Encryption`: none, SSE-S3,
+SSE-KMS, SSE-C) into a data key through the KMS (or the customer's key) and records how
+the object is encrypted (the row's `crypt` column and the data file's footer).
+`Store::stage_for` gives a staged upload that encrypts as bytes arrive; `read_with`
+unseals the key and returns an `ObjectBody` that decrypts only the packages a range
+needs. Copies of encrypted objects are decrypted and encrypted again under the copy's own
+key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's default
+(`settings.rs`) and AWS's rules onto this. The server attaches a `LocalKms` keyring kept
+outside the drive.
+
 ## How a write works
 
 `PutObject` (`crates/s3/src/drive.rs` → `crates/store/src/lib.rs`):

@@ -10,11 +10,15 @@ use std::{
 use md5::{Digest, Md5};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use crate::error::Result;
+use teifs_crypto::{PartCipher, PartEncryptor};
+
+use crate::{error::Result, sse::Keyed};
 
 const BUFFER: usize = 256 * 1024;
 
-/// An upload being written. Dropped without being committed, its file is removed.
+/// An upload being written. Dropped without being committed, its file is removed. When
+/// it's encrypted, what reaches the file is ciphertext; the MD5 and size are of the
+/// plaintext.
 #[derive(Debug)]
 pub struct Staged {
     path: PathBuf,
@@ -22,6 +26,19 @@ pub struct Staged {
     md5: Md5,
     size: u64,
     kept: bool,
+    sealing: Option<Sealing>,
+}
+
+/// An encrypted upload's key and encryptor.
+#[derive(Debug)]
+pub(crate) struct Sealing {
+    pub keyed: Keyed,
+    /// The object bucket the data key is bound to.
+    pub bucket_id: String,
+    /// The part the bytes are encrypted as (1 for a single-part object).
+    pub part: u32,
+    encryptor: Option<PartEncryptor>,
+    scratch: Vec<u8>,
 }
 
 impl Staged {
@@ -34,19 +51,58 @@ impl Staged {
             md5: Md5::new(),
             size: 0,
             kept: false,
+            sealing: None,
         })
+    }
+
+    /// A staged upload encrypted with `keyed`'s data key as part `part`.
+    pub(crate) async fn create_sealed(
+        dir: &Path,
+        keyed: Keyed,
+        bucket_id: String,
+        part: u32,
+    ) -> Result<Self> {
+        let mut staged = Self::create(dir).await?;
+        let encryptor = PartCipher::new(&keyed.data_key, part).encryptor();
+        staged.sealing = Some(Sealing {
+            keyed,
+            bucket_id,
+            part,
+            encryptor: Some(encryptor),
+            scratch: Vec::with_capacity(BUFFER + BUFFER / 4),
+        });
+        Ok(staged)
     }
 
     /// Appends bytes.
     pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.md5.update(bytes);
         self.size += bytes.len() as u64;
-        self.file
-            .as_mut()
-            .expect("written after finishing")
-            .write_all(bytes)
-            .await?;
+        let file = self.file.as_mut().expect("written after finishing");
+        match self.sealing.as_mut() {
+            Some(sealing) => {
+                sealing.scratch.clear();
+                sealing
+                    .encryptor
+                    .as_mut()
+                    .expect("written after finishing")
+                    .update(bytes, &mut sealing.scratch);
+                file.write_all(&sealing.scratch).await?;
+            }
+            None => file.write_all(bytes).await?,
+        }
         Ok(())
+    }
+
+    /// The encryption this upload carries, if any.
+    pub(crate) fn sealing(&self) -> Option<&Sealing> {
+        self.sealing.as_ref()
+    }
+
+    /// Whether the bytes are encrypted.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.sealing.is_some()
     }
 
     /// How many bytes were written.
@@ -63,6 +119,13 @@ impl Staged {
     /// anything it appends).
     pub(crate) async fn finish(&mut self) -> Result<()> {
         if let Some(mut file) = self.file.take() {
+            if let Some(sealing) = self.sealing.as_mut()
+                && let Some(encryptor) = sealing.encryptor.take()
+            {
+                sealing.scratch.clear();
+                encryptor.finish(&mut sealing.scratch);
+                file.write_all(&sealing.scratch).await?;
+            }
             file.flush().await?;
         }
         Ok(())

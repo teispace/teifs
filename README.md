@@ -54,10 +54,11 @@ process list.
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
 | `teifs ls BUCKET [PREFIX] [-r]` | List objects |
+| `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
 
 ## S3 support today
 
@@ -70,9 +71,13 @@ process list.
 | Integrity | Content-MD5, and CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256 (also as trailers), returned with checksum mode |
 | Auth | Signature V4 (headers and presigned URLs); path-style and virtual-hosted-style |
 
-**Not yet:** users and policies, versioning, Object Lock, lifecycle rules, server-side
-encryption, tagging, CORS, website hosting, event notifications, replication, several
-disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
+**Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
+keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
+(`teifs key list|create|rotate`); **back it up**, because encrypted objects can't be read
+without it.
+
+**Not yet:** users and policies, versioning, Object Lock, lifecycle rules, tagging,
+CORS, website hosting, event notifications, replication, several disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
 **Two kinds of bucket.** An *object bucket* stores objects by id under `.teifs/` and
 takes every key S3 allows. A *folder bucket* is a folder of plain files you can open

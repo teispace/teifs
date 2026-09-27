@@ -14,13 +14,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use teifs_meta::{Index, NULL_VERSION, VersionRow};
 
 use crate::{
     Inner, ObjectAttrs, ObjectInfo, Precondition, StoreError,
     error::Result,
     now_ms,
+    sse::Crypt,
     staged::{Publish, publish, sync_dir},
 };
 
@@ -51,6 +52,52 @@ struct Footer<'a> {
     etag: &'a str,
     created_ms: i64,
     attrs: &'a ObjectAttrs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crypt: Option<&'a Crypt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parts: Option<&'a PartsRecord>,
+}
+
+/// A multipart object's parts (the row's `parts` column, JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PartsRecord {
+    /// Each part's size in bytes, in order (before encryption).
+    pub sizes: Vec<u64>,
+}
+
+/// Finished bytes about to become an object.
+#[derive(Debug)]
+pub(crate) struct Finished<'a> {
+    /// The staged file: the stored bytes (ciphertext when encrypted), maybe followed by
+    /// leftovers to cut off.
+    pub tmp: &'a Path,
+    /// The object's size (before encryption).
+    pub size: u64,
+    /// How many bytes of `tmp` are the object's stored bytes.
+    pub stored_len: u64,
+    /// Its ETag.
+    pub etag: String,
+    /// Its attributes.
+    pub attrs: ObjectAttrs,
+    /// When encrypted: the object id its data key is bound to, and the record.
+    pub sealed: Option<(String, Crypt)>,
+    /// When uploaded in parts: their sizes.
+    pub parts: Option<Vec<u64>>,
+}
+
+impl<'a> Finished<'a> {
+    /// Unencrypted bytes: stored as they are.
+    pub(crate) fn plain(tmp: &'a Path, size: u64, etag: String, attrs: ObjectAttrs) -> Self {
+        Self {
+            tmp,
+            size,
+            stored_len: size,
+            etag,
+            attrs,
+            sealed: None,
+            parts: None,
+        }
+    }
 }
 
 impl ObjectBucket {
@@ -64,6 +111,11 @@ impl ObjectBucket {
 }
 
 pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
+    let sse = row
+        .crypt
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Crypt>(json).ok())
+        .map(|crypt| crypt.info(None));
     ObjectInfo {
         key: row.key.clone(),
         size: row.size,
@@ -71,6 +123,25 @@ pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
             + Duration::from_millis(u64::try_from(row.modified_ms).unwrap_or(0)),
         etag: row.etag.clone(),
         attrs: row.attrs.clone(),
+        sse,
+    }
+}
+
+/// What's recorded about an object's encryption, if it's encrypted.
+pub(crate) fn crypt_of(row: &VersionRow) -> Result<Option<Crypt>> {
+    row.crypt
+        .as_deref()
+        .map(|json| serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata))
+        .transpose()
+}
+
+/// The sizes of an object's parts (one part unless it was uploaded in parts).
+pub(crate) fn part_sizes(row: &VersionRow) -> Result<Vec<u64>> {
+    match row.parts.as_deref() {
+        None => Ok(vec![row.size]),
+        Some(json) => serde_json::from_str::<PartsRecord>(json)
+            .map(|p| p.sizes)
+            .map_err(|_| StoreError::CorruptMetadata),
     }
 }
 
@@ -99,30 +170,38 @@ impl Inner {
             .filter(|row| !row.delete_marker))
     }
 
-    /// Makes the finished file `tmp` (`size` bytes, not yet synced) the object `key`.
-    /// Holds the commit lock (`conn`).
-    #[allow(clippy::too_many_arguments)]
+    /// Makes the finished bytes the object `key`. Holds the commit lock (`conn`).
     pub(crate) fn commit_object(
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
-        tmp: &Path,
-        size: u64,
-        etag: String,
-        attrs: ObjectAttrs,
+        finished: Finished<'_>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         teifs_types::check_object_key(key)?;
         let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
         precondition.check(current.as_ref())?;
 
-        let object_id = uuid::Uuid::now_v7().simple().to_string();
+        let Finished {
+            tmp,
+            size,
+            stored_len,
+            etag,
+            attrs,
+            sealed,
+            parts,
+        } = finished;
+        let (object_id, crypt) = match sealed {
+            Some((object_id, crypt)) => (object_id, Some(crypt)),
+            None => (uuid::Uuid::now_v7().simple().to_string(), None),
+        };
+        let parts = parts.map(|sizes| PartsRecord { sizes });
         let created_ms = now_ms();
-        // Anything after `size` (a copied file's old footer) goes before the new footer.
+        // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()
             .write(true)
             .open(tmp)?
-            .set_len(size)?;
+            .set_len(stored_len)?;
         append_footer(
             tmp,
             &Footer {
@@ -133,6 +212,8 @@ impl Inner {
                 etag: &etag,
                 created_ms,
                 attrs: &attrs,
+                crypt: crypt.as_ref(),
+                parts: parts.as_ref(),
             },
         )?;
         let path = bucket.data_path(&object_id);
@@ -151,8 +232,8 @@ impl Inner {
             etag,
             modified_ms: created_ms,
             attrs,
-            crypt: None,
-            parts: None,
+            crypt: crypt.map(|c| serde_json::to_string(&c).expect("crypt serializes")),
+            parts: parts.map(|p| serde_json::to_string(&p).expect("parts serialize")),
             inline: None,
         };
         let replaced = conn.put_null_version(&row, created_ms)?;
@@ -167,13 +248,13 @@ impl Inner {
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
-    ) -> Result<(ObjectInfo, Option<fs::File>)> {
+    ) -> Result<(VersionRow, Option<fs::File>)> {
         let row = Inner::object_row(conn, bucket, key)?.ok_or(StoreError::NoSuchKey)?;
         let file = match &row.object_id {
             Some(id) => Some(fs::File::open(bucket.data_path(id))?),
             None => None,
         };
-        Ok((to_info(&row), file))
+        Ok((row, file))
     }
 
     /// Deletes the `null` version of `key`; deleting one that doesn't exist succeeds.

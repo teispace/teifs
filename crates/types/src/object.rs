@@ -38,6 +38,28 @@ pub struct ObjectAttrs {
     pub checksums: BTreeMap<String, String>,
 }
 
+/// How an object is encrypted at rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SseMode {
+    /// SSE-S3: with a key TeiFS manages (`AES256`).
+    S3,
+    /// SSE-KMS: with a named KMS key (`aws:kms`).
+    Kms,
+    /// SSE-C: with the customer's own key, sent with every request.
+    Customer,
+}
+
+/// What S3 reports about an object's encryption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SseInfo {
+    /// The kind.
+    pub mode: SseMode,
+    /// The KMS key (SSE-KMS).
+    pub kms_key: Option<String>,
+    /// The base64 MD5 of the customer's key (SSE-C), as S3 echoes it.
+    pub customer_key_md5: Option<String>,
+}
+
 /// An object as listed or read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectInfo {
@@ -51,6 +73,8 @@ pub struct ObjectInfo {
     pub etag: String,
     /// Its attributes.
     pub attrs: ObjectAttrs,
+    /// How it's encrypted at rest, if it is.
+    pub sse: Option<SseInfo>,
 }
 
 impl ObjectInfo {
@@ -282,6 +306,7 @@ mod tests {
             modified: SystemTime::UNIX_EPOCH,
             etag: empty_etag(),
             attrs: ObjectAttrs::default(),
+            sse: None,
         };
         assert_eq!(info.content_type(), "image/jpeg");
         info.attrs.content_type = Some("text/plain".into());

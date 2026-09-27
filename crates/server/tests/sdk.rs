@@ -25,12 +25,14 @@ const SECRET_KEY: &str = "not-a-real-secret-only-for-tests";
 
 struct Server {
     dir: TempDir,
+    _keys: TempDir,
     endpoint: String,
     _stop: oneshot::Sender<()>,
 }
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
     let server = TeiFS::bind(Config {
         dir: dir.path().to_owned(),
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -40,6 +42,9 @@ async fn start() -> Server {
             secret_key: SECRET_KEY.into(),
         }),
         default_layout: teifs_store::Layout::Folder,
+        kms_keyring: Some(keys.path().join("keyring.json")),
+        allow_sse_c: true,
+        plain_http_is_secure: None,
     })
     .await
     .unwrap();
@@ -50,6 +55,7 @@ async fn start() -> Server {
     }));
     Server {
         dir,
+        _keys: keys,
         endpoint,
         _stop: stop,
     }
@@ -694,4 +700,316 @@ async fn object_buckets_hold_any_key() {
         .send()
         .await;
     assert_eq!(bad.unwrap_err().code(), Some("InvalidArgument"));
+}
+
+async fn object_bucket(s3: &Client, name: &str) {
+    s3.create_bucket()
+        .bucket(name)
+        .customize()
+        .mutate_request(|request| {
+            request
+                .headers_mut()
+                .insert(teifs_s3::LAYOUT_HEADER, "object");
+        })
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn objects_are_encrypted_at_rest_by_default() {
+    use aws_sdk_s3::types::ServerSideEncryption;
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "secure").await;
+
+    // Nothing asked: the bucket's default, SSE-S3, as on AWS.
+    let put = s3
+        .put_object()
+        .bucket("secure")
+        .key("a")
+        .body(ByteStream::from_static(b"top secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        put.server_side_encryption(),
+        Some(&ServerSideEncryption::Aes256)
+    );
+    let got = s3
+        .get_object()
+        .bucket("secure")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.server_side_encryption(),
+        Some(&ServerSideEncryption::Aes256)
+    );
+    assert_eq!(body(got).await, b"top secret");
+    let head = s3
+        .head_object()
+        .bucket("secure")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.server_side_encryption(),
+        Some(&ServerSideEncryption::Aes256)
+    );
+
+    // SSE-KMS with the managed key.
+    let kms = s3
+        .put_object()
+        .bucket("secure")
+        .key("k")
+        .server_side_encryption(ServerSideEncryption::AwsKms)
+        .body(ByteStream::from_static(b"kms"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        kms.server_side_encryption(),
+        Some(&ServerSideEncryption::AwsKms)
+    );
+    assert_eq!(kms.ssekms_key_id(), Some("teifs-default"));
+
+    let config = s3
+        .get_bucket_encryption()
+        .bucket("secure")
+        .send()
+        .await
+        .unwrap();
+    let rule = &config
+        .server_side_encryption_configuration()
+        .unwrap()
+        .rules()[0];
+    assert_eq!(
+        rule.apply_server_side_encryption_by_default()
+            .unwrap()
+            .sse_algorithm(),
+        &ServerSideEncryption::Aes256
+    );
+}
+
+#[tokio::test]
+async fn sse_c_objects_need_their_key() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use md5::{Digest, Md5};
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "customer").await;
+    let key = [42u8; 32];
+    let (k, m) = (STANDARD.encode(key), STANDARD.encode(Md5::digest(key)));
+    let other = [7u8; 32];
+    let (ok, om) = (STANDARD.encode(other), STANDARD.encode(Md5::digest(other)));
+
+    let put = s3
+        .put_object()
+        .bucket("customer")
+        .key("c")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .body(ByteStream::from_static(b"mine"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.sse_customer_key_md5(), Some(m.as_str()));
+
+    let missing = s3.get_object().bucket("customer").key("c").send().await;
+    assert_eq!(missing.unwrap_err().code(), Some("InvalidRequest"));
+    let wrong = s3
+        .get_object()
+        .bucket("customer")
+        .key("c")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&ok)
+        .sse_customer_key_md5(&om)
+        .send()
+        .await;
+    assert_eq!(wrong.unwrap_err().code(), Some("InvalidRequest"));
+    let right = s3
+        .get_object()
+        .bucket("customer")
+        .key("c")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(body(right).await, b"mine");
+
+    // Copy to SSE-S3 with the source's key.
+    s3.copy_object()
+        .bucket("customer")
+        .key("copy")
+        .copy_source("customer/c")
+        .copy_source_sse_customer_algorithm("AES256")
+        .copy_source_sse_customer_key(&k)
+        .copy_source_sse_customer_key_md5(&m)
+        .send()
+        .await
+        .unwrap();
+    let copy = s3
+        .get_object()
+        .bucket("customer")
+        .key("copy")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(body(copy).await, b"mine");
+}
+
+#[tokio::test]
+async fn blocked_sse_c_and_bucket_encryption_settings() {
+    use aws_sdk_s3::types::{
+        BlockedEncryptionTypes, EncryptionType, ServerSideEncryption,
+        ServerSideEncryptionByDefault, ServerSideEncryptionConfiguration, ServerSideEncryptionRule,
+    };
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use md5::{Digest, Md5};
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "blocking").await;
+    let rule = |blocked: EncryptionType| {
+        ServerSideEncryptionConfiguration::builder()
+            .rules(
+                ServerSideEncryptionRule::builder()
+                    .apply_server_side_encryption_by_default(
+                        ServerSideEncryptionByDefault::builder()
+                            .sse_algorithm(ServerSideEncryption::AwsKms)
+                            .build()
+                            .unwrap(),
+                    )
+                    .blocked_encryption_types(
+                        BlockedEncryptionTypes::builder()
+                            .encryption_type(blocked)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+            .unwrap()
+    };
+    s3.put_bucket_encryption()
+        .bucket("blocking")
+        .server_side_encryption_configuration(rule(EncryptionType::SseC))
+        .send()
+        .await
+        .unwrap();
+    let key = [1u8; 32];
+    let (k, m) = (STANDARD.encode(key), STANDARD.encode(Md5::digest(key)));
+    let blocked = s3
+        .put_object()
+        .bucket("blocking")
+        .key("x")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await;
+    assert_eq!(blocked.unwrap_err().code(), Some("AccessDenied"));
+    // The new default applies to writes that don't ask.
+    let put = s3
+        .put_object()
+        .bucket("blocking")
+        .key("d")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        put.server_side_encryption(),
+        Some(&ServerSideEncryption::AwsKms)
+    );
+
+    s3.delete_bucket_encryption()
+        .bucket("blocking")
+        .send()
+        .await
+        .unwrap();
+    // Folder buckets have no encryption.
+    s3.create_bucket()
+        .bucket("plainfolder")
+        .send()
+        .await
+        .unwrap();
+    let none = s3
+        .get_bucket_encryption()
+        .bucket("plainfolder")
+        .send()
+        .await;
+    assert_eq!(
+        none.unwrap_err().code(),
+        Some("ServerSideEncryptionConfigurationNotFoundError")
+    );
+}
+
+#[tokio::test]
+async fn multipart_uploads_are_encrypted_too() {
+    use aws_sdk_s3::types::ServerSideEncryption;
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "bigsecure").await;
+    let create = s3
+        .create_multipart_upload()
+        .bucket("bigsecure")
+        .key("video")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        create.server_side_encryption(),
+        Some(&ServerSideEncryption::Aes256)
+    );
+    let upload_id = create.upload_id().unwrap();
+    let first = vec![3u8; 5 * 1024 * 1024 + 1];
+    let second = b"the end".to_vec();
+    let mut parts = Vec::new();
+    for (number, bytes) in [(1, first.clone()), (2, second.clone())] {
+        let part = s3
+            .upload_part()
+            .bucket("bigsecure")
+            .key("video")
+            .upload_id(upload_id)
+            .part_number(number)
+            .body(ByteStream::from(bytes))
+            .send()
+            .await
+            .unwrap();
+        parts.push(
+            CompletedPart::builder()
+                .part_number(number)
+                .e_tag(part.e_tag().unwrap())
+                .build(),
+        );
+    }
+    s3.complete_multipart_upload()
+        .bucket("bigsecure")
+        .key("video")
+        .upload_id(upload_id)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .set_parts(Some(parts))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let got = s3
+        .get_object()
+        .bucket("bigsecure")
+        .key("video")
+        .range("bytes=5242870-5242885")
+        .send()
+        .await
+        .unwrap();
+    let mut whole = first;
+    whole.extend_from_slice(&second);
+    assert_eq!(body(got).await, &whole[5_242_870..=5_242_885]);
 }

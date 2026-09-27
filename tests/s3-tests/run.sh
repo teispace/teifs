@@ -35,10 +35,15 @@ fi
 
 cargo build --quiet --release --locked -p teifs --manifest-path "$ROOT/Cargo.toml"
 
-rm -rf "$WORK/drive"
+rm -rf "$WORK/drive" "$WORK/keyring.json"
 mkdir -p "$WORK/drive"
+# The KMS keys the suite's SSE-KMS tests name (its defaults).
+for key in testkey-1 testkey-2; do
+  "$ROOT/target/release/teifs" key create "$key" --kms-keyring "$WORK/keyring.json" > /dev/null
+done
 TEIFS_ACCESS_KEY="$ACCESS_KEY" TEIFS_SECRET_KEY="$SECRET_KEY" TEIFS_LOG=warn \
-  TEIFS_DEFAULT_LAYOUT="$LAYOUT" \
+  TEIFS_DEFAULT_LAYOUT="$LAYOUT" TEIFS_KMS_KEYRING="$WORK/keyring.json" \
+  TEIFS_ALLOW_SSE_C=true \
   "$ROOT/target/release/teifs" serve "$WORK/drive" --listen "127.0.0.1:$PORT" \
   > "$WORK/server.log" 2>&1 &
 server=$!

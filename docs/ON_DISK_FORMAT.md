@@ -77,12 +77,14 @@ becomes one if the object bucket is deleted.
 Each version of an object is a row in `index.db`'s `object_versions`, which is
 authoritative. Its bytes are a data file at `.teifs/buckets/<bucket id>/<aa>/<bb>/<object
 id>`, where the object id is a UUIDv7 (32 hex digits) and `aa`, `bb` are its last four
-digits. A data file holds exactly the object's bytes, then a footer:
+digits. A data file holds exactly the object's bytes (for an encrypted object, its encrypted
+packages as [ENCRYPTION_FORMAT.md](ENCRYPTION_FORMAT.md) describes; `size` is always the
+size before encryption), then a footer:
 
 | Part | Bytes |
 |---|---|
 | The object's bytes | `size` |
-| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs` | variable |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes) | variable |
 | Footer JSON length | 4, big-endian |
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
@@ -99,6 +101,7 @@ garbage is removed at the next start.
 | `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, and `attrs` (JSON: content headers, user metadata, checksums). Rebuildable from the files |
 | `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq`, `version_id` (`null` without versioning), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
 | `garbage` | Data files waiting to be removed |
+| `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt` |
 | `uploads` | Multipart uploads in progress: id, bucket, key, owner, attributes, start time |
 | `parts` | Their parts: number, size, ETag, checksums, upload time |
 
@@ -123,7 +126,7 @@ What can't be rebuilt from the files.
 
 | Table | Holds |
 |---|---|
-| `buckets` | Buckets TeiFS created: `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON) |
+| `buckets` | Buckets TeiFS created: `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked) |
 
 A bucket folder without a row is a folder bucket with default settings.
 

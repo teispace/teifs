@@ -12,7 +12,8 @@ use s3s::{
     s3_error,
 };
 use teifs_store::{
-    After, Layout, ListQuery, Match, ObjectAttrs, ObjectInfo, Precondition, Staged, Store, Upload,
+    After, BucketEncryption, CustomerKey, DefaultEncryption, Encryption, Layout, ListQuery, Match,
+    ObjectAttrs, ObjectInfo, Precondition, SseInfo, SseMode, Staged, Store, Upload,
 };
 use tokio_util::io::ReaderStream;
 
@@ -20,6 +21,7 @@ use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
     encode,
     errors::{StoreResultExt, from_body},
+    sse::{self, set_sse},
 };
 
 /// How many keys a listing returns at most, and by default.
@@ -41,25 +43,39 @@ const NULL_VERSION: &str = "null";
 pub struct Drive {
     store: Store,
     default_layout: Layout,
+    /// Whether requests over plain HTTP count as secure for SSE-C (a server that only
+    /// listens on this machine, or behind a proxy that terminates TLS).
+    plain_http_is_secure: bool,
 }
 
 impl Drive {
     /// Serves `store`; buckets created without choosing get `default_layout`.
     #[must_use]
-    pub fn new(store: Store, default_layout: Layout) -> Self {
+    pub fn new(store: Store, default_layout: Layout, plain_http_is_secure: bool) -> Self {
         Self {
             store,
             default_layout,
+            plain_http_is_secure,
         }
     }
 
-    /// Streams a request body into a staged file, hashing it for the checksums asked for.
+    /// Decides a write's encryption from its SSE headers and the bucket's default.
+    async fn write_encryption(
+        &self,
+        bucket: &str,
+        request: sse::WriteRequest<'_>,
+    ) -> S3Result<Encryption> {
+        let default = self.store.bucket_encryption(bucket).await.s3()?;
+        sse::for_write(request, default.as_ref(), self.plain_http_is_secure)
+    }
+
+    /// Streams a request body into `staged`, hashing it for the checksums asked for.
     async fn stage(
         &self,
+        mut staged: Staged,
         body: StreamingBlob,
         sums: &mut s3s::checksum::ChecksumHasher,
     ) -> S3Result<Staged> {
-        let mut staged = self.store.stage().await.s3()?;
         let mut body = body;
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(from_body)?;
@@ -75,6 +91,16 @@ fn owner() -> dto::Owner {
         display_name: Some(OWNER.to_owned()),
         id: Some(OWNER.to_owned()),
     }
+}
+
+/// An object's encryption as S3 reports it, with the SSE-C key's MD5 the request sent.
+fn with_customer_md5(info: Option<SseInfo>, md5: Option<String>) -> Option<SseInfo> {
+    info.map(|mut info| {
+        if info.mode == SseMode::Customer {
+            info.customer_key_md5 = md5;
+        }
+        info
+    })
 }
 
 /// Checks a request's `versionId`. Without versioning, an object's only version is
@@ -363,6 +389,140 @@ impl S3 for Drive {
         Ok(S3Response::new(dto::GetBucketVersioningOutput::default()))
     }
 
+    async fn get_bucket_encryption(
+        &self,
+        req: S3Request<dto::GetBucketEncryptionInput>,
+    ) -> S3Result<S3Response<dto::GetBucketEncryptionOutput>> {
+        let Some(config) = self.store.bucket_encryption(&req.input.bucket).await.s3()? else {
+            return Err(s3_error!(
+                ServerSideEncryptionConfigurationNotFoundError,
+                "a folder bucket stores plain files and has no encryption"
+            ));
+        };
+        let algorithm = match config.default.mode {
+            SseMode::Kms => dto::ServerSideEncryption::AWS_KMS,
+            _ => dto::ServerSideEncryption::AES256,
+        };
+        let blocked = if config.block_customer_keys {
+            dto::EncryptionType::SSE_C
+        } else {
+            dto::EncryptionType::NONE
+        };
+        let rule = dto::ServerSideEncryptionRule {
+            apply_server_side_encryption_by_default: Some(dto::ServerSideEncryptionByDefault {
+                sse_algorithm: dto::ServerSideEncryption::from_static(algorithm),
+                kms_master_key_id: config.default.kms_key.clone(),
+            }),
+            bucket_key_enabled: Some(config.default.bucket_key),
+            blocked_encryption_types: Some(dto::BlockedEncryptionTypes {
+                encryption_type: Some(vec![dto::EncryptionType::from_static(blocked)]),
+            }),
+        };
+        Ok(S3Response::new(dto::GetBucketEncryptionOutput {
+            server_side_encryption_configuration: Some(dto::ServerSideEncryptionConfiguration {
+                rules: vec![rule],
+            }),
+        }))
+    }
+
+    async fn put_bucket_encryption(
+        &self,
+        req: S3Request<dto::PutBucketEncryptionInput>,
+    ) -> S3Result<S3Response<dto::PutBucketEncryptionOutput>> {
+        let input = req.input;
+        let [rule] = input.server_side_encryption_configuration.rules.as_slice() else {
+            return Err(s3_error!(
+                MalformedXML,
+                "a bucket encryption configuration has exactly one rule"
+            ));
+        };
+        let current = self
+            .store
+            .bucket_encryption(&input.bucket)
+            .await
+            .s3()?
+            .unwrap_or_else(BucketEncryption::aws_default);
+        let default = match &rule.apply_server_side_encryption_by_default {
+            None => current.default.clone(),
+            Some(by_default) => {
+                let kms_key = by_default
+                    .kms_master_key_id
+                    .as_deref()
+                    .map(sse::kms_key_name);
+                let mode = match by_default.sse_algorithm.as_str() {
+                    dto::ServerSideEncryption::AES256 if kms_key.is_none() => SseMode::S3,
+                    dto::ServerSideEncryption::AES256 => {
+                        return Err(s3_error!(
+                            InvalidArgument,
+                            "a KMS key can only be given with aws:kms"
+                        ));
+                    }
+                    dto::ServerSideEncryption::AWS_KMS => SseMode::Kms,
+                    dto::ServerSideEncryption::AWS_KMS_DSSE => {
+                        return Err(s3_error!(
+                            NotImplemented,
+                            "dual-layer encryption (aws:kms:dsse) isn't supported"
+                        ));
+                    }
+                    _ => {
+                        return Err(s3_error!(
+                            InvalidArgument,
+                            "the algorithm must be AES256 or aws:kms"
+                        ));
+                    }
+                };
+                DefaultEncryption {
+                    mode,
+                    kms_key,
+                    bucket_key: rule.bucket_key_enabled.unwrap_or(false),
+                }
+            }
+        };
+        let block_customer_keys = match rule
+            .blocked_encryption_types
+            .as_ref()
+            .and_then(|b| b.encryption_type.as_ref())
+        {
+            None => current.block_customer_keys,
+            Some(types) => {
+                let names: Vec<&str> = types.iter().map(dto::EncryptionType::as_str).collect();
+                match names.as_slice() {
+                    [dto::EncryptionType::SSE_C] => true,
+                    [dto::EncryptionType::NONE] | [] => false,
+                    _ => {
+                        return Err(s3_error!(
+                            InvalidArgument,
+                            "BlockedEncryptionTypes is SSE-C or NONE"
+                        ));
+                    }
+                }
+            }
+        };
+        self.store
+            .set_bucket_encryption(
+                &input.bucket,
+                Some(BucketEncryption {
+                    default,
+                    block_customer_keys,
+                }),
+            )
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketEncryptionOutput::default()))
+    }
+
+    async fn delete_bucket_encryption(
+        &self,
+        req: S3Request<dto::DeleteBucketEncryptionInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketEncryptionOutput>> {
+        // As on AWS, a bucket goes back to the default (SSE-S3), not to no encryption.
+        self.store
+            .set_bucket_encryption(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteBucketEncryptionOutput::default()))
+    }
+
     async fn put_object(
         &self,
         req: S3Request<dto::PutObjectInput>,
@@ -377,7 +537,29 @@ impl S3 for Drive {
                 .as_ref()
                 .map(s3s::dto::ChecksumAlgorithm::as_str),
         )?;
-        let staged = self.stage(body, &mut hasher).await?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let customer_md5 = customer.as_ref().map(CustomerKey::md5_base64);
+        let encryption = self
+            .write_encryption(
+                &input.bucket,
+                sse::WriteRequest {
+                    sse: input.server_side_encryption.as_ref(),
+                    kms_key: input.ssekms_key_id.as_deref(),
+                    kms_context: input.ssekms_encryption_context.as_deref(),
+                    customer,
+                },
+            )
+            .await?;
+        let staged = self
+            .store
+            .stage_for(&input.bucket, &encryption)
+            .await
+            .s3()?;
+        let staged = self.stage(staged, body, &mut hasher).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         let computed = checksums::from_dto(&hasher.finalize());
         checksums::verify(&sent, &computed)?;
@@ -402,6 +584,7 @@ impl S3 for Drive {
             ..Default::default()
         };
         set_checksums!(out, &computed);
+        set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
         Ok(S3Response::new(out))
     }
 
@@ -417,7 +600,16 @@ impl S3 for Drive {
                 "reading one part of an object isn't supported"
             ));
         }
-        let (info, file) = self.store.read(&input.bucket, &input.key).await.s3()?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let (info, file) = self
+            .store
+            .read_with(&input.bucket, &input.key, customer.as_ref())
+            .await
+            .s3()?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -486,6 +678,7 @@ impl S3 for Drive {
         if asked && whole {
             set_checksums!(out, &info.attrs.checksums);
         }
+        set_sse!(out, info.sse.as_ref());
         Ok(S3Response::new(out))
     }
 
@@ -495,7 +688,16 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::HeadObjectOutput>> {
         let input = req.input;
         check_version(input.version_id.as_deref())?;
-        let info = self.store.head(&input.bucket, &input.key).await.s3()?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let (info, _) = self
+            .store
+            .read_with(&input.bucket, &input.key, customer.as_ref())
+            .await
+            .s3()?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -525,6 +727,7 @@ impl S3 for Drive {
         {
             set_checksums!(out, &info.attrs.checksums);
         }
+        set_sse!(out, info.sse.as_ref());
         Ok(S3Response::new(out))
     }
 
@@ -602,7 +805,16 @@ impl S3 for Drive {
             ));
         };
         check_version(src_version.as_deref())?;
-        let source = self.store.head(src_bucket, src_key).await.s3()?;
+        let source_key = sse::customer_key(
+            input.copy_source_sse_customer_algorithm.as_deref(),
+            input.copy_source_sse_customer_key.as_deref(),
+            input.copy_source_sse_customer_key_md5.as_deref(),
+        )?;
+        let (source, _) = self
+            .store
+            .read_with(src_bucket, src_key, source_key.as_ref())
+            .await
+            .s3()?;
         check_read(
             &source,
             input.copy_source_if_match.as_ref(),
@@ -611,30 +823,63 @@ impl S3 for Drive {
             input.copy_source_if_unmodified_since.as_ref(),
         )
         .map_err(|_| s3_error!(PreconditionFailed))?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let customer_md5 = customer.as_ref().map(CustomerKey::md5_base64);
+        let encryption = self
+            .write_encryption(
+                &input.bucket,
+                sse::WriteRequest {
+                    sse: input.server_side_encryption.as_ref(),
+                    kms_key: input.ssekms_key_id.as_deref(),
+                    kms_context: input.ssekms_encryption_context.as_deref(),
+                    customer,
+                },
+            )
+            .await?;
         let replace = input
             .metadata_directive
             .as_ref()
             .is_some_and(|d| d.as_str() == MetadataDirective::REPLACE);
+        // A copy onto itself must change something the request names: metadata or
+        // encryption (the bucket's default encryption doesn't count).
+        let asks_encryption = input.server_side_encryption.is_some()
+            || input.sse_customer_algorithm.is_some()
+            || input.ssekms_key_id.is_some();
+        if **src_bucket == *input.bucket && **src_key == *input.key && !replace && !asks_encryption
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes."
+            ));
+        }
         let attrs = replace.then(|| new_attrs!(input).into_attrs(BTreeMap::new()));
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
-            .copy(
+            .copy_with(
                 (src_bucket, src_key),
                 (&input.bucket, &input.key),
                 attrs,
                 pre,
+                source_key.as_ref(),
+                &encryption,
             )
             .await
             .s3()?;
-        Ok(S3Response::new(dto::CopyObjectOutput {
+        let mut out = dto::CopyObjectOutput {
             copy_object_result: Some(dto::CopyObjectResult {
                 e_tag: Some(etag(&info.etag)),
                 last_modified: Some(info.modified.into()),
                 ..Default::default()
             }),
             ..Default::default()
-        }))
+        };
+        set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
+        Ok(S3Response::new(out))
     }
 
     async fn list_objects_v2(
@@ -885,17 +1130,37 @@ impl S3 for Drive {
         let owner = access_key(&req).map(str::to_owned);
         let mut input = req.input;
         let attrs = new_attrs!(input).into_attrs(BTreeMap::new());
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let customer_md5 = customer.as_ref().map(CustomerKey::md5_base64);
+        let encryption = self
+            .write_encryption(
+                &input.bucket,
+                sse::WriteRequest {
+                    sse: input.server_side_encryption.as_ref(),
+                    kms_key: input.ssekms_key_id.as_deref(),
+                    kms_context: input.ssekms_encryption_context.as_deref(),
+                    customer,
+                },
+            )
+            .await?;
         let upload = self
             .store
-            .create_upload(&input.bucket, &input.key, attrs, owner)
+            .create_upload(&input.bucket, &input.key, attrs, owner, &encryption)
             .await
             .s3()?;
-        Ok(S3Response::new(dto::CreateMultipartUploadOutput {
+        let mut out = dto::CreateMultipartUploadOutput {
             bucket: Some(input.bucket),
             key: Some(input.key),
-            upload_id: Some(upload.id),
+            upload_id: Some(upload.id.clone()),
             ..Default::default()
-        }))
+        };
+        let info = self.store.upload_encryption(&upload);
+        set_sse!(out, with_customer_md5(info, customer_md5).as_ref());
+        Ok(S3Response::new(out))
     }
 
     async fn upload_part(
@@ -915,7 +1180,17 @@ impl S3 for Drive {
                 .as_ref()
                 .map(s3s::dto::ChecksumAlgorithm::as_str),
         )?;
-        let staged = self.stage(body, &mut hasher).await?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let staged = self
+            .store
+            .stage_part(&upload.id, number, customer.as_ref())
+            .await
+            .s3()?;
+        let staged = self.stage(staged, body, &mut hasher).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         let computed = checksums::from_dto(&hasher.finalize());
         checksums::verify(&sent, &computed)?;
@@ -929,6 +1204,11 @@ impl S3 for Drive {
             ..Default::default()
         };
         set_checksums!(out, &computed);
+        let info = self.store.upload_encryption(&upload);
+        set_sse!(
+            out,
+            with_customer_md5(info, customer.as_ref().map(CustomerKey::md5_base64)).as_ref()
+        );
         Ok(S3Response::new(out))
     }
 
@@ -952,7 +1232,21 @@ impl S3 for Drive {
             ));
         };
         check_version(src_version.as_deref())?;
-        let (source, file) = self.store.read(src_bucket, src_key).await.s3()?;
+        let source_key = sse::customer_key(
+            input.copy_source_sse_customer_algorithm.as_deref(),
+            input.copy_source_sse_customer_key.as_deref(),
+            input.copy_source_sse_customer_key_md5.as_deref(),
+        )?;
+        let customer = sse::customer_key(
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+        let (source, file) = self
+            .store
+            .read_with(src_bucket, src_key, source_key.as_ref())
+            .await
+            .s3()?;
         check_read(
             &source,
             input.copy_source_if_match.as_ref(),
@@ -965,7 +1259,11 @@ impl S3 for Drive {
             Some(range) => copy_range(range, source.size)?,
             None => (0, source.size),
         };
-        let mut staged = self.store.stage().await.s3()?;
+        let mut staged = self
+            .store
+            .stage_part(&upload.id, number, customer.as_ref())
+            .await
+            .s3()?;
         if let Some(body) = file {
             let reader = body.range(start, length).await.s3()?;
             let mut reader = ReaderStream::with_capacity(reader, READ_CHUNK);

@@ -65,6 +65,7 @@ jobs:
         env:
           TEIFS_ACCESS_KEY: ci-access-key
           TEIFS_SECRET_KEY: ci-secret-key-not-real
+          TEIFS_KMS_KEYRING: ${{ runner.temp }}/keyring.json
           AWS_ACCESS_KEY_ID: ci-access-key
           AWS_SECRET_ACCESS_KEY: ci-secret-key-not-real
           AWS_DEFAULT_REGION: us-east-1

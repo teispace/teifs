@@ -12,7 +12,10 @@ publish.workspace = true
 [dependencies]
 teifs-types.workspace = true
 teifs-meta.workspace = true
+teifs-crypto.workspace = true
+base64.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 bytes.workspace = true
 md-5.workspace = true

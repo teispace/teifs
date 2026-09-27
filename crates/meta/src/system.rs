@@ -112,6 +112,24 @@ impl System {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// A bucket's settings (JSON the store owns), if it's recorded.
+    pub fn bucket_config(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT config FROM buckets WHERE name = ?1")?
+            .query_row([name], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Replaces a recorded bucket's settings; false when the bucket isn't recorded.
+    pub fn set_bucket_config(&self, name: &str, config: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("UPDATE buckets SET config = ?2 WHERE name = ?1")?
+            .execute([name, config])?
+            > 0)
+    }
+
     /// Forgets a deleted bucket.
     pub fn forget_bucket(&self, name: &str) -> Result<()> {
         self.conn
@@ -149,6 +167,16 @@ mod tests {
         system.record_bucket(&record).unwrap();
         assert_eq!(system.bucket("photos").unwrap(), Some(record.clone()));
         assert_eq!(system.buckets().unwrap(), [record]);
+        assert_eq!(
+            system.bucket_config("photos").unwrap().as_deref(),
+            Some("{}")
+        );
+        assert!(system.set_bucket_config("photos", r#"{"a":1}"#).unwrap());
+        assert_eq!(
+            system.bucket_config("photos").unwrap().as_deref(),
+            Some(r#"{"a":1}"#)
+        );
+        assert!(!system.set_bucket_config("missing", "{}").unwrap());
         system.forget_bucket("photos").unwrap();
         assert_eq!(system.bucket("photos").unwrap(), None);
     }

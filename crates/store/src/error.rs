@@ -55,6 +55,24 @@ pub enum StoreError {
     /// `.teifs/format.json` can't be read.
     #[error("the drive's format file (.teifs/format.json) is damaged: {0}")]
     CorruptFormat(String),
+    /// The object is encrypted with a customer key (SSE-C) and the request has none.
+    #[error("the object is encrypted with a customer-provided key; send that key")]
+    CustomerKeyRequired,
+    /// The customer key isn't the one the object was encrypted with.
+    #[error("the customer-provided key isn't the object's key")]
+    WrongCustomerKey,
+    /// A customer key was sent for an object that isn't encrypted with one.
+    #[error("the object isn't encrypted with a customer-provided key")]
+    CustomerKeyNotApplicable,
+    /// Encryption was asked for but no KMS is configured.
+    #[error("encryption needs a KMS, and none is configured")]
+    NoKms,
+    /// Recorded metadata can't be read (damaged or from a newer TeiFS).
+    #[error("the object's recorded metadata is damaged")]
+    CorruptMetadata,
+    /// Encryption failed: a wrong key, damaged data, or a KMS error.
+    #[error(transparent)]
+    Crypto(#[from] teifs_crypto::CryptoError),
     /// The disk failed.
     #[error(transparent)]
     Io(#[from] io::Error),

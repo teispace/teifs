@@ -45,6 +45,18 @@ enum Command {
             env = "TEIFS_DEFAULT_LAYOUT"
         )]
         default_layout: LayoutArg,
+        /// The KMS keyring (default: `<config dir>/teifs/keys/<drive id>.json`). Keep it
+        /// off the drive and back it up: encrypted objects can't be read without it.
+        #[arg(long, env = "TEIFS_KMS_KEYRING")]
+        kms_keyring: Option<PathBuf>,
+        /// Allow SSE-C (customer-provided keys) on buckets that don't set it themselves;
+        /// AWS blocks it by default since April 2026.
+        #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
+        allow_sse_c: bool,
+        /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
+        /// a server listening on this machine only accepts them anyway.
+        #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
+        sse_c_over_http: bool,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
         secret_key: Option<String>,
@@ -60,6 +72,11 @@ enum Command {
         #[command(subcommand)]
         action: BucketAction,
     },
+    /// Manage the KMS keys that encrypt objects (SSE-S3 uses `teifs-default`).
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
     /// List a bucket's objects.
     Ls {
         /// The bucket.
@@ -73,6 +90,39 @@ enum Command {
         /// The drive's folder.
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
+    },
+}
+
+/// Where a key command finds the keyring.
+#[derive(clap::Args)]
+struct KeyringArgs {
+    /// The keyring (default: the drive's, in `<config dir>/teifs/keys/`).
+    #[arg(long, env = "TEIFS_KMS_KEYRING")]
+    kms_keyring: Option<PathBuf>,
+    /// The drive whose default keyring to use.
+    #[arg(long, default_value = ".", env = "TEIFS_DIR")]
+    dir: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum KeyAction {
+    /// List the keys and their newest versions.
+    List {
+        #[command(flatten)]
+        keyring: KeyringArgs,
+    },
+    /// Create a key (for SSE-KMS: `x-amz-server-side-encryption-aws-kms-key-id`).
+    Create {
+        /// Its name: letters, digits, `-`, `_` and `.`.
+        name: String,
+        #[command(flatten)]
+        keyring: KeyringArgs,
+    },
+    /// Add a new version to a key; objects sealed by older versions stay readable.
+    Rotate {
+        name: String,
+        #[command(flatten)]
+        keyring: KeyringArgs,
     },
 }
 
@@ -149,8 +199,25 @@ async fn run(command: Command) -> Result<(), String> {
             domains,
             access_key,
             default_layout,
+            kms_keyring,
+            allow_sse_c,
+            sse_c_over_http,
             ..
-        } => serve(&dir, listen, domains, access_key, default_layout.into()).await,
+        } => {
+            serve(
+                &dir,
+                listen,
+                access_key,
+                Options {
+                    domains,
+                    default_layout: default_layout.into(),
+                    kms_keyring,
+                    allow_sse_c,
+                    sse_c_over_http,
+                },
+            )
+            .await
+        }
         Command::Credentials { dir } => {
             let store = open(&dir)?;
             let (credentials, _) = credentials::load_or_create(store.root())
@@ -163,6 +230,7 @@ async fn run(command: Command) -> Result<(), String> {
             Ok(())
         }
         Command::Bucket { action } => bucket(action).await,
+        Command::Key { action } => key(action).await,
         Command::Ls {
             bucket,
             prefix,
@@ -172,12 +240,20 @@ async fn run(command: Command) -> Result<(), String> {
     }
 }
 
+/// `teifs serve` settings beyond the drive, address and key.
+struct Options {
+    domains: Vec<String>,
+    default_layout: Layout,
+    kms_keyring: Option<PathBuf>,
+    allow_sse_c: bool,
+    sse_c_over_http: bool,
+}
+
 async fn serve(
     dir: &Path,
     listen: SocketAddr,
-    domains: Vec<String>,
     access_key: Option<String>,
-    default_layout: Layout,
+    options: Options,
 ) -> Result<(), String> {
     let credentials = match access_key {
         Some(access_key) => {
@@ -193,9 +269,12 @@ async fn serve(
     let server = Server::bind(Config {
         dir: dir.to_owned(),
         listen,
-        domains,
+        domains: options.domains,
         credentials,
-        default_layout,
+        default_layout: options.default_layout,
+        kms_keyring: options.kms_keyring,
+        allow_sse_c: options.allow_sse_c,
+        plain_http_is_secure: options.sse_c_over_http.then_some(true),
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -203,6 +282,12 @@ async fn serve(
         eprintln!(
             "Created credentials for this drive in {}",
             credentials::path(server.root()).display()
+        );
+    }
+    if server.created_keyring() {
+        eprintln!(
+            "Created the encryption keyring for this drive in {}\n  Back it up: encrypted objects can't be read without it.",
+            server.keyring().display()
         );
     }
     let address = server.local_addr().map_err(|e| e.to_string())?;
@@ -217,6 +302,47 @@ async fn serve(
     server.run(shutdown_signal()).await;
     eprintln!("Stopped.");
     Ok(())
+}
+
+async fn key(action: KeyAction) -> Result<(), String> {
+    use teifs_store::{Kms, LocalKms};
+    let (KeyAction::List { keyring }
+    | KeyAction::Create { keyring, .. }
+    | KeyAction::Rotate { keyring, .. }) = &action;
+    let path = if let Some(path) = &keyring.kms_keyring {
+        path.clone()
+    } else {
+        let store = open(&keyring.dir)?;
+        teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
+    };
+    let kms = LocalKms::open(&path)
+        .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
+    match action {
+        KeyAction::List { .. } => {
+            for key in kms.keys().await.map_err(|e| e.to_string())? {
+                println!(
+                    "{}  v{:<3}  {}",
+                    date(from_ms(key.created_ms)),
+                    key.version,
+                    key.name
+                );
+            }
+        }
+        KeyAction::Create { name, .. } => {
+            kms.create_key(&name).await.map_err(|e| e.to_string())?;
+            println!("Created key {name} in {}", path.display());
+        }
+        KeyAction::Rotate { name, .. } => {
+            let info = kms.rotate_key(&name).await.map_err(|e| e.to_string())?;
+            println!("Key {name} is now at version {}", info.version);
+        }
+    }
+    Ok(())
+}
+
+/// A time in milliseconds since the Unix epoch.
+fn from_ms(ms: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
 
 async fn bucket(action: BucketAction) -> Result<(), String> {
