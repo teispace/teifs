@@ -22,10 +22,5 @@ time.workspace = true
 http = "1"
 tracing.workspace = true
 
-[dev-dependencies]
-aws-sdk-s3.workspace = true
-reqwest.workspace = true
-tempfile.workspace = true
-
 [lints]
 workspace = true

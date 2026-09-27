@@ -1,0 +1,6 @@
+# Line endings: LF everywhere, so formatters and tests behave the same on every system.
+* text=auto eol=lf
+
+# Fixture drives keep their bytes exactly.
+*.tar.gz binary
+*.db binary

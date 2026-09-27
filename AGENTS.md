@@ -36,15 +36,18 @@ crates/store    the storage engine: drive format, buckets, writes, reads, listin
 crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
 apps/cli        the `teifs` command
+xtask           project tasks (`cargo xtask verify`)
 docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPATIBILITY
 ```
 
 ## Commands
 
+- `cargo xtask verify`: everything CI checks (rustfmt, clippy, tests with cargo-nextest,
+  doc tests, cargo-deny, and a check that every path the docs name exists). **Must pass
+  before every commit.** Needs `cargo install cargo-nextest cargo-deny --locked`.
 - `cargo test --workspace`: every test, including the AWS SDK end-to-end suite
   (`crates/server/tests/sdk.rs`) and the format fixtures (`crates/store/tests/format.rs`).
-- `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all`: must be
-  clean before every commit.
+- `cargo xtask docs`: only the docs path check.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
   `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
 - `cargo run -p teifs -- serve <dir>`: run a server; drive it with the AWS CLI
@@ -60,7 +63,7 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPA
 4. Update the docs the change affects, in the same pull request: COMPATIBILITY for S3
    behaviour, ON_DISK_FORMAT for anything on disk, SECURITY_MODEL for a security rule,
    ARCHITECTURE when the structure changes, the README for commands.
-5. Run the checks above and fix everything they report.
+5. Run `cargo xtask verify` and fix everything it reports.
 
 ## Keep this guidance current
 

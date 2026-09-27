@@ -48,12 +48,12 @@ cargo test --workspace
 cargo run -p teifs -- serve /tmp/drive
 ```
 
-Before every commit:
+Before every commit, run everything CI checks:
 
 ```sh
+cargo install cargo-nextest cargo-deny --locked   # once
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo xtask verify
 ```
 
 ## Pull requests
