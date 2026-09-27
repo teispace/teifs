@@ -28,8 +28,9 @@ SDKs, the Terraform S3 backend).
 | Multipart: Create, UploadPart, UploadPartCopy, ListParts, ListMultipartUploads, Complete, Abort | Supported; 5 MiB minimum part size except the last, up to 10,000 parts |
 | Checksums: Content-MD5, CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256 | Supported, as headers or trailers; stored and returned with `x-amz-checksum-mode` |
 | Signature V4 (headers, presigned, chunked, trailers); path-style and virtual-hosted-style | Supported |
-| Conditional writes on PutObject, CompleteMultipartUpload and CopyObject (`If-None-Match: *`, `If-Match`) | Supported; atomic on one server |
-| Conditional deletes, RenameObject, GetObjectAttributes, reading one part (`partNumber`), tagging, CORS | Next |
+| Conditional writes on PutObject, CompleteMultipartUpload and CopyObject (`If-None-Match`, `If-Match`) | Supported; atomic on one server. `If-Match` on a missing object is `404 NoSuchKey`, as on AWS |
+| Conditional deletes: `If-Match` on DeleteObject, per-object ETag, size and modification time in DeleteObjects, `x-amz-if-match-size` and `x-amz-if-match-last-modified-time` | Supported; deleting a missing object succeeds whatever the condition, as on AWS |
+| RenameObject, GetObjectAttributes, reading one part (`partNumber`), tagging, CORS | Next |
 | Server-side encryption: SSE-S3 (`AES256`), SSE-KMS (`aws:kms`, named keys, encryption context), SSE-C (customer keys) on PutObject, GetObject, HeadObject, CopyObject (source and destination keys), multipart uploads and UploadPartCopy | Supported in object buckets, with AWS's rules: SSE-C only over a secure connection, ETags not MD5 for SSE-KMS and SSE-C |
 | KMS | A local keyring, or a Vault/OpenBao transit engine (tested nightly against OpenBao); `teifs key` lists, creates and rotates keys in either |
 | Get/Put/DeleteBucketEncryption, including `BlockedEncryptionTypes` | Supported. Object buckets default to SSE-S3 with SSE-C blocked, as AWS buckets do since April 2026 |

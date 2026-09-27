@@ -1014,3 +1014,53 @@ async fn multipart_uploads_are_encrypted_too() {
     whole.extend_from_slice(&second);
     assert_eq!(body(got).await, &whole[5_242_870..=5_242_885]);
 }
+
+#[tokio::test]
+async fn conditional_deletes_and_writes_on_missing_objects() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "conditional").await;
+    let missing = s3
+        .put_object()
+        .bucket("conditional")
+        .key("k")
+        .if_match("*")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await;
+    assert_eq!(missing.unwrap_err().code(), Some("NoSuchKey"));
+    let etag = s3
+        .put_object()
+        .bucket("conditional")
+        .key("k")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap()
+        .e_tag()
+        .unwrap()
+        .to_owned();
+    let wrong = s3
+        .delete_object()
+        .bucket("conditional")
+        .key("k")
+        .if_match("\"nope\"")
+        .send()
+        .await;
+    assert_eq!(wrong.unwrap_err().code(), Some("PreconditionFailed"));
+    s3.delete_object()
+        .bucket("conditional")
+        .key("k")
+        .if_match(&etag)
+        .send()
+        .await
+        .unwrap();
+    // Gone already: succeeds whatever the condition.
+    s3.delete_object()
+        .bucket("conditional")
+        .key("k")
+        .if_match("\"nope\"")
+        .send()
+        .await
+        .unwrap();
+}

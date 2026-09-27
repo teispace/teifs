@@ -144,6 +144,7 @@ fn precondition(
     Precondition {
         if_match: condition(if_match),
         if_none_match: condition(if_none_match),
+        ..Precondition::default()
     }
 }
 
@@ -154,6 +155,12 @@ fn unix_seconds(time: SystemTime) -> i64 {
 
 fn timestamp_seconds(timestamp: &Timestamp) -> i64 {
     time::OffsetDateTime::from(timestamp.clone()).unix_timestamp()
+}
+
+/// A timestamp as a time, to the second (S3's conditional headers carry seconds).
+fn to_system_time(timestamp: &Timestamp) -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs(u64::try_from(timestamp_seconds(timestamp)).unwrap_or(0))
 }
 
 /// Checks a read's conditions in the order HTTP defines (RFC 9110 §13.2.2).
@@ -735,14 +742,25 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::DeleteObjectInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectOutput>> {
-        check_version(req.input.version_id.as_deref())?;
-        self.store.head_bucket(&req.input.bucket).await.s3()?;
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        self.store.head_bucket(&input.bucket).await.s3()?;
+        let precondition = Precondition {
+            if_size: input
+                .if_match_size
+                .map(|size| u64::try_from(size).unwrap_or(u64::MAX)),
+            if_modified_at: input
+                .if_match_last_modified_time
+                .as_ref()
+                .map(to_system_time),
+            ..precondition(input.if_match.as_ref(), None)
+        };
         self.store
-            .delete(&req.input.bucket, &req.input.key)
+            .delete_if(&input.bucket, &input.key, precondition)
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteObjectOutput {
-            version_id: req.input.version_id,
+            version_id: input.version_id,
             ..Default::default()
         }))
     }
@@ -762,8 +780,23 @@ impl S3 for Drive {
         let quiet = input.delete.quiet.unwrap_or(false);
         let (mut deleted, mut errors) = (Vec::new(), Vec::new());
         for object in input.delete.objects {
+            let precondition = Precondition {
+                if_match: object.e_tag.as_ref().map(|etag| match etag.value() {
+                    "*" => Match::Any,
+                    value => Match::ETag(value.to_owned()),
+                }),
+                if_size: object
+                    .size
+                    .map(|size| u64::try_from(size).unwrap_or(u64::MAX)),
+                if_modified_at: object.last_modified_time.as_ref().map(to_system_time),
+                ..Precondition::default()
+            };
             let result = match check_version(object.version_id.as_deref()) {
-                Ok(()) => self.store.delete(&input.bucket, &object.key).await.s3(),
+                Ok(()) => self
+                    .store
+                    .delete_if(&input.bucket, &object.key, precondition)
+                    .await
+                    .s3(),
                 Err(err) => Err(err),
             };
             match result {

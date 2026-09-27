@@ -77,6 +77,11 @@ pub struct Precondition {
     pub if_match: Option<Match>,
     /// `If-None-Match`: the object must not exist (or not have this ETag).
     pub if_none_match: Option<Match>,
+    /// Deletes only: the object must have this size (`x-amz-if-match-size`).
+    pub if_size: Option<u64>,
+    /// Deletes only: the object must have been modified at this second
+    /// (`x-amz-if-match-last-modified-time`).
+    pub if_modified_at: Option<SystemTime>,
 }
 
 /// An `If-Match` / `If-None-Match` value.
@@ -103,7 +108,12 @@ impl Precondition {
         self.if_none_match == Some(Match::Any)
     }
 
+    /// Checks a write against the object it would replace. As on AWS, `If-Match` on an
+    /// object that doesn't exist is `NoSuchKey`, not a failed precondition.
     fn check(&self, current: Option<&ObjectInfo>) -> Result<()> {
+        if self.if_match.is_some() && current.is_none() {
+            return Err(StoreError::NoSuchKey);
+        }
         let ok_match = self
             .if_match
             .as_ref()
@@ -114,6 +124,28 @@ impl Precondition {
             .is_none_or(|m| current.is_none_or(|info| !m.matches(info)));
         if ok_match && ok_none {
             Ok(())
+        } else {
+            Err(StoreError::PreconditionFailed)
+        }
+    }
+
+    /// Checks a delete: whether to go ahead (`false` when there's nothing to delete,
+    /// which succeeds whatever the conditions, as on AWS).
+    fn check_delete(&self, current: Option<&ObjectInfo>) -> Result<bool> {
+        let Some(info) = current else {
+            return Ok(false);
+        };
+        let seconds = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        };
+        let ok = self.if_match.as_ref().is_none_or(|m| m.matches(info))
+            && self.if_size.is_none_or(|size| size == info.size)
+            && self
+                .if_modified_at
+                .is_none_or(|t| seconds(t) == seconds(info.modified));
+        if ok {
+            Ok(true)
         } else {
             Err(StoreError::PreconditionFailed)
         }
@@ -559,15 +591,44 @@ impl Store {
 
     /// Deletes an object. Deleting one that doesn't exist succeeds, as in S3.
     pub async fn delete(&self, bucket: &str, key: &str) -> Result<()> {
+        self.delete_if(bucket, key, Precondition::default()).await
+    }
+
+    /// Deletes an object if it meets `precondition` (`If-Match`, size, modification
+    /// time); one that doesn't exist is gone already, which succeeds.
+    pub async fn delete_if(
+        &self,
+        bucket: &str,
+        key: &str,
+        precondition: Precondition,
+    ) -> Result<()> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         self.blocking(move |inner| {
             let conn = inner.lock();
             match inner.bucket(&bucket)? {
-                Bucket::Folder(name, dir) => match ObjectKey::parse(&key) {
-                    Ok(key) => Inner::delete_folder_object(&conn, &name, &dir, &key),
-                    Err(_) => Ok(()),
-                },
-                Bucket::Object(bucket) => Inner::delete_object(&conn, &bucket, &key),
+                Bucket::Folder(name, dir) => {
+                    let Ok(key) = ObjectKey::parse(&key) else {
+                        return Ok(());
+                    };
+                    let current = match Inner::find(&dir, &key)? {
+                        Found::File(_, meta) | Found::Folder(_, meta) => {
+                            Some(Inner::info(&conn, &name, key.as_str(), &meta)?)
+                        }
+                        Found::Missing | Found::Other => None,
+                    };
+                    if precondition.check_delete(current.as_ref())? {
+                        Inner::delete_folder_object(&conn, &name, &dir, &key)?;
+                    }
+                    Ok(())
+                }
+                Bucket::Object(bucket) => {
+                    let current =
+                        Inner::object_row(&conn, &bucket, &key)?.map(|row| objects::to_info(&row));
+                    if precondition.check_delete(current.as_ref())? {
+                        Inner::delete_object(&conn, &bucket, &key)?;
+                    }
+                    Ok(())
+                }
             }
         })
         .await

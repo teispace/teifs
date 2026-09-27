@@ -449,3 +449,56 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+#[tokio::test]
+async fn conditional_writes_and_deletes_follow_aws() {
+    for layout in LAYOUTS {
+        let (_dir, store) = bucket(layout).await;
+        let if_match = |etag: &str| Precondition {
+            if_match: Some(if etag == "*" {
+                Match::Any
+            } else {
+                Match::ETag(etag.into())
+            }),
+            ..Precondition::default()
+        };
+        let put = |pre: Precondition| {
+            let store = store.clone();
+            async move {
+                let mut staged = store.stage().await.unwrap();
+                staged.write(b"v").await.unwrap();
+                store
+                    .commit("bkt", "k", staged, ObjectAttrs::default(), pre)
+                    .await
+            }
+        };
+        // If-Match on a missing object: NoSuchKey, as on AWS (not 412).
+        assert!(
+            matches!(put(if_match("*")).await, Err(StoreError::NoSuchKey)),
+            "{layout:?}"
+        );
+        let etag = put(Precondition::default()).await.unwrap().etag;
+        assert!(matches!(
+            put(if_match("nope")).await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        put(if_match(&etag)).await.unwrap();
+
+        // Deletes: a mismatch fails; a match deletes; a missing object always succeeds.
+        assert!(matches!(
+            store.delete_if("bkt", "k", if_match("nope")).await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        let size_mismatch = Precondition {
+            if_size: Some(99),
+            ..Precondition::default()
+        };
+        assert!(matches!(
+            store.delete_if("bkt", "k", size_mismatch).await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        store.delete_if("bkt", "k", if_match(&etag)).await.unwrap();
+        assert!(store.head("bkt", "k").await.is_err());
+        store.delete_if("bkt", "k", if_match("nope")).await.unwrap();
+    }
+}
