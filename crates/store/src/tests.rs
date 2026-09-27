@@ -50,7 +50,7 @@ async fn objects_are_plain_files() {
         read_all(&store, "photos", "2026/trip/a.txt").await,
         b"hello"
     );
-    // Nothing of TeiDrive's lands in the bucket.
+    // Nothing of TeiFS's lands in the bucket.
     assert!(
         fs::read_dir(dir.path().join(SYSTEM_DIR).join("tmp"))
             .unwrap()
@@ -290,7 +290,7 @@ async fn keys_that_collide_on_disk_are_refused() {
         store
             .put_bytes("photos", "../escape", b"x", ObjectAttrs::default())
             .await,
-        Err(StoreError::InvalidKey(_))
+        Err(StoreError::InvalidName(NameError::InvalidKey(_)))
     ));
 }
 
@@ -521,9 +521,9 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
         .unwrap();
     let md5s: Vec<[u8; 16]> = etags
         .iter()
-        .map(|(_, e)| object::md5_of_etag(e).unwrap())
+        .map(|(_, e)| teifs_types::md5_of_etag(e).unwrap())
         .collect();
-    assert_eq!(info.etag, object::multipart_etag(&md5s));
+    assert_eq!(info.etag, teifs_types::multipart_etag(&md5s));
     assert_eq!(info.size, MIN_PART_SIZE + 4);
     assert_eq!(
         fs::metadata(dir.path().join("photos/big.bin"))
@@ -624,7 +624,7 @@ async fn buckets_are_folders() {
     ));
     assert!(matches!(
         store.create_bucket("Bad_Name").await,
-        Err(StoreError::InvalidBucketName(_))
+        Err(StoreError::InvalidName(NameError::InvalidBucketName(_)))
     ));
 
     store

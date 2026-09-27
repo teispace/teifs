@@ -11,7 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{Inner, ObjectInfo, Store, error::Result, names::MAX_SEGMENT_LEN};
+use teifs_types::MAX_SEGMENT_LEN;
+
+use crate::{Inner, ObjectInfo, Store, error::Result};
 
 /// Where a page starts: after this key, or after every key under this common prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]

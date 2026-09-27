@@ -1,4 +1,4 @@
-//! Bytes on their way into the drive: written to `.teidrive/tmp`, hashed as they arrive,
+//! Bytes on their way into the drive: written to `.teifs/tmp`, hashed as they arrive,
 //! flushed to disk, and only then renamed into place, so a crash or a failed upload never
 //! leaves a half-written file where an object should be.
 

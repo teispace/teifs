@@ -2768,23 +2768,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "teidrive"
+name = "teifs"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
- "serde_json",
- "teidrive-s3",
- "teidrive-store",
+ "teifs-server",
+ "teifs-store",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
-name = "teidrive-s3"
+name = "teifs-meta"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "teifs-types",
+ "thiserror",
+]
+
+[[package]]
+name = "teifs-s3"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2793,10 +2800,9 @@ dependencies = [
  "bytes",
  "futures",
  "http 1.5.0",
- "hyper-util",
  "reqwest",
  "s3s",
- "teidrive-store",
+ "teifs-store",
  "tempfile",
  "time",
  "tokio",
@@ -2805,21 +2811,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "teidrive-store"
+name = "teifs-server"
 version = "0.1.0"
 dependencies = [
- "bytes",
- "futures",
- "md-5",
- "mime_guess",
- "rusqlite",
+ "aws-sdk-s3",
+ "hyper-util",
+ "reqwest",
+ "s3s",
  "serde",
  "serde_json",
+ "teifs-s3",
+ "teifs-store",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "teifs-store"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "md-5",
+ "teifs-meta",
+ "teifs-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "teifs-types"
+version = "0.1.0"
+dependencies = [
+ "md-5",
+ "mime_guess",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

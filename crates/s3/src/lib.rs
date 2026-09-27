@@ -1,18 +1,17 @@
-//! The S3 API over a TeiDrive store: any S3 client, SDK or tool (the AWS CLI, rclone,
+//! The S3 API over a TeiFS store: any S3 client, SDK or tool (the AWS CLI, rclone,
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
 mod checksums;
 mod drive;
 mod encode;
 mod errors;
-pub mod server;
 
 use s3s::{
     auth::SimpleAuth,
     host::MultiDomain,
     service::{S3Service, S3ServiceBuilder},
 };
-use teidrive_store::Store;
+use teifs_store::Store;
 
 pub use drive::Drive;
 

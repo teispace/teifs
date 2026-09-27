@@ -1,6 +1,6 @@
 [package]
-name = "teifs-s3"
-description = "The S3 API over a TeiFS store"
+name = "teifs-server"
+description = "The TeiFS server: a drive served over S3, with its credentials and HTTP listener"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,16 +11,15 @@ publish.workspace = true
 
 [dependencies]
 teifs-store.workspace = true
+teifs-s3.workspace = true
 s3s.workspace = true
-async-trait.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
-futures.workspace = true
-bytes.workspace = true
-base64.workspace = true
-time = "0.3"
-http = "1"
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3.workspace = true

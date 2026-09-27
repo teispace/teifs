@@ -1,5 +1,8 @@
 use std::io;
 
+use teifs_meta::MetaError;
+use teifs_types::NameError;
+
 /// Why a storage operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -15,12 +18,9 @@ pub enum StoreError {
     /// The bucket still holds objects.
     #[error("the bucket isn't empty")]
     BucketNotEmpty,
-    /// The name can't be a bucket name.
-    #[error("invalid bucket name: {0}")]
-    InvalidBucketName(&'static str),
-    /// The key can't be stored as a file.
-    #[error("invalid object key: {0}")]
-    InvalidKey(&'static str),
+    /// The bucket name or object key breaks the rules.
+    #[error(transparent)]
+    InvalidName(#[from] NameError),
     /// The key collides with something already on disk: a file where a folder is needed,
     /// a folder where a file is needed, or a name that differs only in letter case on a
     /// case-insensitive disk.
@@ -47,9 +47,9 @@ pub enum StoreError {
     /// The disk failed.
     #[error(transparent)]
     Io(#[from] io::Error),
-    /// The metadata database failed.
+    /// The metadata index failed.
     #[error(transparent)]
-    Db(#[from] rusqlite::Error),
+    Meta(#[from] MetaError),
 }
 
 /// A storage result.

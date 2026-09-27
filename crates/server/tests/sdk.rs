@@ -1,5 +1,7 @@
-//! TeiDrive as the official AWS SDK sees it: a real server on a local port, signed
+//! TeiFS as the official AWS SDK sees it: a real server on a local port, signed
 //! requests, default SDK behaviour (CRC32 checksums in trailers, chunked bodies).
+
+#![allow(clippy::unwrap_used, reason = "test helpers fail the test on any error")]
 
 use std::time::Duration;
 
@@ -11,12 +13,11 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart, Delete, MetadataDirective, ObjectIdentifier},
 };
-use teidrive_s3::{Options, server};
-use teidrive_store::Store;
+use teifs_server::{Config, Credentials as DriveCredentials, Server as TeiFS};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
-const ACCESS_KEY: &str = "teidrive-test";
+const ACCESS_KEY: &str = "teifs-test";
 const SECRET_KEY: &str = "not-a-real-secret-only-for-tests";
 
 struct Server {
@@ -27,19 +28,20 @@ struct Server {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let service = teidrive_s3::service(
-        store,
-        Options {
-            credentials: Some((ACCESS_KEY.into(), SECRET_KEY.into())),
-            domains: Vec::new(),
-        },
-    )
+    let server = TeiFS::bind(Config {
+        dir: dir.path().to_owned(),
+        listen: "127.0.0.1:0".parse().unwrap(),
+        domains: Vec::new(),
+        credentials: Some(DriveCredentials {
+            access_key: ACCESS_KEY.into(),
+            secret_key: SECRET_KEY.into(),
+        }),
+    })
+    .await
     .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let endpoint = format!("http://{}", server.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(server::serve(listener, service, async {
+    tokio::spawn(server.run(async {
         let _ = stopped.await;
     }));
     Server {

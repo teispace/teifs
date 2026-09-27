@@ -1,19 +1,22 @@
 [workspace]
 resolver = "3"
-members = ["crates/store", "crates/s3", "crates/cli"]
+members = ["crates/*", "apps/*"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/teispace/teidrive"
+repository = "https://github.com/teispace/teifs"
 authors = ["Teispace <info@teispace.com>"]
 publish = false
 
 [workspace.dependencies]
-teidrive-store = { path = "crates/store" }
-teidrive-s3 = { path = "crates/s3" }
+teifs-types = { path = "crates/types" }
+teifs-meta = { path = "crates/meta" }
+teifs-store = { path = "crates/store" }
+teifs-s3 = { path = "crates/s3" }
+teifs-server = { path = "crates/server" }
 
 s3s = "0.17"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal", "sync", "time", "net"] }
@@ -46,6 +49,12 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Request data never panics the server: no unwrap outside tests. `expect` is allowed
+# only for invariants, with a message saying which (CONVENTIONS.md).
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "warn"
 
 [profile.release]
 lto = "thin"

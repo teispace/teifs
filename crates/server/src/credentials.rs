@@ -1,5 +1,5 @@
-//! The drive's S3 credentials: from `TEIDRIVE_ACCESS_KEY` / `TEIDRIVE_SECRET_KEY`, or
-//! generated once and kept in `.teidrive/credentials.json`, readable only by the owner.
+//! The drive's S3 credentials: from `TEIFS_ACCESS_KEY` / `TEIFS_SECRET_KEY`, or
+//! generated once and kept in `.teifs/credentials.json`, readable only by the owner.
 
 use std::{
     fs, io,
@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
+    /// The access key id.
     pub access_key: String,
+    /// The secret key. Never logged: `Debug` leaves it out.
     pub secret_key: String,
 }
 
@@ -25,10 +27,9 @@ impl std::fmt::Debug for Credentials {
 }
 
 /// Where a drive keeps its generated credentials.
+#[must_use]
 pub fn path(drive: &Path) -> PathBuf {
-    drive
-        .join(teidrive_store::SYSTEM_DIR)
-        .join("credentials.json")
+    drive.join(teifs_store::SYSTEM_DIR).join("credentials.json")
 }
 
 /// The credentials, and whether they were just created.
@@ -56,7 +57,7 @@ fn generate() -> Credentials {
     let random = || uuid::Uuid::new_v4().simple().to_string();
     Credentials {
         // 20 characters, like AWS access keys.
-        access_key: format!("TD{}", &random()[..18]).to_uppercase(),
+        access_key: format!("TF{}", &random()[..18]).to_uppercase(),
         // 256 random bits.
         secret_key: format!("{}{}", random(), random()),
     }
@@ -87,7 +88,7 @@ mod tests {
     #[test]
     fn generated_once_then_reused() {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join(teidrive_store::SYSTEM_DIR)).unwrap();
+        fs::create_dir(dir.path().join(teifs_store::SYSTEM_DIR)).unwrap();
         let (first, created) = load_or_create(dir.path()).unwrap();
         assert!(created);
         assert_eq!(first.access_key.len(), 20);

@@ -1,6 +1,6 @@
 [package]
-name = "teidrive"
-description = "TeiDrive: your folders as a drive and as S3"
+name = "teifs"
+description = "TeiFS: S3 for your own disks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,17 +10,14 @@ authors.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "teidrive"
+name = "teifs"
 path = "src/main.rs"
 
 [dependencies]
-teidrive-store.workspace = true
-teidrive-s3.workspace = true
+teifs-store.workspace = true
+teifs-server.workspace = true
 tokio.workspace = true
 clap.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

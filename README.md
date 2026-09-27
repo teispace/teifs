@@ -1,10 +1,10 @@
-# TeiDrive
+# TeiFS
 
 Your folders, as a drive and as S3.
 
-TeiDrive serves a folder over the S3 API. Every folder inside it is a bucket, and every
+TeiFS serves a folder over the S3 API. Every folder inside it is a bucket, and every
 object is a plain file at the path its key names. Open the folder in Finder or Explorer,
-back it up with anything, or stop using TeiDrive: your files are just files.
+back it up with anything, or stop using TeiFS: your files are just files.
 
 > Early development. The S3 core works; the web drive, previews and the Teitunnel
 > integration come next.
@@ -13,44 +13,44 @@ back it up with anything, or stop using TeiDrive: your files are just files.
 
 ```sh
 cargo build --release
-./target/release/teidrive serve ~/Drive
+./target/release/teifs serve ~/Drive
 ```
 
-The first run creates credentials in `~/Drive/.teidrive/credentials.json` (readable only
+The first run creates credentials in `~/Drive/.teifs/credentials.json` (readable only
 by you) and prints the access key. Then use any S3 client:
 
 ```sh
 export AWS_ENDPOINT_URL=http://127.0.0.1:9000
-export AWS_ACCESS_KEY_ID=…      # printed by `teidrive serve`
-export AWS_SECRET_ACCESS_KEY=…  # in .teidrive/credentials.json
+export AWS_ACCESS_KEY_ID=…      # printed by `teifs serve`
+export AWS_SECRET_ACCESS_KEY=…  # in .teifs/credentials.json
 aws s3 mb s3://photos
 aws s3 sync ~/Pictures s3://photos/
 ```
 
 `photos` is now the folder `~/Drive/photos`, with your pictures in it as plain files.
 
-To set the keys yourself (servers, containers), use `TEIDRIVE_ACCESS_KEY` and
-`TEIDRIVE_SECRET_KEY`. The secret is only read from the environment, so it never shows in
+To set the keys yourself (servers, containers), use `TEIFS_ACCESS_KEY` and
+`TEIFS_SECRET_KEY`. The secret is only read from the environment, so it never shows in
 a process list.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `teidrive serve [DIR] [--listen ADDR] [--domain D]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
-| `teidrive credentials [DIR]` | Show the access key and where the secret is |
-| `teidrive bucket list\|create\|remove` | Manage buckets without a server |
-| `teidrive ls BUCKET [PREFIX] [-r]` | List objects |
+| `teifs serve [DIR] [--listen ADDR] [--domain D]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs credentials [DIR]` | Show the access key and where the secret is |
+| `teifs bucket list\|create\|remove` | Manage buckets without a server |
+| `teifs ls BUCKET [PREFIX] [-r]` | List objects |
 
 ## How it stores things
 
 - **Buckets are folders** directly in the drive; **objects are files**. A key ending in `/`
   is a folder.
-- **Metadata lives beside the buckets** in `.teidrive/meta.db` (SQLite): ETags, content
+- **Metadata lives beside the buckets** in `.teifs/meta.db` (SQLite): ETags, content
   types, user metadata, checksums, and multipart uploads in progress.
-- **Writes are atomic.** Bytes go to `.teidrive/tmp`, are synced to disk, and are renamed
+- **Writes are atomic.** Bytes go to `.teifs/tmp`, are synced to disk, and are renamed
   into place. A crash or a failed upload never leaves a half-written file.
-- **Files changed outside TeiDrive are objects too.** Until TeiDrive has read one, its ETag
+- **Files changed outside TeiFS are objects too.** Until TeiFS has read one, its ETag
   is a provisional one shaped like a multipart ETag (`…-1`), so clients don't take it for
   an MD5. Its content type is guessed from the name.
 - **Folders a file needed go when it goes**, as in S3. Folders created on purpose (a `key/`
@@ -72,7 +72,7 @@ object lock, tagging, CORS configuration, website hosting, several nodes.
 
 **Known limits of storing plain files:**
 - On a case-insensitive disk (the default on macOS and Windows), two keys that differ only
-  in letter case can't both exist. The second is refused with `409 XTeiDriveKeyConflict`.
+  in letter case can't both exist. The second is refused with `409 XTeiFSKeyConflict`.
 - A key can't name a file and a folder at once (`a` and `a/b`).
 - Symbolic links inside a bucket aren't served. A bucket itself may be a link to a folder
   elsewhere, such as another disk.

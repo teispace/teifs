@@ -1,7 +1,7 @@
 //! Listing details: `encoding-type=url` and continuation tokens.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use teidrive_store::After;
+use teifs_store::After;
 
 /// Percent-encodes a key the way S3 does for `encoding-type=url`: everything but
 /// unreserved characters and `/`.

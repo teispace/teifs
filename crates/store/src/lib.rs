@@ -1,19 +1,16 @@
-//! TeiDrive's storage: a drive is a folder, each folder in it is a bucket, and each object
+//! TeiFS's storage: a drive is a folder, each folder in it is a bucket, and each object
 //! is a plain file at the path its key names. What S3 needs beyond the bytes (ETags,
 //! content types, user metadata, checksums, multipart uploads) lives in
-//! `.teidrive/meta.db` beside the buckets, so the files stay usable by anything else and
-//! a drive can be opened, backed up or left without TeiDrive.
+//! `.teifs/meta.db` (the `teifs-meta` index) beside the buckets, so the files stay usable by anything else and
+//! a drive can be opened, backed up or left without TeiFS.
 //!
-//! Writes go to `.teidrive/tmp` first, are synced, and are renamed into place under one
+//! Writes go to `.teifs/tmp` first, are synced, and are renamed into place under one
 //! commit lock, so every object is either its old or its new version, and the stored ETag
 //! always belongs to the bytes on disk.
 
 mod error;
 mod list;
-mod meta;
 mod multipart;
-mod names;
-mod object;
 mod staged;
 
 use std::{
@@ -24,22 +21,21 @@ use std::{
     time::SystemTime,
 };
 
-use rusqlite::Connection;
+use teifs_meta::{Index, Row};
 
 pub use error::{Result, StoreError};
 pub use list::{After, ListQuery, Listing};
-pub use meta::{Part, Upload};
 pub use multipart::{MAX_PART_NUMBER, MIN_PART_SIZE};
-pub use names::{MAX_KEY_LEN, ObjectKey, check_bucket};
-pub use object::{ObjectAttrs, ObjectInfo};
 pub use staged::Staged;
+pub use teifs_meta::{Part, Upload};
+pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
 use error::not_found_as;
-use object::{Stamp, empty_etag, provisional_etag};
 use staged::{TmpFile, sync_dir};
+use teifs_types::{Stamp, empty_etag, provisional_etag};
 
-/// The folder in a drive's root that holds TeiDrive's own data.
-pub const SYSTEM_DIR: &str = ".teidrive";
+/// The folder in a drive's root that holds TeiFS's own data.
+pub const SYSTEM_DIR: &str = ".teifs";
 
 /// A bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +104,7 @@ struct Inner {
     uploads: PathBuf,
     /// The database, also the commit lock: whoever changes a file holds it until the file
     /// and its row agree again.
-    db: Mutex<Connection>,
+    db: Mutex<Index>,
 }
 
 /// What's at an object's path.
@@ -123,7 +119,7 @@ enum Found {
 }
 
 impl Store {
-    /// Opens the drive at `root` (which must exist), creating `.teidrive` inside it.
+    /// Opens the drive at `root` (which must exist), creating `.teifs` inside it.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = fs::canonicalize(root.as_ref())?;
         if !root.is_dir() {
@@ -139,7 +135,7 @@ impl Store {
         // Whatever was being written when the last run stopped is gone for good.
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let db = meta::open(&system.join("meta.db"))?;
+        let db = Index::open(&system.join("meta.db"))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 root,
@@ -232,14 +228,14 @@ impl Store {
             if fs::read_dir(&dir)?.next().is_some() {
                 return Err(StoreError::BucketNotEmpty);
             }
-            let unfinished = meta::list_uploads(&conn, &name, "", None, usize::MAX)?;
+            let unfinished = conn.list_uploads(&name, "", None, usize::MAX)?;
             // A bucket that's a symlink goes as a symlink; its target folder stays.
             if fs::symlink_metadata(inner.root.join(&name))?.is_symlink() {
                 fs::remove_file(inner.root.join(&name))?;
             } else {
                 fs::remove_dir(&dir)?;
             }
-            meta::forget_bucket(&conn, &name)?;
+            conn.forget_bucket(&name)?;
             drop(conn);
             for upload in unfinished {
                 let _ = fs::remove_dir_all(inner.uploads.join(&upload.id));
@@ -276,7 +272,7 @@ impl Store {
             if key.is_folder() {
                 return inner.make_folder(&conn, &bucket, &key, attrs, &precondition);
             }
-            let etag = object::hex(&staged.md5());
+            let etag = teifs_types::hex(&staged.md5());
             let info = inner.commit_file(
                 &conn,
                 &bucket,
@@ -356,10 +352,10 @@ impl Store {
                         Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err.into()),
                         _ => {}
                     }
-                    meta::delete(&conn, &bucket, key.as_str())?;
+                    conn.delete(&bucket, key.as_str())?;
                 }
                 Found::Folder(path, _) => {
-                    meta::delete(&conn, &bucket, key.as_str())?;
+                    conn.delete(&bucket, key.as_str())?;
                     // A folder with something in it keeps existing as the prefix of its keys.
                     if fs::remove_dir(&path).is_err() {
                         return Ok(());
@@ -399,7 +395,7 @@ impl Store {
 }
 
 impl Inner {
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    fn lock(&self) -> MutexGuard<'_, Index> {
         // A panic while holding it can't leave a half-applied change: every change is one
         // statement or one rename.
         self.db
@@ -447,9 +443,9 @@ impl Inner {
     }
 
     /// Describes the object at `key`, whose file (or folder) has `meta`.
-    fn info(conn: &Connection, bucket: &str, key: &str, meta: &Metadata) -> Result<ObjectInfo> {
+    fn info(conn: &Index, bucket: &str, key: &str, meta: &Metadata) -> Result<ObjectInfo> {
         let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let row = meta::get(conn, bucket, key)?;
+        let row = conn.get(bucket, key)?;
         if meta.is_dir() {
             let attrs = row.map(|r| r.attrs).unwrap_or_default();
             return Ok(ObjectInfo {
@@ -477,7 +473,7 @@ impl Inner {
     /// The object currently at `key`, for preconditions; errors when nothing can be
     /// written there.
     fn current_for_write(
-        conn: &Connection,
+        conn: &Index,
         bucket: &str,
         dir: &Path,
         key: &ObjectKey,
@@ -551,7 +547,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn commit_file(
         &self,
-        conn: &Connection,
+        conn: &Index,
         bucket: &str,
         key: &ObjectKey,
         tmp: &Path,
@@ -568,11 +564,10 @@ impl Inner {
         sync_dir(&parent)?;
         let meta = fs::metadata(&path)?;
         let stamp = Stamp::of(&meta);
-        meta::put(
-            conn,
+        conn.put(
             bucket,
             key.as_str(),
-            &meta::Row {
+            &Row {
                 stamp,
                 etag: etag.clone(),
                 attrs: attrs.clone(),
@@ -590,7 +585,7 @@ impl Inner {
     /// Creates a folder on purpose (a `key/` object): it stays when its last file goes.
     fn make_folder(
         &self,
-        conn: &Connection,
+        conn: &Index,
         bucket: &str,
         key: &ObjectKey,
         attrs: ObjectAttrs,
@@ -607,23 +602,23 @@ impl Inner {
         }
         sync_dir(&parent)?;
         let meta = fs::metadata(&path)?;
-        let row = meta::Row {
+        let row = Row {
             stamp: Stamp::of(&meta),
             etag: empty_etag(),
             attrs,
         };
-        meta::put(conn, bucket, key.as_str(), &row)?;
+        conn.put(bucket, key.as_str(), &row)?;
         Inner::info(conn, bucket, key.as_str(), &meta)
     }
 
     /// Removes the folders above `key` that its deletion left empty, stopping at one that
     /// isn't empty or was created on purpose.
-    fn prune(conn: &Connection, bucket: &str, dir: &Path, key: &str) -> Result<()> {
+    fn prune(conn: &Index, bucket: &str, dir: &Path, key: &str) -> Result<()> {
         let mut prefix = key.trim_end_matches('/');
         while let Some(end) = prefix.rfind('/') {
             prefix = &prefix[..end];
             let folder_key = format!("{prefix}/");
-            if meta::is_kept_folder(conn, bucket, &folder_key)?
+            if conn.is_kept_folder(bucket, &folder_key)?
                 || fs::remove_dir(dir.join(prefix)).is_err()
             {
                 break;
@@ -679,18 +674,19 @@ impl Inner {
             let source = Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta)?;
             precondition.check(Some(&source))?;
             // A recorded ETag (plain or multipart) stays; a file changed outside gets its MD5.
-            let recorded = meta::get(&conn, src_bucket, src_key.as_str())?
+            let recorded = conn
+                .get(src_bucket, src_key.as_str())?
                 .filter(|r| r.stamp == Stamp::of(&src_meta));
             let etag = match recorded {
                 Some(row) => row.etag,
-                None => object::hex(&md5_file(&src_path)?),
+                None => teifs_types::hex(&md5_file(&src_path)?),
             };
-            let row = meta::Row {
+            let row = Row {
                 stamp: Stamp::of(&src_meta),
                 etag,
                 attrs,
             };
-            meta::put(&conn, src_bucket, src_key.as_str(), &row)?;
+            conn.put(src_bucket, src_key.as_str(), &row)?;
             return Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta);
         }
 
@@ -706,9 +702,9 @@ impl Inner {
             ));
         }
         // A copy's ETag is its MD5; a known one carries over, else it's worked out now.
-        let etag = match object::md5_of_etag(&source.etag) {
+        let etag = match teifs_types::md5_of_etag(&source.etag) {
             Some(_) => source.etag,
-            None => object::hex(&md5_file(&tmp.path)?),
+            None => teifs_types::hex(&md5_file(&tmp.path)?),
         };
         let attrs = attrs.unwrap_or(source.attrs);
         let conn = self.lock();

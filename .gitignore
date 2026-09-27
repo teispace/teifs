@@ -1,1 +1,6 @@
 /target
+
+# Maintainer notes and personal agent settings (never pushed)
+/docs/internal/
+/CLAUDE.local.md
+/.claude/settings.local.json

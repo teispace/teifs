@@ -1,19 +1,20 @@
-//! `teidrive`: serve a folder as a drive over S3, and manage it from the terminal.
+//! `teifs`: serve a folder as a drive over S3, and manage it from the terminal.
 
-mod credentials;
+#![allow(clippy::print_stdout, reason = "a command line prints its results")]
 
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::SystemTime};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::SystemTime,
+};
 
 use clap::{Parser, Subcommand};
-use teidrive_s3::Options;
-use teidrive_store::{ListQuery, Store};
+use teifs_server::{Config, Credentials, Server, credentials};
+use teifs_store::{ListQuery, Store};
 
 #[derive(Parser)]
-#[command(
-    name = "teidrive",
-    version,
-    about = "Your folders as a drive and as S3"
-)]
+#[command(name = "teifs", version, about = "Your folders as a drive and as S3")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -24,16 +25,16 @@ enum Command {
     /// Serve a drive over the S3 API. Every folder in it is a bucket.
     Serve {
         /// The drive's folder (created if missing).
-        #[arg(default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
         /// Address to listen on.
-        #[arg(long, default_value = "127.0.0.1:9000", env = "TEIDRIVE_LISTEN")]
+        #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
         listen: SocketAddr,
         /// A domain for virtual-hosted-style requests (bucket.domain); repeatable.
-        #[arg(long = "domain", env = "TEIDRIVE_DOMAINS", value_delimiter = ',')]
+        #[arg(long = "domain", env = "TEIFS_DOMAINS", value_delimiter = ',')]
         domains: Vec<String>,
         /// The access key (else one is generated and kept in the drive).
-        #[arg(long, env = "TEIDRIVE_ACCESS_KEY")]
+        #[arg(long, env = "TEIFS_ACCESS_KEY")]
         access_key: Option<String>,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
@@ -42,7 +43,7 @@ enum Command {
     /// Show the drive's access key and where its secret is kept.
     Credentials {
         /// The drive's folder.
-        #[arg(default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
     /// List, create or remove buckets.
@@ -61,7 +62,7 @@ enum Command {
         #[arg(short, long)]
         recursive: bool,
         /// The drive's folder.
-        #[arg(long, default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
 }
@@ -70,19 +71,19 @@ enum Command {
 enum BucketAction {
     /// List buckets.
     List {
-        #[arg(long, default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
     /// Create a bucket.
     Create {
         name: String,
-        #[arg(long, default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
     /// Remove an empty bucket.
     Remove {
         name: String,
-        #[arg(long, default_value = ".", env = "TEIDRIVE_DIR")]
+        #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
 }
@@ -90,7 +91,7 @@ enum BucketAction {
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("TEIDRIVE_LOG")
+            tracing_subscriber::EnvFilter::try_from_env("TEIFS_LOG")
                 .unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
@@ -100,7 +101,7 @@ fn main() -> ExitCode {
     match runtime.block_on(run(cli.command)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("teidrive: {message}");
+            eprintln!("teifs: {message}");
             ExitCode::FAILURE
         }
     }
@@ -141,52 +142,46 @@ async fn run(command: Command) -> Result<(), String> {
 }
 
 async fn serve(
-    dir: &PathBuf,
+    dir: &Path,
     listen: SocketAddr,
     domains: Vec<String>,
     access_key: Option<String>,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
-    let store = open(dir)?;
-    let credentials = if let Some(access_key) = access_key {
-        let secret_key = std::env::var("TEIDRIVE_SECRET_KEY")
-            .map_err(|_| "set TEIDRIVE_SECRET_KEY along with the access key".to_owned())?;
-        credentials::Credentials {
-            access_key,
-            secret_key,
+    let credentials = match access_key {
+        Some(access_key) => {
+            let secret_key = std::env::var("TEIFS_SECRET_KEY")
+                .map_err(|_| "set TEIFS_SECRET_KEY along with the access key".to_owned())?;
+            Some(Credentials {
+                access_key,
+                secret_key,
+            })
         }
-    } else {
-        let (credentials, created) = credentials::load_or_create(store.root())
-            .map_err(|e| format!("can't read the credentials: {e}"))?;
-        if created {
-            eprintln!(
-                "Created credentials for this drive in {}",
-                credentials::path(store.root()).display()
-            );
-        }
-        credentials
+        None => None,
     };
-    let service = teidrive_s3::service(
-        store.clone(),
-        Options {
-            credentials: Some((credentials.access_key.clone(), credentials.secret_key)),
-            domains,
-        },
-    )
-    .map_err(|e| format!("invalid domain: {e}"))?;
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .map_err(|e| format!("can't listen on {listen}: {e}"))?;
-    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let server = Server::bind(Config {
+        dir: dir.to_owned(),
+        listen,
+        domains,
+        credentials,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if server.created_credentials() {
+        eprintln!(
+            "Created credentials for this drive in {}",
+            credentials::path(server.root()).display()
+        );
+    }
+    let address = server.local_addr().map_err(|e| e.to_string())?;
     eprintln!(
         "Serving {} over S3 at http://{address}",
-        store.root().display()
+        server.root().display()
     );
     eprintln!(
-        "Access key: {}  (secret: `teidrive credentials`)",
-        credentials.access_key
+        "Access key: {}  (secret: `teifs credentials`)",
+        server.access_key()
     );
-    teidrive_s3::server::serve(listener, service, shutdown_signal()).await;
+    server.run(shutdown_signal()).await;
     eprintln!("Stopped.");
     Ok(())
 }

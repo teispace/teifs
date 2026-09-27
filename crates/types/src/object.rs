@@ -71,16 +71,21 @@ impl ObjectInfo {
 }
 
 /// Identifies a file's current contents without reading them: when any part changes, the
-/// file was written again (by TeiDrive or by anything else) and what was stored about it
+/// file was written again (by TeiFS or by anything else) and what was stored about it
 /// no longer applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Stamp {
+pub struct Stamp {
+    /// Size in bytes.
     pub size: u64,
+    /// Modification time, in nanoseconds since the Unix epoch.
     pub mtime_ns: i64,
+    /// Inode number (0 where the platform has none).
     pub ino: u64,
 }
 
 impl Stamp {
+    /// The stamp of a file's metadata.
+    #[must_use]
     pub fn of(meta: &Metadata) -> Self {
         let mtime_ns = meta
             .modified()
@@ -106,7 +111,8 @@ fn inode(_: &Metadata) -> u64 {
 }
 
 /// Lowercase hex.
-pub(crate) fn hex(bytes: &[u8]) -> String {
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes
         .iter()
@@ -117,12 +123,14 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 /// The ETag of an empty object (and of folders).
-pub(crate) fn empty_etag() -> String {
+#[must_use]
+pub fn empty_etag() -> String {
     hex(&Md5::digest([]))
 }
 
 /// The ETag of a multipart object: the MD5 of the parts' MD5s, then `-` and the count.
-pub(crate) fn multipart_etag(part_md5s: &[[u8; 16]]) -> String {
+#[must_use]
+pub fn multipart_etag(part_md5s: &[[u8; 16]]) -> String {
     let mut hasher = Md5::new();
     for md5 in part_md5s {
         hasher.update(md5);
@@ -130,16 +138,18 @@ pub(crate) fn multipart_etag(part_md5s: &[[u8; 16]]) -> String {
     format!("{}-{}", hex(&hasher.finalize()), part_md5s.len())
 }
 
-/// An ETag for a file whose MD5 isn't known yet (placed or changed outside TeiDrive). It's
+/// An ETag for a file whose MD5 isn't known yet (placed or changed outside TeiFS). It's
 /// stable while the file doesn't change, and shaped like a multipart ETag so clients don't
 /// mistake it for the file's MD5.
-pub(crate) fn provisional_etag(stamp: Stamp) -> String {
+#[must_use]
+pub fn provisional_etag(stamp: Stamp) -> String {
     let digest = Md5::digest(format!("{}:{}:{}", stamp.size, stamp.mtime_ns, stamp.ino));
     format!("{}-1", hex(&digest))
 }
 
 /// Parses an ETag's hex MD5 (a plain one, not a multipart one).
-pub(crate) fn md5_of_etag(etag: &str) -> Option<[u8; 16]> {
+#[must_use]
+pub fn md5_of_etag(etag: &str) -> Option<[u8; 16]> {
     let etag = etag.trim_matches('"');
     if etag.len() != 32 {
         return None;

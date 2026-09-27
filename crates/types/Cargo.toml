@@ -1,0 +1,19 @@
+[package]
+name = "teifs-types"
+description = "Shared TeiFS types: bucket names, object keys, object attributes and ETags"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+md-5.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

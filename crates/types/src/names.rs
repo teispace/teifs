@@ -1,4 +1,4 @@
-//! Bucket names and object keys, and the paths they map to.
+//! Bucket names and object keys, and the paths they map to in a plain bucket.
 //!
 //! A bucket is a folder directly under the drive's root and an object is a file inside it,
 //! so a key must be something every supported file system can hold: no empty, `.` or `..`
@@ -7,7 +7,21 @@
 
 use std::path::PathBuf;
 
-use crate::error::{Result, StoreError};
+/// Why a name can't be a bucket name or an object key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NameError {
+    /// The name breaks S3's rules for bucket names.
+    #[error("invalid bucket name: {0}")]
+    InvalidBucketName(&'static str),
+    /// The key is longer than [`MAX_KEY_LEN`] bytes.
+    #[error("the key is longer than 1024 bytes")]
+    KeyTooLong,
+    /// The key can't be stored as a file.
+    #[error("invalid object key: {0}")]
+    InvalidKey(&'static str),
+}
+
+type Result<T> = std::result::Result<T, NameError>;
 
 /// The longest key S3 allows, in bytes.
 pub const MAX_KEY_LEN: usize = 1024;
@@ -16,7 +30,7 @@ pub const MAX_SEGMENT_LEN: usize = 255;
 
 /// Checks a bucket name against S3's rules for new buckets.
 pub fn check_bucket(name: &str) -> Result<()> {
-    let invalid = StoreError::InvalidBucketName;
+    let invalid = NameError::InvalidBucketName;
     if !(3..=63).contains(&name.len()) {
         return Err(invalid("it must be 3 to 63 characters long"));
     }
@@ -53,12 +67,12 @@ pub struct ObjectKey {
 impl ObjectKey {
     /// Checks `key` and maps it to a relative path.
     pub fn parse(key: &str) -> Result<Self> {
-        let invalid = StoreError::InvalidKey;
+        let invalid = NameError::InvalidKey;
         if key.is_empty() {
             return Err(invalid("it's empty"));
         }
         if key.len() > MAX_KEY_LEN {
-            return Err(invalid("it's longer than 1024 bytes"));
+            return Err(NameError::KeyTooLong);
         }
         if key.starts_with('/') {
             return Err(invalid("it starts with a slash"));
@@ -159,9 +173,9 @@ mod tests {
             "a\0b",
             "/",
             &long_segment,
-            &long_key,
         ] {
             assert!(ObjectKey::parse(bad).is_err(), "{bad:?}");
         }
+        assert_eq!(ObjectKey::parse(&long_key), Err(NameError::KeyTooLong));
     }
 }

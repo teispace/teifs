@@ -1,6 +1,6 @@
 [package]
-name = "teidrive-store"
-description = "TeiDrive's storage: buckets are folders, objects are plain files, metadata beside them"
+name = "teifs-store"
+description = "TeiFS's storage: buckets are folders, objects are plain files, metadata beside them"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,14 +10,12 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+teifs-types.workspace = true
+teifs-meta.workspace = true
 tokio.workspace = true
 futures.workspace = true
 bytes.workspace = true
-rusqlite.workspace = true
 md-5.workspace = true
-mime_guess.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true

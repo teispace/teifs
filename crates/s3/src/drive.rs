@@ -11,7 +11,7 @@ use s3s::{
     },
     s3_error,
 };
-use teidrive_store::{
+use teifs_store::{
     After, ListQuery, Match, ObjectAttrs, ObjectInfo, Precondition, Staged, Store, Upload,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -30,7 +30,7 @@ const MAX_DELETE: usize = 1000;
 /// Read buffer for object bodies.
 const READ_CHUNK: usize = 256 * 1024;
 /// Who owns every bucket (a drive has one owner).
-const OWNER: &str = "teidrive";
+const OWNER: &str = "teifs";
 
 /// The S3 API over a drive.
 #[derive(Debug, Clone)]
@@ -211,7 +211,7 @@ fn access_key<T>(req: &S3Request<T>) -> Option<&str> {
 fn part_number(number: i32) -> S3Result<u32> {
     u32::try_from(number)
         .ok()
-        .filter(|n| (1..=teidrive_store::MAX_PART_NUMBER).contains(n))
+        .filter(|n| (1..=teifs_store::MAX_PART_NUMBER).contains(n))
         .ok_or_else(|| s3_error!(InvalidArgument, "part numbers go from 1 to 10000"))
 }
 

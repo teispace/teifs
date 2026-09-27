@@ -1,0 +1,19 @@
+[package]
+name = "teifs-meta"
+description = "TeiFS's metadata index in SQLite: object attributes and multipart uploads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+teifs-types.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

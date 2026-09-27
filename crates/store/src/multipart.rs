@@ -1,14 +1,15 @@
-//! Multipart uploads: parts wait in `.teidrive/uploads/<id>/`, and completing the upload
+//! Multipart uploads: parts wait in `.teifs/uploads/<id>/`, and completing the upload
 //! joins them into one staged file that's committed like any other write.
 
 use std::{collections::BTreeMap, fs, io};
 
+use teifs_meta::{Part, Upload};
+use teifs_types::{md5_of_etag, multipart_etag};
+
 use crate::{
     ObjectInfo, ObjectKey, Precondition, Staged, Store, StoreError,
     error::Result,
-    meta::{self, Part, Upload},
     now_ms,
-    object::{md5_of_etag, multipart_etag},
     staged::{TmpFile, sync_dir},
 };
 
@@ -43,7 +44,7 @@ impl Store {
         self.blocking(move |inner| {
             inner.bucket_dir(&upload.bucket)?;
             fs::create_dir(inner.uploads.join(&upload.id))?;
-            meta::insert_upload(&inner.lock(), &upload)?;
+            inner.lock().insert_upload(&upload)?;
             Ok(upload)
         })
         .await
@@ -53,7 +54,10 @@ impl Store {
     pub async fn upload(&self, id: &str) -> Result<Upload> {
         let id = id.to_owned();
         self.blocking(move |inner| {
-            meta::get_upload(&inner.lock(), &id)?.ok_or(StoreError::NoSuchUpload)
+            inner
+                .lock()
+                .get_upload(&id)?
+                .ok_or(StoreError::NoSuchUpload)
         })
         .await
     }
@@ -75,11 +79,11 @@ impl Store {
         let id = id.to_owned();
         self.blocking(move |inner| {
             let conn = inner.lock();
-            if meta::get_upload(&conn, &id)?.is_none() {
+            if conn.get_upload(&id)?.is_none() {
                 return Err(StoreError::NoSuchUpload);
             }
             let dir = inner.uploads.join(&id);
-            let (size, etag) = (staged.size(), crate::object::hex(&staged.md5()));
+            let (size, etag) = (staged.size(), teifs_types::hex(&staged.md5()));
             fs::rename(staged.path(), dir.join(number.to_string()))?;
             staged.keep();
             sync_dir(&dir)?;
@@ -90,7 +94,7 @@ impl Store {
                 checksums,
                 modified_ms: now_ms(),
             };
-            meta::put_part(&conn, &id, &part)?;
+            conn.put_part(&id, &part)?;
             Ok(part)
         })
         .await
@@ -101,10 +105,10 @@ impl Store {
         let id = id.to_owned();
         self.blocking(move |inner| {
             let conn = inner.lock();
-            if meta::get_upload(&conn, &id)?.is_none() {
+            if conn.get_upload(&id)?.is_none() {
                 return Err(StoreError::NoSuchUpload);
             }
-            meta::list_parts(&conn, &id, after, limit)
+            Ok(conn.list_parts(&id, after, limit)?)
         })
         .await
     }
@@ -121,7 +125,7 @@ impl Store {
         self.blocking(move |inner| {
             inner.bucket_dir(&bucket)?;
             let after = after.as_ref().map(|(k, i)| (k.as_str(), i.as_str()));
-            meta::list_uploads(&inner.lock(), &bucket, &prefix, after, limit)
+            Ok(inner.lock().list_uploads(&bucket, &prefix, after, limit)?)
         })
         .await
     }
@@ -135,7 +139,10 @@ impl Store {
     ) -> Result<ObjectInfo> {
         let id = id.to_owned();
         self.blocking(move |inner| {
-            let upload = meta::get_upload(&inner.lock(), &id)?.ok_or(StoreError::NoSuchUpload)?;
+            let upload = inner
+                .lock()
+                .get_upload(&id)?
+                .ok_or(StoreError::NoSuchUpload)?;
             let key = ObjectKey::parse(&upload.key)?;
             if listed.is_empty() {
                 return Err(StoreError::InvalidPart);
@@ -143,7 +150,9 @@ impl Store {
             if listed.windows(2).any(|w| w[0].0 >= w[1].0) {
                 return Err(StoreError::InvalidPartOrder);
             }
-            let stored: BTreeMap<u32, Part> = meta::list_parts(&inner.lock(), &id, 0, usize::MAX)?
+            let stored: BTreeMap<u32, Part> = inner
+                .lock()
+                .list_parts(&id, 0, usize::MAX)?
                 .into_iter()
                 .map(|part| (part.number, part))
                 .collect();
@@ -173,7 +182,7 @@ impl Store {
 
             let conn = inner.lock();
             // Aborted while the parts were being joined: the upload no longer exists.
-            if meta::get_upload(&conn, &id)?.is_none() {
+            if conn.get_upload(&id)?.is_none() {
                 return Err(StoreError::NoSuchUpload);
             }
             let info = inner.commit_file(
@@ -186,7 +195,7 @@ impl Store {
                 &precondition,
             )?;
             tmp.keep();
-            meta::delete_upload(&conn, &id)?;
+            conn.delete_upload(&id)?;
             drop(conn);
             let _ = fs::remove_dir_all(&dir);
             Ok(info)
@@ -199,10 +208,10 @@ impl Store {
         let id = id.to_owned();
         self.blocking(move |inner| {
             let conn = inner.lock();
-            if meta::get_upload(&conn, &id)?.is_none() {
+            if conn.get_upload(&id)?.is_none() {
                 return Err(StoreError::NoSuchUpload);
             }
-            meta::delete_upload(&conn, &id)?;
+            conn.delete_upload(&id)?;
             drop(conn);
             match fs::remove_dir_all(inner.uploads.join(&id)) {
                 Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.into()),

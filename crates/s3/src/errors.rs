@@ -1,7 +1,7 @@
 //! Store errors as S3 errors, and request bodies that failed mid-stream.
 
 use s3s::{S3Error, S3ErrorCode, StdError, s3_error};
-use teidrive_store::StoreError;
+use teifs_store::{NameError, StoreError};
 
 /// Maps a store error to the S3 error a client expects.
 pub(crate) fn from_store(err: StoreError) -> S3Error {
@@ -10,12 +10,16 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::NoSuchKey => s3_error!(NoSuchKey),
         StoreError::BucketExists => s3_error!(BucketAlreadyOwnedByYou),
         StoreError::BucketNotEmpty => s3_error!(BucketNotEmpty),
-        StoreError::InvalidBucketName(why) => s3_error!(InvalidBucketName, "{why}"),
-        StoreError::InvalidKey(why) if why.contains("1024") => s3_error!(KeyTooLongError),
-        StoreError::InvalidKey(why) => s3_error!(InvalidArgument, "invalid key: {why}"),
+        StoreError::InvalidName(NameError::InvalidBucketName(why)) => {
+            s3_error!(InvalidBucketName, "{why}")
+        }
+        StoreError::InvalidName(NameError::KeyTooLong) => s3_error!(KeyTooLongError),
+        StoreError::InvalidName(NameError::InvalidKey(why)) => {
+            s3_error!(InvalidArgument, "invalid key: {why}")
+        }
         StoreError::KeyConflict(why) => {
             let mut err =
-                S3Error::with_message(S3ErrorCode::Custom("XTeiDriveKeyConflict".into()), why);
+                S3Error::with_message(S3ErrorCode::Custom("XTeiFSKeyConflict".into()), why);
             err.set_status_code(http::StatusCode::CONFLICT);
             err
         }
@@ -25,7 +29,7 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
-        err @ (StoreError::Io(_) | StoreError::Db(_)) => {
+        err @ (StoreError::Io(_) | StoreError::Meta(_)) => {
             tracing::error!(error = %err, "storage failed");
             S3Error::with_source(S3ErrorCode::InternalError, Box::new(err))
         }
