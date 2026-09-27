@@ -17,6 +17,13 @@ async fn store() -> (TempDir, Store) {
     (dir, store)
 }
 
+fn at(now: SystemTime) -> Step {
+    Step {
+        now,
+        cancel: CancellationToken::new(),
+    }
+}
+
 async fn upload(store: &Store) -> String {
     store
         .create_upload(
@@ -38,15 +45,15 @@ async fn uploads_expire_after_their_time_only() {
     let id = upload(&store).await;
     let mut job = ExpireUploads { after: 7 * DAY };
     let now = SystemTime::now();
-    assert_eq!(job.step(&store.inner, now + DAY).unwrap(), 0);
+    assert_eq!(job.step(&store.inner, &at(now + DAY)).unwrap(), 0);
     assert!(store.upload(&id).await.is_ok());
-    assert_eq!(job.step(&store.inner, now + 8 * DAY).unwrap(), 1);
+    assert_eq!(job.step(&store.inner, &at(now + 8 * DAY)).unwrap(), 1);
     assert!(matches!(
         store.upload(&id).await,
         Err(StoreError::NoSuchUpload)
     ));
     assert!(!store.inner.uploads.join(&id).exists());
-    assert_eq!(job.step(&store.inner, now + 8 * DAY).unwrap(), 0);
+    assert_eq!(job.step(&store.inner, &at(now + 8 * DAY)).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -60,9 +67,14 @@ async fn only_idle_staged_files_are_swept() {
 
     let now = SystemTime::now();
     // Recently written: an upload may still be writing it.
-    assert_eq!(SweepStaging.step(&store.inner, now).unwrap(), 0);
+    assert_eq!(SweepStaging.step(&store.inner, &at(now)).unwrap(), 0);
     assert!(staged.exists());
-    assert_eq!(SweepStaging.step(&store.inner, now + 2 * HOUR).unwrap(), 2);
+    assert_eq!(
+        SweepStaging
+            .step(&store.inner, &at(now + 2 * HOUR))
+            .unwrap(),
+        2
+    );
     assert!(!staged.exists());
     assert!(!bucket_staging.join("other-disk").exists());
 }
@@ -81,9 +93,12 @@ async fn housekeeping_forgets_old_retry_answers() {
         .lock()
         .record_completed("u1", &done, millis(now), 0)
         .unwrap();
-    assert_eq!(Housekeeping.step(&store.inner, now).unwrap(), 0);
+    assert_eq!(Housekeeping.step(&store.inner, &at(now)).unwrap(), 0);
     assert!(store.inner.lock().completed_upload("u1").unwrap().is_some());
-    assert_eq!(Housekeeping.step(&store.inner, now + 2 * DAY).unwrap(), 1);
+    assert_eq!(
+        Housekeeping.step(&store.inner, &at(now + 2 * DAY)).unwrap(),
+        1
+    );
     assert!(store.inner.lock().completed_upload("u1").unwrap().is_none());
 }
 

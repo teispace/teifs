@@ -113,9 +113,12 @@ all of its metadata. Times are compared at the coarser precision of the two valu
 (nanoseconds, 100 ns on NTFS, 10 ms on exFAT, 1 s on HFS+ and ext3), so a drive moved to
 a file system that keeps coarser times keeps its metadata too; FAT's 2-second times are
 the exception, and files copied to FAT are treated as changed. A file changed by anything other than TeiFS no longer matches its
-row: until TeiFS reads it again, its ETag is a stable provisional one shaped like a
-multipart ETag (`<hex>-1`), so clients never mistake it for the file's MD5, and its
-content type is guessed from its name.
+row: until the background indexer reaches it, its ETag is a stable provisional one
+shaped like a multipart ETag (`<hex>-1`), so clients never mistake it for the file's
+MD5, and its content type is guessed from its name. The indexer then hashes the file.
+If the content still matches the old row (its MD5, or for a multipart object the MD5s of
+its recorded parts), the row is re-adopted with its metadata, tags and checksums; if not,
+the file gets a new row with its MD5. Rows whose files are gone are removed.
 
 On file systems that record modification times only to the second (FAT, HFS+, ext3), a
 change that keeps the size and happens within the same second as the recorded write can

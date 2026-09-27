@@ -17,6 +17,7 @@ mod jobs;
 mod list;
 mod multipart;
 mod objects;
+mod reconcile;
 mod settings;
 mod sse;
 mod staged;
@@ -319,51 +320,7 @@ impl Store {
 
     /// Every bucket, by name: the drive's folders and its object buckets.
     pub async fn list_buckets(&self) -> Result<Vec<BucketInfo>> {
-        self.blocking(|inner| {
-            let records = inner.system().buckets()?;
-            let mut buckets: Vec<BucketInfo> = records
-                .iter()
-                .filter(|r| r.layout == Layout::Object)
-                .map(|r| BucketInfo {
-                    name: r.name.clone(),
-                    layout: Layout::Object,
-                    created: from_ms(r.created_ms),
-                })
-                .collect();
-            for entry in fs::read_dir(&inner.root)? {
-                let entry = entry?;
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                if check_bucket(&name).is_err() {
-                    continue;
-                }
-                let record = records.iter().find(|r| r.name == name);
-                // An object bucket owns its name; a folder that has it too isn't a bucket.
-                if record.is_some_and(|r| r.layout == Layout::Object) {
-                    continue;
-                }
-                // A bucket may be a symlink to a folder elsewhere (another disk).
-                let Ok(meta) = fs::metadata(entry.path()) else {
-                    continue;
-                };
-                if meta.is_dir() {
-                    let created = record
-                        .map(|r| from_ms(r.created_ms))
-                        .or_else(|| meta.created().ok())
-                        .or_else(|| meta.modified().ok())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
-                    buckets.push(BucketInfo {
-                        name,
-                        layout: Layout::Folder,
-                        created,
-                    });
-                }
-            }
-            buckets.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(buckets)
-        })
-        .await
+        self.blocking(Inner::buckets).await
     }
 
     /// Creates a bucket with the given layout.
@@ -897,6 +854,53 @@ pub(crate) fn replaced_attrs(current: &ObjectAttrs, replacement: ObjectAttrs) ->
 }
 
 impl Inner {
+    /// Every bucket, by name: object buckets from their records, folder buckets from the
+    /// drive's folders.
+    pub(crate) fn buckets(&self) -> Result<Vec<BucketInfo>> {
+        let records = self.system().buckets()?;
+        let mut buckets: Vec<BucketInfo> = records
+            .iter()
+            .filter(|r| r.layout == Layout::Object)
+            .map(|r| BucketInfo {
+                name: r.name.clone(),
+                layout: Layout::Object,
+                created: from_ms(r.created_ms),
+            })
+            .collect();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if check_bucket(&name).is_err() {
+                continue;
+            }
+            let record = records.iter().find(|r| r.name == name);
+            // An object bucket owns its name; a folder that has it too isn't a bucket.
+            if record.is_some_and(|r| r.layout == Layout::Object) {
+                continue;
+            }
+            // A bucket may be a symlink to a folder elsewhere (another disk).
+            let Ok(meta) = fs::metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_dir() {
+                let created = record
+                    .map(|r| from_ms(r.created_ms))
+                    .or_else(|| meta.created().ok())
+                    .or_else(|| meta.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                buckets.push(BucketInfo {
+                    name,
+                    layout: Layout::Folder,
+                    created,
+                });
+            }
+        }
+        buckets.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(buckets)
+    }
+
     fn system(&self) -> MutexGuard<'_, System> {
         self.system
             .lock()

@@ -102,7 +102,11 @@ metadata returned belong together even if the object is replaced during the read
 
 - A row in the index applies only while its file's size and modification time match
   (`Stamp::matches` in `crates/types/src/object.rs`). A file changed by anything else
-  gets a provisional ETag (`<hex>-1`) and a content type guessed from its name.
+  gets a provisional ETag (`<hex>-1`) and a content type guessed from its name, until
+  the `index-folders` job (`crates/store/src/reconcile.rs`) hashes it: a file whose
+  content still matches its old row (a restore that lost modification times) gets the
+  row back with its metadata; any other gets a new row with its MD5. Rows of deleted
+  files are forgotten.
 - Listing a folder bucket walks its folders in S3's byte order
   (`crates/store/src/list.rs`), so objects added outside TeiFS appear immediately.
   Object buckets list from the index with range queries, jumping past rolled-up common
@@ -127,6 +131,7 @@ A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), st
 | `expire-uploads` | Aborts multipart uploads unfinished after `--upload-expiry` (7 days by default) |
 | `sweep-staging` | Removes staged files no write has touched for an hour (a crashed client's leftovers) |
 | `housekeeping` | Retries data files the garbage queue holds; forgets retry answers older than a day |
+| `index-folders` | Walks folder buckets page by page: hashes files added or changed outside TeiFS, re-adopts rows of restored files, forgets rows of deleted ones; rests 30 minutes after a full pass |
 
 Each job works in bounded steps on the blocking pool. After a step that did something it
 sleeps for as long as the step took (so it uses at most half a core), and after a step

@@ -176,6 +176,20 @@ pub struct Part {
     pub modified_ms: i64,
 }
 
+/// A row from `size, mtime_ns, ino, etag, attrs, parts` (the first six columns).
+fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+    Ok(Row {
+        stamp: Stamp {
+            size: from_db(r.get(0)?),
+            mtime_ns: r.get(1)?,
+            ino: from_db(r.get(2)?),
+        },
+        etag: r.get(3)?,
+        attrs: attrs_from_json(&r.get::<_, String>(4)?),
+        parts: r.get(5)?,
+    })
+}
+
 fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
     Ok(Upload {
         id: r.get(0)?,
@@ -197,26 +211,39 @@ impl Index {
         })
     }
 
+    /// Runs `change` in one transaction: its writes are committed and synced together,
+    /// or not at all. Many small writes cost one sync instead of one each.
+    pub fn batch<T>(&self, change: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let out = change(self)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// The row for an object, if any.
     pub fn get(&self, bucket: &str, key: &str) -> Result<Option<Row>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT size, mtime_ns, ino, etag, attrs, parts FROM objects WHERE bucket = ?1 AND key = ?2",
         )?;
-        let row = stmt
-            .query_row(params![bucket, key], |r| {
-                Ok(Row {
-                    stamp: Stamp {
-                        size: from_db(r.get(0)?),
-                        mtime_ns: r.get(1)?,
-                        ino: from_db(r.get(2)?),
-                    },
-                    etag: r.get(3)?,
-                    attrs: attrs_from_json(&r.get::<_, String>(4)?),
-                    parts: r.get(5)?,
-                })
-            })
-            .optional()?;
-        Ok(row)
+        Ok(stmt.query_row(params![bucket, key], row_from).optional()?)
+    }
+
+    /// A folder bucket's rows after `after` (from the start when `None`) up to and
+    /// including `upto`, in key order: one query for a page of keys.
+    pub fn rows_between(
+        &self,
+        bucket: &str,
+        after: Option<&str>,
+        upto: &str,
+    ) -> Result<Vec<(String, Row)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT size, mtime_ns, ino, etag, attrs, parts, key FROM objects
+             WHERE bucket = ?1 AND (?2 IS NULL OR key > ?2) AND key <= ?3 ORDER BY key",
+        )?;
+        let rows = stmt.query_map(params![bucket, after, upto], |r| {
+            Ok((r.get(6)?, row_from(r)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Records an object's row, replacing any earlier one.
@@ -281,6 +308,32 @@ impl Index {
             .prepare_cached("DELETE FROM client_tokens WHERE created_ms < ?1")?
             .execute([before_ms])?;
         Ok(())
+    }
+
+    /// Keys of a folder bucket's rows after `after` (from the start when `None`) up to
+    /// and including `upto` (to the end when `None`), in key order, at most `limit`.
+    pub fn keys_between(
+        &self,
+        bucket: &str,
+        after: Option<&str>,
+        upto: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key FROM objects WHERE bucket = ?1
+               AND (?2 IS NULL OR key > ?2) AND (?3 IS NULL OR key <= ?3)
+             ORDER BY key LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                bucket,
+                after,
+                upto,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Moves a folder bucket's row from one key to another (a rename keeps the file).

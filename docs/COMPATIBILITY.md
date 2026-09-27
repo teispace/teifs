@@ -64,6 +64,6 @@ that map keys to paths behave:
 | Keys `a` and `a/b` at once | The second: `409 XTeiFSKeyConflict` | Both accepted |
 | Keys differing only in letter case, on a case-insensitive disk | The second: `409 XTeiFSKeyConflict` | Both accepted |
 | A key ending in `/` with content | `400 InvalidRequest` (it's a folder) | Accepted |
-| ETag of a file changed outside TeiFS | Provisional `<hex>-1` until TeiFS reads it again | Always the MD5 |
+| ETag of a file changed outside TeiFS | Provisional `<hex>-1` until the background indexer hashes it (within one pass, 30 minutes apart) | Always the MD5 |
 
 Use an object bucket for data that needs these keys.

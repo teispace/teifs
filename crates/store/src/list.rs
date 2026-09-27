@@ -65,19 +65,34 @@ enum Item {
     Prefix(String),
 }
 
-struct Entry {
+/// A file or folder met by a walk.
+pub(crate) struct Entry {
     /// The full key; a folder's ends in `/`.
-    key: String,
-    path: PathBuf,
-    folder: bool,
+    pub key: String,
+    pub path: PathBuf,
+    pub folder: bool,
 }
 
+/// What a walk yields next: an object's entry (a file, or an empty folder), or a common
+/// prefix.
+pub(crate) enum Next {
+    Object(Entry),
+    Prefix(String),
+}
+
+/// A depth-first walk of a folder bucket in key order. It owns its state, so a walk can
+/// pause and carry on later (each folder is read when the walk reaches it).
+pub(crate) struct FolderWalk {
+    query: ListQuery,
+    stack: Vec<std::vec::IntoIter<Entry>>,
+    last_prefix: Option<String>,
+}
+
+/// A listing's walk: a cursor, and the index to describe the objects it meets.
 struct Walk<'a> {
     inner: &'a Inner,
     bucket: &'a str,
-    query: &'a ListQuery,
-    stack: Vec<std::vec::IntoIter<Entry>>,
-    last_prefix: Option<String>,
+    cursor: FolderWalk,
 }
 
 impl Store {
@@ -98,8 +113,13 @@ impl Store {
             if query.max_keys == 0 {
                 return Ok(listing);
             }
-            let Some(mut walk) = Walk::start(inner, &bucket, &dir, &query)? else {
+            let Some(cursor) = FolderWalk::start(&dir, query.clone())? else {
                 return Ok(listing);
+            };
+            let mut walk = Walk {
+                inner,
+                bucket: &bucket,
+                cursor,
             };
             let mut count = 0;
             while let Some(item) = walk.next_item()? {
@@ -128,14 +148,25 @@ impl Store {
     }
 }
 
-impl<'a> Walk<'a> {
+impl Walk<'_> {
+    fn next_item(&mut self) -> Result<Option<Item>> {
+        Ok(match self.cursor.next()? {
+            None => None,
+            Some(Next::Prefix(prefix)) => Some(Item::Prefix(prefix)),
+            Some(Next::Object(entry)) => Some(self.object(&entry)?),
+        })
+    }
+
+    fn object(&self, entry: &Entry) -> Result<Item> {
+        let meta = fs::symlink_metadata(&entry.path)?;
+        let info = Inner::info(&self.inner.lock(), self.bucket, &entry.key, &meta)?;
+        Ok(Item::Object(Box::new(info)))
+    }
+}
+
+impl FolderWalk {
     /// Starts at the deepest folder the prefix names; `None` when it names none.
-    fn start(
-        inner: &'a Inner,
-        bucket: &'a str,
-        dir: &Path,
-        query: &'a ListQuery,
-    ) -> Result<Option<Self>> {
+    pub(crate) fn start(dir: &Path, query: ListQuery) -> Result<Option<Self>> {
         let folder_part = query
             .prefix
             .rfind('/')
@@ -160,15 +191,14 @@ impl<'a> Walk<'a> {
         }
         let entries = read_folder(&start, folder_part)?;
         Ok(Some(Self {
-            inner,
-            bucket,
             query,
             stack: vec![entries.into_iter()],
             last_prefix: None,
         }))
     }
 
-    fn next_item(&mut self) -> Result<Option<Item>> {
+    /// The next object entry or common prefix, in key order.
+    pub(crate) fn next(&mut self) -> Result<Option<Next>> {
         let prefix = self.query.prefix.as_str();
         while let Some(frame) = self.stack.last_mut() {
             let Some(entry) = frame.next() else {
@@ -190,21 +220,21 @@ impl<'a> Walk<'a> {
                     continue;
                 }
                 self.last_prefix = Some(common.clone());
-                return Ok(Some(Item::Prefix(common)));
+                return Ok(Some(Next::Prefix(common)));
             }
             if entry.folder {
                 let children = read_folder(&entry.path, &entry.key)?;
                 if children.is_empty() {
                     // An empty folder is the object `key/`.
                     if under_prefix && self.includes(&entry.key) {
-                        return self.object(&entry).map(Some);
+                        return Ok(Some(Next::Object(entry)));
                     }
                 } else {
                     self.stack.push(children.into_iter());
                 }
                 continue;
             }
-            return self.object(&entry).map(Some);
+            return Ok(Some(Next::Object(entry)));
         }
         Ok(None)
     }
@@ -238,12 +268,6 @@ impl<'a> Walk<'a> {
         let start = self.query.prefix.len();
         let at = key[start..].find(delimiter)?;
         Some(key[..start + at + delimiter.len()].to_owned())
-    }
-
-    fn object(&self, entry: &Entry) -> Result<Item> {
-        let meta = fs::symlink_metadata(&entry.path)?;
-        let info = Inner::info(&self.inner.lock(), self.bucket, &entry.key, &meta)?;
-        Ok(Item::Object(Box::new(info)))
     }
 }
 

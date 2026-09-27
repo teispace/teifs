@@ -61,13 +61,21 @@ pub struct JobStatus {
     pub last_error: Option<String>,
 }
 
+/// What a step runs with.
+pub(crate) struct Step {
+    /// The time the step runs at.
+    pub now: SystemTime,
+    /// Set when the jobs are stopping: long work checks it and ends early.
+    pub cancel: CancellationToken,
+}
+
 /// One kind of background work.
 pub(crate) trait Job: Send + 'static {
     /// Its name, as `teifs status` shows it.
     fn name(&self) -> &'static str;
-    /// Does one bounded piece of work as of `now`; how many items it handled (0: there
-    /// was nothing to do).
-    fn step(&mut self, inner: &Inner, now: SystemTime) -> Result<usize>;
+    /// Does one bounded piece of work; how many items it handled (0: there was nothing
+    /// to do).
+    fn step(&mut self, inner: &Inner, step: &Step) -> Result<usize>;
     /// How long to wait after a step with nothing to do.
     fn idle(&self) -> Duration;
 }
@@ -82,8 +90,8 @@ impl Job for ExpireUploads {
         "expire-uploads"
     }
 
-    fn step(&mut self, inner: &Inner, now: SystemTime) -> Result<usize> {
-        let before = millis(now) - millis_of(self.after);
+    fn step(&mut self, inner: &Inner, step: &Step) -> Result<usize> {
+        let before = millis(step.now) - millis_of(self.after);
         let stale = inner.lock().stale_uploads(before, BATCH)?;
         let mut done = 0;
         for id in stale {
@@ -113,7 +121,8 @@ impl Job for SweepStaging {
         "sweep-staging"
     }
 
-    fn step(&mut self, inner: &Inner, now: SystemTime) -> Result<usize> {
+    fn step(&mut self, inner: &Inner, step: &Step) -> Result<usize> {
+        let now = step.now;
         let mut swept = sweep_idle_files(&inner.tmp, now)?;
         // Buckets on other disks stage writes in their own folder.
         for entry in fs::read_dir(&inner.root)?.flatten() {
@@ -163,7 +172,8 @@ impl Job for Housekeeping {
         "housekeeping"
     }
 
-    fn step(&mut self, inner: &Inner, now: SystemTime) -> Result<usize> {
+    fn step(&mut self, inner: &Inner, step: &Step) -> Result<usize> {
+        let now = step.now;
         let conn = inner.lock();
         let removed = inner.sweep_garbage(&conn, BATCH)?;
         let before = millis(now) - millis_of(RETRY_WINDOW);
@@ -220,7 +230,11 @@ impl Store {
     /// Starts the background jobs. Call once, from within a Tokio runtime.
     #[must_use]
     pub fn start_jobs(&self, options: &JobOptions) -> Jobs {
-        let mut jobs: Vec<Box<dyn Job>> = vec![Box::new(Housekeeping), Box::new(SweepStaging)];
+        let mut jobs: Vec<Box<dyn Job>> = vec![
+            Box::new(Housekeeping),
+            Box::new(SweepStaging),
+            Box::new(crate::reconcile::IndexFolders::default()),
+        ];
         if let Some(after) = options.upload_expiry {
             jobs.push(Box::new(ExpireUploads { after }));
         }
@@ -258,8 +272,12 @@ async fn run(
     while !cancel.is_cancelled() {
         let started = Instant::now();
         let inner = Arc::clone(&inner);
+        let step = Step {
+            now: SystemTime::now(),
+            cancel: cancel.clone(),
+        };
         let (returned, result) = match tokio::task::spawn_blocking(move || {
-            let result = job.step(&inner, SystemTime::now());
+            let result = job.step(&inner, &step);
             (job, result)
         })
         .await

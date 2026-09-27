@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Folder buckets are indexed in the background: files added or changed outside TeiFS
+  get their MD5 ETag, restored files get their metadata back, and rows of deleted files
+  are forgotten.
 - Background jobs on a running server: unfinished multipart uploads are aborted after
   7 days (`--upload-expiry`), abandoned staged files are swept, and the garbage queue
   is retried without waiting for a restart.
