@@ -1,0 +1,55 @@
+# ceph/s3-tests configuration for a local TeiFS server. run.sh fills in the port.
+# TeiFS has one set of credentials until users arrive, so every user the suite knows
+# uses them; tests that need two users fail and are listed as not yet implemented.
+[DEFAULT]
+host = 127.0.0.1
+port = @PORT@
+is_secure = False
+ssl_verify = False
+
+[fixtures]
+bucket prefix = teifs-{random}-
+iam name prefix = s3-tests-
+iam path prefix = /s3-tests/
+
+[s3 main]
+display_name = teifs
+user_id = teifs
+email = main@example.com
+api_name = default
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@
+
+[s3 alt]
+display_name = alt
+user_id = alt
+email = alt@example.com
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@
+
+[s3 tenant]
+display_name = tenant
+user_id = tenant
+email = tenant@example.com
+tenant = testx
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@
+
+[iam]
+display_name = iam
+user_id = iam
+email = iam@example.com
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@
+
+[iam root]
+user_id = RGW11111111111111111
+email = root@example.com
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@
+
+[iam alt root]
+user_id = RGW22222222222222222
+email = altroot@example.com
+access_key = @ACCESS_KEY@
+secret_key = @SECRET_KEY@

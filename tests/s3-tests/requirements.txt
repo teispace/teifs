@@ -1,0 +1,13 @@
+# What ceph/s3-tests needs to run against TeiFS (its own requirements.txt also lists
+# gevent and tox, which the functional tests don't use).
+boto3==1.43.103
+botocore
+munch
+isodate
+requests
+pytz
+httplib2
+lxml
+pytest==9.1.1
+pytest-timeout
+PyYAML

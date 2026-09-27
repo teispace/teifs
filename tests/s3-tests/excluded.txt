@@ -1,0 +1,3 @@
+# Tests that aren't a goal, each with its reason after `#`: another server's own
+# behaviour, or a limit of storing objects as plain files.
+test_bucket_create_exists  # the test reads e.status, which botocore's ClientError lacks, so it passes only when re-creating an owned bucket returns 200 (AWS us-east-1's legacy behaviour); TeiFS answers 409 BucketAlreadyOwnedByYou like every other AWS region

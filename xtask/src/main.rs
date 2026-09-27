@@ -101,6 +101,7 @@ const DOCS: &[&str] = &[
     "docs/SECURITY_MODEL.md",
     "docs/ON_DISK_FORMAT.md",
     "docs/COMPATIBILITY.md",
+    "tests/s3-tests/README.md",
 ];
 
 /// Top-level folders a path in the docs can start with.

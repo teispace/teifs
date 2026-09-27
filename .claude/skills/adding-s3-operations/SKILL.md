@@ -44,6 +44,9 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
      `err.code()`, and check the file on disk through `server.dir` when it matters).
 6. **Anything new on disk** (a column, a table, a file in `.teifs/`): follow the
    `changing-on-disk-format` skill.
-7. **Docs**: the operation's row in `docs/COMPATIBILITY.md`, the README's support table
+7. **Conformance**: `S3TESTS_K='<feature>' tests/s3-tests/run.sh --update` moves the
+   tests that now pass into `tests/s3-tests/implemented.txt`; commit the lists with the
+   change.
+8. **Docs**: the operation's row in `docs/COMPATIBILITY.md`, the README's support table
    if it's a headline feature, `CHANGELOG.md` under "Unreleased".
-8. Run the `verifying-changes` skill, including a real client (AWS CLI or rclone).
+9. Run the `verifying-changes` skill, including a real client (AWS CLI or rclone).

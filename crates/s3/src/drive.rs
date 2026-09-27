@@ -625,7 +625,9 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::ListObjectsV2Input>,
     ) -> S3Result<S3Response<dto::ListObjectsV2Output>> {
-        let input = req.input;
+        let mut input = req.input;
+        // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
+        input.delimiter = input.delimiter.filter(|d| !d.is_empty());
         let after = match &input.continuation_token {
             Some(token) => Some(
                 encode::parse_token(token)
@@ -698,7 +700,9 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::ListObjectsInput>,
     ) -> S3Result<S3Response<dto::ListObjectsOutput>> {
-        let input = req.input;
+        let mut input = req.input;
+        // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
+        input.delimiter = input.delimiter.filter(|d| !d.is_empty());
         let prefix = input.prefix.clone().unwrap_or_default();
         let after = after_marker(input.marker.clone(), input.delimiter.as_deref(), &prefix);
         let max_keys = input.max_keys.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
@@ -725,7 +729,7 @@ impl S3 for Drive {
         let next_marker = listing
             .next
             .as_ref()
-            .filter(|_| input.delimiter.as_deref().is_some_and(|d| !d.is_empty()))
+            .filter(|_| input.delimiter.is_some())
             .map(|after| match after {
                 After::Key(k) | After::Prefix(k) => enc(k.clone()),
             });
@@ -772,7 +776,9 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::ListObjectVersionsOutput>> {
         // Without versioning each object has exactly one version, `null`, so this is the
         // V1 listing with version fields: a page resumes after its key marker.
-        let input = req.input;
+        let mut input = req.input;
+        // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
+        input.delimiter = input.delimiter.filter(|d| !d.is_empty());
         let prefix = input.prefix.clone().unwrap_or_default();
         if input
             .version_id_marker

@@ -36,6 +36,7 @@ crates/store    the storage engine: drive format, buckets, writes, reads, listin
 crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
 apps/cli        the `teifs` command
+tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
 xtask           project tasks (`cargo xtask verify`)
 docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPATIBILITY
 ```
@@ -48,6 +49,8 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPA
 - `cargo test --workspace`: every test, including the AWS SDK end-to-end suite
   (`crates/server/tests/sdk.rs`) and the format fixtures (`crates/store/tests/format.rs`).
 - `cargo xtask docs`: only the docs path check.
+- `tests/s3-tests/run.sh [--update]`: the S3 conformance suite against a fresh server
+  (needs Python 3); `S3TESTS_K='<pattern>'` runs a subset. Nightly CI runs it in full.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
   `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
 - `cargo run -p teifs -- serve <dir>`: run a server; drive it with the AWS CLI

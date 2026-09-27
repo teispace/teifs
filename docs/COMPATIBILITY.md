@@ -8,14 +8,13 @@ here come only from tests; nothing is listed as supported because it "should wor
 | Evidence | What it covers | Where |
 |---|---|---|
 | AWS SDK for Rust, end to end | A real server driven by the official SDK: signed and presigned requests, chunked uploads with trailer checksums, multipart, copies, listings, conditional requests | `crates/server/tests/sdk.rs` |
-| AWS CLI | `mb`, `sync` both ways, multipart uploads, presigned GET, `rm`, `rb`; byte-for-byte round trips | Checked by hand for each release until the client matrix runs in CI |
+| AWS CLI | A release build in CI: `mb`, a 20 MB multipart upload and download compared byte for byte (also on disk), recursive `ls`, `rm`, `rb`. By hand: `sync` both ways, presigned GET | `.github/workflows/ci.yml` |
 | Store tests | Keys, paths, atomic writes, listings in S3 order, multipart, copies, outside changes, case and link safety | `crates/store/src/tests.rs` |
 | Format fixtures | Drives written by earlier releases open with all metadata | `crates/store/tests/format.rs` |
+| ceph/s3-tests | The standard S3 conformance suite, run nightly; every test is in one of three lists (passing, not yet implemented, excluded with a reason) | `tests/s3-tests/` |
 
-**Coming:** the [ceph/s3-tests](https://github.com/ceph/s3-tests) suite in CI, with three
-lists (passing, not yet implemented, excluded with a reason), and a client matrix (AWS
-CLI, rclone, restic, boto3, the Go and JavaScript SDKs, the Terraform S3 backend). The
-table below will then be generated from those lists.
+**Coming:** a client matrix in CI (AWS CLI, rclone, restic, boto3, the Go and JavaScript
+SDKs, the Terraform S3 backend).
 
 ## Operations
 
