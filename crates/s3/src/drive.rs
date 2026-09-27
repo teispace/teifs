@@ -1,6 +1,6 @@
 //! The S3 operations.
 
-use std::{collections::BTreeMap, io::SeekFrom, time::SystemTime};
+use std::{collections::BTreeMap, time::SystemTime};
 
 use futures::StreamExt;
 use s3s::{
@@ -12,9 +12,8 @@ use s3s::{
     s3_error,
 };
 use teifs_store::{
-    After, ListQuery, Match, ObjectAttrs, ObjectInfo, Precondition, Staged, Store, Upload,
+    After, Layout, ListQuery, Match, ObjectAttrs, ObjectInfo, Precondition, Staged, Store, Upload,
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -31,6 +30,9 @@ const MAX_DELETE: usize = 1000;
 const READ_CHUNK: usize = 256 * 1024;
 /// Who owns every bucket (a drive has one owner).
 const OWNER: &str = "teifs";
+/// Chooses the layout of a bucket being created (`object` or `folder`); without it, the
+/// server's default applies.
+pub const LAYOUT_HEADER: &str = "x-teifs-bucket-layout";
 /// The version id of every object in a bucket without versioning, as S3 names it.
 const NULL_VERSION: &str = "null";
 
@@ -38,13 +40,17 @@ const NULL_VERSION: &str = "null";
 #[derive(Debug, Clone)]
 pub struct Drive {
     store: Store,
+    default_layout: Layout,
 }
 
 impl Drive {
-    /// Serves `store`.
+    /// Serves `store`; buckets created without choosing get `default_layout`.
     #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self { store }
+    pub fn new(store: Store, default_layout: Layout) -> Self {
+        Self {
+            store,
+            default_layout,
+        }
     }
 
     /// Streams a request body into a staged file, hashing it for the checksums asked for.
@@ -303,7 +309,21 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::CreateBucketInput>,
     ) -> S3Result<S3Response<dto::CreateBucketOutput>> {
-        self.store.create_bucket(&req.input.bucket).await.s3()?;
+        let layout = match req.headers.get(LAYOUT_HEADER).map(|v| v.to_str()) {
+            None => self.default_layout,
+            Some(Ok("object")) => Layout::Object,
+            Some(Ok("folder")) => Layout::Folder,
+            Some(_) => {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "x-teifs-bucket-layout must be `object` or `folder`"
+                ));
+            }
+        };
+        self.store
+            .create_bucket(&req.input.bucket, layout)
+            .await
+            .s3()?;
         Ok(S3Response::new(dto::CreateBucketOutput {
             location: Some(format!("/{}", req.input.bucket)),
             ..Default::default()
@@ -417,13 +437,9 @@ impl S3 for Drive {
             .as_ref()
             .map_or((0, info.size), |r| (r.start, r.end - r.start));
         let body = match file {
-            Some(mut file) => {
-                if start > 0 {
-                    file.seek(SeekFrom::Start(start))
-                        .await
-                        .map_err(|e| s3_error!(e, InternalError))?;
-                }
-                StreamingBlob::wrap(ReaderStream::with_capacity(file.take(length), READ_CHUNK))
+            Some(body) => {
+                let reader = body.range(start, length).await.s3()?;
+                StreamingBlob::wrap(ReaderStream::with_capacity(reader, READ_CHUNK))
             }
             None => StreamingBlob::from(s3s::Body::empty()),
         };
@@ -950,11 +966,9 @@ impl S3 for Drive {
             None => (0, source.size),
         };
         let mut staged = self.store.stage().await.s3()?;
-        if let Some(mut file) = file {
-            file.seek(SeekFrom::Start(start))
-                .await
-                .map_err(|e| s3_error!(e, InternalError))?;
-            let mut reader = ReaderStream::with_capacity(file.take(length), READ_CHUNK);
+        if let Some(body) = file {
+            let reader = body.range(start, length).await.s3()?;
+            let mut reader = ReaderStream::with_capacity(reader, READ_CHUNK);
             while let Some(chunk) = reader.next().await {
                 let chunk = chunk.map_err(|e| s3_error!(e, InternalError))?;
                 staged.write(&chunk).await.s3()?;

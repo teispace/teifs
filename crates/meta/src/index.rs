@@ -1,5 +1,6 @@
-//! The index (`.teifs/index.db`): what S3 needs about each object that its file doesn't
-//! hold, and multipart uploads in progress. Everything here can be rebuilt from the disk.
+//! The index (`.teifs/index.db`): for folder buckets, what S3 needs about each object
+//! that its file doesn't hold (rebuildable from the disk); for object buckets, every
+//! object version (authoritative); and multipart uploads in progress.
 
 use std::path::Path;
 
@@ -39,12 +40,39 @@ const MIGRATIONS: &[&str] = &[
         modified_ms INTEGER NOT NULL,
         PRIMARY KEY (upload_id, part)
      ) WITHOUT ROWID;",
+    // 2: object buckets: one row per object version (keys as bytes, so comparisons are
+    //    S3's byte order), and data files waiting to be removed.
+    "CREATE TABLE object_versions (
+        bucket_id     TEXT    NOT NULL,
+        key           BLOB    NOT NULL,
+        seq           INTEGER NOT NULL,
+        version_id    TEXT    NOT NULL,
+        latest        INTEGER NOT NULL,
+        delete_marker INTEGER NOT NULL,
+        object_id     TEXT,
+        size          INTEGER NOT NULL,
+        etag          TEXT    NOT NULL,
+        modified_ms   INTEGER NOT NULL,
+        attrs         TEXT    NOT NULL,
+        crypt         TEXT,
+        parts         TEXT,
+        data          BLOB,
+        PRIMARY KEY (bucket_id, key, seq)
+     ) WITHOUT ROWID;
+     CREATE INDEX object_versions_latest ON object_versions (bucket_id, key) WHERE latest = 1;
+     CREATE INDEX object_versions_by_object ON object_versions (object_id)
+        WHERE object_id IS NOT NULL;
+     CREATE TABLE garbage (
+        object_id TEXT    PRIMARY KEY,
+        bucket_id TEXT    NOT NULL,
+        queued_ms INTEGER NOT NULL
+     ) WITHOUT ROWID;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
 #[derive(Debug)]
 pub struct Index {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// What's stored about an object.
@@ -67,13 +95,13 @@ mod cast {
         value as u64
     }
 }
-use cast::{from_db, to_db};
+pub(crate) use cast::{from_db, to_db};
 
-fn attrs_to_json(attrs: &ObjectAttrs) -> String {
+pub(crate) fn attrs_to_json(attrs: &ObjectAttrs) -> String {
     serde_json::to_string(attrs).expect("attributes serialize")
 }
 
-fn attrs_from_json(json: &str) -> ObjectAttrs {
+pub(crate) fn attrs_from_json(json: &str) -> ObjectAttrs {
     // A row written by a newer version with fields this one doesn't know still reads.
     serde_json::from_str(json).unwrap_or_default()
 }

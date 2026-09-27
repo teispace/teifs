@@ -1,0 +1,7 @@
+# Tests folder buckets can't pass by design: they store keys a folder can't hold. They
+# must still pass on object buckets (they're in implemented.txt).
+test_bucket_list_delimiter_basic  # stores foo/bar and foo/bar/xyzzy: a file and a folder with one name
+test_bucket_listv2_delimiter_basic  # stores foo/bar and foo/bar/xyzzy: a file and a folder with one name
+test_bucket_list_delimiter_not_skip_special  # stores keys that are both a file and a folder's name
+test_bucket_list_delimiter_prefix_ends_with_delimiter  # stores asdf/ with content: a folder key with bytes
+test_bucket_listv2_delimiter_prefix_ends_with_delimiter  # stores asdf/ with content: a folder key with bytes

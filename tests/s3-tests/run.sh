@@ -5,6 +5,8 @@
 #   tests/s3-tests/run.sh             run and compare
 #   tests/s3-tests/run.sh --update    also move newly passing tests to implemented.txt
 #   S3TESTS_K='bucket_list' tests/s3-tests/run.sh   only tests matching a pytest -k filter
+#   S3TESTS_LAYOUT=folder tests/s3-tests/run.sh     buckets the suite creates are folder buckets
+#                                                  (default: object)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +18,7 @@ COMMIT=5522d1c351f75bc00ae0f64f742f3f095f5939d9
 ACCESS_KEY=TFS3TESTSACCESSKEY01
 SECRET_KEY=s3-tests-only-secret-key-not-a-real-one-01
 PORT="${S3TESTS_PORT:-9312}"
+LAYOUT="${S3TESTS_LAYOUT:-object}"
 
 mkdir -p "$WORK"
 
@@ -35,6 +38,7 @@ cargo build --quiet --release --locked -p teifs --manifest-path "$ROOT/Cargo.tom
 rm -rf "$WORK/drive"
 mkdir -p "$WORK/drive"
 TEIFS_ACCESS_KEY="$ACCESS_KEY" TEIFS_SECRET_KEY="$SECRET_KEY" TEIFS_LOG=warn \
+  TEIFS_DEFAULT_LAYOUT="$LAYOUT" \
   "$ROOT/target/release/teifs" serve "$WORK/drive" --listen "127.0.0.1:$PORT" \
   > "$WORK/server.log" 2>&1 &
 server=$!
@@ -59,4 +63,5 @@ set +e
 )
 set -e
 
-"$WORK/venv/bin/python" "$HERE/compare.py" "$WORK/report.xml" ${S3TESTS_K:+--partial} "$@"
+"$WORK/venv/bin/python" "$HERE/compare.py" "$WORK/report.xml" "--layout=$LAYOUT" \
+  ${S3TESTS_K:+--partial} "$@"

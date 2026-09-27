@@ -27,12 +27,6 @@ impl Store {
         attrs: crate::ObjectAttrs,
         owner: Option<String>,
     ) -> Result<Upload> {
-        let parsed = ObjectKey::parse(key)?;
-        if parsed.is_folder() {
-            return Err(StoreError::InvalidRequest(
-                "a folder (a key ending in `/`) can't be uploaded in parts",
-            ));
-        }
         let upload = Upload {
             id: uuid::Uuid::new_v4().simple().to_string(),
             bucket: bucket.to_owned(),
@@ -42,7 +36,16 @@ impl Store {
             created_ms: now_ms(),
         };
         self.blocking(move |inner| {
-            inner.bucket_dir(&upload.bucket)?;
+            match inner.bucket(&upload.bucket)? {
+                crate::Bucket::Folder(..) => {
+                    if ObjectKey::parse(&upload.key)?.is_folder() {
+                        return Err(StoreError::InvalidRequest(
+                            "a folder (a key ending in `/`) can't be uploaded in parts",
+                        ));
+                    }
+                }
+                crate::Bucket::Object(_) => teifs_types::check_object_key(&upload.key)?,
+            }
             fs::create_dir(inner.uploads.join(&upload.id))?;
             inner.lock().insert_upload(&upload)?;
             Ok(upload)
@@ -123,7 +126,7 @@ impl Store {
     ) -> Result<Vec<Upload>> {
         let (bucket, prefix) = (bucket.to_owned(), prefix.to_owned());
         self.blocking(move |inner| {
-            inner.bucket_dir(&bucket)?;
+            inner.bucket(&bucket)?;
             let after = after.as_ref().map(|(k, i)| (k.as_str(), i.as_str()));
             Ok(inner.lock().list_uploads(&bucket, &prefix, after, limit)?)
         })
@@ -143,7 +146,6 @@ impl Store {
                 .lock()
                 .get_upload(&id)?
                 .ok_or(StoreError::NoSuchUpload)?;
-            let key = ObjectKey::parse(&upload.key)?;
             if listed.is_empty() {
                 return Err(StoreError::InvalidPart);
             }
@@ -177,7 +179,6 @@ impl Store {
                     })?;
                 io::copy(&mut source, &mut out)?;
             }
-            out.sync_all()?;
             drop(out);
 
             let conn = inner.lock();
@@ -185,11 +186,14 @@ impl Store {
             if conn.get_upload(&id)?.is_none() {
                 return Err(StoreError::NoSuchUpload);
             }
-            let info = inner.commit_file(
+            let bucket = inner.bucket(&upload.bucket)?;
+            let size = fs::metadata(&tmp.path)?.len();
+            let info = inner.commit_to(
                 &conn,
-                &upload.bucket,
-                &key,
+                &bucket,
+                &upload.key,
                 &tmp.path,
+                size,
                 multipart_etag(&md5s),
                 upload.attrs.clone(),
                 &precondition,

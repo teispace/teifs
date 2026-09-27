@@ -39,6 +39,7 @@ async fn start() -> Server {
             access_key: ACCESS_KEY.into(),
             secret_key: SECRET_KEY.into(),
         }),
+        default_layout: teifs_store::Layout::Folder,
     })
     .await
     .unwrap();
@@ -625,4 +626,72 @@ async fn unversioned_buckets_have_null_versions() {
     assert_eq!(deleted.deleted().len(), 4);
     assert!(deleted.errors().is_empty());
     s3.delete_bucket().bucket("plain").send().await.unwrap();
+}
+
+#[tokio::test]
+async fn object_buckets_hold_any_key() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket()
+        .bucket("anykey")
+        .customize()
+        .mutate_request(|request| {
+            request
+                .headers_mut()
+                .insert(teifs_s3::LAYOUT_HEADER, "object");
+        })
+        .send()
+        .await
+        .unwrap();
+    for key in ["a", "a/b", "a/../b", "a//b", "Readme", "README"] {
+        s3.put_object()
+            .bucket("anykey")
+            .key(key)
+            .body(ByteStream::from(key.as_bytes().to_vec()))
+            .send()
+            .await
+            .unwrap();
+    }
+    for key in ["a", "a/b", "a/../b", "a//b", "Readme", "README"] {
+        let got = s3
+            .get_object()
+            .bucket("anykey")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(body(got).await, key.as_bytes(), "{key}");
+    }
+    let listed = s3
+        .list_objects_v2()
+        .bucket("anykey")
+        .delimiter("/")
+        .send()
+        .await
+        .unwrap();
+    let keys: Vec<_> = listed.contents().iter().map(|o| o.key().unwrap()).collect();
+    let prefixes: Vec<_> = listed
+        .common_prefixes()
+        .iter()
+        .map(|p| p.prefix().unwrap())
+        .collect();
+    assert_eq!(
+        (keys, prefixes),
+        (vec!["README", "Readme", "a"], vec!["a/"])
+    );
+    // Nothing appears in the drive's folder: the bucket lives under .teifs.
+    assert!(!server.dir.path().join("anykey").exists());
+
+    let bad = s3
+        .create_bucket()
+        .bucket("badlayout")
+        .customize()
+        .mutate_request(|request| {
+            request
+                .headers_mut()
+                .insert(teifs_s3::LAYOUT_HEADER, "sideways");
+        })
+        .send()
+        .await;
+    assert_eq!(bad.unwrap_err().code(), Some("InvalidArgument"));
 }

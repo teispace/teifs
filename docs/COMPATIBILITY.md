@@ -35,7 +35,15 @@ SDKs, the Terraform S3 backend).
 | Notifications, website hosting, logging, replication | Planned |
 | S3 Select, Glacier restore, torrents, Object Lambda, accelerate | Not planned for now |
 
-## Differences from AWS, by design
+## Bucket layouts
+
+A bucket is either an **object bucket** (objects stored by id, every key S3 allows) or a
+**folder bucket** (a folder of plain files). Choose when creating it: the
+`x-teifs-bucket-layout: object|folder` header on CreateBucket, `teifs bucket create
+--layout`, or the server's `--default-layout`. The differences below apply to folder
+buckets only; object buckets have none of them.
+
+## Differences from AWS in folder buckets, by design
 
 Storing objects as plain files means some keys can't exist, the same way other S3 servers
 that map keys to paths behave:
@@ -48,5 +56,4 @@ that map keys to paths behave:
 | A key ending in `/` with content | `400 InvalidRequest` (it's a folder) | Accepted |
 | ETag of a file changed outside TeiFS | Provisional `<hex>-1` until TeiFS reads it again | Always the MD5 |
 
-A future bucket layout that stores objects by id instead of by path will lift these
-limits for buckets that don't need to be browsable as folders.
+Use an object bucket for data that needs these keys.

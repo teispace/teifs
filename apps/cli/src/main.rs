@@ -11,7 +11,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use teifs_server::{Config, Credentials, Server, credentials};
-use teifs_store::{ListQuery, Store};
+use teifs_store::{Layout, ListQuery, Store};
 
 #[derive(Parser)]
 #[command(name = "teifs", version, about = "Your folders as a drive and as S3")]
@@ -36,6 +36,15 @@ enum Command {
         /// The access key (else one is generated and kept in the drive).
         #[arg(long, env = "TEIFS_ACCESS_KEY")]
         access_key: Option<String>,
+        /// How buckets created over S3 store objects, unless the request says:
+        /// `object` (any key S3 allows) or `folder` (plain files).
+        #[arg(
+            long,
+            value_enum,
+            default_value = "folder",
+            env = "TEIFS_DEFAULT_LAYOUT"
+        )]
+        default_layout: LayoutArg,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
         secret_key: Option<String>,
@@ -77,6 +86,9 @@ enum BucketAction {
     /// Create a bucket.
     Create {
         name: String,
+        /// How it stores objects: `object` (any key S3 allows) or `folder` (plain files).
+        #[arg(long, value_enum, default_value = "folder")]
+        layout: LayoutArg,
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
@@ -86,6 +98,24 @@ enum BucketAction {
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
+}
+
+/// A bucket layout on the command line.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LayoutArg {
+    /// Objects stored by id under `.teifs`, with every key S3 allows.
+    Object,
+    /// A folder of plain files.
+    Folder,
+}
+
+impl From<LayoutArg> for Layout {
+    fn from(arg: LayoutArg) -> Self {
+        match arg {
+            LayoutArg::Object => Layout::Object,
+            LayoutArg::Folder => Layout::Folder,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -118,8 +148,9 @@ async fn run(command: Command) -> Result<(), String> {
             listen,
             domains,
             access_key,
+            default_layout,
             ..
-        } => serve(&dir, listen, domains, access_key).await,
+        } => serve(&dir, listen, domains, access_key, default_layout.into()).await,
         Command::Credentials { dir } => {
             let store = open(&dir)?;
             let (credentials, _) = credentials::load_or_create(store.root())
@@ -146,6 +177,7 @@ async fn serve(
     listen: SocketAddr,
     domains: Vec<String>,
     access_key: Option<String>,
+    default_layout: Layout,
 ) -> Result<(), String> {
     let credentials = match access_key {
         Some(access_key) => {
@@ -163,6 +195,7 @@ async fn serve(
         listen,
         domains,
         credentials,
+        default_layout,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -194,12 +227,16 @@ async fn bucket(action: BucketAction) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())?
             {
-                println!("{}  {}", date(bucket.created), bucket.name);
+                let layout = match bucket.layout {
+                    Layout::Object => "object",
+                    Layout::Folder => "folder",
+                };
+                println!("{}  {layout:<6}  {}", date(bucket.created), bucket.name);
             }
         }
-        BucketAction::Create { name, dir } => {
+        BucketAction::Create { name, layout, dir } => {
             open(&dir)?
-                .create_bucket(&name)
+                .create_bucket(&name, layout.into())
                 .await
                 .map_err(|e| format!("can't create {name}: {e}"))?;
             println!("Created {name}");

@@ -54,9 +54,9 @@ process list.
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
-| `teifs bucket list\|create\|remove` | Manage buckets without a server |
+| `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
 | `teifs ls BUCKET [PREFIX] [-r]` | List objects |
 
 ## S3 support today
@@ -74,7 +74,12 @@ process list.
 encryption, tagging, CORS, website hosting, event notifications, replication, several
 disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
-**Limits of storing plain files:**
+**Two kinds of bucket.** An *object bucket* stores objects by id under `.teifs/` and
+takes every key S3 allows. A *folder bucket* is a folder of plain files you can open
+anywhere, with the limits below. Choose per bucket (`--layout`, or the
+`x-teifs-bucket-layout` header on CreateBucket).
+
+**Limits of folder buckets:**
 - On a case-insensitive disk (the default on macOS and Windows), two keys that differ
   only in letter case can't both exist. The second is refused with
   `409 XTeiFSKeyConflict`.
@@ -85,9 +90,10 @@ disks or machines. [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's prove
 
 ## How it stores things
 
-Buckets are folders and objects are files. What S3 needs beyond the bytes (ETags,
-content types, user metadata, checksums, multipart uploads in progress) lives in
-`.teifs/` beside the buckets. Writes are atomic: bytes go to `.teifs/tmp`, are synced to
+Folder buckets are folders and their objects are files; object buckets keep their data
+under `.teifs/buckets/`. What S3 needs beyond the bytes (ETags, content types, user
+metadata, checksums, multipart uploads in progress) lives in `.teifs/` beside the
+buckets. Writes are atomic: bytes go to `.teifs/tmp`, are synced to
 disk and renamed into place, so a crash never leaves a half-written file. Files changed
 outside TeiFS are objects too. The full specification is
 [ON_DISK_FORMAT.md](docs/ON_DISK_FORMAT.md).

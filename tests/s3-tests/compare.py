@@ -43,10 +43,16 @@ def main():
     update = "--update" in sys.argv
     # A run filtered with -k checks only what it ran.
     partial = "--partial" in sys.argv
+    folder = "--layout=folder" in sys.argv
     ran = results(report)
     implemented = read_list("implemented.txt")
     unimplemented = read_list("unimplemented.txt")
     excluded = read_list("excluded.txt")
+    if folder:
+        # Folder buckets skip what they can't hold by design; the rest must still pass.
+        skipped = read_list("folder-excluded.txt")
+        implemented -= skipped
+        excluded |= skipped
 
     regressions = sorted(t for t in implemented if t in ran and not ran[t])
     missing = [] if partial else sorted(t for t in implemented if t not in ran)
@@ -68,7 +74,7 @@ def main():
             for name in names:
                 print(f"  {name}")
 
-    if update and now_passing:
+    if update and now_passing and not folder:
         write_list("implemented.txt", None, implemented | set(now_passing))
         write_list("unimplemented.txt", None, unimplemented - set(now_passing))
         print(f"\nMoved {len(now_passing)} tests to implemented.txt")

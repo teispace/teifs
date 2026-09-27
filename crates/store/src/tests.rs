@@ -12,15 +12,21 @@ fn drive() -> (TempDir, Store) {
 
 async fn with_bucket() -> (TempDir, Store) {
     let (dir, store) = drive();
-    store.create_bucket("photos").await.unwrap();
+    store.create_bucket("photos", Layout::Folder).await.unwrap();
     (dir, store)
 }
 
 async fn read_all(store: &Store, bucket: &str, key: &str) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
-    let (_, file) = store.read(bucket, key).await.unwrap();
+    let (_, body) = store.read(bucket, key).await.unwrap();
     let mut out = Vec::new();
-    file.unwrap().read_to_end(&mut out).await.unwrap();
+    body.unwrap()
+        .all()
+        .await
+        .unwrap()
+        .read_to_end(&mut out)
+        .await
+        .unwrap();
     out
 }
 
@@ -440,7 +446,7 @@ async fn copies_keep_or_replace_attributes() {
         .put_bytes("photos", "a", b"data", attrs.clone())
         .await
         .unwrap();
-    store.create_bucket("backup").await.unwrap();
+    store.create_bucket("backup", Layout::Folder).await.unwrap();
 
     let copy = store
         .copy(
@@ -607,8 +613,8 @@ async fn multipart_rules_are_enforced() {
 #[tokio::test]
 async fn buckets_are_folders() {
     let (dir, store) = drive();
-    store.create_bucket("alpha").await.unwrap();
-    store.create_bucket("beta").await.unwrap();
+    store.create_bucket("alpha", Layout::Folder).await.unwrap();
+    store.create_bucket("beta", Layout::Folder).await.unwrap();
     fs::create_dir(dir.path().join("Not_A_Bucket")).unwrap();
     let names: Vec<_> = store
         .list_buckets()
@@ -619,11 +625,11 @@ async fn buckets_are_folders() {
         .collect();
     assert_eq!(names, ["alpha", "beta"]);
     assert!(matches!(
-        store.create_bucket("alpha").await,
+        store.create_bucket("alpha", Layout::Folder).await,
         Err(StoreError::BucketExists)
     ));
     assert!(matches!(
-        store.create_bucket("Bad_Name").await,
+        store.create_bucket("Bad_Name", Layout::Folder).await,
         Err(StoreError::InvalidName(NameError::InvalidBucketName(_)))
     ));
 

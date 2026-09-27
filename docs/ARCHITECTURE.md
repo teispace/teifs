@@ -6,9 +6,10 @@ says, change it in the same pull request.
 
 ## Bird's-eye view
 
-TeiFS turns a folder (a **drive**) into an S3 endpoint. Each folder in the drive is a
-bucket and each object is a plain file at its key's path. What S3 needs beyond the bytes
-lives in two SQLite databases in `.teifs/`. The layout is specified in
+TeiFS turns a folder (a **drive**) into an S3 endpoint with two kinds of bucket: **folder
+buckets** (a folder at the drive's root, each object a plain file at its key's path) and
+**object buckets** (every key S3 allows, stored by id under `.teifs/buckets/`). What S3
+needs beyond the bytes lives in two SQLite databases in `.teifs/`. The layout is specified in
 [ON_DISK_FORMAT.md](ON_DISK_FORMAT.md).
 
 ```
@@ -32,8 +33,10 @@ crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): d
                                sealing, 64 KiB authenticated packages, SSE-C keys, the
                                KMS trait and the local keyring. aws-lc-rs only.
 crates/store    teifs-store    The storage engine: opening a drive (and upgrading its
-                               format), buckets, staging and committing writes, reads,
-                               listing in S3 order, copies, multipart uploads.
+                               format), folder buckets (folder.rs) and object buckets
+                               (objects.rs) behind one API, staging and committing
+                               writes, reads (ObjectBody), listings in S3 order,
+                               copies, multipart uploads.
 crates/s3       teifs-s3       The S3 operations: implements s3s's `S3` trait over a
                                store; checksums, S3 errors, continuation tokens.
 crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP/2),
@@ -53,6 +56,17 @@ interface, so the server can be embedded (Teitunnel will run it this way).
 back: routing, XML, SigV4 (headers, presigned URLs, chunked and trailer bodies) and the
 S3 error format. TeiFS implements the `S3` trait in `teifs-s3` (`drive.rs`). Nothing
 outside `teifs-s3` and `teifs-server` knows about s3s.
+
+## Two layouts, one API
+
+`Store` resolves a bucket name to `Bucket::Folder` (a folder at the root) or
+`Bucket::Object` (a record in `system.db`), and every operation dispatches on it. The
+shared step is `Inner::commit_to`: a finished temporary file becomes the object `key`,
+either renamed to its path (folder) or given a footer and stored by id with a row in
+`object_versions` (object). Reads return an `ObjectBody`, which only ever yields the
+object's own bytes (whole or a range). Copies between layouts clone the bytes where
+the disk can. The tests in `crates/store/src/layout_tests.rs` run the same S3 behaviour
+against both layouts.
 
 ## How a write works
 
@@ -77,8 +91,10 @@ metadata returned belong together even if the object is replaced during the read
 - A row in the index applies only while its file's size and modification time match
   (`Stamp::matches` in `crates/types/src/object.rs`). A file changed by anything else
   gets a provisional ETag (`<hex>-1`) and a content type guessed from its name.
-- Listing walks the bucket's folders in S3's byte order (`crates/store/src/list.rs`),
-  so objects added outside TeiFS appear immediately.
+- Listing a folder bucket walks its folders in S3's byte order
+  (`crates/store/src/list.rs`), so objects added outside TeiFS appear immediately.
+  Object buckets list from the index with range queries, jumping past rolled-up common
+  prefixes.
 - Folders created on purpose (a `key/` object) stay when their last file is deleted;
   folders created only to hold a file are removed with it.
 

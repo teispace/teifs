@@ -4,6 +4,8 @@
 //! Formats (the full specification is `docs/ON_DISK_FORMAT.md`):
 //! - **0** (before formats were recorded): one database, `.teifs/meta.db`.
 //! - **1**: `format.json`, the index in `index.db`, bucket settings in `system.db`.
+//! - **2**: object buckets: bucket ids, object versions in `index.db`, data files under
+//!   `.teifs/buckets/`.
 
 use std::{
     fs, io,
@@ -18,7 +20,7 @@ use crate::{
 };
 
 /// The format this build writes.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 const FORMAT_FILE: &str = "format.json";
 const LEGACY_DB: &str = "meta.db";
@@ -55,11 +57,16 @@ pub(crate) fn prepare(system: &Path) -> Result<DriveFormat> {
             }
             // An upgrade from format 0 stopped after its commit point: finish it.
             remove_legacy(system);
+            if format.format < FORMAT {
+                return upgrade(system, &path, format);
+            }
             Ok(format)
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             if system.join(LEGACY_DB).exists() {
                 upgrade_from_0(system)?;
+                // Format 0 goes to 1 here; 1 → 2 is only schema migrations, which the
+                // databases run when they open (their backup was just made).
             }
             let format = DriveFormat {
                 format: FORMAT,
@@ -75,6 +82,27 @@ pub(crate) fn prepare(system: &Path) -> Result<DriveFormat> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Upgrades a recorded format to the current one: backs up both databases (their schema
+/// migrations run when they open), then records the new format.
+fn upgrade(system: &Path, path: &Path, mut format: DriveFormat) -> Result<DriveFormat> {
+    let to = FORMAT;
+    tracing::info!(from = format.format, to, "upgrading the drive's format");
+    let backup_dir = system.join(BACKUPS).join(format!("pre-format-{to}"));
+    let _ = fs::remove_dir_all(&backup_dir);
+    fs::create_dir_all(&backup_dir)?;
+    for db in [INDEX_DB, SYSTEM_DB] {
+        if system.join(db).exists() {
+            teifs_meta::backup(&system.join(db), &backup_dir.join(db))?;
+        }
+    }
+    format.format = to;
+    write_atomic(
+        path,
+        &serde_json::to_vec_pretty(&format).expect("the format serializes"),
+    )?;
+    Ok(format)
 }
 
 /// Format 0 → 1: `meta.db` becomes `index.db` (same schema). The old database is copied to

@@ -18,7 +18,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use teifs_store::{FORMAT, Store, StoreError};
+use teifs_store::{FORMAT, Layout, Store, StoreError};
 use tempfile::TempDir;
 
 #[derive(Deserialize)]
@@ -125,6 +125,24 @@ async fn every_released_format_opens_intact() {
 }
 
 #[tokio::test]
+async fn format_1_drives_are_backed_up_before_their_upgrade() {
+    let (dir, manifest) = restore(1);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.format().format, FORMAT);
+    let backups = system(dir.path()).join(format!("backups/pre-format-{FORMAT}"));
+    assert!(backups.join("index.db").is_file());
+    assert!(backups.join("system.db").is_file());
+    assert_intact(&store, &manifest).await;
+    // Every bucket in a format 1 drive is a folder bucket, and new object buckets work.
+    assert_eq!(store.head_bucket("photos").await.unwrap(), Layout::Folder);
+    store.create_bucket("fresh", Layout::Object).await.unwrap();
+    store
+        .put_bytes("fresh", "a/../b", b"x", teifs_store::ObjectAttrs::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn an_upgrade_that_stopped_halfway_is_redone() {
     let (dir, manifest) = restore(0);
     let system = system(dir.path());
@@ -179,7 +197,7 @@ async fn buckets_remember_when_teifs_created_them() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let before = SystemTime::now() - Duration::from_secs(1);
-    store.create_bucket("photos").await.unwrap();
+    store.create_bucket("photos", Layout::Folder).await.unwrap();
     let listed = store.list_buckets().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert!(listed[0].created >= before);

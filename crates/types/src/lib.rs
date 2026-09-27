@@ -4,7 +4,10 @@
 mod names;
 mod object;
 
-pub use names::{BUCKET_STAGING, MAX_KEY_LEN, MAX_SEGMENT_LEN, NameError, ObjectKey, check_bucket};
+pub use names::{
+    BUCKET_STAGING, MAX_KEY_LEN, MAX_SEGMENT_LEN, NameError, ObjectKey, check_bucket,
+    check_object_key,
+};
 pub use object::{
     ObjectAttrs, ObjectInfo, Stamp, empty_etag, hex, md5_of_etag, multipart_etag, provisional_etag,
 };

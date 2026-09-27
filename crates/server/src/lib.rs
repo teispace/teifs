@@ -13,7 +13,7 @@ use std::{
 };
 
 use teifs_s3::Options;
-use teifs_store::{Store, StoreError};
+use teifs_store::{Layout, Store, StoreError};
 use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
@@ -30,6 +30,8 @@ pub struct Config {
     pub domains: Vec<String>,
     /// Credentials to use; `None` loads the drive's own, generating them on first run.
     pub credentials: Option<Credentials>,
+    /// The layout of buckets created without choosing one.
+    pub default_layout: Layout,
 }
 
 /// Why the server couldn't start.
@@ -106,6 +108,7 @@ impl Server {
             Options {
                 credentials: Some((credentials.access_key, credentials.secret_key)),
                 domains: config.domains,
+                default_layout: config.default_layout,
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;

@@ -5,7 +5,7 @@ bumps the format version, and every release can open every drive any earlier rel
 wrote. `crates/store/src/format.rs` enforces it and `crates/store/tests/format.rs` proves
 it against a drive written by each released format.
 
-## Current format: 1
+## Current format: 2
 
 ```
 <drive>/
@@ -14,11 +14,13 @@ it against a drive written by each released format.
 │   ├── index.db              the object index (SQLite, WAL mode)
 │   ├── system.db             bucket settings (SQLite, WAL mode)
 │   ├── backups/              copies made before upgrades
-│   │   └── pre-format-1/meta.db
+│   │   └── pre-format-<n>/
+│   ├── buckets/<bucket id>/  object buckets' data files
+│   │   └── <aa>/<bb>/<object id>
 │   ├── tmp/                  bytes being written (emptied at every start)
 │   ├── uploads/<id>/<part>   parts of multipart uploads in progress
 │   └── credentials.json      generated credentials, readable only by the owner
-├── <bucket>/                 each folder is a bucket
+├── <bucket>/                 each folder is a folder bucket
 │   └── <key path>            each object is a plain file at its key's path
 └── …
 ```
@@ -27,7 +29,7 @@ it against a drive written by each released format.
 
 ```json
 {
-  "format": 1,
+  "format": 2,
   "drive": "0b7f3e5c-2d4e-4c1a-9f7e-6a3b2c1d0e9f",
   "created": "2026-09-27T12:00:00Z"
 }
@@ -42,10 +44,22 @@ it against a drive written by each released format.
 The file is written to a temporary name, synced and renamed into place, so it's always
 complete.
 
-### Buckets and objects
+### Two kinds of bucket
 
-- A **bucket** is a folder directly inside the drive whose name follows S3's bucket
-  rules. A folder created by anything else is a bucket too. A bucket may be a symbolic
+| | Folder bucket | Object bucket |
+|---|---|---|
+| Where | A folder at the drive's root | `.teifs/buckets/<bucket id>/`, recorded in `system.db` |
+| Objects | Plain files at their keys' paths | Data files named by object id |
+| Keys | Those a file system can hold (below) | Any key S3 allows: 1 to 1024 bytes |
+| Source of truth | The files; the index is rebuildable | The index; data files carry a footer to rebuild it |
+
+A folder at the drive's root that has an object bucket's name isn't a bucket; it
+becomes one if the object bucket is deleted.
+
+### Folder buckets
+
+- A **folder bucket** is a folder directly inside the drive whose name follows S3's
+  bucket rules. A folder created by anything else is a bucket too. It may be a symbolic
   link to a folder elsewhere (another disk).
 - An **object** is a regular file at the path its key names: key `2026/trip/a.jpg` in
   bucket `photos` is the file `photos/2026/trip/a.jpg`. A key ending in `/` is a folder.
@@ -58,14 +72,33 @@ complete.
   than the drive stage there, so the last step is an atomic rename on that disk. It's
   never listed and is emptied at every start.
 
-### `index.db`
+### Object buckets
 
-What S3 needs about an object that its file doesn't hold. **It can always be rebuilt
-from the files**; losing it loses only what's listed as "attributes" below.
+Each version of an object is a row in `index.db`'s `object_versions`, which is
+authoritative. Its bytes are a data file at `.teifs/buckets/<bucket id>/<aa>/<bb>/<object
+id>`, where the object id is a UUIDv7 (32 hex digits) and `aa`, `bb` are its last four
+digits. A data file holds exactly the object's bytes, then a footer:
+
+| Part | Bytes |
+|---|---|
+| The object's bytes | `size` |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs` | variable |
+| Footer JSON length | 4, big-endian |
+| Footer version (1) | 1 |
+| Magic `TFSO` | 4 |
+
+A write puts the data file in place (staged, synced, renamed, folder synced), then
+replaces the row in one transaction that also queues the replaced file in `garbage`,
+then removes that file. A crash leaves at most a data file no row refers to; queued
+garbage is removed at the next start.
+
+### `index.db`
 
 | Table | Holds |
 |---|---|
-| `objects` | Per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, and `attrs` (JSON: content headers, user metadata, checksums) |
+| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, and `attrs` (JSON: content headers, user metadata, checksums). Rebuildable from the files |
+| `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq`, `version_id` (`null` without versioning), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
+| `garbage` | Data files waiting to be removed |
 | `uploads` | Multipart uploads in progress: id, bucket, key, owner, attributes, start time |
 | `parts` | Their parts: number, size, ETag, checksums, upload time |
 
@@ -90,9 +123,9 @@ What can't be rebuilt from the files.
 
 | Table | Holds |
 |---|---|
-| `buckets` | Buckets TeiFS created: `name`, `layout` (`plain`), creation time, settings (JSON) |
+| `buckets` | Buckets TeiFS created: `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON) |
 
-A bucket folder without a row is a plain bucket with default settings.
+A bucket folder without a row is a folder bucket with default settings.
 
 ### Durability
 
@@ -116,11 +149,14 @@ remove.
 | From | To | What changes |
 |---|---|---|
 | 0 | 1 | `meta.db` (format 0's only database) becomes `index.db`; `system.db` and `format.json` are created |
+| 1 | 2 | Both databases are copied to `backups/pre-format-2/`; buckets get ids; `index.db` gets `object_versions` and `garbage`; every existing bucket stays a folder bucket |
 
 Format 0 is what TeiFS wrote before formats were recorded: a `.teifs/meta.db` and no
 `format.json`.
 
 To go back to an older release after an upgrade, restore the matching backup: stop
-TeiFS, move `.teifs/backups/pre-format-<n>/meta.db` (or the files it lists) back into
-`.teifs/`, and remove `format.json`, `index.db` and `system.db`. Objects written after the
-upgrade keep their bytes but lose the metadata recorded since.
+TeiFS, copy the databases from `.teifs/backups/pre-format-<n>/` back into `.teifs/`, and
+set `format` in `format.json` to the older number (for format 0, remove `format.json`,
+`index.db` and `system.db` and restore `meta.db`). Objects written in folder buckets
+after the upgrade keep their bytes but lose metadata recorded since; object buckets
+created after the upgrade don't exist in the older release.

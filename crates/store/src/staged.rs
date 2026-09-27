@@ -59,11 +59,11 @@ impl Staged {
         self.md5.clone().finalize().into()
     }
 
-    /// Flushes and syncs the file; nothing more can be written.
+    /// Flushes the file; nothing more can be written. The commit syncs it (once, after
+    /// anything it appends).
     pub(crate) async fn finish(&mut self) -> Result<()> {
         if let Some(mut file) = self.file.take() {
             file.flush().await?;
-            file.into_inner().sync_all().await?;
         }
         Ok(())
     }

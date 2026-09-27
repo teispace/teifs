@@ -15,10 +15,12 @@
 mod db;
 mod index;
 mod system;
+mod versions;
 
 pub use db::backup;
 pub use index::{Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System};
+pub use versions::{ListFrom, NULL_VERSION, VersionRow};
 
 /// Why a metadata database failed.
 #[derive(Debug, thiserror::Error)]

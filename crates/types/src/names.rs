@@ -59,6 +59,18 @@ pub fn check_bucket(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks a key for an object bucket, which stores any key S3 allows: 1 to 1024 bytes of
+/// UTF-8 (the type guarantees UTF-8).
+pub fn check_object_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(NameError::InvalidKey("it's empty"));
+    }
+    if key.len() > MAX_KEY_LEN {
+        return Err(NameError::KeyTooLong);
+    }
+    Ok(())
+}
+
 /// An object key, checked, with the path it maps to inside its bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectKey {
@@ -189,5 +201,26 @@ mod tests {
             assert!(ObjectKey::parse(reserved).is_err(), "{reserved}");
         }
         assert!(ObjectKey::parse("a/.teifs-tmp/x").is_ok());
+    }
+
+    #[test]
+    fn object_buckets_take_any_s3_key() {
+        for key in [
+            "a",
+            "a/../b",
+            "//x",
+            "/lead",
+            "a\\b",
+            ".teifs-tmp/x",
+            "CON",
+            "a:b",
+        ] {
+            assert!(check_object_key(key).is_ok(), "{key}");
+        }
+        assert!(check_object_key("").is_err());
+        assert_eq!(
+            check_object_key(&"k".repeat(1025)),
+            Err(NameError::KeyTooLong)
+        );
     }
 }

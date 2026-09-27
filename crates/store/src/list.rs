@@ -13,7 +13,9 @@ use std::{
 
 use teifs_types::{BUCKET_STAGING, MAX_SEGMENT_LEN};
 
-use crate::{Inner, ObjectInfo, Store, error::Result};
+use teifs_meta::{Index, ListFrom};
+
+use crate::{Bucket, Inner, ObjectInfo, Store, error::Result, objects::to_info};
 
 /// Where a page starts: after this key, or after every key under this common prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,8 +85,16 @@ impl Store {
     pub async fn list(&self, bucket: &str, query: ListQuery) -> Result<Listing> {
         let bucket = bucket.to_owned();
         self.blocking(move |inner| {
-            let dir = inner.bucket_dir(&bucket)?;
             let mut listing = Listing::default();
+            let dir = match inner.bucket(&bucket)? {
+                Bucket::Folder(_, dir) => dir,
+                Bucket::Object(object_bucket) => {
+                    if query.max_keys > 0 {
+                        list_index(&inner.lock(), &object_bucket.id, &query, &mut listing)?;
+                    }
+                    return Ok(listing);
+                }
+            };
             if query.max_keys == 0 {
                 return Ok(listing);
             }
@@ -274,4 +284,71 @@ fn read_folder(dir: &Path, key_prefix: &str) -> Result<Vec<Entry>> {
     }
     entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
     Ok(entries)
+}
+
+/// Lists an object bucket from the index: rows in key order, rolled up into common
+/// prefixes at the delimiter; a prefix already listed is skipped in one jump.
+fn list_index(
+    conn: &Index,
+    bucket_id: &str,
+    query: &ListQuery,
+    listing: &mut Listing,
+) -> Result<()> {
+    let delimiter = query.delimiter.as_deref().filter(|d| !d.is_empty());
+    let mut from = match &query.after {
+        None => Cursor::Start,
+        Some(After::Key(key)) => Cursor::AfterKey(key.clone()),
+        Some(After::Prefix(prefix)) => Cursor::AfterAll(prefix.clone()),
+    };
+    let mut count = 0;
+    'pages: loop {
+        let batch = (query.max_keys - count + 1).clamp(1, 1000);
+        let rows = conn.list_latest(bucket_id, &query.prefix, from.as_list_from(), batch)?;
+        let Some(last) = rows.last().map(|r| r.key.clone()) else {
+            break;
+        };
+        for row in rows {
+            let common = delimiter.and_then(|d| {
+                let rest = &row.key[query.prefix.len()..];
+                rest.find(d)
+                    .map(|at| row.key[..query.prefix.len() + at + d.len()].to_owned())
+            });
+            if count == query.max_keys {
+                listing.truncated = true;
+                break 'pages;
+            }
+            count += 1;
+            if let Some(prefix) = common {
+                listing.next = Some(After::Prefix(prefix.clone()));
+                from = Cursor::AfterAll(prefix.clone());
+                listing.prefixes.push(prefix);
+                // Everything else under this prefix is rolled up: jump past it.
+                continue 'pages;
+            }
+            listing.next = Some(After::Key(row.key.clone()));
+            listing.objects.push(to_info(&row));
+        }
+        from = Cursor::AfterKey(last);
+    }
+    if !listing.truncated {
+        listing.next = None;
+    }
+    Ok(())
+}
+
+/// An owned [`ListFrom`].
+enum Cursor {
+    Start,
+    AfterKey(String),
+    AfterAll(String),
+}
+
+impl Cursor {
+    fn as_list_from(&self) -> ListFrom<'_> {
+        match self {
+            Cursor::Start => ListFrom::Start,
+            Cursor::AfterKey(key) => ListFrom::AfterKey(key),
+            Cursor::AfterAll(prefix) => ListFrom::AfterAll(prefix),
+        }
+    }
 }
