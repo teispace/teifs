@@ -1,0 +1,1 @@
+doc-valid-idents = ["TeiDrive", "ETag", "ETags", "MinIO", "APFS", "Btrfs", "XFS", "NTFS", "CRC32", "CRC32C", "CRC64NVME", "SHA-1", "SHA-256", "..", "S3"]
