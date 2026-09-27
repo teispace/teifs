@@ -1,0 +1,27 @@
+[package]
+name = "teifs-crypto"
+description = "TeiFS's encryption at rest: data keys, sealing, encrypted packages, SSE-C and KMS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aws-lc-rs.workspace = true
+zeroize.workspace = true
+md-5.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

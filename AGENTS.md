@@ -20,7 +20,10 @@ before speed.
   built only from checked parts and compared with their canonical form before use.
 - **Writes are atomic**: stage in `.teifs/tmp`, sync, rename, sync the folder, record the
   row, all under the commit lock.
-- **Secrets never reach logs, command lines or test fixtures.**
+- **Secrets never reach logs, command lines or test fixtures.** Keys are wiped from memory
+  when dropped (`zeroize`) and never printed.
+- **Cryptography only through `teifs-crypto`**, only with aws-lc-rs primitives, and only
+  as `docs/ENCRYPTION_FORMAT.md` specifies; changing it is a format change.
 - **S3 behaviour matches AWS**, except where plain files make it impossible; those
   differences are listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 - **Tests with every change.** A bug fix includes a test that fails without it.
@@ -32,13 +35,15 @@ before speed.
 ```
 crates/types    shared types with no I/O: names, keys, attributes, stamps, ETags
 crates/meta     SQLite: the object index and the system database (all SQL lives here)
+crates/crypto   encryption at rest: keys, sealing, packages, SSE-C, KMS (aws-lc-rs)
 crates/store    the storage engine: drive format, buckets, writes, reads, listing, multipart
 crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
 apps/cli        the `teifs` command
 tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
 xtask           project tasks (`cargo xtask verify`)
-docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPATIBILITY
+docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRYPTION_FORMAT,
+                COMPATIBILITY
 ```
 
 ## Commands
@@ -52,7 +57,7 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, COMPA
 - `tests/s3-tests/run.sh [--update]`: the S3 conformance suite against a fresh server
   (needs Python 3); `S3TESTS_K='<pattern>'` runs a subset. Nightly CI runs it in full.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
-  `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
+  `teifs-crypto`, `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
 - `cargo run -p teifs -- serve <dir>`: run a server; drive it with the AWS CLI
   (`AWS_ENDPOINT_URL=http://127.0.0.1:9000`) to check a change end to end.
 

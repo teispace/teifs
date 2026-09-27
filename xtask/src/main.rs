@@ -100,6 +100,7 @@ const DOCS: &[&str] = &[
     "docs/CONVENTIONS.md",
     "docs/SECURITY_MODEL.md",
     "docs/ON_DISK_FORMAT.md",
+    "docs/ENCRYPTION_FORMAT.md",
     "docs/COMPATIBILITY.md",
     "tests/s3-tests/README.md",
 ];

@@ -28,6 +28,9 @@ crates/types    teifs-types    Bucket names and object keys with their rules, ob
                                attributes, file stamps, ETags. No I/O.
 crates/meta     teifs-meta     SQLite: the object index (index.db) and the system
                                database (system.db). All SQL lives here.
+crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): data keys,
+                               sealing, 64 KiB authenticated packages, SSE-C keys, the
+                               KMS trait and the local keyring. aws-lc-rs only.
 crates/store    teifs-store    The storage engine: opening a drive (and upgrading its
                                format), buckets, staging and committing writes, reads,
                                listing in S3 order, copies, multipart uploads.

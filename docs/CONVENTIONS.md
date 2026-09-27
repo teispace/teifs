@@ -23,6 +23,15 @@ in the pull request.
 - **Dependencies**: add one only when it earns its place; prefer crates already in the
   tree. Versions live in the workspace `Cargo.toml`.
 
+## Cryptography
+
+- Only in `teifs-crypto`, only with aws-lc-rs (AES-256-GCM, HKDF-SHA256, HMAC-SHA256,
+  randomness). No hand-rolled primitives, no second crypto library.
+- Key material lives in `zeroize` types, has a `Debug` that prints nothing, and is
+  compared in constant time.
+- The byte format is specified in [ENCRYPTION_FORMAT.md](ENCRYPTION_FORMAT.md) first,
+  then implemented; tests cover tampering, reordering, truncation and wrong keys.
+
 ## Crates and boundaries
 
 - `types` has no I/O. `meta` owns all SQL. `store` owns the disk layout. `s3` owns the S3

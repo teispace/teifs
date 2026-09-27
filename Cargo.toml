@@ -14,6 +14,7 @@ publish = false
 [workspace.dependencies]
 teifs-types = { path = "crates/types" }
 teifs-meta = { path = "crates/meta" }
+teifs-crypto = { path = "crates/crypto" }
 teifs-store = { path = "crates/store" }
 teifs-s3 = { path = "crates/s3" }
 teifs-server = { path = "crates/server" }
@@ -30,6 +31,8 @@ mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+aws-lc-rs = "1.18"
+zeroize = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["formatting"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
