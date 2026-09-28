@@ -19,6 +19,15 @@ impl Context {
         ]))
     }
 
+    /// The context of a drive's IAM key, which seals access keys' secrets.
+    #[must_use]
+    pub fn iam(drive: &str) -> Self {
+        Self(BTreeMap::from([
+            ("teifs:drive".to_owned(), drive.to_owned()),
+            ("teifs:purpose".to_owned(), "iam".to_owned()),
+        ]))
+    }
+
     /// Adds a pair (a client's SSE-KMS context). TeiFS's own pairs can't be replaced.
     #[must_use]
     pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {

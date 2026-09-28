@@ -35,6 +35,10 @@ crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): d
 crates/policy   teifs-policy   The IAM policy language: parsing, conditions, policy
                                variables, the allow/deny decision, and which S3
                                actions each S3 operation needs. Pure: no I/O.
+crates/iam      teifs-iam      IAM's users, access keys, groups, managed and inline
+                               policies (AWS's rules and quotas), kept in system.db
+                               with sealed secrets; who signed a request and which
+                               policies apply to them.
 crates/store    teifs-store    The storage engine: opening a drive (and upgrading its
                                format), folder buckets (folder.rs) and object buckets
                                (objects.rs) behind one API, staging and committing
@@ -55,7 +59,7 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.
-`policy` depends on no other TeiFS crate.
+`policy` depends on no other TeiFS crate; `iam` depends on `meta`, `crypto` and `policy`.
 Library crates never depend on the command line, and nothing depends on a user
 interface, so the server can be embedded (Teitunnel will run it this way).
 
@@ -77,6 +81,22 @@ table and condition keys against AWS's machine-readable Service Authorization Re
 policies from AWS's documentation and its known pitfalls, with the documented decision;
 `tests/properties.rs` checks laws such as "a Deny anywhere wins" and "a boundary only
 narrows" on thousands of random policies.
+
+### IAM
+
+`teifs-iam` keeps a drive's users, access keys, groups and policies in `system.db` and
+the whole state in memory. A change (`Iam::change`) edits a copy of the state (entities
+are behind `Arc`s, so the copy is cheap), checks AWS's rules against it, writes every
+row it touched in one transaction, and only then swaps the copy in and rebuilds the
+lookup that authentication reads: access key → secret and identity (principal, tags,
+the user's and its groups' policies, parsed once, and the permissions boundary). Requests
+never touch SQLite. The drive's root credentials are the account's root user.
+
+Access keys' secrets can't be hashed (SigV4 signs with them), so each is sealed with
+AES-256-GCM under an IAM key, bound to its access key id; the IAM key is sealed by the
+drive's KMS under the context `{teifs:drive, teifs:purpose=iam}`. A stored policy that
+no longer parses stops IAM from starting rather than being skipped, since skipping a
+Deny would widen access.
 
 ### The protocol layer: s3s
 

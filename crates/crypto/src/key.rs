@@ -63,30 +63,62 @@ impl DataKey {
     /// Encrypts small metadata (checksums) with this key: a random nonce in front.
     #[must_use]
     pub fn seal_metadata(&self, plaintext: &[u8]) -> Vec<u8> {
-        let key = aead_key(&hkdf(&self.0, &[], &[b"teifs meta v1"]));
-        let mut nonce = [0u8; 12];
-        random(&mut nonce);
-        let mut out = plaintext.to_vec();
-        key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut out)
-            .expect("sealing a buffer can't fail");
-        [nonce.as_slice(), &out].concat()
+        self.seal_labeled(META, &[], plaintext)
     }
 
     /// Decrypts what [`DataKey::seal_metadata`] produced.
     pub fn open_metadata(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        self.open_labeled(META, &[], sealed)
+    }
+
+    /// Encrypts a secret (an access key's secret key) bound to `owner` (its access key
+    /// id): opening it under any other owner fails, so sealed secrets can't be swapped.
+    #[must_use]
+    pub fn seal_secret(&self, owner: &[u8], secret: &[u8]) -> Vec<u8> {
+        self.seal_labeled(SECRET, owner, secret)
+    }
+
+    /// Decrypts what [`DataKey::seal_secret`] produced for the same `owner`.
+    pub fn open_secret(&self, owner: &[u8], sealed: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        self.open_labeled(SECRET, owner, sealed)
+            .map(zeroize::Zeroizing::new)
+    }
+
+    /// AES-256-GCM under a key derived for `label`, with a random nonce in front.
+    fn seal_labeled(&self, label: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+        let key = aead_key(&hkdf(&self.0, &[], &[label]));
+        let mut nonce = [0u8; 12];
+        random(&mut nonce);
+        let mut out = plaintext.to_vec();
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad),
+            &mut out,
+        )
+        .expect("sealing a buffer can't fail");
+        [nonce.as_slice(), &out].concat()
+    }
+
+    fn open_labeled(&self, label: &[u8], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
         let (nonce, body) = sealed
             .split_at_checked(12)
             .ok_or(CryptoError::Authentication)?;
-        let key = aead_key(&hkdf(&self.0, &[], &[b"teifs meta v1"]));
+        let key = aead_key(&hkdf(&self.0, &[], &[label]));
         let nonce =
             Nonce::try_assume_unique_for_key(nonce).map_err(|_| CryptoError::Authentication)?;
         let mut body = body.to_vec();
         let plain = key
-            .open_in_place(nonce, Aad::empty(), &mut body)
+            .open_in_place(nonce, Aad::from(aad), &mut body)
             .map_err(|_| CryptoError::Authentication)?;
-        Ok(plain.to_vec())
+        let len = plain.len();
+        body.truncate(len);
+        Ok(body)
     }
 }
+
+/// The derivation labels: each use of a data key gets its own AEAD key.
+const META: &[u8] = b"teifs meta v1";
+const SECRET: &[u8] = b"teifs secret v1";
 
 #[cfg(test)]
 mod tests {
@@ -120,5 +152,26 @@ mod tests {
         assert!(key.open_metadata(&bad).is_err());
         assert!(DataKey::generate().open_metadata(&sealed).is_err());
         assert!(key.open_metadata(&sealed[..5]).is_err());
+    }
+
+    #[test]
+    fn secrets_are_bound_to_their_owner_and_apart_from_metadata() {
+        let key = DataKey::generate();
+        let sealed = key.seal_secret(b"TKIAEXAMPLE", b"s3cret");
+        assert_eq!(
+            &*key.open_secret(b"TKIAEXAMPLE", &sealed).unwrap(),
+            b"s3cret"
+        );
+        assert!(key.open_secret(b"TKIAOTHER", &sealed).is_err());
+        assert!(key.open_metadata(&sealed).is_err());
+        assert!(
+            key.open_secret(b"", &key.seal_metadata(b"x")).is_err(),
+            "metadata and secrets use different keys"
+        );
+        assert_ne!(
+            sealed,
+            key.seal_secret(b"TKIAEXAMPLE", b"s3cret"),
+            "random nonces"
+        );
     }
 }

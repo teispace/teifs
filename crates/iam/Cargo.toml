@@ -1,0 +1,26 @@
+[package]
+name = "teifs-iam"
+description = "TeiFS's IAM: users, access keys, groups and policies, and who signed a request"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+teifs-meta.workspace = true
+teifs-crypto.workspace = true
+teifs-policy.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

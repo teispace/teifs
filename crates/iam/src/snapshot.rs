@@ -1,0 +1,161 @@
+//! What authentication and authorization read on every request: access key → secret and
+//! identity, built once per IAM change so requests never touch the database.
+
+use std::{collections::HashMap, sync::Arc};
+
+use teifs_policy::{Policy, Principal};
+use zeroize::Zeroizing;
+
+use crate::state::State;
+
+/// Who signed a request, and the policies that decide what they may do.
+#[derive(Debug)]
+pub struct Identity {
+    principal: Principal,
+    root: bool,
+    tags: Box<[(String, String)]>,
+    policies: Box<[Arc<Policy>]>,
+    boundary: Option<Arc<Policy>>,
+}
+
+impl Identity {
+    /// The principal, for the request's context.
+    #[must_use]
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    /// Whether this is the account's root user, whom no policy restricts.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.root
+    }
+
+    /// The user's tags (`aws:PrincipalTag/…`).
+    #[must_use]
+    pub fn tags(&self) -> &[(String, String)] {
+        &self.tags
+    }
+
+    /// The identity policies: the user's inline and attached policies and those of its
+    /// groups.
+    #[must_use]
+    pub fn policies(&self) -> &[Arc<Policy>] {
+        &self.policies
+    }
+
+    /// The permissions boundary, if the user has one.
+    #[must_use]
+    pub fn boundary(&self) -> Option<&Policy> {
+        self.boundary.as_deref()
+    }
+}
+
+/// An active access key's secret and whose it is.
+#[derive(Clone)]
+pub struct Credential {
+    /// The secret key, to check the signature with.
+    pub secret: Arc<Zeroizing<String>>,
+    /// Who it belongs to.
+    pub identity: Arc<Identity>,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The account's root access key.
+pub struct RootKey {
+    /// The access key id.
+    pub access_key: String,
+    /// The secret key.
+    pub secret: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for RootKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RootKey")
+            .field("access_key", &self.access_key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Every active access key.
+#[derive(Debug, Default)]
+pub(crate) struct Snapshot {
+    keys: HashMap<Box<str>, Credential>,
+}
+
+impl Snapshot {
+    pub(crate) fn build(state: &State, root: Option<&RootKey>) -> Self {
+        let mut keys = HashMap::with_capacity(state.keys.len() + 1);
+        if let Some(root) = root {
+            keys.insert(
+                root.access_key.as_str().into(),
+                Credential {
+                    secret: Arc::new(root.secret.clone()),
+                    identity: Arc::new(Identity {
+                        principal: Principal::root(&state.account),
+                        root: true,
+                        tags: Box::default(),
+                        policies: Box::default(),
+                        boundary: None,
+                    }),
+                },
+            );
+        }
+        let mut identities: HashMap<&str, Arc<Identity>> = HashMap::new();
+        for key in state.keys.values().filter(|k| k.active) {
+            if root.is_some_and(|r| r.access_key == key.id) {
+                continue;
+            }
+            let identity = identities
+                .entry(key.user.as_str())
+                .or_insert_with(|| Arc::new(identity(state, &key.user)))
+                .clone();
+            keys.insert(
+                key.id.as_str().into(),
+                Credential {
+                    secret: key.secret.clone(),
+                    identity,
+                },
+            );
+        }
+        Self { keys }
+    }
+
+    pub(crate) fn credential(&self, access_key: &str) -> Option<Credential> {
+        self.keys.get(access_key).cloned()
+    }
+}
+
+fn identity(state: &State, user_id: &str) -> Identity {
+    let user = &state.users[user_id];
+    let managed = |ids: &std::collections::BTreeSet<String>| {
+        ids.iter()
+            .filter_map(|id| state.policies.get(id))
+            .map(|p| p.default_document().policy.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut policies: Vec<Arc<Policy>> = user.inline.values().map(|d| d.policy.clone()).collect();
+    policies.extend(managed(&user.attached));
+    for group in state.groups_of(&user.id) {
+        policies.extend(group.inline.values().map(|d| d.policy.clone()));
+        policies.extend(managed(&group.attached));
+    }
+    Identity {
+        principal: Principal::user(&state.account, &user.path, &user.name, &user.id),
+        root: false,
+        tags: user.tags.clone().into_boxed_slice(),
+        policies: policies.into_boxed_slice(),
+        boundary: user
+            .boundary
+            .as_ref()
+            .and_then(|id| state.policies.get(id))
+            .map(|p| p.default_document().policy.clone()),
+    }
+}

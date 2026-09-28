@@ -2793,6 +2793,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "teifs-iam"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde_json",
+ "teifs-crypto",
+ "teifs-meta",
+ "teifs-policy",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "teifs-meta"
 version = "0.1.0"
 dependencies = [

@@ -136,11 +136,15 @@ impl Principal {
         self.kind
     }
 
-    pub(crate) fn arn(&self) -> Option<&str> {
+    /// The principal's ARN (a session's `assumed-role` ARN); none for anonymous.
+    #[must_use]
+    pub fn arn(&self) -> Option<&str> {
         self.arn.as_deref()
     }
 
-    pub(crate) fn account(&self) -> Option<&str> {
+    /// The principal's account; none for anonymous.
+    #[must_use]
+    pub fn account(&self) -> Option<&str> {
         self.account.as_deref()
     }
 

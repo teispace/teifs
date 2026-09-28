@@ -5,19 +5,23 @@
 //!   stay the source of truth: a row applies only while its file's [`Stamp`] matches, and
 //!   the whole index can be rebuilt from the disk.
 //! - the **system** database (`system.db`): what can't be rebuilt from files (bucket
-//!   settings now; users, keys and policies later). It's backed up before every
-//!   migration.
+//!   settings, and IAM's users, access keys, groups and policies). It's backed up before
+//!   every migration.
 //!
 //! All SQL lives in this crate.
 //!
 //! [`Stamp`]: teifs_types::Stamp
 
 mod db;
+mod iam;
 mod index;
 mod system;
 mod versions;
 
 pub use db::backup;
+pub use iam::{
+    AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, PolicyRow, PolicyVersionRow, UserRow,
+};
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System};
 pub use versions::{ListFrom, NULL_VERSION, VersionRow};

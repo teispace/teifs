@@ -20,6 +20,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE buckets ADD COLUMN id TEXT;
      UPDATE buckets SET id = lower(hex(randomblob(16))) WHERE id IS NULL;
      CREATE UNIQUE INDEX buckets_by_id ON buckets (id);",
+    // 3: IAM (teifs-iam owns the rules; these tables only keep its state).
+    crate::iam::MIGRATION,
 ];
 
 /// How a bucket stores its objects.
@@ -66,7 +68,7 @@ pub struct BucketRecord {
 /// A drive's system database. Not `Sync`: the store keeps it behind a lock.
 #[derive(Debug)]
 pub struct System {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl System {
