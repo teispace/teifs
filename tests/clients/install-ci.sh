@@ -27,6 +27,7 @@ fetch https://releases.hashicorp.com/terraform/1.16.4/terraform_1.16.4_linux_amd
 unzip -q "$tmp/terraform.zip" terraform -d "$BIN"
 
 chmod +x "$BIN/rclone" "$BIN/restic" "$BIN/terraform"
-"$BIN/rclone" version | head -1
+# Whole outputs: `| head -1` can kill the writer with SIGPIPE, failing under pipefail.
+"$BIN/rclone" version
 "$BIN/restic" version
-"$BIN/terraform" version | head -1
+"$BIN/terraform" version
