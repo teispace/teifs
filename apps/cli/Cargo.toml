@@ -18,6 +18,7 @@ teifs-store.workspace = true
 teifs-server.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 clap.workspace = true
+clap_complete.workspace = true
 toml.workspace = true
 aws-sdk-s3.workspace = true
 anstream.workspace = true

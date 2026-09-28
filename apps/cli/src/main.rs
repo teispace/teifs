@@ -73,6 +73,10 @@ enum Command {
     },
     #[command(flatten)]
     Client(client::Command),
+    /// Print the shell completion script for `shell`, for example
+    /// `teifs completions zsh > ~/.zfunc/_teifs` or
+    /// `teifs completions bash > ~/.local/share/bash-completion/completions/teifs`.
+    Completions { shell: clap_complete::Shell },
 }
 
 /// `teifs serve`'s settings. Each can also be set in a settings file (`--config`),
@@ -341,6 +345,13 @@ pub(crate) fn open(dir: &Path) -> Result<Store, error::Error> {
 async fn run(command: Command, sources: &config::Sources) -> Result<(), error::Error> {
     match command {
         Command::Init(args) => init::init(&args),
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "teifs", &mut script);
+            ui::raw(&String::from_utf8_lossy(&script));
+            Ok(())
+        }
         Command::Serve(args) => Ok(serve(args).await?),
         Command::Config {
             action: ConfigAction::Show(args),

@@ -15,7 +15,8 @@ behaviour; the on-disk format is always upgraded automatically.
   to do on the next line, aligned tables, and progress bars (bytes, speed, time left)
   for copies. Plain output when piped, `--json` (JSON Lines, errors included) for
   programs, `-q` for quiet, `-y` to answer questions, `--color` and `NO_COLOR`.
-  `rm -r` asks before deleting unless `--force` or `-y`.
+  `rm -r` asks before deleting unless `--force` or `-y`. `teifs completions SHELL`
+  prints completions for bash, zsh, fish, PowerShell and Elvish.
 - `teifs` is an S3 client too, for TeiFS or any S3 service: `alias`, `ls`, `mb`, `rb`,
   `cp`, `mv`, `rm`, `cat`, `stat`, `presign` and `mirror` on `ALIAS/BUCKET/KEY` paths.
   Large files go in parallel parts, an interrupted upload resumes, downloads replace a

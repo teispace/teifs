@@ -82,8 +82,14 @@ fn around_bar<T>(print: impl FnOnce() -> T) -> T {
 }
 
 fn stdout_line(line: &str) {
+    raw(&format!("{line}\n"));
+}
+
+/// `text` on standard output as it is, for output meant for another program (a
+/// completion script); a reader that stops early ends the command quietly.
+pub fn raw(text: &str) {
     use std::io::Write;
-    let result = around_bar(|| writeln!(anstream::stdout(), "{line}"));
+    let result = around_bar(|| anstream::stdout().write_all(text.as_bytes()));
     if let Err(err) = result
         && err.kind() == std::io::ErrorKind::BrokenPipe
     {

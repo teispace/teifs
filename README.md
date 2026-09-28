@@ -131,6 +131,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
+| `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
 
 ## S3 support today
