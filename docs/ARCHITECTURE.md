@@ -32,6 +32,9 @@ crates/meta     teifs-meta     SQLite: the object index (index.db) and the syste
 crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): data keys,
                                sealing, 64 KiB authenticated packages, SSE-C keys, the
                                KMS trait and the local keyring. aws-lc-rs only.
+crates/policy   teifs-policy   The IAM policy language: parsing, conditions, policy
+                               variables, the allow/deny decision, and which S3
+                               actions each S3 operation needs. Pure: no I/O.
 crates/store    teifs-store    The storage engine: opening a drive (and upgrading its
                                format), folder buckets (folder.rs) and object buckets
                                (objects.rs) behind one API, staging and committing
@@ -52,8 +55,28 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.
+`policy` depends on no other TeiFS crate.
 Library crates never depend on the command line, and nothing depends on a user
 interface, so the server can be embedded (Teitunnel will run it this way).
+
+### Policies
+
+`teifs-policy` reads IAM policies strictly: an unknown element, a repeated JSON key, a
+malformed action, ARN, principal or condition is refused when the policy is stored,
+never skipped when it's evaluated. `evaluate` decides one action on one resource from
+the principal's identity policies, the resource's policy, a permissions boundary and
+session policies, in AWS's order (`evaluate.rs` says it step by step). Conditions read
+only a typed `Context` the server fills in: condition keys are closed enums
+(`key.rs`), so no request header is ever looked up by a name a policy chose.
+`authorizations` (`actions.rs`) says which actions an S3 operation needs, on which
+resource, given the request's version id, tag, ACL and lock headers.
+
+The tests hold it to AWS's behaviour three ways: `tests/reference.rs` checks the action
+table and condition keys against AWS's machine-readable Service Authorization Reference
+(`tests/fixtures/s3-reference.json`); `tests/corpus.json` has 270 requests against
+policies from AWS's documentation and its known pitfalls, with the documented decision;
+`tests/properties.rs` checks laws such as "a Deny anywhere wins" and "a boundary only
+narrows" on thousands of random policies.
 
 ### The protocol layer: s3s
 

@@ -40,10 +40,19 @@ route declares its action, and the server refuses to start a route without one. 
 walks the table and proves anonymous and under-privileged callers are rejected.
 Profiling and debug endpoints are off by default and admin-only.
 
-### 3. Policies are evaluated by a pure, heavily tested engine (*planned*)
-Explicit deny wins over allow, and anything not allowed is denied. Condition keys come
-only from facts the server establishes, never from request headers by name. Every S3
-operation maps to the actions AWS documents for it, checked by a test.
+### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced with users and bucket policies*)
+`teifs-policy` has no I/O and decides in AWS's order: an explicit Deny in any policy
+wins, then the root user, then a resource policy naming the principal, then identity
+policies, which a permissions boundary and session policies can only narrow; anything
+not allowed is denied. Condition keys come only from a typed context the server fills
+in, never from request headers by name, and an unknown key is simply absent. The set
+operators follow AWS exactly, negations included (`ForAllValues:` holds when the key is
+absent: the known pitfall is kept, not "fixed"). Policies are refused, not half-read,
+when anything in them is invalid, and a JSON key given twice is refused. `NotPrincipal`
+goes only with Deny, and an account named in it spares only its root user. Every S3
+operation maps to the actions AWS documents for it (`…Version` actions for a version),
+checked against AWS's own reference by a test; a rename needs read and delete on the
+source as well as write on the target.
 
 ### 4. Credentials can't be escalated (*planned*)
 A key can only create keys with a subset of its own rights, never for another user; the

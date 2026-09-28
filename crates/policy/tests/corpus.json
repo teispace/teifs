@@ -1,0 +1,602 @@
+{
+  "about": "Expected decisions for policies from AWS's documentation and its known pitfalls. Each case is [principal, action, resource, expected] with an optional fifth element: context changes for that case. Principals: user names (alice, bob, admin; `alice@c-alice` adds a canonical id), `session` (role reader, session job), `root`, `anonymous`. Identity policies under `*` apply to every signed principal but root.",
+  "account": "123456789012",
+  "context": {"time": "2026-09-29T12:00:00Z", "secureTransport": true, "sourceIp": "192.0.2.10"},
+  "scenarios": [
+    {
+      "name": "home folders with aws:username (IAM user guide: home directory example)",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": [
+        {"Sid": "List", "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::home",
+         "Condition": {"StringLike": {"s3:prefix": ["", "${aws:username}/*"]}}},
+        {"Sid": "Own", "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+         "Resource": "arn:aws:s3:::home/${aws:username}/*"}]}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::home/alice/a.txt", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::home/alice/sub/b", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::home/alice/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::home/bob/a.txt", "ImplicitDeny"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::home/bob/a.txt", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::home/alice/a.txt", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::home/alice", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::home/alicex/a", "ImplicitDeny"],
+        ["alice", "s3:GetObjectVersion", "arn:aws:s3:::home/alice/a", "ImplicitDeny"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "Allow", {"s3": {"s3:prefix": "alice/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "Allow", {"s3": {"s3:prefix": "alice/docs/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "Allow", {"s3": {"s3:prefix": ""}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "ImplicitDeny", {"s3": {"s3:prefix": "bob/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "ImplicitDeny", {"s3": {"s3:prefix": "alice"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::home", "ImplicitDeny"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::other", "ImplicitDeny", {"s3": {"s3:prefix": "alice/"}}],
+        ["session", "s3:GetObject", "arn:aws:s3:::home/job/x", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::home/reader/x", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::home/alice/a.txt", "ImplicitDeny"],
+        ["root", "s3:GetObject", "arn:aws:s3:::home/bob/a.txt", "Allow"]
+      ]
+    },
+    {
+      "name": "deny requests without TLS (bucket policy)",
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Sid": "TlsOnly", "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+         "Resource": ["arn:aws:s3:::secure", "arn:aws:s3:::secure/*"],
+         "Condition": {"Bool": {"aws:SecureTransport": "false"}}},
+        {"Sid": "Read", "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::secure/*"}]},
+      "cases": [
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::secure/a", "Allow"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::secure/a", "ExplicitDeny", {"secureTransport": false}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::secure/a", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::secure/a", "ExplicitDeny", {"secureTransport": false}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::secure/a", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::secure/a", "ExplicitDeny", {"secureTransport": false}],
+        ["root", "s3:GetObject", "arn:aws:s3:::secure/a", "ExplicitDeny", {"secureTransport": false}],
+        ["root", "s3:PutObject", "arn:aws:s3:::secure/a", "Allow"],
+        ["anonymous", "s3:ListBucket", "arn:aws:s3:::secure", "ExplicitDeny", {"secureTransport": false}],
+        ["anonymous", "s3:ListBucket", "arn:aws:s3:::secure", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::secure/a/b", "Allow"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::other/a", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "allow only from listed networks (NotIpAddress deny)",
+      "identity": {"alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "resource": {"Version": "2012-10-17", "Statement": {
+        "Effect": "Deny", "Principal": "*", "Action": "s3:*", "Resource": "arn:aws:s3:::lab/*",
+        "Condition": {"NotIpAddress": {"aws:SourceIp": ["192.0.2.0/24", "2001:db8::/32"]}}}},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "ExplicitDeny", {"sourceIp": "198.51.100.1"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "Allow", {"sourceIp": "2001:db8::5"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "Allow", {"sourceIp": "::ffff:192.0.2.77"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "ExplicitDeny", {"sourceIp": "::ffff:198.51.100.1"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "ExplicitDeny", {"sourceIp": "2001:db9::1"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::lab/x", "ExplicitDeny", {"sourceIp": null}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::lab", "Allow", {"sourceIp": "198.51.100.1"}],
+        ["root", "s3:GetObject", "arn:aws:s3:::lab/x", "ExplicitDeny", {"sourceIp": "198.51.100.1"}],
+        ["root", "s3:GetObject", "arn:aws:s3:::lab/x", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::lab/x", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "public read for a website bucket",
+      "resource": {"Version": "2012-10-17", "Statement": {
+        "Sid": "PublicRead", "Effect": "Allow", "Principal": {"AWS": "*"}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::site/*"}},
+      "cases": [
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::site/index.html", "Allow"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::site/a/b/c.css", "Allow"],
+        ["anonymous", "s3:GetObjectVersion", "arn:aws:s3:::site/index.html", "ImplicitDeny"],
+        ["anonymous", "s3:ListBucket", "arn:aws:s3:::site", "ImplicitDeny"],
+        ["anonymous", "s3:PutObject", "arn:aws:s3:::site/x", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::site", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::sitex/a", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::site/index.html", "Allow"],
+        ["session", "s3:GetObject", "arn:aws:s3:::site/index.html", "Allow"],
+        ["root", "s3:GetObject", "arn:aws:s3:::site/index.html", "Allow"]
+      ]
+    },
+    {
+      "name": "a bucket policy naming a user grants alone; naming the account needs the user's own policy",
+      "identity": {"bob": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::shared/*"}}]},
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:user/alice"}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::shared/*"},
+        {"Effect": "Allow", "Principal": {"AWS": "123456789012"}, "Action": ["s3:PutObject", "s3:DeleteObject"], "Resource": "arn:aws:s3:::shared/*"},
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::shared"}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::shared/a", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::shared/a", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::shared/a", "ImplicitDeny"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::shared/a", "Allow"],
+        ["bob", "s3:DeleteObject", "arn:aws:s3:::shared/a", "ImplicitDeny"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::shared", "ImplicitDeny"],
+        ["root", "s3:ListBucket", "arn:aws:s3:::shared", "Allow"],
+        ["session", "s3:PutObject", "arn:aws:s3:::shared/a", "ImplicitDeny"],
+        ["anonymous", "s3:PutObject", "arn:aws:s3:::shared/a", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::shared/a", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "a permissions boundary limits identity policies and bucket policies for everyone, not those naming the user",
+      "identity": {"alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "boundary": {"alice": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"], "Resource": "*"},
+        {"Effect": "Deny", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/secret/*"}]}},
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:user/alice"}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/drop/*"},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:DeleteObject", "Resource": "arn:aws:s3:::b/tmp/*"}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/secret/x", "ExplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/drop/x", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/tmp/x", "ImplicitDeny"],
+        ["bob", "s3:DeleteObject", "arn:aws:s3:::b/tmp/x", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::b/secret/x", "ImplicitDeny"],
+        ["anonymous", "s3:DeleteObject", "arn:aws:s3:::b/tmp/x", "Allow"]
+      ]
+    },
+    {
+      "name": "session policies limit a role session; a bucket policy naming the session itself doesn't need them",
+      "identity": {"session": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "sessionPolicies": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"}},
+                          {"Version": "2012-10-17", "Statement": [
+                            {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::b"},
+                            {"Effect": "Deny", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/private/*"}]}],
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:role/reader"}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/in/*"},
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:sts::123456789012:assumed-role/reader/job"}, "Action": "s3:DeleteObject", "Resource": "arn:aws:s3:::b/del/*"}]},
+      "cases": [
+        ["session", "s3:GetObject", "arn:aws:s3:::b/x", "Allow"],
+        ["session", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["session", "s3:GetObject", "arn:aws:s3:::c/x", "ImplicitDeny"],
+        ["session", "s3:PutObject", "arn:aws:s3:::b/x", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/private/x", "ExplicitDeny"],
+        ["session", "s3:PutObject", "arn:aws:s3:::b/in/x", "ImplicitDeny"],
+        ["session", "s3:DeleteObject", "arn:aws:s3:::b/del/x", "Allow"],
+        ["session", "s3:DeleteObject", "arn:aws:s3:::b/x", "ImplicitDeny"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/del/x", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/in/x", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "an empty list of session policies allows nothing but what names the session",
+      "identity": {"session": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "sessionPolicies": [],
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:sts::123456789012:assumed-role/reader/job"}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/named/*"},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/public/*"}]},
+      "cases": [
+        ["session", "s3:GetObject", "arn:aws:s3:::b/x", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/named/x", "Allow"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/public/x", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::b/public/x", "Allow"]
+      ]
+    },
+    {
+      "name": "session policies and a boundary must both allow",
+      "identity": {"session": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "boundary": {"session": {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": "*"}}},
+      "sessionPolicies": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": ["s3:GetObject", "s3:DeleteObject"], "Resource": "*"}}],
+      "cases": [
+        ["session", "s3:GetObject", "arn:aws:s3:::b/x", "Allow"],
+        ["session", "s3:PutObject", "arn:aws:s3:::b/x", "ImplicitDeny"],
+        ["session", "s3:DeleteObject", "arn:aws:s3:::b/x", "ImplicitDeny"],
+        ["session", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "NotAction allows all but some; NotResource denies all but some",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "NotAction": ["s3:DeleteObject", "s3:DeleteObjectVersion"], "Resource": "*"}}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:*", "NotResource": ["arn:aws:s3:::mine", "arn:aws:s3:::mine/*"]}]}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:DeleteObjectVersion", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:DeleteObjectTagging", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:ListAllMyBuckets", "arn:aws:s3:::", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::mine/a", "Allow"],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::mine", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::other/a", "ExplicitDeny"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::mine2/a", "ExplicitDeny"],
+        ["bob", "s3:ListAllMyBuckets", "arn:aws:s3:::", "ExplicitDeny"]
+      ]
+    },
+    {
+      "name": "Deny with NotPrincipal spares only whom it names (an account spares only its root user)",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}]},
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Deny", "NotPrincipal": {"AWS": "arn:aws:iam::123456789012:user/admin"}, "Action": "s3:DeleteObject", "Resource": "arn:aws:s3:::vault/*"},
+        {"Effect": "Deny", "NotPrincipal": {"AWS": "123456789012"}, "Action": "s3:DeleteObject", "Resource": "arn:aws:s3:::vault2/*"},
+        {"Effect": "Deny", "NotPrincipal": {"AWS": "arn:aws:iam::123456789012:role/reader"}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::vault3/*"}]},
+      "cases": [
+        ["admin", "s3:DeleteObject", "arn:aws:s3:::vault/x", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::vault/x", "ExplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::vault/x", "Allow"],
+        ["root", "s3:DeleteObject", "arn:aws:s3:::vault/x", "ExplicitDeny"],
+        ["session", "s3:DeleteObject", "arn:aws:s3:::vault/x", "ExplicitDeny"],
+        ["anonymous", "s3:DeleteObject", "arn:aws:s3:::vault/x", "ExplicitDeny"],
+        ["root", "s3:DeleteObject", "arn:aws:s3:::vault2/x", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::vault2/x", "ExplicitDeny"],
+        ["session", "s3:PutObject", "arn:aws:s3:::vault3/x", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::vault3/x", "ExplicitDeny"]
+      ]
+    },
+    {
+      "name": "attribute-based access: object tags must match the principal's",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*",
+        "Condition": {"StringEquals": {"s3:ExistingObjectTag/team": "${aws:PrincipalTag/team}"}}}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["aws:PrincipalTag", "team", "blue"], ["s3:ExistingObjectTag", "team", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "blue"], ["s3:ExistingObjectTag", "team", "red"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["aws:PrincipalTag", "Team", "blue"], ["s3:ExistingObjectTag", "TEAM", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "blue"], ["s3:ExistingObjectTag", "team", "Blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["s3:ExistingObjectTag", "team", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "blue"], ["aws:ResourceTag", "team", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", ""], ["s3:ExistingObjectTag", "team", "blue"]]}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["aws:PrincipalTag", "team", ""], ["s3:ExistingObjectTag", "team", ""]]}]
+      ]
+    },
+    {
+      "name": "tags on upload: allowed keys (ForAllValues) and allowed values",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "*",
+          "Condition": {"ForAllValues:StringEquals": {"s3:RequestObjectTagKeys": ["team", "cost"]},
+                        "StringEquals": {"s3:RequestObjectTag/team": ["blue", "red"]}}}}],
+        "bob": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "*",
+          "Condition": {"ForAllValues:StringEquals": {"s3:RequestObjectTagKeys": ["team", "cost"]}}}}]},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "blue"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "red"], ["s3:RequestObjectTag", "cost", "7"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["s3:RequestObjectTag", "team", "blue"], ["s3:RequestObjectTag", "owner", "x"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["s3:RequestObjectTag", "team", "green"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "cost", "1"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"tags": [["s3:RequestObjectTag", "owner", "1"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"]
+      ]
+    },
+    {
+      "name": "deny protected tag keys with ForAnyValue on aws:TagKeys",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+        {"Effect": "Deny", "Action": "s3:PutBucketTagging", "Resource": "*",
+         "Condition": {"ForAnyValue:StringEquals": {"aws:TagKeys": ["protected", "owner"]}}}]}]},
+      "cases": [
+        ["alice", "s3:PutBucketTagging", "arn:aws:s3:::b", "ExplicitDeny", {"tags": [["aws:RequestTag", "protected", "1"]]}],
+        ["alice", "s3:PutBucketTagging", "arn:aws:s3:::b", "ExplicitDeny", {"tags": [["aws:RequestTag", "x", "1"], ["aws:RequestTag", "owner", "me"]]}],
+        ["alice", "s3:PutBucketTagging", "arn:aws:s3:::b", "Allow", {"tags": [["aws:RequestTag", "x", "1"]]}],
+        ["alice", "s3:PutBucketTagging", "arn:aws:s3:::b", "Allow"],
+        ["alice", "s3:GetBucketTagging", "arn:aws:s3:::b", "Allow", {"tags": [["aws:RequestTag", "protected", "1"]]}]
+      ]
+    },
+    {
+      "name": "set operators with negated operators (the transposition RustFS had)",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*",
+           "Condition": {"ForAnyValue:StringNotEquals": {"s3:RequestObjectTagKeys": ["team", "cost"]}}}]}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*",
+           "Condition": {"ForAllValues:StringNotEquals": {"s3:RequestObjectTagKeys": ["team"]}}}]}]},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "a"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "a"], ["s3:RequestObjectTag", "cost", "1"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny", {"tags": [["s3:RequestObjectTag", "team", "a"], ["s3:RequestObjectTag", "owner", "x"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny", {"tags": [["s3:RequestObjectTag", "owner", "x"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "a"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"tags": [["s3:RequestObjectTag", "team", "a"], ["s3:RequestObjectTag", "x", "1"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny", {"tags": [["s3:RequestObjectTag", "owner", "x"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"]
+      ]
+    },
+    {
+      "name": "a time window (DateGreaterThan and DateLessThan are strict)",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*",
+         "Condition": {"DateGreaterThan": {"aws:CurrentTime": "2026-01-01T00:00:00Z"}, "DateLessThan": {"aws:CurrentTime": "2027-01-01T00:00:00Z"}}},
+        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "*", "Condition": {"NumericLessThan": {"aws:EpochTime": 1800000000}}},
+        {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "*", "Condition": {"DateLessThanEquals": {"aws:EpochTime": "2026-09-29T12:00:00Z"}}}]}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow", {"time": "2026-01-01T00:00:01Z"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"time": "2026-01-01T00:00:00Z"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"time": "2025-12-31T23:59:59Z"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"time": "2027-01-01T00:00:00Z"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow", {"time": "2026-12-31T23:59:59.999Z"}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"time": "2027-06-01T00:00:00Z"}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny", {"time": "2026-09-29T12:00:01Z"}]
+      ]
+    },
+    {
+      "name": "numbers: s3:max-keys, with and without IfExists",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::b",
+          "Condition": {"NumericLessThanEquals": {"s3:max-keys": "100"}}}}],
+        "bob": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::b",
+          "Condition": {"NumericLessThanEqualsIfExists": {"s3:max-keys": 100}}}}]},
+      "cases": [
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:max-keys": 100}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:max-keys": 1}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:max-keys": 101}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:max-keys": "100"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:max-keys": "lots"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny"],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:max-keys": 99}}],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:max-keys": 1000}}]
+      ]
+    },
+    {
+      "name": "BoolIfExists on MFA denies long-term keys; Bool alone doesn't",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:DeleteObject", "Resource": "*", "Condition": {"BoolIfExists": {"aws:MultiFactorAuthPresent": "false"}}}]}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:DeleteObject", "Resource": "*", "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "false"}}}]}]},
+      "cases": [
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:DeleteObject", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"]
+      ]
+    },
+    {
+      "name": "require encryption on upload: StringNotEquals and Null on a missing header",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"StringNotEquals": {"s3:x-amz-server-side-encryption": "AES256"}}}]}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"Null": {"s3:x-amz-server-side-encryption": "true"}}}]}],
+        "admin": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"StringNotEqualsIfExists": {"s3:x-amz-server-side-encryption": "AES256"}}}]}]},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"s3": {"s3:x-amz-server-side-encryption": "AES256"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny", {"s3": {"s3:x-amz-server-side-encryption": "aws:kms"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"s3": {"s3:x-amz-server-side-encryption": "aws:kms"}}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["admin", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny", {"s3": {"s3:x-amz-server-side-encryption": "aws:kms"}}],
+        ["admin", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["admin", "s3:PutObject", "arn:aws:s3:::b/k", "Allow", {"s3": {"s3:x-amz-server-side-encryption": "AES256"}}]
+      ]
+    },
+    {
+      "name": "a negated ARN operator on a missing key holds, even with IfExists",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"ArnNotLike": {"aws:SourceArn": "arn:aws:s3:::*"}}}]}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"ArnNotLikeIfExists": {"aws:SourceArn": "arn:aws:s3:::*"}}}]}],
+        "admin": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:*", "Resource": "*"},
+          {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"ArnNotLike": {"aws:SourceArn": "arn:aws:s3:::*"}, "Null": {"aws:SourceArn": "false"}}}]}]},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["admin", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"]
+      ]
+    },
+    {
+      "name": "policy variables are literal text before version 2012-10-17",
+      "identity": {"alice": [{"Version": "2008-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/${aws:username}/*"}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/alice/x", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/${aws:username}/x", "Allow"]
+      ]
+    },
+    {
+      "name": "escapes and defaults in variables",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/${*}/x"},
+        {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::teams/${aws:PrincipalTag/team, 'shared'}/*"},
+        {"Effect": "Allow", "Action": "s3:DeleteObject", "Resource": "arn:aws:s3:::q/what${?}"}]}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/*/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/a/x", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::teams/shared/x", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::teams/blue/x", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::teams/blue/x", "Allow", {"tags": [["aws:PrincipalTag", "team", "blue"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::teams/shared/x", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "blue"]]}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::teams/blue/x", "ImplicitDeny", {"tags": [["aws:PrincipalTag", "team", "b*"]]}],
+        ["bob", "s3:PutObject", "arn:aws:s3:::teams/b*/x", "Allow", {"tags": [["aws:PrincipalTag", "team", "b*"]]}],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::q/what?", "Allow"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::q/whatx", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "versions are separate permissions",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": ["s3:GetObject", "s3:DeleteObject", "s3:GetObjectTagging"], "Resource": "arn:aws:s3:::b/*"}}],
+        "bob": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": ["s3:GetObject*", "s3:Delete*"], "Resource": "arn:aws:s3:::b/*"}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:GetObjectVersion", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:DeleteObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:DeleteObjectVersion", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice", "s3:GetObjectTagging", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:GetObjectVersionTagging", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["bob", "s3:GetObjectVersion", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:GetObjectVersionTagging", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:DeleteObjectVersion", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "action names compare without case and take wildcards",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": ["s3:get*", "S3:LIST*"], "Resource": "*"}}],
+        "bob": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:?utObject", "Resource": "*"}}],
+        "admin": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:GetObjectTagging", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["alice", "s3:ListAllMyBuckets", "arn:aws:s3:::", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"],
+        ["bob", "s3:PutObjectTagging", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["admin", "s3:DeleteBucket", "arn:aws:s3:::b", "Allow"],
+        ["admin", "s3:ListAllMyBuckets", "arn:aws:s3:::", "Allow"]
+      ]
+    },
+    {
+      "name": "resource wildcards stay within the ARN's parts",
+      "identity": {
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::logs-20??/*.jpg"}}],
+        "bob": [{"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "arn:aws:s3:::*"},
+          {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::b"}]}],
+        "admin": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "arn:aws:s3:::b"}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-2026/a.jpg", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-2026/a/b.jpg", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-202/a.jpg", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-20266/a.jpg", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-2026/a.png", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::logs-2026/a.JPG", "ImplicitDeny"],
+        ["bob", "s3:ListAllMyBuckets", "arn:aws:s3:::", "Allow"],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::b", "Allow"],
+        ["bob", "s3:ListBucket", "arn:aws:s3:::b/", "ImplicitDeny"],
+        ["admin", "s3:ListAllMyBuckets", "arn:aws:s3:::", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "a Deny in any identity policy wins over an Allow in another",
+      "identity": {"alice": [
+        {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}},
+        {"Version": "2012-10-17", "Statement": {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/*"}},
+        {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/*"}}]},
+      "resource": {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:user/alice"}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/*"}},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::b/k", "ExplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::c/k", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["root", "s3:PutObject", "arn:aws:s3:::b/k", "Allow"]
+      ]
+    },
+    {
+      "name": "bucket policies conditioned on who asks",
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/acct/*",
+         "Condition": {"StringEquals": {"aws:PrincipalAccount": "123456789012"}}},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/role/*",
+         "Condition": {"ArnLike": {"aws:PrincipalArn": "arn:aws:iam::123456789012:role/read*"}}},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/ids/*",
+         "Condition": {"StringLike": {"aws:userid": "AROAREADER:*"}}},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/users/*",
+         "Condition": {"StringEquals": {"aws:PrincipalType": "User"}}},
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/anon/*",
+         "Condition": {"StringEquals": {"aws:userid": "anonymous"}}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/acct/x", "Allow"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/acct/x", "Allow"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::b/acct/x", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/role/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/role/x", "ImplicitDeny"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/ids/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/ids/x", "ImplicitDeny"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/users/x", "Allow"],
+        ["session", "s3:GetObject", "arn:aws:s3:::b/users/x", "ImplicitDeny"],
+        ["anonymous", "s3:GetObject", "arn:aws:s3:::b/anon/x", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/anon/x", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "canonical user and service principals",
+      "resource": {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"CanonicalUser": "c-alice"}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"},
+        {"Effect": "Allow", "Principal": {"Service": "logging.s3.amazonaws.com"}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::b/*"}]},
+      "cases": [
+        ["alice@c-alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["bob@c-bob", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["alice@c-alice", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["anonymous", "s3:PutObject", "arn:aws:s3:::b/k", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "string operators on request headers",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::ci/*",
+         "Condition": {"StringEqualsIgnoreCase": {"s3:x-amz-storage-class": ["standard", "standard_ia"]}}},
+        {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::acl/*",
+         "Condition": {"StringEquals": {"s3:x-amz-acl": ["private", "bucket-owner-full-control"]}}},
+        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::ua/*",
+         "Condition": {"StringLike": {"aws:UserAgent": "*aws-cli/2.*"}, "StringNotLike": {"aws:referer": "*evil*"}}},
+        {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::copy/*",
+         "Condition": {"StringLike": {"s3:x-amz-copy-source": "src/public/*"}}}]}]},
+      "cases": [
+        ["alice", "s3:PutObject", "arn:aws:s3:::ci/k", "Allow", {"s3": {"s3:x-amz-storage-class": "STANDARD"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::ci/k", "Allow", {"s3": {"s3:x-amz-storage-class": "Standard_IA"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::ci/k", "ImplicitDeny", {"s3": {"s3:x-amz-storage-class": "GLACIER"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::ci/k", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::acl/k", "Allow", {"s3": {"s3:x-amz-acl": "private"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::acl/k", "ImplicitDeny", {"s3": {"s3:x-amz-acl": "public-read"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::acl/k", "ImplicitDeny", {"s3": {"s3:x-amz-acl": "Private"}}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::ua/k", "Allow", {"userAgent": "aws-cli/2.15.0 Python/3.11"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::ua/k", "ImplicitDeny", {"userAgent": "aws-cli/1.29 Python/3.11"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::ua/k", "ImplicitDeny", {"userAgent": "aws-cli/2.15.0", "referer": "https://evil.example"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::ua/k", "Allow", {"userAgent": "aws-cli/2.15.0", "referer": "https://good.example"}],
+        ["alice", "s3:GetObject", "arn:aws:s3:::ua/k", "ImplicitDeny"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::copy/k", "Allow", {"s3": {"s3:x-amz-copy-source": "src/public/a.txt"}}],
+        ["alice", "s3:PutObject", "arn:aws:s3:::copy/k", "ImplicitDeny", {"s3": {"s3:x-amz-copy-source": "src/private/a.txt"}}]
+      ]
+    },
+    {
+      "name": "several keys and operators all hold; several values are alternatives",
+      "identity": {"*": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::b",
+        "Condition": {"StringEquals": {"s3:prefix": ["a/", "b/"], "s3:delimiter": "/"},
+                      "IpAddress": {"aws:SourceIp": ["192.0.2.0/24", "198.51.100.0/24"]},
+                      "Bool": {"aws:SecureTransport": "true"}}}}]},
+      "cases": [
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:prefix": "a/", "s3:delimiter": "/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "Allow", {"s3": {"s3:prefix": "b/", "s3:delimiter": "/"}, "sourceIp": "198.51.100.3"}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:prefix": "c/", "s3:delimiter": "/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:prefix": "a/"}}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:prefix": "a/", "s3:delimiter": "/"}, "sourceIp": "203.0.113.1"}],
+        ["alice", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny", {"s3": {"s3:prefix": "a/", "s3:delimiter": "/"}, "secureTransport": false}]
+      ]
+    },
+    {
+      "name": "one of several identity policies allowing is enough",
+      "identity": {"*": [
+        {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::a/*"}},
+        {"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"}}],
+        "alice": [{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::a/*"}}]},
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::a/k", "Allow"],
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "Allow"],
+        ["alice", "s3:PutObject", "arn:aws:s3:::a/k", "Allow"],
+        ["bob", "s3:PutObject", "arn:aws:s3:::a/k", "ImplicitDeny"],
+        ["bob", "s3:GetObject", "arn:aws:s3:::c/k", "ImplicitDeny"]
+      ]
+    },
+    {
+      "name": "nothing allows: implicit deny for everyone but root",
+      "cases": [
+        ["alice", "s3:GetObject", "arn:aws:s3:::b/k", "ImplicitDeny"],
+        ["session", "s3:ListBucket", "arn:aws:s3:::b", "ImplicitDeny"],
+        ["anonymous", "s3:ListAllMyBuckets", "arn:aws:s3:::", "ImplicitDeny"],
+        ["root", "s3:DeleteBucket", "arn:aws:s3:::b", "Allow"],
+        ["root", "s3:PutBucketPolicy", "arn:aws:s3:::b", "Allow"]
+      ]
+    }
+  ]
+}

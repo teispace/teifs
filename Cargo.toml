@@ -19,6 +19,7 @@ teifs-crypto = { path = "crates/crypto" }
 teifs-store = { path = "crates/store" }
 teifs-s3 = { path = "crates/s3" }
 teifs-server = { path = "crates/server" }
+teifs-policy = { path = "crates/policy" }
 
 s3s = "0.17"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal", "sync", "time", "net"] }

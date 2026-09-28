@@ -2804,6 +2804,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "teifs-policy"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "teifs-s3"
 version = "0.1.0"
 dependencies = [

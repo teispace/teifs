@@ -1,0 +1,1000 @@
+{
+"actions": {
+"AbortMultipartUpload": [
+"accesspointobject",
+"object"
+],
+"AllowVendedLogDeliveryForResource": [
+"bucket"
+],
+"AssociateAccessGrantsIdentityCenter": [
+"accessgrantsinstance"
+],
+"BypassGovernanceRetention": [
+"accesspointobject",
+"object"
+],
+"CreateAccessGrant": [
+"accessgrant"
+],
+"CreateAccessGrantsInstance": [
+"accessgrantsinstance"
+],
+"CreateAccessGrantsLocation": [
+"accessgrantslocation"
+],
+"CreateAccessPoint": [
+"accesspoint"
+],
+"CreateAccessPointForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"CreateBucket": [
+"bucket"
+],
+"CreateBucketMetadataTableConfiguration": [
+"bucket"
+],
+"CreateJob": [],
+"CreateMultiRegionAccessPoint": [
+"multiregionaccesspoint"
+],
+"CreateStorageLensGroup": [],
+"DeleteAccessGrant": [
+"accessgrant"
+],
+"DeleteAccessGrantsInstance": [
+"accessgrantsinstance"
+],
+"DeleteAccessGrantsInstanceResourcePolicy": [
+"accessgrantsinstance"
+],
+"DeleteAccessGrantsLocation": [
+"accessgrantslocation"
+],
+"DeleteAccessPoint": [
+"accesspoint"
+],
+"DeleteAccessPointForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"DeleteAccessPointPolicy": [
+"accesspoint"
+],
+"DeleteAccessPointPolicyForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"DeleteBucket": [
+"bucket"
+],
+"DeleteBucketMetadataTableConfiguration": [
+"bucket"
+],
+"DeleteBucketPolicy": [
+"bucket"
+],
+"DeleteBucketWebsite": [
+"bucket"
+],
+"DeleteJobTagging": [
+"job"
+],
+"DeleteMultiRegionAccessPoint": [
+"multiregionaccesspoint"
+],
+"DeleteObject": [
+"accesspointobject",
+"object"
+],
+"DeleteObjectAnnotation": [
+"accesspointobject",
+"object"
+],
+"DeleteObjectTagging": [
+"accesspointobject",
+"object"
+],
+"DeleteObjectVersion": [
+"accesspointobject",
+"object"
+],
+"DeleteObjectVersionAnnotation": [
+"accesspointobject",
+"object"
+],
+"DeleteObjectVersionTagging": [
+"accesspointobject",
+"object"
+],
+"DeleteStorageLensConfiguration": [
+"storagelensconfiguration"
+],
+"DeleteStorageLensConfigurationTagging": [
+"storagelensconfiguration"
+],
+"DeleteStorageLensGroup": [
+"storagelensgroup"
+],
+"DescribeJob": [
+"job"
+],
+"DescribeMultiRegionAccessPointOperation": [
+"multiregionaccesspointrequestarn"
+],
+"DissociateAccessGrantsIdentityCenter": [
+"accessgrantsinstance"
+],
+"GetAccelerateConfiguration": [
+"bucket"
+],
+"GetAccessGrant": [
+"accessgrant"
+],
+"GetAccessGrantsInstance": [
+"accessgrantsinstance"
+],
+"GetAccessGrantsInstanceForPrefix": [
+"accessgrantsinstance"
+],
+"GetAccessGrantsInstanceResourcePolicy": [
+"accessgrantsinstance"
+],
+"GetAccessGrantsLocation": [
+"accessgrantslocation"
+],
+"GetAccessPoint": [],
+"GetAccessPointConfigurationForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"GetAccessPointForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"GetAccessPointPolicy": [
+"accesspoint"
+],
+"GetAccessPointPolicyForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"GetAccessPointPolicyStatus": [
+"accesspoint"
+],
+"GetAccessPointPolicyStatusForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"GetAccountPublicAccessBlock": [],
+"GetAnalyticsConfiguration": [
+"bucket"
+],
+"GetBucketAbac": [
+"bucket"
+],
+"GetBucketAcl": [
+"accesspoint",
+"bucket"
+],
+"GetBucketCORS": [
+"accesspoint",
+"bucket"
+],
+"GetBucketLocation": [
+"accesspoint",
+"bucket"
+],
+"GetBucketLogging": [
+"bucket"
+],
+"GetBucketMetadataTableConfiguration": [
+"bucket"
+],
+"GetBucketNotification": [
+"accesspoint",
+"bucket"
+],
+"GetBucketObjectLockConfiguration": [
+"bucket"
+],
+"GetBucketOwnershipControls": [
+"bucket"
+],
+"GetBucketPolicy": [
+"accesspoint",
+"bucket"
+],
+"GetBucketPolicyStatus": [
+"bucket"
+],
+"GetBucketPublicAccessBlock": [
+"bucket"
+],
+"GetBucketRequestPayment": [
+"bucket"
+],
+"GetBucketTagging": [
+"bucket"
+],
+"GetBucketVersioning": [
+"bucket"
+],
+"GetBucketWebsite": [
+"bucket"
+],
+"GetDataAccess": [
+"accessgrantsinstance"
+],
+"GetEncryptionConfiguration": [
+"bucket"
+],
+"GetIntelligentTieringConfiguration": [
+"bucket"
+],
+"GetInventoryConfiguration": [
+"bucket"
+],
+"GetJobTagging": [
+"job"
+],
+"GetLifecycleConfiguration": [
+"bucket"
+],
+"GetMetricsConfiguration": [
+"bucket"
+],
+"GetMultiRegionAccessPoint": [
+"multiregionaccesspoint"
+],
+"GetMultiRegionAccessPointPolicy": [
+"multiregionaccesspoint"
+],
+"GetMultiRegionAccessPointPolicyStatus": [
+"multiregionaccesspoint"
+],
+"GetMultiRegionAccessPointRoutes": [
+"multiregionaccesspoint"
+],
+"GetObject": [
+"accesspointobject",
+"object"
+],
+"GetObjectAcl": [
+"accesspointobject",
+"object"
+],
+"GetObjectAnnotation": [
+"accesspointobject",
+"object"
+],
+"GetObjectAttributes": [
+"accesspointobject",
+"object"
+],
+"GetObjectLegalHold": [
+"accesspointobject",
+"object"
+],
+"GetObjectRetention": [
+"accesspointobject",
+"object"
+],
+"GetObjectTagging": [
+"accesspointobject",
+"object"
+],
+"GetObjectTorrent": [
+"object"
+],
+"GetObjectVersion": [
+"accesspointobject",
+"object"
+],
+"GetObjectVersionAcl": [
+"accesspointobject",
+"object"
+],
+"GetObjectVersionAnnotation": [
+"accesspointobject",
+"object"
+],
+"GetObjectVersionAnnotationForReplication": [
+"object"
+],
+"GetObjectVersionAttributes": [
+"accesspointobject",
+"object"
+],
+"GetObjectVersionForReplication": [
+"object"
+],
+"GetObjectVersionTagging": [
+"accesspointobject",
+"object"
+],
+"GetObjectVersionTorrent": [
+"object"
+],
+"GetReplicationConfiguration": [
+"bucket"
+],
+"GetStorageLensConfiguration": [
+"storagelensconfiguration"
+],
+"GetStorageLensConfigurationTagging": [
+"storagelensconfiguration"
+],
+"GetStorageLensDashboard": [
+"storagelensconfiguration"
+],
+"GetStorageLensGroup": [
+"storagelensgroup"
+],
+"InitiateReplication": [
+"object"
+],
+"ListAccessGrants": [
+"accessgrantsinstance"
+],
+"ListAccessGrantsInstances": [],
+"ListAccessGrantsLocations": [
+"accessgrantsinstance"
+],
+"ListAccessPoints": [],
+"ListAccessPointsForObjectLambda": [],
+"ListAllMyBuckets": [],
+"ListBucket": [
+"accesspoint",
+"bucket"
+],
+"ListBucketMultipartUploads": [
+"bucket"
+],
+"ListBucketVersions": [
+"accesspoint",
+"bucket"
+],
+"ListCallerAccessGrants": [
+"accessgrantsinstance"
+],
+"ListJobs": [],
+"ListMultiRegionAccessPoints": [],
+"ListMultipartUploadParts": [
+"accesspointobject",
+"object"
+],
+"ListObjectAnnotations": [
+"accesspointobject",
+"object"
+],
+"ListObjectVersionAnnotations": [
+"accesspointobject",
+"object"
+],
+"ListStorageLensConfigurations": [],
+"ListStorageLensGroups": [],
+"ListTagsForResource": [
+"accessgrant",
+"accessgrantsinstance",
+"accessgrantslocation",
+"accesspoint",
+"bucket",
+"storagelensgroup"
+],
+"ObjectOwnerOverrideToBucketOwner": [
+"object"
+],
+"PauseReplication": [
+"bucket"
+],
+"PutAccelerateConfiguration": [
+"bucket"
+],
+"PutAccessGrantsInstanceResourcePolicy": [
+"accessgrantsinstance"
+],
+"PutAccessPointConfigurationForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"PutAccessPointPolicy": [
+"accesspoint"
+],
+"PutAccessPointPolicyForObjectLambda": [
+"objectlambdaaccesspoint"
+],
+"PutAccessPointPublicAccessBlock": [],
+"PutAccountPublicAccessBlock": [],
+"PutAnalyticsConfiguration": [
+"bucket"
+],
+"PutBucketAbac": [
+"bucket"
+],
+"PutBucketAcl": [
+"bucket"
+],
+"PutBucketCORS": [
+"bucket"
+],
+"PutBucketLogging": [
+"bucket"
+],
+"PutBucketNotification": [
+"bucket"
+],
+"PutBucketObjectLockConfiguration": [
+"bucket"
+],
+"PutBucketOwnershipControls": [
+"bucket"
+],
+"PutBucketPolicy": [
+"bucket"
+],
+"PutBucketPublicAccessBlock": [
+"bucket"
+],
+"PutBucketRequestPayment": [
+"bucket"
+],
+"PutBucketTagging": [
+"bucket"
+],
+"PutBucketVersioning": [
+"bucket"
+],
+"PutBucketWebsite": [
+"bucket"
+],
+"PutEncryptionConfiguration": [
+"bucket"
+],
+"PutIntelligentTieringConfiguration": [
+"bucket"
+],
+"PutInventoryConfiguration": [
+"bucket"
+],
+"PutJobTagging": [
+"job"
+],
+"PutLifecycleConfiguration": [
+"bucket"
+],
+"PutMetricsConfiguration": [
+"bucket"
+],
+"PutMultiRegionAccessPointPolicy": [
+"multiregionaccesspoint"
+],
+"PutObject": [
+"accesspointobject",
+"object"
+],
+"PutObjectAcl": [
+"accesspointobject",
+"object"
+],
+"PutObjectAnnotation": [
+"accesspointobject",
+"object"
+],
+"PutObjectLegalHold": [
+"accesspointobject",
+"object"
+],
+"PutObjectRetention": [
+"accesspointobject",
+"object"
+],
+"PutObjectTagging": [
+"accesspointobject",
+"object"
+],
+"PutObjectVersionAcl": [
+"accesspointobject",
+"object"
+],
+"PutObjectVersionAnnotation": [
+"accesspointobject",
+"object"
+],
+"PutObjectVersionTagging": [
+"accesspointobject",
+"object"
+],
+"PutReplicationConfiguration": [
+"bucket"
+],
+"PutStorageLensConfiguration": [],
+"PutStorageLensConfigurationTagging": [
+"storagelensconfiguration"
+],
+"ReplicateDelete": [
+"object"
+],
+"ReplicateObject": [
+"object"
+],
+"ReplicateObjectAnnotation": [
+"object"
+],
+"ReplicateTags": [
+"object"
+],
+"RestoreObject": [
+"accesspointobject",
+"object"
+],
+"SubmitMultiRegionAccessPointRoutes": [
+"multiregionaccesspoint"
+],
+"TagResource": [
+"accessgrant",
+"accessgrantsinstance",
+"accessgrantslocation",
+"accesspoint",
+"bucket",
+"storagelensgroup"
+],
+"UntagResource": [
+"accessgrant",
+"accessgrantsinstance",
+"accessgrantslocation",
+"accesspoint",
+"bucket",
+"storagelensgroup"
+],
+"UpdateAccessGrantsLocation": [
+"accessgrantslocation"
+],
+"UpdateBucketMetadataAnnotationTableConfiguration": [
+"bucket"
+],
+"UpdateBucketMetadataInventoryTableConfiguration": [
+"bucket"
+],
+"UpdateBucketMetadataJournalTableConfiguration": [
+"bucket"
+],
+"UpdateJobPriority": [
+"job"
+],
+"UpdateJobStatus": [
+"job"
+],
+"UpdateObjectEncryption": [
+"accesspointobject",
+"object"
+],
+"UpdateStorageLensGroup": [
+"storagelensgroup"
+]
+},
+"conditionKeys": {
+"aws:RequestTag/${TagKey}": "String",
+"aws:ResourceTag/${TagKey}": "String",
+"aws:TagKeys": "ArrayOfString",
+"s3:AccessGrantScope": "String",
+"s3:AccessGrantsInstanceArn": "ARN",
+"s3:AccessGrantsLocationScope": "String",
+"s3:AccessPointNetworkOrigin": "String",
+"s3:AccessPointTag/${TagKey}": "String",
+"s3:BucketTag/${TagKey}": "String",
+"s3:DataAccessPointAccount": "String",
+"s3:DataAccessPointArn": "ARN",
+"s3:ExistingJobOperation": "String",
+"s3:ExistingJobPriority": "Numeric",
+"s3:ExistingObjectTag/<key>": "String",
+"s3:InventoryAccessibleOptionalFields": "ArrayOfString",
+"s3:JobSuspendedCause": "String",
+"s3:ObjectCreationOperation": "Bool",
+"s3:RequestJobOperation": "String",
+"s3:RequestJobPriority": "Numeric",
+"s3:RequestObjectTag/<key>": "String",
+"s3:RequestObjectTagKeys": "ArrayOfString",
+"s3:ResourceAccount": "String",
+"s3:TlsVersion": "Numeric",
+"s3:annotation-prefix": "String",
+"s3:authType": "String",
+"s3:delimiter": "String",
+"s3:deliverySourceArn": "ARN",
+"s3:destinationRegion": "String",
+"s3:if-match": "String",
+"s3:if-none-match": "String",
+"s3:isReplicationPauseRequest": "Bool",
+"s3:locationconstraint": "String",
+"s3:logType": "String",
+"s3:max-annotation-results": "Numeric",
+"s3:max-keys": "Numeric",
+"s3:object-lock-event-hold": "String",
+"s3:object-lock-event-hold-duration-days": "Numeric",
+"s3:object-lock-legal-hold": "String",
+"s3:object-lock-mode": "String",
+"s3:object-lock-remaining-retention-days": "Numeric",
+"s3:object-lock-retain-until-date": "Date",
+"s3:prefix": "String",
+"s3:resourceArnBeingAuthorized": "ARN",
+"s3:signatureAge": "Numeric",
+"s3:signatureversion": "String",
+"s3:versionid": "String",
+"s3:x-amz-acl": "String",
+"s3:x-amz-bucket-namespace": "String",
+"s3:x-amz-content-sha256": "String",
+"s3:x-amz-copy-source": "String",
+"s3:x-amz-grant-full-control": "String",
+"s3:x-amz-grant-read": "String",
+"s3:x-amz-grant-read-acp": "String",
+"s3:x-amz-grant-write": "String",
+"s3:x-amz-grant-write-acp": "String",
+"s3:x-amz-metadata-directive": "String",
+"s3:x-amz-object-annotation-directive": "String",
+"s3:x-amz-object-if-match": "String",
+"s3:x-amz-object-ownership": "String",
+"s3:x-amz-server-side-encryption": "String",
+"s3:x-amz-server-side-encryption-aws-kms-key-id": "ARN",
+"s3:x-amz-server-side-encryption-customer-algorithm": "String",
+"s3:x-amz-storage-class": "String",
+"s3:x-amz-website-redirect-location": "String"
+},
+"operations": {
+"AbortMultipartUpload": [
+"AbortMultipartUpload"
+],
+"CompleteMultipartUpload": [
+"PutObject"
+],
+"CopyObject": [
+"GetObject",
+"GetObjectVersion",
+"PutObject",
+"PutObjectAcl",
+"PutObjectLegalHold",
+"PutObjectRetention",
+"PutObjectTagging"
+],
+"CreateBucket": [
+"CreateBucket",
+"PutBucketAcl",
+"PutBucketObjectLockConfiguration",
+"PutBucketOwnershipControls",
+"PutBucketVersioning"
+],
+"CreateBucketMetadataConfiguration": [
+"CreateBucketMetadataTableConfiguration"
+],
+"CreateBucketMetadataTableConfiguration": [
+"CreateBucketMetadataTableConfiguration"
+],
+"CreateMultipartUpload": [
+"PutObject",
+"PutObjectAcl",
+"PutObjectLegalHold",
+"PutObjectRetention",
+"PutObjectTagging"
+],
+"CreateSession": [],
+"DeleteBucket": [
+"DeleteBucket"
+],
+"DeleteBucketAnalyticsConfiguration": [
+"PutAnalyticsConfiguration"
+],
+"DeleteBucketCors": [
+"PutBucketCORS"
+],
+"DeleteBucketEncryption": [
+"PutEncryptionConfiguration"
+],
+"DeleteBucketIntelligentTieringConfiguration": [
+"PutIntelligentTieringConfiguration"
+],
+"DeleteBucketInventoryConfiguration": [
+"PutInventoryConfiguration"
+],
+"DeleteBucketLifecycle": [
+"PutLifecycleConfiguration"
+],
+"DeleteBucketMetadataConfiguration": [
+"DeleteBucketMetadataTableConfiguration"
+],
+"DeleteBucketMetadataTableConfiguration": [
+"DeleteBucketMetadataTableConfiguration"
+],
+"DeleteBucketMetricsConfiguration": [
+"PutMetricsConfiguration"
+],
+"DeleteBucketOwnershipControls": [
+"PutBucketOwnershipControls"
+],
+"DeleteBucketPolicy": [
+"DeleteBucketPolicy"
+],
+"DeleteBucketReplication": [
+"PutReplicationConfiguration"
+],
+"DeleteBucketTagging": [
+"PutBucketTagging"
+],
+"DeleteBucketWebsite": [
+"DeleteBucketWebsite"
+],
+"DeleteObject": [
+"BypassGovernanceRetention",
+"DeleteObject",
+"DeleteObjectVersion"
+],
+"DeleteObjectAnnotation": [],
+"DeleteObjectTagging": [
+"DeleteObjectTagging",
+"DeleteObjectVersionTagging"
+],
+"DeleteObjects": [
+"BypassGovernanceRetention",
+"DeleteObject",
+"DeleteObjectVersion"
+],
+"DeletePublicAccessBlock": [
+"PutBucketPublicAccessBlock"
+],
+"GetBucketAbac": [],
+"GetBucketAccelerateConfiguration": [
+"GetAccelerateConfiguration"
+],
+"GetBucketAcl": [
+"GetBucketAcl"
+],
+"GetBucketAnalyticsConfiguration": [
+"GetAnalyticsConfiguration"
+],
+"GetBucketCors": [
+"GetBucketCORS"
+],
+"GetBucketEncryption": [
+"GetEncryptionConfiguration"
+],
+"GetBucketIntelligentTieringConfiguration": [
+"GetIntelligentTieringConfiguration"
+],
+"GetBucketInventoryConfiguration": [
+"GetInventoryConfiguration"
+],
+"GetBucketLifecycle": [
+"GetLifecycleConfiguration"
+],
+"GetBucketLifecycleConfiguration": [
+"GetLifecycleConfiguration"
+],
+"GetBucketLocation": [
+"GetBucketLocation"
+],
+"GetBucketLogging": [
+"GetBucketLogging"
+],
+"GetBucketMetadataConfiguration": [
+"GetBucketMetadataTableConfiguration"
+],
+"GetBucketMetadataTableConfiguration": [
+"GetBucketMetadataTableConfiguration"
+],
+"GetBucketMetricsConfiguration": [
+"GetMetricsConfiguration"
+],
+"GetBucketNotification": [
+"GetBucketNotification"
+],
+"GetBucketNotificationConfiguration": [
+"GetBucketNotification"
+],
+"GetBucketOwnershipControls": [
+"GetBucketOwnershipControls"
+],
+"GetBucketPolicy": [
+"GetBucketPolicy"
+],
+"GetBucketPolicyStatus": [
+"GetBucketPolicyStatus"
+],
+"GetBucketReplication": [
+"GetReplicationConfiguration"
+],
+"GetBucketRequestPayment": [
+"GetBucketRequestPayment"
+],
+"GetBucketTagging": [
+"GetBucketTagging"
+],
+"GetBucketVersioning": [
+"GetBucketVersioning"
+],
+"GetBucketWebsite": [
+"GetBucketWebsite"
+],
+"GetObject": [
+"GetObject",
+"GetObjectLegalHold",
+"GetObjectRetention",
+"GetObjectTagging",
+"GetObjectVersion"
+],
+"GetObjectAcl": [
+"GetObjectAcl",
+"GetObjectVersionAcl"
+],
+"GetObjectAnnotation": [],
+"GetObjectAttributes": [
+"GetObject",
+"GetObjectVersion"
+],
+"GetObjectLegalHold": [
+"GetObjectLegalHold"
+],
+"GetObjectLockConfiguration": [
+"GetBucketObjectLockConfiguration"
+],
+"GetObjectRetention": [
+"GetObjectRetention"
+],
+"GetObjectTagging": [
+"GetObjectTagging",
+"GetObjectVersionTagging"
+],
+"GetObjectTorrent": [
+"GetObject"
+],
+"GetPublicAccessBlock": [
+"GetBucketPublicAccessBlock"
+],
+"HeadBucket": [
+"ListBucket"
+],
+"HeadObject": [
+"GetObject",
+"GetObjectLegalHold",
+"GetObjectRetention"
+],
+"ListBucketAnalyticsConfigurations": [
+"GetAnalyticsConfiguration"
+],
+"ListBucketIntelligentTieringConfigurations": [
+"GetIntelligentTieringConfiguration"
+],
+"ListBucketInventoryConfigurations": [
+"GetInventoryConfiguration"
+],
+"ListBucketMetricsConfigurations": [
+"GetMetricsConfiguration"
+],
+"ListBuckets": [
+"ListAllMyBuckets"
+],
+"ListDirectoryBuckets": [],
+"ListMultipartUploads": [
+"ListBucketMultipartUploads"
+],
+"ListObjectAnnotations": [],
+"ListObjectVersions": [
+"ListBucketVersions"
+],
+"ListObjects": [
+"GetObjectAcl",
+"ListBucket"
+],
+"ListObjectsV2": [
+"GetObjectAcl",
+"ListBucket"
+],
+"ListParts": [
+"ListMultipartUploadParts"
+],
+"PutBucketAbac": [],
+"PutBucketAccelerateConfiguration": [
+"PutAccelerateConfiguration"
+],
+"PutBucketAcl": [
+"PutBucketAcl"
+],
+"PutBucketAnalyticsConfiguration": [
+"PutAnalyticsConfiguration"
+],
+"PutBucketCors": [
+"PutBucketCORS"
+],
+"PutBucketEncryption": [
+"PutEncryptionConfiguration"
+],
+"PutBucketIntelligentTieringConfiguration": [
+"PutIntelligentTieringConfiguration"
+],
+"PutBucketInventoryConfiguration": [
+"PutInventoryConfiguration"
+],
+"PutBucketLifecycle": [
+"PutLifecycleConfiguration"
+],
+"PutBucketLifecycleConfiguration": [
+"PutLifecycleConfiguration"
+],
+"PutBucketLogging": [
+"PutBucketLogging"
+],
+"PutBucketMetricsConfiguration": [
+"PutMetricsConfiguration"
+],
+"PutBucketNotification": [],
+"PutBucketNotificationConfiguration": [
+"PutBucketNotification"
+],
+"PutBucketOwnershipControls": [
+"PutBucketOwnershipControls"
+],
+"PutBucketPolicy": [
+"PutBucketPolicy"
+],
+"PutBucketReplication": [
+"PutReplicationConfiguration"
+],
+"PutBucketRequestPayment": [
+"PutBucketRequestPayment"
+],
+"PutBucketTagging": [
+"PutBucketTagging"
+],
+"PutBucketVersioning": [
+"PutBucketVersioning"
+],
+"PutBucketWebsite": [
+"PutBucketWebsite"
+],
+"PutObject": [
+"PutObject",
+"PutObjectAcl",
+"PutObjectLegalHold",
+"PutObjectRetention",
+"PutObjectTagging"
+],
+"PutObjectAcl": [
+"PutObjectAcl",
+"PutObjectVersionAcl"
+],
+"PutObjectAnnotation": [],
+"PutObjectLegalHold": [
+"PutObjectLegalHold"
+],
+"PutObjectLockConfiguration": [
+"PutBucketObjectLockConfiguration"
+],
+"PutObjectRetention": [
+"BypassGovernanceRetention",
+"PutObjectRetention"
+],
+"PutObjectTagging": [
+"PutObjectTagging",
+"PutObjectVersionTagging"
+],
+"PutPublicAccessBlock": [
+"PutBucketPublicAccessBlock"
+],
+"RenameObject": [],
+"RestoreObject": [
+"RestoreObject"
+],
+"SelectObjectContent": [
+"GetObject"
+],
+"UpdateBucketMetadataAnnotationTableConfiguration": [],
+"UpdateBucketMetadataInventoryTableConfiguration": [
+"UpdateBucketMetadataInventoryTableConfiguration"
+],
+"UpdateBucketMetadataJournalTableConfiguration": [
+"UpdateBucketMetadataJournalTableConfiguration"
+],
+"UpdateObjectEncryption": [],
+"UploadPart": [
+"PutObject"
+],
+"UploadPartCopy": [
+"GetObject",
+"GetObjectVersion",
+"PutObject"
+],
+"WriteGetObjectResponse": []
+},
+"version": "v1.4"
+}
