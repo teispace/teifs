@@ -120,6 +120,15 @@ answered from the first rule whose origin, method and every requested header mat
 refused otherwise. Credentials are allowed only for origins a rule names (not `*`), as
 S3 does. CORS never grants access by itself: requests are still signed and authorized.
 
+### 16. The client keeps keys private and never writes outside its destination
+`teifs` as a client keeps aliases in a file only its owner can read, written whole and
+renamed into place; secret keys come from a hidden prompt, standard input, the
+environment or a drive's own credentials file, never from the command line, and are
+never printed (`Debug` leaves them out). A download writes only below the folder it was
+given: keys with `..`, `.`, empty or absolute parts (and, on Windows, `\` or `:`) are
+refused instead of mapped to a path. Tests: `apps/cli/tests/client.rs`,
+`apps/cli/src/client/target.rs`.
+
 ## Data safety
 
 - Writes are atomic (stage, sync, rename, sync the folder), so a crash never leaves a

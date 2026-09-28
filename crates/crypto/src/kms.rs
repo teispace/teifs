@@ -286,37 +286,14 @@ fn write(path: &Path, keys: &BTreeMap<String, Vec<KeyVersion>>, create_new: bool
             .collect(),
     };
     let bytes = Zeroizing::new(serde_json::to_vec_pretty(&file).expect("the keyring serializes"));
-    let tmp = path.with_extension("tmp");
-    write_private(&tmp, &bytes).map_err(|e| keyring_error(&e))?;
     if create_new && path.exists() {
-        let _ = fs::remove_file(&tmp);
         return Err(CryptoError::Keyring(format!(
             "{} already exists",
             path.display()
         )));
     }
-    fs::rename(&tmp, path).map_err(|e| keyring_error(&e))
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    let _ = fs::remove_file(path);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut file = fs::File::create(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    // Written whole beside it and renamed, so a crash never leaves half a keyring.
+    crate::replace_private(path, &bytes).map_err(|e| keyring_error(&e))
 }
 
 #[cfg(test)]

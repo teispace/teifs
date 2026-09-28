@@ -32,25 +32,28 @@ pub fn path(drive: &Path) -> PathBuf {
     drive.join(teifs_store::SYSTEM_DIR).join("credentials.json")
 }
 
-/// The credentials, and whether they were just created.
-pub fn load_or_create(drive: &Path) -> io::Result<(Credentials, bool)> {
-    let path = path(drive);
-    match fs::read(&path) {
-        Ok(bytes) => {
-            let credentials = serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok((credentials, false))
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let credentials = generate();
-            write_private(
-                &path,
-                &serde_json::to_vec_pretty(&credentials).expect("credentials serialize"),
-            )?;
-            Ok((credentials, true))
-        }
+/// The credentials a drive generated, if it has.
+pub fn load(drive: &Path) -> io::Result<Option<Credentials>> {
+    match fs::read(path(drive)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+/// The credentials, and whether they were just created.
+pub fn load_or_create(drive: &Path) -> io::Result<(Credentials, bool)> {
+    if let Some(credentials) = load(drive)? {
+        return Ok((credentials, false));
+    }
+    let credentials = generate();
+    teifs_store::create_private(
+        &path(drive),
+        &serde_json::to_vec_pretty(&credentials).expect("credentials serialize"),
+    )?;
+    Ok((credentials, true))
 }
 
 fn generate() -> Credentials {
@@ -61,24 +64,6 @@ fn generate() -> Credentials {
         // 256 random bits.
         secret_key: format!("{}{}", random(), random()),
     }
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // The drive's folder is the user's own; ACLs are inherited from it.
-    fs::write(path, bytes)
 }
 
 #[cfg(test)]

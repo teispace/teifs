@@ -15,6 +15,7 @@ mod error;
 mod key;
 mod kms;
 mod package;
+mod private;
 mod seal;
 mod transit;
 
@@ -27,6 +28,7 @@ pub use package::{
     PACKAGE_SIZE, PartCipher, PartEncryptor, TAG_LEN, ciphertext_len, decrypt_part, packages_for,
     plaintext_len,
 };
+pub use private::{create_private, replace_private};
 pub use seal::{SealedKey, seal, unseal};
 pub use transit::{TRANSIT, TransitKms};
 

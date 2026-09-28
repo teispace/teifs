@@ -7,6 +7,12 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `teifs` is an S3 client too, for TeiFS or any S3 service: `alias`, `ls`, `mb`, `rb`,
+  `cp`, `mv`, `rm`, `cat`, `stat`, `presign` and `mirror` on `ALIAS/BUCKET/KEY` paths.
+  Large files go in parallel parts, an interrupted upload resumes, downloads replace a
+  file only once complete, and copies within an endpoint are done by the server.
+  Aliases are kept owner-only; secret keys never come from the command line. Exit codes
+  tell scripts what failed. `teifs ls` now lists over S3 (it read the drive directly).
 - Signature V2 is refused unless `serve --allow-sigv2` turns it on, as AWS does for its
   newer buckets. boto3 makes V2 presigned links by default; set
   `signature_version="s3v4"` or allow V2.

@@ -43,7 +43,9 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
                                graceful shutdown, and `Server::bind` / `run`, which the
                                command and embedders use.
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
-                               prints results.
+                               prints results. `src/client/` is its S3 client (aliases,
+                               cp/mirror with parallel, resumable transfers) on the AWS
+                               SDK, for TeiFS or any S3 service.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

@@ -65,6 +65,26 @@ To set the keys yourself (on servers and in containers), use `TEIFS_ACCESS_KEY` 
 never shows in a process list. Coming from MinIO, `MINIO_ROOT_USER` and
 `MINIO_ROOT_PASSWORD` work too when nothing else sets the keys.
 
+### TeiFS as an S3 client
+
+`teifs` is also a client for TeiFS or any S3 service, with `ALIAS/BUCKET/KEY` paths:
+
+```sh
+teifs alias set home http://127.0.0.1:9000 --drive ~/Drive   # or --access-key, then the secret
+teifs mb home/photos
+teifs cp -r ~/Pictures home/photos/2026/     # parallel parts; an interrupted copy resumes
+teifs ls home/photos/2026
+teifs mirror ~/Documents home/docs --remove  # copy what changed, delete what's gone
+teifs cp home/photos/2026/cat.jpg .
+teifs presign home/photos/2026/cat.jpg --expires 1d
+```
+
+Aliases live in `aliases.toml` in your config folder, readable only by you (like
+`~/.aws/credentials`); secret keys are asked for hidden or read from standard input,
+never from the command line. `TEIFS_ALIAS_<NAME>=https://KEY:SECRET@host` sets one for a
+single run. Exit codes: 1 other, 2 usage, 3 network, 4 keys refused, 5 not found,
+6 conflict.
+
 ### Settings file
 
 Every `serve` flag can live in a TOML file instead, under the flag's name. Flags and
@@ -92,7 +112,14 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
-| `teifs ls BUCKET [PREFIX] [-r]` | List objects |
+| `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys |
+| `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r]` | List buckets or objects |
+| `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `rb --force`) |
+| `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`) |
+| `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way |
+| `teifs rm ALIAS/BUCKET/KEY… [-r --force]` | Delete objects |
+| `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
+| `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
 
 ## S3 support today

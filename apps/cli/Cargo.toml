@@ -16,14 +16,23 @@ path = "src/main.rs"
 [dependencies]
 teifs-store.workspace = true
 teifs-server.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 clap.workspace = true
 toml.workspace = true
+aws-sdk-s3.workspace = true
+bytes.workspace = true
+dirs.workspace = true
+futures.workspace = true
+inquire.workspace = true
+md-5.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+reqwest.workspace = true
 
 [lints]
 workspace = true

@@ -2,21 +2,19 @@
 
 #![allow(clippy::print_stdout, reason = "a command line prints its results")]
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    process::ExitCode,
-    time::{Duration, SystemTime},
-};
+use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
 
+mod client;
 mod config;
+mod units;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
     Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, Server, Transit,
     credentials,
 };
-use teifs_store::{Layout, ListQuery, Store};
+use teifs_store::{Layout, Store};
+use units::{date, from_ms, parse_count, parse_duration};
 
 #[derive(Parser)]
 #[command(name = "teifs", version, about = "Your folders as a drive and as S3")]
@@ -50,20 +48,8 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
-    /// List a bucket's objects.
-    Ls {
-        /// The bucket.
-        bucket: String,
-        /// Only keys starting with this.
-        #[arg(default_value = "")]
-        prefix: String,
-        /// List everything under the prefix, not just one level.
-        #[arg(short, long)]
-        recursive: bool,
-        /// The drive's folder.
-        #[arg(long, default_value = ".", env = "TEIFS_DIR")]
-        dir: PathBuf,
-    },
+    #[command(flatten)]
+    Client(client::Command),
 }
 
 /// `teifs serve`'s settings. Each can also be set in a settings file (`--config`),
@@ -265,9 +251,9 @@ fn main() -> ExitCode {
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime");
     match runtime.block_on(run(cli.command, &sources)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("teifs: {message}");
-            ExitCode::FAILURE
+        Err(err) => {
+            eprintln!("teifs: {err}");
+            ExitCode::from(err.kind as u8)
         }
     }
 }
@@ -282,12 +268,12 @@ fn open(dir: &PathBuf) -> Result<Store, String> {
     })
 }
 
-async fn run(command: Command, sources: &config::Sources) -> Result<(), String> {
+async fn run(command: Command, sources: &config::Sources) -> Result<(), client::Error> {
     match command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => Ok(serve(args).await?),
         Command::Config {
             action: ConfigAction::Show(args),
-        } => config::show(&args, sources),
+        } => Ok(config::show(&args, sources)?),
         Command::Credentials { dir } => {
             let store = open(&dir)?;
             let (credentials, _) = credentials::load_or_create(store.root())
@@ -299,14 +285,9 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), String> 
             );
             Ok(())
         }
-        Command::Bucket { action } => bucket(action).await,
-        Command::Key { action } => key(action).await,
-        Command::Ls {
-            bucket,
-            prefix,
-            recursive,
-            dir,
-        } => ls(&open(&dir)?, &bucket, prefix, recursive).await,
+        Command::Bucket { action } => Ok(bucket(action).await?),
+        Command::Key { action } => Ok(key(action).await?),
+        Command::Client(command) => client::run(command).await,
     }
 }
 
@@ -354,41 +335,6 @@ fn parse_expiry(text: &str) -> Result<Expiry, String> {
     parse_duration(text)
         .map(|duration| Expiry(Some(duration)))
         .map_err(|e| format!("{e} (or say never)"))
-}
-
-/// Parses a positive number with a unit: `s`, `m`, `h` or `d` (`30s`, `12h`, `7d`).
-fn parse_duration(text: &str) -> Result<Duration, String> {
-    let text = text.trim();
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let number: u64 = number
-        .parse()
-        .map_err(|_| format!("`{text}` isn't a duration like 30s, 12h or 7d"))?;
-    let seconds = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 60 * 60,
-        "d" => 24 * 60 * 60,
-        _ => return Err(format!("`{text}` needs a unit: s, m, h or d")),
-    };
-    let duration = number
-        .checked_mul(seconds)
-        .map(Duration::from_secs)
-        .ok_or_else(|| format!("`{text}` is too long"))?;
-    if duration.is_zero() {
-        return Err(format!("`{text}` must be longer than zero"));
-    }
-    Ok(duration)
-}
-
-/// Parses a count of at least one.
-fn parse_count(text: &str) -> Result<usize, String> {
-    match text.trim().parse() {
-        Ok(0) | Err(_) => Err(format!("`{text}` isn't a whole number of at least 1")),
-        Ok(n) => Ok(n),
-    }
 }
 
 async fn serve(args: ServeArgs) -> Result<(), String> {
@@ -529,11 +475,6 @@ async fn key(action: KeyAction) -> Result<(), String> {
     Ok(())
 }
 
-/// A time in milliseconds since the Unix epoch.
-fn from_ms(ms: i64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0))
-}
-
 async fn bucket(action: BucketAction) -> Result<(), String> {
     match action {
         BucketAction::List { dir } => {
@@ -567,69 +508,6 @@ async fn bucket(action: BucketAction) -> Result<(), String> {
     Ok(())
 }
 
-/// Prints a bucket's objects and folders in key order, page by page.
-async fn ls(store: &Store, bucket: &str, prefix: String, recursive: bool) -> Result<(), String> {
-    let mut query = ListQuery {
-        prefix,
-        delimiter: (!recursive).then(|| "/".to_owned()),
-        after: None,
-        max_keys: 1000,
-    };
-    loop {
-        let page = store
-            .list(bucket, query.clone())
-            .await
-            .map_err(|e| format!("can't list {bucket}: {e}"))?;
-        let mut lines: Vec<(&str, String)> = page
-            .prefixes
-            .iter()
-            .map(|p| (p.as_str(), format!("{:>19}  {:>12}  {p}", "", "DIR")))
-            .chain(page.objects.iter().map(|o| {
-                (
-                    o.key.as_str(),
-                    format!("{}  {:>12}  {}", date(o.modified), o.size, o.key),
-                )
-            }))
-            .collect();
-        lines.sort_by(|a, b| a.0.cmp(b.0));
-        for (_, line) in lines {
-            println!("{line}");
-        }
-        if !page.truncated {
-            return Ok(());
-        }
-        query.after = page.next;
-    }
-}
-
-/// `YYYY-MM-DD HH:MM:SS` in UTC.
-fn date(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = civil_from_days(i64::try_from(days).unwrap_or(0));
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-/// Days since 1970-01-01 to a calendar date (Howard Hinnant's algorithm).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
-    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
-}
-
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -659,12 +537,6 @@ mod tests {
             Some(Duration::from_mins(30))
         );
         assert_eq!(parse_expiry("NEVER").unwrap().0, None);
-        assert_eq!(parse_duration("45s"), Ok(Duration::from_secs(45)));
-        assert!(parse_duration("never").is_err());
-        assert_eq!(parse_count("4096"), Ok(4096));
-        for bad in ["0", "-1", "x", ""] {
-            assert!(parse_count(bad).is_err(), "{bad}");
-        }
         for bad in [
             "",
             "7",
@@ -677,12 +549,5 @@ mod tests {
         ] {
             assert!(parse_expiry(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn dates_are_utc_calendar_dates() {
-        assert_eq!(date(SystemTime::UNIX_EPOCH), "1970-01-01 00:00:00");
-        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000);
-        assert_eq!(date(t), "2026-09-21 14:13:20");
     }
 }

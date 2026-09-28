@@ -44,7 +44,9 @@ pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{BucketEncryption, CorsRule, DefaultEncryption};
 pub use sse::Encryption;
 pub use staged::Staged;
-pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};
+pub use teifs_crypto::{
+    CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
+};
 pub use teifs_meta::{Layout, Part, Upload};
 use teifs_types::check_folder_bucket;
 pub use teifs_types::{ChecksumType, PartInfo, SseInfo, SseMode, UploadChecksum};
