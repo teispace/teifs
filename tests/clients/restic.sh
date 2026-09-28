@@ -15,7 +15,8 @@ step "check every byte"
 restic check --read-data
 
 step "forget and prune"
-restic forget --keep-last 1 --prune
+# Both snapshots in one group, whatever paths they hold.
+restic forget --keep-last 1 --group-by host --prune
 [ "$(restic snapshots --json | grep -o '"id"' | wc -l)" -eq 1 ]
 restic check
 

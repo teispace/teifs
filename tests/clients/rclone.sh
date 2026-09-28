@@ -28,7 +28,7 @@ step "sync deletes what's gone locally"
 rm tree/a/f1.bin
 rc sync tree "t:$BUCKET/tree"
 rc check tree "t:$BUCKET/tree"
-[ -z "$(rc lsf "t:$BUCKET/tree/a" --include f1.bin)" ] || { echo "f1.bin survived the sync"; exit 1; }
+[ -z "$(rc lsf --files-only "t:$BUCKET/tree/a" --include f1.bin)" ] || { echo "f1.bin survived the sync"; exit 1; }
 
 step "purge"
 rc purge "t:$BUCKET"
