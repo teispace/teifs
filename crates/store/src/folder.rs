@@ -13,7 +13,7 @@ use teifs_meta::{Index, Row};
 use teifs_types::{Stamp, empty_etag, provisional_etag};
 
 use crate::{
-    Inner, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, StoreError,
+    Inner, KeyRules, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, StoreError,
     error::{Result, not_found_as},
     md5_file,
     objects::PartsRecord,
@@ -32,6 +32,16 @@ pub(crate) enum Found {
 }
 
 impl Inner {
+    /// Checks `key` as a name a folder bucket is about to create: beyond what any file
+    /// needs, the drive's [`KeyRules`].
+    pub(crate) fn new_key(&self, key: &str) -> Result<ObjectKey> {
+        let key = ObjectKey::parse(key)?;
+        if self.key_rules == KeyRules::Portable {
+            key.check_portable()?;
+        }
+        Ok(key)
+    }
+
     /// Opens the object at `key`: its description and file (`None` for a folder).
     pub(crate) fn open_folder_object(
         &self,
@@ -222,7 +232,7 @@ impl Inner {
                 let path = dir.join(key.rel());
                 Err(StoreError::KeyConflict(
                     if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) == key.is_folder() {
-                        "a name differing only in letter case, or a link, is already there"
+                        "a name differing only in letter case or Unicode form, or a link, is already there"
                     } else {
                         "a file and a folder can't have the same name"
                     },
@@ -269,7 +279,7 @@ impl Inner {
         if fs::canonicalize(&current)? != current {
             return Err(conflict(
                 &mut created,
-                "a folder differing only in letter case, or a link, is already there",
+                "a folder differing only in letter case or Unicode form, or a link, is already there",
             ));
         }
         for path in &created {

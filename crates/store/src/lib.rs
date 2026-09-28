@@ -46,6 +46,7 @@ pub use sse::Encryption;
 pub use staged::Staged;
 pub use teifs_crypto::{CryptoError, CustomerKey, Kms, LocalKms, TransitKms};
 pub use teifs_meta::{Layout, Part, Upload};
+use teifs_types::check_folder_bucket;
 pub use teifs_types::{ChecksumType, PartInfo, SseInfo, SseMode, UploadChecksum};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
@@ -210,6 +211,8 @@ struct Inner {
     tmp: PathBuf,
     /// How hard writes are made to survive a power cut.
     durability: Durability,
+    /// Which names folder buckets may create.
+    key_rules: KeyRules,
     /// The drive's lock: one process at a time.
     _lock: fs::File,
     /// Large folders' sorted contents, for folder-bucket listings.
@@ -242,6 +245,19 @@ pub enum Durability {
     None,
 }
 
+/// Which names TeiFS may create in folder buckets. Object buckets store keys by id, so
+/// they take any key S3 allows either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyRules {
+    /// Only names every supported system can hold (Windows' rules everywhere), so the
+    /// drive can move between systems.
+    #[default]
+    Portable,
+    /// Whatever this system can hold. Files written this way may be unreachable, or
+    /// reach something else, on another system.
+    Host,
+}
+
 /// How to open a drive.
 #[derive(Debug, Clone, Default)]
 pub struct StoreOptions {
@@ -253,6 +269,8 @@ pub struct StoreOptions {
     pub default_encryption: Option<BucketEncryption>,
     /// How hard writes are made to survive a power cut.
     pub durability: Durability,
+    /// Which names folder buckets may create.
+    pub key_rules: KeyRules,
 }
 
 impl Store {
@@ -297,6 +315,7 @@ impl Store {
             system_dir,
             tmp,
             durability: options.durability,
+            key_rules: options.key_rules,
             _lock: lock,
             folders: folders::FolderCache::default(),
             uploads,
@@ -363,7 +382,12 @@ impl Store {
 
     /// Creates a bucket with the given layout.
     pub async fn create_bucket(&self, name: &str, layout: Layout) -> Result<()> {
-        check_bucket(name)?;
+        match layout {
+            Layout::Object => check_bucket(name)?,
+            Layout::Folder => {
+                check_folder_bucket(name, self.inner.key_rules == KeyRules::Portable)?;
+            }
+        }
         let name = name.to_owned();
         self.blocking(move |inner| {
             let _lock = inner.lock();
@@ -733,7 +757,7 @@ impl Store {
             match inner.bucket(&bucket)? {
                 Bucket::Folder(name, dir) => {
                     let src = ObjectKey::parse(&from).map_err(|_| StoreError::NoSuchKey)?;
-                    let dst = ObjectKey::parse(&to)?;
+                    let dst = inner.new_key(&to)?;
                     inner.rename_folder_object(
                         &conn,
                         &name,
@@ -822,7 +846,7 @@ impl Store {
             match (&src, &dst) {
                 (Bucket::Folder(src_name, _), Bucket::Folder(dst_name, _)) => {
                     let src_key = ObjectKey::parse(&src_key).map_err(|_| StoreError::NoSuchKey)?;
-                    let dst_key = ObjectKey::parse(&dst_key)?;
+                    let dst_key = inner.new_key(&dst_key)?;
                     inner.copy_folder(src_name, &src_key, dst_name, &dst_key, attrs, &precondition)
                 }
                 (Bucket::Object(a), Bucket::Object(b)) if a.id == b.id && same => {
@@ -1020,7 +1044,7 @@ impl Inner {
                         "encryption at rest needs an object bucket",
                     ));
                 }
-                let key = ObjectKey::parse(key)?;
+                let key = self.new_key(key)?;
                 if key.is_folder() {
                     if finished.size > 0 {
                         return Err(StoreError::InvalidRequest(

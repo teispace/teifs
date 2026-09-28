@@ -11,7 +11,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Config, Credentials, Durability, JobOptions, KmsLocation, Server, Transit, credentials,
+    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Server, Transit,
+    credentials,
 };
 use teifs_store::{Layout, ListQuery, Store};
 
@@ -79,6 +80,11 @@ enum Command {
         /// may be lost) or `none` (scratch data). None of them can corrupt the drive.
         #[arg(long, value_enum, default_value = "strict", env = "TEIFS_DURABILITY")]
         durability: DurabilityArg,
+        /// Which names folder buckets may create: `portable` (names Windows, macOS and
+        /// Linux can all hold, so the drive can move between them) or `host` (whatever
+        /// this system can hold). Object buckets take any S3 key either way.
+        #[arg(long, value_enum, default_value = "portable", env = "TEIFS_KEY_NAMES")]
+        key_names: KeyNamesArg,
         /// The secret key; only through the environment, so it never shows in a process list.
         #[arg(skip)]
         secret_key: Option<String>,
@@ -245,6 +251,7 @@ async fn run(command: Command) -> Result<(), String> {
             sse_c_over_http,
             upload_expiry,
             durability,
+            key_names,
             ..
         } => {
             serve(
@@ -264,6 +271,7 @@ async fn run(command: Command) -> Result<(), String> {
                     sse_c_over_http,
                     upload_expiry: upload_expiry.0,
                     durability: durability.into(),
+                    key_rules: key_names.into(),
                 },
             )
             .await
@@ -300,6 +308,22 @@ struct Options {
     sse_c_over_http: bool,
     upload_expiry: Option<Duration>,
     durability: Durability,
+    key_rules: KeyRules,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum KeyNamesArg {
+    Portable,
+    Host,
+}
+
+impl From<KeyNamesArg> for KeyRules {
+    fn from(arg: KeyNamesArg) -> Self {
+        match arg {
+            KeyNamesArg::Portable => Self::Portable,
+            KeyNamesArg::Host => Self::Host,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -390,6 +414,7 @@ async fn serve(
             ..JobOptions::default()
         },
         durability: options.durability,
+        key_rules: options.key_rules,
     })
     .await
     .map_err(|e| e.to_string())?;

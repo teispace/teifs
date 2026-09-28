@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
 pub use serve::{DRAIN, serve};
-pub use teifs_store::{Durability, JobOptions};
+pub use teifs_store::{Durability, JobOptions, KeyRules};
 
 /// How to serve a drive.
 #[derive(Debug, Clone)]
@@ -54,6 +54,8 @@ pub struct Config {
     pub jobs: JobOptions,
     /// How hard writes are made to survive a power cut.
     pub durability: Durability,
+    /// Which names folder buckets may create.
+    pub key_rules: KeyRules,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -211,6 +213,7 @@ impl Server {
                 kms: None,
                 default_encryption,
                 durability: config.durability,
+                key_rules: config.key_rules,
             },
         )
         .map_err(|source| ServerError::Open {

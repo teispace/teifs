@@ -67,7 +67,7 @@ process list.
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
 | `teifs ls BUCKET [PREFIX] [-r]` | List objects |
@@ -104,8 +104,13 @@ can open anywhere, with the limits below. Choose per bucket (`--layout`, or the
 - On a case-insensitive disk (the default on macOS and Windows), two keys that differ
   only in letter case can't both exist. The second is refused with
   `409 XTeiFSKeyConflict`.
+- The same goes for keys that differ only in Unicode form (`é` composed or decomposed)
+  on macOS.
 - A key can't name a file and a folder at once (`a` and `a/b`), and keys with `.`, `..`
   or empty segments are refused.
+- Names Windows can't hold (`CON`, `NUL.txt`, `a:b`, `what?`, a name ending in a dot or
+  a space) are refused everywhere, so the drive can move between systems;
+  `--key-names host` allows them outside Windows.
 - Symbolic links inside a bucket aren't served. A bucket itself may be a link to a folder
   elsewhere, such as another disk.
 

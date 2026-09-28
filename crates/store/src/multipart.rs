@@ -10,8 +10,7 @@ use teifs_types::{ChecksumType, PartInfo, UploadChecksum, md5_of_etag, multipart
 use teifs_types::SseMode;
 
 use crate::{
-    Bucket, CustomerKey, Encryption, Inner, ObjectInfo, ObjectKey, Precondition, Staged, Store,
-    StoreError,
+    Bucket, CustomerKey, Encryption, Inner, ObjectInfo, Precondition, Staged, Store, StoreError,
     error::Result,
     now_ms,
     objects::Finished,
@@ -94,7 +93,7 @@ impl Store {
         self.blocking(move |inner| {
             match inner.bucket(&upload.bucket)? {
                 crate::Bucket::Folder(..) => {
-                    if ObjectKey::parse(&upload.key)?.is_folder() {
+                    if inner.new_key(&upload.key)?.is_folder() {
                         return Err(StoreError::InvalidRequest(
                             "a folder (a key ending in `/`) can't be uploaded in parts",
                         ));

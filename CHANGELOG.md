@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Folder buckets only create names every system can hold (no `CON`, `NUL.txt`, `a:b`,
+  trailing dots or spaces), so a drive can move between Windows, macOS and Linux;
+  `serve --key-names host` allows them outside Windows. On Windows such keys could
+  reach something else (`a:b` names a hidden stream of `a`); they're now refused there.
+  Keys differing only in Unicode form are refused like letter case on macOS.
 - Durability modes (`serve --durability strict|relaxed|none`), one process per drive
   (`.teifs/lock`), and a full disk answers `507 XTeiFSStorageFull` before deletes stop
   working.

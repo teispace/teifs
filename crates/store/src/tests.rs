@@ -870,3 +870,168 @@ async fn every_durability_mode_keeps_what_it_wrote() {
         }
     }
 }
+
+fn not_portable<T>(result: &Result<T>) -> bool {
+    matches!(
+        result,
+        Err(StoreError::InvalidName(NameError::InvalidKey(_)))
+    )
+}
+
+#[tokio::test]
+async fn folder_buckets_only_create_portable_names() {
+    let (_dir, store) = with_bucket().await;
+    store.create_bucket("objs", Layout::Object).await.unwrap();
+    store
+        .put_bytes("photos", "ok.txt", b"x", ObjectAttrs::default())
+        .await
+        .unwrap();
+    for key in ["CON", "a/nul.txt", "a:b", "what?", "dot.", "space "] {
+        let put = store
+            .put_bytes("photos", key, b"x", ObjectAttrs::default())
+            .await;
+        assert!(not_portable(&put), "{key:?}");
+        assert!(
+            not_portable(&store.check_write("photos", Some(key), None).await),
+            "{key:?} is refused before any bytes are read"
+        );
+        let rename = store
+            .rename(
+                "photos",
+                "ok.txt",
+                key,
+                Precondition::default(),
+                Precondition::default(),
+                None,
+            )
+            .await;
+        assert!(not_portable(&rename), "{key:?}");
+        let copy = store
+            .copy(
+                ("photos", "ok.txt"),
+                ("photos", key),
+                None,
+                Precondition::default(),
+            )
+            .await;
+        assert!(not_portable(&copy), "{key:?}");
+        let upload = store
+            .create_upload(
+                "photos",
+                key,
+                ObjectAttrs::default(),
+                None,
+                &Encryption::None,
+                None,
+            )
+            .await;
+        assert!(not_portable(&upload), "{key:?}");
+        // Object buckets store keys by id: any S3 key is fine.
+        store
+            .put_bytes("objs", key, b"x", ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    assert!(
+        store
+            .check_write("photos", Some("fine/name"), None)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        store.create_bucket("nul", Layout::Folder).await,
+        Err(StoreError::InvalidName(NameError::InvalidBucketName(_)))
+    ));
+    store.create_bucket("nul", Layout::Object).await.unwrap();
+    assert_eq!(read_all(&store, "photos", "ok.txt").await, b"x");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn names_put_there_by_hand_stay_readable() {
+    let (dir, store) = with_bucket().await;
+    // Another program's file with a name Windows can't hold: listed, read and deleted
+    // like any other, even though TeiFS wouldn't create it.
+    fs::write(dir.path().join("photos/a:b"), b"by hand").unwrap();
+    let query = ListQuery {
+        max_keys: 100,
+        ..ListQuery::default()
+    };
+    let listing = store.list("photos", query).await.unwrap();
+    assert_eq!(keys(&listing), ["a:b"]);
+    assert_eq!(read_all(&store, "photos", "a:b").await, b"by hand");
+    store.delete("photos", "a:b").await.unwrap();
+    assert!(!dir.path().join("photos/a:b").exists());
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn host_rules_create_any_name_this_system_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_with(
+        dir.path(),
+        StoreOptions {
+            key_rules: KeyRules::Host,
+            ..StoreOptions::default()
+        },
+    )
+    .unwrap();
+    store.create_bucket("con", Layout::Folder).await.unwrap();
+    for key in ["CON", "a:b", "dot.", "what?"] {
+        store
+            .put_bytes("con", key, key.as_bytes(), ObjectAttrs::default())
+            .await
+            .unwrap();
+        assert_eq!(read_all(&store, "con", key).await, key.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn unicode_forms_are_kept_apart_or_refused() {
+    let (dir, store) = with_bucket().await;
+    let (composed, decomposed) = ("caf\u{e9}", "cafe\u{301}");
+    store
+        .put_bytes("photos", composed, b"nfc", ObjectAttrs::default())
+        .await
+        .unwrap();
+    // APFS and HFS+ look names up regardless of form; most others keep them apart.
+    let insensitive = dir.path().join("photos").join(decomposed).exists();
+    let other = store
+        .put_bytes("photos", decomposed, b"nfd", ObjectAttrs::default())
+        .await;
+    if insensitive {
+        assert!(matches!(other, Err(StoreError::KeyConflict(_))));
+        assert!(matches!(
+            store.head("photos", decomposed).await,
+            Err(StoreError::NoSuchKey)
+        ));
+        // A folder in the other form is refused too.
+        let folder = store
+            .put_bytes(
+                "photos",
+                &format!("{composed}/in"),
+                b"",
+                ObjectAttrs::default(),
+            )
+            .await;
+        assert!(
+            matches!(folder, Err(StoreError::KeyConflict(_))),
+            "{folder:?}"
+        );
+        store
+            .put_bytes("photos", "d\u{ef}r/a", b"", ObjectAttrs::default())
+            .await
+            .unwrap();
+        let folder = store
+            .put_bytes("photos", "di\u{308}r/b", b"", ObjectAttrs::default())
+            .await;
+        assert!(
+            matches!(folder, Err(StoreError::KeyConflict(_))),
+            "{folder:?}"
+        );
+    } else {
+        other.unwrap();
+        assert_eq!(read_all(&store, "photos", decomposed).await, b"nfd");
+    }
+    assert_eq!(read_all(&store, "photos", composed).await, b"nfc");
+}

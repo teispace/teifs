@@ -58,11 +58,13 @@ log level and searches the output for the secret.
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,
-`.` and `..` segments, a leading `/`, backslashes and NUL bytes. Paths are built only
+`.` and `..` segments, a leading `/`, backslashes and NUL bytes, and on Windows the names
+its path layer would redirect (devices such as `NUL.txt`, `a:b` streams, trailing dots and
+spaces). Paths are built only
 from checked parts, and the store compares the canonical path with the expected one
-before using it, so symbolic links inside a bucket and names that differ only in case are
-never followed or overwritten (`Inner::find` and `Inner::make_parents` in
-`crates/store/src/lib.rs`). *Planned:* fuzzing of the parser and the path mapping.
+before using it, so symbolic links inside a bucket and names that differ only in case or
+Unicode form (or an NTFS short name) are never followed or overwritten (`Inner::find` and `Inner::make_parents` in
+`crates/store/src/folder.rs`). *Planned:* fuzzing of the parser and the path mapping.
 
 ### 8. Only trusted proxies can set the client's address (*planned*)
 `X-Forwarded-For` and similar headers will be read only from configured proxy addresses.

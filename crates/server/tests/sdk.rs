@@ -48,6 +48,7 @@ async fn start() -> Server {
         plain_http_is_secure: None,
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
+        key_rules: teifs_server::KeyRules::Portable,
     })
     .await
     .unwrap();
@@ -1813,4 +1814,30 @@ async fn bucket_lists_page_and_filter() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("InvalidArgument"));
+}
+
+#[tokio::test]
+async fn folder_buckets_refuse_names_other_systems_cant_hold() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("portable").send().await.unwrap();
+    for key in ["NUL.txt", "a/b:c", "trailing./x"] {
+        let put = s3
+            .put_object()
+            .bucket("portable")
+            .key(key)
+            .body(ByteStream::from_static(b"x"))
+            .send()
+            .await;
+        assert_eq!(put.unwrap_err().code(), Some("InvalidArgument"), "{key}");
+    }
+    assert_eq!(
+        std::fs::read_dir(server.dir.path().join("portable"))
+            .unwrap()
+            .count(),
+        0,
+        "nothing was written"
+    );
+    let device = s3.create_bucket().bucket("aux").send().await;
+    assert_eq!(device.unwrap_err().code(), Some("InvalidBucketName"));
 }

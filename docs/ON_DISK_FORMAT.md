@@ -67,7 +67,15 @@ becomes one if the object bucket is deleted.
 - Keys that can't be files are refused: empty, `.` or `..` segments, `//`, a leading
   `/`, NUL or `\`, segments over 255 bytes, keys over 1024 bytes, and a name that
   collides with an existing file or folder (a file and a folder with the same name, or
-  names that differ only in letter case on a case-insensitive disk).
+  names the disk treats as one: letter case on a case-insensitive disk, Unicode form on
+  APFS and HFS+, short 8.3 names on NTFS).
+- Names Windows can't hold are refused on Windows, and by default everywhere, so a drive
+  can move between systems: device names in any case and with any extension (`CON`,
+  `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9` and their
+  superscript-digit forms), any of `<>:"|?*` or a control character, and a name ending
+  in `.` or a space. `serve --key-names host` lifts that outside Windows. Files with such
+  names put there by other programs are still served; TeiFS only never creates them.
+  Folder buckets can't be named after a device either.
 - Symbolic links inside a bucket are never followed.
 - `.teifs-tmp` at the top of a bucket is reserved: writes to a bucket on another disk
   than the drive stage there, so the last step is an atomic rename on that disk. It's

@@ -195,13 +195,12 @@ impl Drive {
         }
     }
 
-    /// Refuses a write of `len` bytes (when the request says how long) that wouldn't
-    /// leave the room kept free for deletes.
-    async fn ensure_space(&self, bucket: &str, len: Option<i64>) -> S3Result<()> {
-        match len.and_then(|len| u64::try_from(len).ok()) {
-            Some(len) => self.store.ensure_space(bucket, len).await.s3(),
-            None => Ok(()),
-        }
+    /// Refuses a write before its body is read: a key (when it names one) the bucket
+    /// can't create, or `len` bytes (when the request says how many) that wouldn't leave
+    /// the room kept free for deletes.
+    async fn check_write(&self, bucket: &str, key: Option<&str>, len: Option<i64>) -> S3Result<()> {
+        let len = len.and_then(|len| u64::try_from(len).ok());
+        self.store.check_write(bucket, key, len).await.s3()
     }
 
     /// Decides a write's encryption from its SSE headers and the bucket's default.
@@ -1006,7 +1005,7 @@ impl S3 for Drive {
                 },
             )
             .await?;
-        self.ensure_space(&input.bucket, input.content_length)
+        self.check_write(&input.bucket, Some(&input.key), input.content_length)
             .await?;
         let staged = self
             .store
@@ -1560,8 +1559,12 @@ impl S3 for Drive {
             ));
         }
         let attrs = copy_attrs(&mut input, &source.attrs, replace)?;
-        self.ensure_space(&input.bucket, i64::try_from(source.size).ok())
-            .await?;
+        self.check_write(
+            &input.bucket,
+            Some(&input.key),
+            i64::try_from(source.size).ok(),
+        )
+        .await?;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
@@ -1926,7 +1929,7 @@ impl S3 for Drive {
             input.sse_customer_key.as_deref(),
             input.sse_customer_key_md5.as_deref(),
         )?;
-        self.ensure_space(&upload.bucket, input.content_length)
+        self.check_write(&upload.bucket, None, input.content_length)
             .await?;
         let staged = self
             .store
@@ -2005,7 +2008,7 @@ impl S3 for Drive {
             Some(range) => copy_range(range, source.size)?,
             None => (0, source.size),
         };
-        self.ensure_space(&upload.bucket, i64::try_from(length).ok())
+        self.check_write(&upload.bucket, None, i64::try_from(length).ok())
             .await?;
         let mut staged = self
             .store

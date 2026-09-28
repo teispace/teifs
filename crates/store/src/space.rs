@@ -57,12 +57,31 @@ fn fits(dir: &Path, len: u64) -> Result<()> {
 }
 
 impl Store {
-    /// Fails with `StorageFull` unless writing `len` more bytes to `bucket` leaves the
-    /// room kept free for deletes and metadata.
-    pub async fn ensure_space(&self, bucket: &str, len: u64) -> Result<()> {
-        let bucket = bucket.to_owned();
-        self.blocking(move |inner| inner.ensure_space(&bucket, len))
-            .await
+    /// Checks a write before its bytes are read: that `key` (when the write names one)
+    /// can be created in `bucket`, and that `len` more bytes (when known) leave the room
+    /// kept free for deletes and metadata.
+    pub async fn check_write(
+        &self,
+        bucket: &str,
+        key: Option<&str>,
+        len: Option<u64>,
+    ) -> Result<()> {
+        let (bucket, key) = (bucket.to_owned(), key.map(str::to_owned));
+        self.blocking(move |inner| {
+            if let Some(key) = &key {
+                match inner.bucket(&bucket)? {
+                    Bucket::Folder(..) => {
+                        inner.new_key(key)?;
+                    }
+                    Bucket::Object(_) => teifs_types::check_object_key(key)?,
+                }
+            }
+            match len {
+                Some(len) => inner.ensure_space(&bucket, len),
+                None => Ok(()),
+            }
+        })
+        .await
     }
 }
 
@@ -73,7 +92,7 @@ mod tests {
     const GIB: u64 = 1024 * MIB;
 
     #[test]
-    fn the_reserve_is_one_percent_within_bounds() {
+    fn the_reserve_is_a_tenth_of_a_percent_within_bounds() {
         assert_eq!(reserve(10 * GIB), MIN_RESERVE);
         assert_eq!(reserve(500 * GIB), GIB / 2);
         assert_eq!(reserve(20_000 * GIB), MAX_RESERVE);
@@ -97,12 +116,13 @@ mod tests {
             .create_bucket("bkt", crate::Layout::Folder)
             .await
             .unwrap();
-        assert!(store.ensure_space("bkt", 1024).await.is_ok());
-        let err = store.ensure_space("bkt", u64::MAX / 2).await.unwrap_err();
+        let check = |len| store.check_write("bkt", Some("k"), Some(len));
+        assert!(check(1024).await.is_ok());
+        let err = check(u64::MAX / 2).await.unwrap_err();
         assert!(matches!(err, StoreError::StorageFull));
         assert!(err.is_storage_full());
         assert!(matches!(
-            store.ensure_space("nope", 1).await,
+            store.check_write("nope", None, Some(1)).await,
             Err(StoreError::NoSuchBucket)
         ));
     }

@@ -6,7 +6,7 @@ mod object;
 
 pub use names::{
     BUCKET_STAGING, MAX_KEY_LEN, MAX_SEGMENT_LEN, NameError, ObjectKey, check_bucket,
-    check_object_key,
+    check_folder_bucket, check_object_key,
 };
 pub use object::{
     ChecksumType, ObjectAttrs, ObjectInfo, PartInfo, SseInfo, SseMode, Stamp, UploadChecksum,

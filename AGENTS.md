@@ -17,7 +17,9 @@ before speed.
   `crates/store/tests/fixtures/` proving old drives still open. Never edit a released
   database migration; add a new one.
 - **Keys never escape their bucket.** Every key goes through `ObjectKey::parse`; paths are
-  built only from checked parts and compared with their canonical form before use.
+  built only from checked parts and compared with their canonical form before use. A
+  name a folder bucket is about to create goes through `Inner::new_key` (the drive's
+  portable-name rules).
 - **Writes are atomic**: stage in `.teifs/tmp`, sync, rename, sync the folder, record the
   row, all under the commit lock.
 - **Secrets never reach logs, command lines or test fixtures.** Keys are wiped from memory

@@ -64,6 +64,9 @@ that map keys to paths behave:
 | Key with `.` or `..` segments, an empty segment (`a//b`) or a leading `/` | `400 InvalidArgument` | Accepted |
 | Keys `a` and `a/b` at once | The second: `409 XTeiFSKeyConflict` | Both accepted |
 | Keys differing only in letter case, on a case-insensitive disk | The second: `409 XTeiFSKeyConflict` | Both accepted |
+| Keys differing only in Unicode form (`é` composed or decomposed), on a disk that treats them as one name (APFS, HFS+) | The second: `409 XTeiFSKeyConflict` | Both accepted |
+| Names Windows can't hold: device names (`CON`, `NUL.txt`, `COM1`, `LPT1`, …), any of `<>:"\|?*`, control characters, a segment ending in `.` or a space | `400 InvalidArgument` on every system, so the drive can move between them; `serve --key-names host` allows them except on Windows. Such files put there by other programs are still listed, read and deleted | Accepted |
+| Folder bucket named after a Windows device (`con`, `nul`, `aux`, `prn`, `com1`, …) | `400 InvalidBucketName` | Accepted |
 | A key ending in `/` with content | `400 InvalidRequest` (it's a folder) | Accepted |
 | ETag of a file changed outside TeiFS | Provisional `<hex>-1` until the background indexer hashes it (within one pass, 30 minutes apart) | Always the MD5 |
 

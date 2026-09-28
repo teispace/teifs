@@ -4,6 +4,12 @@
 //! so a key must be something every supported file system can hold: no empty, `.` or `..`
 //! segments, no backslashes or NUL bytes, and no segment longer than a file name may be.
 //! A key ending in `/` is a folder (S3's "directory marker").
+//!
+//! Windows can't hold every name the others can: device names (`CON`, `NUL.txt`), the
+//! characters `<>:"|?*` and control characters, and names ending in a dot or a space are
+//! refused or silently changed by its path layer (`a:b` even writes a hidden stream of the
+//! file `a`). Those names are always refused on Windows, and elsewhere when a drive's keys
+//! are kept portable ([`ObjectKey::check_portable`]), so a drive can move between systems.
 
 use std::path::PathBuf;
 
@@ -59,6 +65,73 @@ pub fn check_bucket(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Names Windows treats as devices, in any letter case and with any extension.
+const WINDOWS_DEVICES: [&str; 32] = [
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CONIN$",
+    "CONOUT$", //
+    "COM0",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9", //
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}", //
+    "LPT0",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9", //
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
+];
+
+/// Why Windows can't hold a file or folder called `name`, if it can't.
+fn windows_name_error(name: &str) -> Option<&'static str> {
+    if name.chars().any(|c| {
+        matches!(
+            c,
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\u{1}'..='\u{1f}'
+        )
+    }) {
+        return Some("Windows can't hold a name with any of <>:\"|?* or a control character");
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some("Windows can't hold a name ending in a dot or a space");
+    }
+    // `NUL.txt` and `NUL .txt` are the device too.
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    WINDOWS_DEVICES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+        .then_some("Windows reserves this name for a device (CON, NUL, COM1, LPT1, …)")
+}
+
+/// Checks a bucket name for a folder bucket, whose folder has the bucket's name:
+/// Windows device names (`con`, `nul`, `com1`, …) can't be folders there.
+pub fn check_folder_bucket(name: &str, portable: bool) -> Result<()> {
+    check_bucket(name)?;
+    match windows_name_error(name) {
+        Some(why) if portable || cfg!(windows) => Err(NameError::InvalidBucketName(why)),
+        _ => Ok(()),
+    }
+}
+
 /// Checks a key for an object bucket, which stores any key S3 allows: 1 to 1024 bytes of
 /// UTF-8 (the type guarantees UTF-8).
 pub fn check_object_key(key: &str) -> Result<()> {
@@ -110,7 +183,16 @@ impl ObjectKey {
                 s if s.len() > MAX_SEGMENT_LEN => {
                     return Err(invalid("a segment is longer than 255 bytes"));
                 }
-                s => rel.push(s),
+                s => {
+                    // Windows would open something else: a device, a hidden stream, the
+                    // name without its trailing dot.
+                    if cfg!(windows)
+                        && let Some(why) = windows_name_error(s)
+                    {
+                        return Err(invalid(why));
+                    }
+                    rel.push(s);
+                }
             }
         }
         Ok(Self {
@@ -118,6 +200,19 @@ impl ObjectKey {
             rel,
             folder,
         })
+    }
+
+    /// Fails unless every system TeiFS runs on can hold the key as a path, so the drive
+    /// can move between them: Windows' rules, whichever system this is.
+    pub fn check_portable(&self) -> Result<()> {
+        self.segments()
+            .find_map(windows_name_error)
+            .map_or(Ok(()), |why| Err(NameError::InvalidKey(why)))
+    }
+
+    /// The key's names, from the bucket's top down.
+    fn segments(&self) -> impl Iterator<Item = &str> {
+        self.key.trim_end_matches('/').split('/')
     }
 
     /// The key as given.
@@ -222,5 +317,76 @@ mod tests {
             check_object_key(&"k".repeat(1025)),
             Err(NameError::KeyTooLong)
         );
+    }
+
+    #[test]
+    fn portable_keys_follow_windows_rules() {
+        let portable = |key: &str| ObjectKey::parse(key).and_then(|k| k.check_portable());
+        for good in [
+            "a/b.txt",
+            "CONSOLE",
+            "con_not",
+            "COM10",
+            "LPT",
+            "nul-ish/x",
+            ".CON",
+            "a/.hidden",
+            " lead",
+            "ünïcødé/ok.txt",
+            "folder/",
+            "a.b.c",
+        ] {
+            assert!(portable(good).is_ok(), "{good:?}");
+        }
+        for bad in [
+            "CON",
+            "con",
+            "Nul.txt",
+            "NUL .tar.gz",
+            "photos/aux/1.jpg",
+            "COM1",
+            "com\u{b9}.log",
+            "LPT9",
+            "lpt0",
+            "CONIN$",
+            "conout$.x",
+            "a:b",
+            "a/b?",
+            "x*",
+            "q\"uote",
+            "p|ipe",
+            "<a>",
+            "tab\there",
+            "bell\u{7}",
+            "dot./x",
+            "ends.",
+            "space /x",
+            "trailing ",
+            "prn/",
+        ] {
+            // Windows refuses them outright; elsewhere they're refused as not portable.
+            let refused = match ObjectKey::parse(bad) {
+                Ok(key) => matches!(key.check_portable(), Err(NameError::InvalidKey(_))),
+                Err(err) => cfg!(windows) && matches!(err, NameError::InvalidKey(_)),
+            };
+            assert!(refused, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn windows_refuses_its_own_names_whatever_the_setting() {
+        assert_eq!(ObjectKey::parse("a:b").is_err(), cfg!(windows));
+        assert_eq!(ObjectKey::parse("NUL.txt").is_err(), cfg!(windows));
+    }
+
+    #[test]
+    fn folder_buckets_cant_be_devices() {
+        for device in ["con", "nul", "aux", "prn", "com1", "lpt9"] {
+            assert!(check_folder_bucket(device, true).is_err(), "{device}");
+            assert_eq!(check_folder_bucket(device, false).is_err(), cfg!(windows));
+        }
+        assert!(check_folder_bucket("console", true).is_ok());
+        assert!(check_folder_bucket("con.logs", true).is_err());
+        assert!(check_folder_bucket("A", true).is_err());
     }
 }
