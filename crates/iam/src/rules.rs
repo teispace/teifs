@@ -135,6 +135,23 @@ pub(crate) fn document(text: &str) -> Result<usize> {
     Ok(size)
 }
 
+/// A managed policy's description: at most 1000 of tab, line breaks and U+0020–U+00FF,
+/// as AWS allows.
+pub(crate) fn description(text: &str) -> Result<()> {
+    let ok = text.chars().count() <= DESCRIPTION
+        && text
+            .chars()
+            .all(|c| matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{FF}'));
+    if ok {
+        Ok(())
+    } else {
+        Err(IamError::InvalidInput(format!(
+            "a description is at most {DESCRIPTION} characters, of tab, line breaks and \
+             U+0020 to U+00FF"
+        )))
+    }
+}
+
 /// A policy version id: `v1`, `v2`, ….
 pub(crate) fn version_id(text: &str) -> Result<u32> {
     text.strip_prefix('v')
@@ -209,6 +226,16 @@ mod tests {
         assert!(document("\u{100}").is_err());
         assert!(document("\u{0}").is_err());
         assert!(document(&" ".repeat(131_073)).is_err());
+    }
+
+    #[test]
+    fn descriptions() {
+        for good in ["", "Reads photos.\r\n\tÿ é", &"x".repeat(1000)] {
+            assert!(description(good).is_ok(), "{good:?}");
+        }
+        for bad in ["日本", "\u{0}", "\u{7F}x\u{100}", &"x".repeat(1001)] {
+            assert!(description(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

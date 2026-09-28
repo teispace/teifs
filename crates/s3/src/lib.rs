@@ -9,6 +9,7 @@ mod drive;
 mod encode;
 mod errors;
 mod health;
+mod iam_api;
 mod limits;
 mod sse;
 mod tagging;
@@ -60,10 +61,13 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     ));
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
+    config.sig_v4_allowed_services = ["s3", "iam", "sts"].map(str::to_owned).into();
+    config.custom_route_max_body_size = Some(iam_api::MAX_FORM_BYTES as u64);
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));
-        builder.set_access(access::Access::new(iam));
+        builder.set_access(access::Access::new(iam.clone()));
+        builder.set_route(iam_api::Route { iam });
     }
     let host = if options.domains.is_empty() {
         None

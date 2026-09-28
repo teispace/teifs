@@ -8,6 +8,7 @@
 //! written in one transaction and then published as a new [`Credential`] lookup, so
 //! authentication never touches the database.
 
+mod api;
 mod ids;
 mod ops;
 mod rules;
@@ -23,6 +24,7 @@ use std::{
 use teifs_crypto::{Context, CryptoError, DEFAULT_KEY, DataKey, Kms, SealedKey};
 use teifs_meta::{IamWrite, MetaError, System};
 
+pub use api::{Call, Reply};
 pub use ops::{
     AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, Owner, PolicyInfo, PolicyVersionInfo,
     UserInfo,

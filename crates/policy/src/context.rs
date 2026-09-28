@@ -5,7 +5,7 @@
 use std::{borrow::Cow, net::IpAddr};
 
 use crate::{
-    key::{GlobalKey, Key, S3Key, TagKind},
+    key::{GlobalKey, IamKey, Key, S3Key, TagKind},
     value::{Date, Number},
 };
 
@@ -149,6 +149,12 @@ impl Principal {
         &self.user_id
     }
 
+    /// `aws:username`: an IAM user's name; none for others.
+    #[must_use]
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
     /// The principal's account; none for anonymous.
     #[must_use]
     pub fn account(&self) -> Option<&str> {
@@ -162,6 +168,21 @@ impl Principal {
     pub(crate) fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()
     }
+}
+
+/// Sets `key` in a list of key values, replacing its earlier value.
+fn set<K: PartialEq>(list: &mut Vec<(K, Value)>, key: K, value: Value) {
+    match list.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, old)) => *old = value,
+        None => list.push((key, value)),
+    }
+}
+
+/// The values of `key` in a list of key values.
+fn get<'a, K: PartialEq>(list: &'a [(K, Value)], key: &K) -> Values<'a> {
+    list.iter()
+        .find(|(k, _)| k == key)
+        .map_or(Values::None, |(_, value)| value.values())
 }
 
 /// A value the server records for a condition key.
@@ -255,6 +276,7 @@ pub struct Context {
     resource_account: Option<String>,
     token_issue_time: Option<Date>,
     s3: Vec<(S3Key, Value)>,
+    iam: Vec<(IamKey, Value)>,
     /// Kind, tag key, tag value.
     tags: Vec<(TagKind, String, String)>,
     /// `aws:TagKeys`: the keys of the `aws:RequestTag`s.
@@ -279,6 +301,7 @@ impl Context {
             resource_account: None,
             token_issue_time: None,
             s3: Vec::new(),
+            iam: Vec::new(),
             tags: Vec::new(),
             request_tag_keys: Vec::new(),
             request_object_tag_keys: Vec::new(),
@@ -349,11 +372,15 @@ impl Context {
             "{} is derived",
             key.name()
         );
-        let value = value.into();
-        match self.s3.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, old)) => *old = value,
-            None => self.s3.push((key, value)),
-        }
+        set(&mut self.s3, key, value.into());
+        self
+    }
+
+    /// An IAM key's value (`iam:PolicyARN` of an attach request), replacing any earlier
+    /// one.
+    #[must_use]
+    pub fn with_iam(mut self, key: IamKey, value: impl Into<Value>) -> Self {
+        set(&mut self.iam, key, value.into());
         self
     }
 
@@ -369,17 +396,22 @@ impl Context {
         self
     }
 
+    /// `aws:TagKeys` for a request that names tag keys without values (`UntagUser`).
+    #[must_use]
+    pub fn with_tag_keys<'k>(mut self, keys: impl IntoIterator<Item = &'k str>) -> Self {
+        self.request_tag_keys
+            .extend(keys.into_iter().map(str::to_owned));
+        self
+    }
+
     /// The values the request has for `key`; none when it doesn't have the key.
     pub(crate) fn lookup(&self, key: &Key) -> Values<'_> {
         match key {
             Key::Global(key) => self.global(*key),
             Key::S3(S3Key::RequestObjectTagKeys) => Values::Many(&self.request_object_tag_keys),
             Key::S3(S3Key::ResourceAccount) => Values::text(self.resource_account.as_deref()),
-            Key::S3(key) => self
-                .s3
-                .iter()
-                .find(|(k, _)| k == key)
-                .map_or(Values::None, |(_, value)| value.values()),
+            Key::S3(key) => get(&self.s3, key),
+            Key::Iam(key) => get(&self.iam, key),
             Key::Tag(kind, name) => self.tag(*kind, name),
             Key::Unknown(_) => Values::None,
         }

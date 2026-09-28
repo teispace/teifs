@@ -24,6 +24,12 @@ pub(crate) const MIGRATION: &str = "
         created_ms      INTEGER NOT NULL,
         updated_ms      INTEGER NOT NULL
     ) WITHOUT ROWID;
+    CREATE TABLE iam_policy_tags (
+        policy_id TEXT NOT NULL REFERENCES iam_policies (id) ON DELETE CASCADE,
+        key       TEXT NOT NULL,
+        value     TEXT NOT NULL,
+        PRIMARY KEY (policy_id, key)
+    ) WITHOUT ROWID;
     CREATE TABLE iam_policy_versions (
         policy_id  TEXT    NOT NULL REFERENCES iam_policies (id) ON DELETE CASCADE,
         version    INTEGER NOT NULL,
@@ -188,6 +194,8 @@ pub struct IamRows {
     pub members: Vec<(String, String)>,
     /// Managed policies.
     pub policies: Vec<PolicyRow>,
+    /// Their tags: (policy id, key, value); keys are case sensitive.
+    pub policy_tags: Vec<(String, String, String)>,
     /// Their versions.
     pub versions: Vec<PolicyVersionRow>,
     /// Inline policies.
@@ -224,6 +232,10 @@ pub enum IamWrite {
     PutPolicy(PolicyRow),
     /// Deletes a managed policy and its versions.
     DeletePolicy(String),
+    /// Sets a managed policy's tag (keys are case sensitive).
+    PutPolicyTag(String, String, String),
+    /// Removes a managed policy's tag.
+    DeletePolicyTag(String, String),
     /// Adds a policy version.
     PutVersion(PolicyVersionRow),
     /// Deletes a policy version: (policy id, version).
@@ -296,6 +308,11 @@ impl System {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
+            policy_tags: all(
+                "SELECT policy_id, key, value FROM iam_policy_tags ORDER BY policy_id, key",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?,
             versions: all(
                 "SELECT policy_id, version, document, created_ms FROM iam_policy_versions
                  ORDER BY policy_id, version",
@@ -348,6 +365,7 @@ impl System {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one statement per kind of write")]
 fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
     let run = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Result<()> {
         tx.prepare_cached(sql)?.execute(params)?;
@@ -408,6 +426,15 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
             ],
         ),
         IamWrite::DeletePolicy(id) => run("DELETE FROM iam_policies WHERE id = ?1", params![id]),
+        IamWrite::PutPolicyTag(policy, key, value) => run(
+            "INSERT INTO iam_policy_tags (policy_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (policy_id, key) DO UPDATE SET value = excluded.value",
+            params![policy, key, value],
+        ),
+        IamWrite::DeletePolicyTag(policy, key) => run(
+            "DELETE FROM iam_policy_tags WHERE policy_id = ?1 AND key = ?2",
+            params![policy, key],
+        ),
         IamWrite::PutVersion(v) => run(
             "INSERT INTO iam_policy_versions (policy_id, version, document, created_ms)
              VALUES (?1, ?2, ?3, ?4)",
@@ -496,6 +523,8 @@ mod tests {
                 document: "{}".into(),
                 created_ms: 1,
             }),
+            IamWrite::PutPolicyTag("P1".into(), "Team".into(), "a".into()),
+            IamWrite::PutPolicyTag("P1".into(), "team".into(), "b".into()),
             IamWrite::PutUser(UserRow {
                 boundary: Some("P1".into()),
                 ..user("U1", "alice")
@@ -523,6 +552,11 @@ mod tests {
         assert_eq!(rows.users[0].boundary.as_deref(), Some("P1"));
         assert_eq!(rows.user_tags, [("U1".into(), "team".into(), "a".into())]);
         assert_eq!(rows.members, [("G1".into(), "U1".into())]);
+        assert_eq!(
+            rows.policy_tags.len(),
+            2,
+            "policy tag keys are case sensitive"
+        );
         assert_eq!(rows.inline[0].owner, "G1");
         assert_eq!(rows.attached, [("U1".into(), "P1".into())]);
         assert_eq!(rows.keys, [key]);

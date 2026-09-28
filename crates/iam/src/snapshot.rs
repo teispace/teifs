@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use teifs_policy::{Policy, Principal};
+use teifs_policy::{Context, Policies, Policy, Principal, Request, evaluate};
 use zeroize::Zeroizing;
 
 use crate::state::State;
@@ -48,6 +48,29 @@ impl Identity {
     #[must_use]
     pub fn boundary(&self) -> Option<&Policy> {
         self.boundary.as_deref()
+    }
+
+    /// Whether this identity may do `action` on `resource` in `context`: always for the
+    /// root user, else as its policies and boundary decide.
+    #[must_use]
+    pub fn allows(&self, context: &Context, action: &str, resource: &str) -> bool {
+        if self.root {
+            return true;
+        }
+        let policies: Vec<&Policy> = self.policies.iter().map(Arc::as_ref).collect();
+        evaluate(
+            &Policies {
+                identity: &policies,
+                boundary: self.boundary(),
+                ..Policies::default()
+            },
+            &Request {
+                action,
+                resource,
+                context,
+            },
+        )
+        .is_allowed()
     }
 }
 

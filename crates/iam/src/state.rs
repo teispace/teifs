@@ -78,6 +78,8 @@ pub(crate) struct Version {
 pub(crate) struct Managed {
     pub(crate) row: PolicyRow,
     pub(crate) versions: BTreeMap<u32, Version>,
+    /// Keys are case sensitive (AWS, for policies).
+    pub(crate) tags: Vec<(String, String)>,
 }
 
 impl Managed {
@@ -127,7 +129,7 @@ impl State {
     pub(crate) fn load(account: &str, rows: IamRows, key: &DataKey) -> Result<Self> {
         let mut state = Self {
             account: account.into(),
-            policies: load_policies(rows.policies, rows.versions)?,
+            policies: load_policies(rows.policies, rows.versions, rows.policy_tags)?,
             keys: load_keys(rows.keys, key)?,
             ..Self::default()
         };
@@ -284,24 +286,15 @@ impl State {
     }
 
     pub(crate) fn user_arn(&self, user: &User) -> String {
-        format!(
-            "arn:aws:iam::{}:user{}{}",
-            self.account, user.path, user.name
-        )
+        arn(&self.account, "user", &user.path, &user.name)
     }
 
     pub(crate) fn group_arn(&self, group: &Group) -> String {
-        format!(
-            "arn:aws:iam::{}:group{}{}",
-            self.account, group.path, group.name
-        )
+        arn(&self.account, "group", &group.path, &group.name)
     }
 
     pub(crate) fn policy_arn(&self, policy: &PolicyRow) -> String {
-        format!(
-            "arn:aws:iam::{}:policy{}{}",
-            self.account, policy.path, policy.name
-        )
+        arn(&self.account, "policy", &policy.path, &policy.name)
     }
 
     /// Whether a name is taken by another entity of the same kind (without case).
@@ -321,8 +314,13 @@ impl State {
 fn load_policies(
     rows: Vec<PolicyRow>,
     version_rows: Vec<PolicyVersionRow>,
+    tag_rows: Vec<(String, String, String)>,
 ) -> Result<BTreeMap<String, Arc<Managed>>> {
     let mut policies = BTreeMap::new();
+    let mut tags: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (policy, key, value) in tag_rows {
+        tags.entry(policy).or_default().push((key, value));
+    }
     let mut versions: BTreeMap<String, BTreeMap<u32, Version>> = BTreeMap::new();
     for v in version_rows {
         let document = Document::stored(
@@ -345,7 +343,15 @@ fn load_policies(
                 row.name
             )));
         }
-        policies.insert(row.id.clone(), Arc::new(Managed { row, versions }));
+        let tags = tags.remove(&row.id).unwrap_or_default();
+        policies.insert(
+            row.id.clone(),
+            Arc::new(Managed {
+                row,
+                versions,
+                tags,
+            }),
+        );
     }
     Ok(policies)
 }
@@ -371,4 +377,9 @@ fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, 
         );
     }
     Ok(keys)
+}
+
+/// The ARN of the `kind` (`user`, `group`, `policy`) called `name` under `path`.
+pub(crate) fn arn(account: &str, kind: &str, path: &str, name: &str) -> String {
+    format!("arn:aws:iam::{account}:{kind}{path}{name}")
 }

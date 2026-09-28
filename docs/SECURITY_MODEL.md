@@ -64,13 +64,20 @@ are withheld without failing the request. Multipart uploads belong to the user w
 started them (any of their keys); only that user or the root user can continue them.
 A key that's deactivated or deleted stops working at the next request.
 
-### 4. Credentials can't be escalated (*secrets built; the rest planned*)
+### 4. Credentials can't be escalated (*built for IAM users; temporary credentials planned*)
 IAM access keys' secrets are stored sealed (AES-256-GCM, each bound to its access key
 id) under an IAM key the drive's KMS seals, so `system.db` alone doesn't reveal them;
 they're never logged, and shown once, when the key is created.
-A key can only create keys with a subset of its own rights, never for another user; the
-root account has no service accounts; bulk import goes through the same checks as single
-changes.
+Changing IAM is itself an IAM permission: every action of the IAM API is authorized
+before it runs, as on AWS, so a user can manage only what its policies grant, and
+delegated administrators can be held to specific policies and boundaries
+(`iam:PolicyARN`, `iam:PermissionsBoundary`). A name given in another case is resolved
+to the entity's own ARN before policies are read, since ARNs compare with case and a
+Deny must not be dodged by spelling. A user without a permission is refused every
+action (a test runs all of them). An IAM request's body is acted on only if it's the
+body the signature covers (`UNSIGNED-PAYLOAD` is refused). The root user's key belongs
+to the drive's configuration and can't be created or changed through IAM; bulk import
+will go through the same checks as single changes.
 
 ### 5. No default secrets
 There is no built-in access key or password. The first run generates random credentials

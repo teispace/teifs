@@ -177,6 +177,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-iam"
+version = "1.127.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "999e82461c353d7839a5365cd94925e2ea04106188a89ebfb23d974d01b86943"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.150.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,6 +236,32 @@ dependencies = [
  "sha2",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sts"
+version = "1.118.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7572569d018ca72923073494eac3c4671a0daea90b9e3923c2d27a3a02a2c1"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -341,6 +393,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e86338c869539a581bf161247762a6e87f92c5c075060057b5ed6d06632ed0c"
 dependencies = [
  "aws-smithy-runtime-api",
+]
+
+[[package]]
+name = "aws-smithy-query"
+version = "0.62.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1d1d71f6562be974caa85442ecd90194c40fdb5df045f182a6c2e872ce95056"
+dependencies = [
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "urlencoding",
 ]
 
 [[package]]
@@ -2798,13 +2863,17 @@ name = "teifs-iam"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "form_urlencoded",
+ "percent-encoding",
  "serde_json",
  "teifs-crypto",
  "teifs-meta",
  "teifs-policy",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
+ "tracing",
  "zeroize",
 ]
 
@@ -2834,6 +2903,7 @@ name = "teifs-s3"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "base64",
  "bytes",
  "futures",
@@ -2851,6 +2921,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2858,7 +2929,9 @@ name = "teifs-server"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
+ "aws-sdk-iam",
  "aws-sdk-s3",
+ "aws-sdk-sts",
  "base64",
  "dirs",
  "hyper-util",

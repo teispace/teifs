@@ -9,6 +9,7 @@ here come only from tests; nothing is listed as supported because it "should wor
 |---|---|---|
 | AWS SDK for Rust, end to end | A real server driven by the official SDK: signed and presigned requests, chunked uploads with trailer checksums, multipart, copies, listings, conditional requests | `crates/server/tests/sdk.rs` |
 | AWS CLI | A release build in CI: `mb`, a 20 MB multipart upload and download compared byte for byte (also on disk), recursive `ls`, `rm`, `rb`. By hand: `sync` both ways, presigned GET | `.github/workflows/ci.yml` |
+| IAM API, end to end | The AWS SDK for Rust's IAM and STS clients and a real server: a user's whole life, keys users rotate themselves, tampered and unsigned bodies refused; every action refused to a user with no permissions; actions, resources and condition keys checked against AWS's service reference | `crates/server/tests/iam_api.rs`, `crates/iam/src/api/tests.rs` |
 | Store tests | Keys, paths, atomic writes, listings in S3 order, multipart, copies, outside changes, case and link safety | `crates/store/src/tests.rs` |
 | Format fixtures | Drives written by earlier releases open with all metadata | `crates/store/tests/format.rs` |
 | ceph/s3-tests | The standard S3 conformance suite, run nightly; every test is in one of three lists (passing, not yet implemented, excluded with a reason) | `tests/s3-tests/` |
@@ -40,7 +41,10 @@ here come only from tests; nothing is listed as supported because it "should wor
 | KMS | A local keyring, or a Vault/OpenBao transit engine (tested nightly against OpenBao); `teifs key` lists, creates and rotates keys in either |
 | Get/Put/DeleteBucketEncryption, including `BlockedEncryptionTypes` | Supported. Object buckets default to SSE-S3 with SSE-C blocked, as AWS buckets do since April 2026 |
 | DSSE-KMS (`aws:kms:dsse`), UpdateObjectEncryption, S3 Bucket Keys caching | Not yet (Bucket Key settings are recorded and reported) |
-| Bucket policies, users, STS, ACLs, POST uploads | Planned |
+| IAM: users, access keys, groups, customer-managed policies (five versions), inline policies, attachments, permissions boundaries, user and policy tags | Supported with AWS's names, paths, quotas, size limits and error codes. Every request signed with a user's key is decided by the user's and its groups' policies and boundary, for the bucket, key and copy source the operation acts on |
+| The IAM API (Query protocol) on the S3 endpoint: 50 actions, the above and `GetAccountSummary` | Supported: `aws iam --endpoint-url …` and the SDKs work unchanged. Each action is authorized as on AWS, with its condition keys (`iam:PolicyARN`, `iam:PermissionsBoundary`, `aws:RequestTag`, `aws:TagKeys`, `aws:ResourceTag`, `iam:ResourceTag`) on the entity's own ARN, whatever case a name is given in. Roles, MFA, login profiles, SSH and signing keys are not there; key last-use isn't recorded (`N/A`) |
+| STS `GetCallerIdentity` | Supported; `AssumeRole` and other temporary credentials planned |
+| Bucket policies, ACLs, POST uploads | Planned |
 | Versioning, Object Lock, lifecycle | Planned |
 | Notifications, website hosting, logging, replication | Planned |
 | S3 Select, Glacier restore, torrents, Object Lambda, accelerate | Not planned for now |

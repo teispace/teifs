@@ -231,7 +231,10 @@ impl Service {
             Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
             None => s3s::Body::from(body),
         });
-        self.s3.call(req).await
+        match crate::iam_api::with_payload_hash(req).await {
+            Ok(req) => self.s3.call(req).await,
+            Err(refused) => Ok(*refused),
+        }
     }
 
     /// The bucket named by a request's virtual host, if it's virtual-hosted.

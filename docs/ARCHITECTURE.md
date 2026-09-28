@@ -107,6 +107,18 @@ a `Caller` in the request's extensions for what operations decide themselves: ea
 a `DeleteObjects`, optional details (tag counts, owners), who owns a multipart upload, and
 whether a missing key may be reported as missing. Root requests skip all of it.
 
+IAM is managed with AWS's own API: `teifs-iam`'s `api` module speaks the Query protocol
+(a form body, answers in XML) for 50 actions and STS's `GetCallerIdentity`. Actions are
+a table (`api/mod.rs`) of name, resource kind and the condition keys it sets; a test
+checks it against AWS's service reference (`crates/iam/tests/fixtures`). Each action
+resolves the names it's given to the entity's own ARN and tags first, asks the caller's
+`Identity::allows` (the same decision S3 requests get), then runs the operation.
+`teifs-s3` serves it on the S3 endpoint (`iam_api.rs`): a signed `POST /` with a form is
+an s3s custom route, dispatched on the signature's service (`iam` or `sts`). SDKs don't
+send `x-amz-content-sha256` for the Query protocol, which s3s needs to check the
+signature, so `cors::Service` adds it from the body before s3s sees the request, and the
+route checks it again, so only the body that was signed is acted on.
+
 ### The protocol layer: s3s
 
 [s3s](https://github.com/s3s-project/s3s) turns HTTP requests into typed S3 operations and

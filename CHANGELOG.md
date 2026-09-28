@@ -7,6 +7,12 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- IAM, as AWS has it: users, access keys, groups, customer-managed policies with
+  versions, inline policies, permissions boundaries and tags, with AWS's rules, quotas
+  and error codes. Requests signed with a user's key do only what the user's policies
+  allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (50
+  actions, each authorized with AWS's condition keys) and STS `GetCallerIdentity` are
+  served on the S3 endpoint. Access key secrets are stored sealed by the drive's KMS.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.

@@ -90,7 +90,7 @@ async fn state_and_secrets_survive_a_restart_sealed() {
     iam.create_group("readers", None).unwrap();
     iam.add_user_to_group("readers", "alice").unwrap();
     let policy = iam
-        .create_policy("read", None, Some("photos"), READ_PHOTOS)
+        .create_policy("read", None, Some("photos"), READ_PHOTOS, &[])
         .unwrap();
     iam.attach(Owner::Group("readers"), &policy.arn).unwrap();
     iam.put_inline(Owner::User("alice"), "home", HOME).unwrap();
@@ -215,7 +215,9 @@ async fn deleting_a_user_needs_its_dependents_gone_first() {
     let iam = Drive::new().open().await;
     iam.create_user("alice", None, &[], None).unwrap();
     iam.create_group("g", None).unwrap();
-    let policy = iam.create_policy("p", None, None, READ_PHOTOS).unwrap();
+    let policy = iam
+        .create_policy("p", None, None, READ_PHOTOS, &[])
+        .unwrap();
     let key = iam.create_access_key("alice").unwrap();
     iam.put_inline(Owner::User("alice"), "home", HOME).unwrap();
     iam.attach(Owner::User("alice"), &policy.arn).unwrap();
@@ -328,6 +330,55 @@ async fn user_tags_compare_without_case() {
 }
 
 #[tokio::test]
+async fn policy_tags_are_case_sensitive_and_survive_a_restart() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    let tag = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    assert_eq!(
+        code(iam.create_policy(
+            "p",
+            None,
+            None,
+            READ_PHOTOS,
+            &[tag("a", "1"), tag("a", "2")]
+        )),
+        "InvalidInput"
+    );
+    let arn = iam
+        .create_policy("p", None, None, READ_PHOTOS, &[tag("Team", "a")])
+        .unwrap()
+        .arn;
+    iam.tag_policy(&arn, &[tag("team", "b"), tag("Team", "c")])
+        .unwrap();
+    assert_eq!(
+        iam.policy(&arn).unwrap().tags,
+        [tag("Team", "c"), tag("team", "b")],
+        "keys differing in case are different tags"
+    );
+    let many: Vec<_> = (0..49).map(|i| tag(&format!("k{i:02}"), "v")).collect();
+    assert_eq!(code(iam.tag_policy(&arn, &many)), "LimitExceeded");
+    assert_eq!(iam.policy(&arn).unwrap().tags.len(), 2);
+    iam.untag_policy(&arn, &["TEAM".into(), "team".into()])
+        .unwrap();
+    assert_eq!(iam.policy(&arn).unwrap().tags, [tag("Team", "c")]);
+    iam.tag_policy(&arn, &many[..10]).unwrap();
+    let before = iam.policy(&arn).unwrap().tags;
+    drop(iam);
+
+    let iam = drive.open().await;
+    assert_eq!(
+        iam.policy(&arn).unwrap().tags,
+        before,
+        "the same after a restart"
+    );
+    assert_eq!(
+        code(iam.tag_policy("arn:aws:iam::000000000000:policy/none", &[])),
+        "NoSuchEntity"
+    );
+    iam.delete_policy(&arn).unwrap();
+}
+
+#[tokio::test]
 async fn groups_and_membership() {
     let iam = Drive::new().open().await;
     iam.create_user("alice", None, &[], None).unwrap();
@@ -366,7 +417,7 @@ async fn groups_and_membership() {
 async fn managed_policies_keep_five_versions_numbered_for_ever() {
     let iam = Drive::new().open().await;
     let policy = iam
-        .create_policy("Read", Some("/team/"), Some("reads"), READ_PHOTOS)
+        .create_policy("Read", Some("/team/"), Some("reads"), READ_PHOTOS, &[])
         .unwrap();
     assert!(policy.id.starts_with("ANPA"));
     assert_eq!(
@@ -375,7 +426,7 @@ async fn managed_policies_keep_five_versions_numbered_for_ever() {
     );
     assert_eq!(policy.default_version, "v1");
     assert_eq!(
-        code(iam.create_policy("read", None, None, READ_PHOTOS)),
+        code(iam.create_policy("read", None, None, READ_PHOTOS, &[])),
         "EntityAlreadyExists"
     );
     let arn = &policy.arn;
@@ -472,7 +523,7 @@ async fn documents_are_checked_and_sized_as_iam_does() {
         "{\"a\":\"\u{100}\"}",
     ] {
         assert_eq!(
-            code(iam.create_policy("p", None, None, bad)),
+            code(iam.create_policy("p", None, None, bad, &[])),
             "MalformedPolicyDocument",
             "{bad:?}"
         );
@@ -492,9 +543,10 @@ async fn documents_are_checked_and_sized_as_iam_does() {
         format!("{base}{}{tail}", "x".repeat(pad))
     };
     let spaced = |n: usize| sized(n).replace(',', " ,   ");
-    iam.create_policy("max", None, None, &spaced(6144)).unwrap();
+    iam.create_policy("max", None, None, &spaced(6144), &[])
+        .unwrap();
     assert_eq!(
-        code(iam.create_policy("over", None, None, &sized(6145))),
+        code(iam.create_policy("over", None, None, &sized(6145), &[])),
         "LimitExceeded"
     );
 
@@ -534,7 +586,7 @@ async fn attachments_are_limited_and_listed() {
     iam.create_user("alice", None, &[], None).unwrap();
     let arns: Vec<String> = (0..11)
         .map(|i| {
-            iam.create_policy(&format!("p{i:02}"), None, None, READ_PHOTOS)
+            iam.create_policy(&format!("p{i:02}"), None, None, READ_PHOTOS, &[])
                 .unwrap()
                 .arn
         })
@@ -563,7 +615,9 @@ async fn identities_combine_user_group_and_boundary_policies() {
     iam.create_user("alice", None, &[], None).unwrap();
     iam.create_group("readers", None).unwrap();
     iam.add_user_to_group("readers", "alice").unwrap();
-    let read = iam.create_policy("read", None, None, READ_PHOTOS).unwrap();
+    let read = iam
+        .create_policy("read", None, None, READ_PHOTOS, &[])
+        .unwrap();
     iam.attach(Owner::Group("readers"), &read.arn).unwrap();
     iam.put_inline(Owner::User("alice"), "home", HOME).unwrap();
     let key = iam.create_access_key("alice").unwrap().info.id;

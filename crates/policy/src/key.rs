@@ -144,6 +144,32 @@ keys! {
 }
 
 keys! {
+    /// IAM's own keys (from AWS's Service Authorization Reference), except
+    /// `iam:ResourceTag`, which is a [`TagKind`]. Those with no IAM feature in TeiFS
+    /// (FIDO keys, Organizations, delegation) are recognized but never present.
+    IamKey {
+        AccountPropertyNamespaces = "iam:AccountPropertyNamespaces",
+        AssociatedResourceArn = "iam:AssociatedResourceArn",
+        AwsServiceName = "iam:AWSServiceName",
+        DelegationDuration = "iam:DelegationDuration",
+        DelegationRequestOwner = "iam:DelegationRequestOwner",
+        FidoFips1402Certification = "iam:FIDO-FIPS-140-2-certification",
+        FidoFips1403Certification = "iam:FIDO-FIPS-140-3-certification",
+        FidoCertification = "iam:FIDO-certification",
+        NotificationChannel = "iam:NotificationChannel",
+        OrganizationsPolicyId = "iam:OrganizationsPolicyId",
+        PassedToService = "iam:PassedToService",
+        PermissionsBoundary = "iam:PermissionsBoundary",
+        PolicyArn = "iam:PolicyARN",
+        RegisterSecurityKey = "iam:RegisterSecurityKey",
+        RoleTemplateArn = "iam:RoleTemplateARN",
+        ServiceSpecificCredentialAgeDays = "iam:ServiceSpecificCredentialAgeDays",
+        ServiceSpecificCredentialServiceName = "iam:ServiceSpecificCredentialServiceName",
+        TemplateArn = "iam:TemplateArn",
+    }
+}
+
+keys! {
     /// The keys that carry a tag key after a `/`: `aws:ResourceTag/team`.
     TagKind {
         Principal = "aws:PrincipalTag",
@@ -153,6 +179,7 @@ keys! {
         Bucket = "s3:BucketTag",
         ExistingObject = "s3:ExistingObjectTag",
         RequestObject = "s3:RequestObjectTag",
+        IamResource = "iam:ResourceTag",
     }
 }
 
@@ -161,6 +188,7 @@ keys! {
 pub(crate) enum Key {
     Global(GlobalKey),
     S3(S3Key),
+    Iam(IamKey),
     /// A tag family and the tag's key.
     Tag(TagKind, Box<str>),
     /// Any other name: never present in a request.
@@ -186,6 +214,7 @@ impl Key {
         Ok(GlobalKey::find(name)
             .map(Self::Global)
             .or_else(|| S3Key::find(name).map(Self::S3))
+            .or_else(|| IamKey::find(name).map(Self::Iam))
             .unwrap_or_else(|| Self::Unknown(name.into())))
     }
 }
@@ -218,6 +247,14 @@ mod tests {
             "a tag key may itself contain `/`"
         );
         assert_eq!(
+            Key::parse("IAM:policyarn").unwrap(),
+            Key::Iam(IamKey::PolicyArn)
+        );
+        assert_eq!(
+            Key::parse("iam:ResourceTag/team").unwrap(),
+            Key::Tag(TagKind::IamResource, "team".into())
+        );
+        assert_eq!(
             Key::parse("s3:madeup").unwrap(),
             Key::Unknown("s3:madeup".into())
         );
@@ -236,6 +273,7 @@ mod tests {
             .iter()
             .map(|k| k.name())
             .chain(S3Key::ALL.iter().map(|k| k.name()))
+            .chain(IamKey::ALL.iter().map(|k| k.name()))
             .chain(TagKind::ALL.iter().map(|k| k.name()))
             .map(str::to_ascii_lowercase)
             .collect();

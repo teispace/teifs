@@ -20,8 +20,8 @@ use s3s::{
 };
 use teifs_iam::{Iam, Identity};
 use teifs_policy::{
-    Authorization, Context, Date, Facts, Number, Policies, Request, S3_ACCOUNT_RESOURCE, S3Key,
-    TagKind, Target, bucket_arn, evaluate, object_arn,
+    Authorization, Context, Date, Facts, Number, S3_ACCOUNT_RESOURCE, S3Key, TagKind, Target,
+    bucket_arn, object_arn,
 };
 
 use crate::{drive::REGION, tagging};
@@ -87,7 +87,7 @@ impl Caller {
     /// Whether the caller may do `action` on `resource` (for operations that name
     /// several objects, such as `DeleteObjects`).
     pub(crate) fn allows(&self, action: &str, resource: &str) -> bool {
-        self.identity.is_root() || decide(&self.identity, &self.context, action, resource)
+        self.identity.allows(&self.context, action, resource)
     }
 
     /// Whether the request has an optional permission (`s3:GetObjectTagging` for the tag
@@ -123,23 +123,6 @@ fn denied() -> s3s::S3Error {
     s3_error!(AccessDenied, "Access Denied")
 }
 
-fn decide(identity: &Identity, context: &Context, action: &str, resource: &str) -> bool {
-    let policies: Vec<_> = identity.policies().iter().map(Arc::as_ref).collect();
-    evaluate(
-        &Policies {
-            identity: &policies,
-            boundary: identity.boundary(),
-            ..Policies::default()
-        },
-        &Request {
-            action,
-            resource,
-            context,
-        },
-    )
-    .is_allowed()
-}
-
 #[async_trait::async_trait]
 impl S3Access for Access {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
@@ -171,7 +154,7 @@ impl S3Access for Access {
             for need in needs.iter() {
                 match resource(need, cx.s3_path(), operation, source.as_ref()) {
                     Resource::Arn(arn) => {
-                        if !decide(&identity, &context, need.action, &arn) {
+                        if !identity.allows(&context, need.action, &arn) {
                             if need.required {
                                 return Err(denied());
                             }
@@ -340,14 +323,14 @@ const QUERY_KEYS: &[(&str, S3Key)] = &[
     ("versionId", S3Key::VersionId),
 ];
 
-/// Everything a condition may test about the request.
-fn context(
+/// What every signed request's context has, whatever the API: who and when, the
+/// connection, and the client's `User-Agent` and `Referer`.
+pub(crate) fn base_context(
     identity: &Identity,
-    cx: &S3AccessContext<'_>,
+    headers: &http::HeaderMap,
     client: Client,
     account: &str,
-) -> S3Result<Context> {
-    let headers = cx.headers();
+) -> Context {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let mut context = Context::new(identity.principal().clone(), Date::now())
         .with_secure_transport(client.secure)
@@ -362,6 +345,22 @@ fn context(
     if let Some(referer) = header("referer") {
         context = context.with_referer(referer);
     }
+    for (key, value) in identity.tags() {
+        context = context.with_tag(TagKind::Principal, key, value);
+    }
+    context
+}
+
+/// Everything a condition may test about an S3 request.
+fn context(
+    identity: &Identity,
+    cx: &S3AccessContext<'_>,
+    client: Client,
+    account: &str,
+) -> S3Result<Context> {
+    let headers = cx.headers();
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let mut context = base_context(identity, headers, client, account);
     for (name, key) in HEADER_KEYS {
         if let Some(value) = header(name) {
             context = context.with(*key, value.to_owned());
@@ -399,9 +398,6 @@ fn context(
         for (key, value) in tagging::from_header(value)? {
             context = context.with_tag(TagKind::RequestObject, &key, &value);
         }
-    }
-    for (key, value) in identity.tags() {
-        context = context.with_tag(TagKind::Principal, key, value);
     }
     Ok(context)
 }

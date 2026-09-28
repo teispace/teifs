@@ -73,6 +73,8 @@ pub struct PolicyInfo {
     pub created_ms: i64,
     /// When its default version last changed.
     pub updated_ms: i64,
+    /// Its tags.
+    pub tags: Vec<(String, String)>,
 }
 
 /// A version of a managed policy.
@@ -173,6 +175,7 @@ fn policy_info(state: &State, policy: &Managed) -> PolicyInfo {
         boundary_usage_count: state.boundary_uses(&policy.row.id),
         created_ms: policy.row.created_ms,
         updated_ms: policy.row.updated_ms,
+        tags: policy.tags.clone(),
     }
 }
 
@@ -210,13 +213,36 @@ fn under(prefix: Option<&str>) -> Result<impl Fn(&str) -> bool + '_> {
     Ok(move |path: &str| prefix.is_none_or(|p| path.starts_with(p)))
 }
 
-/// Checks a request's tags: valid, at most 50, no key twice (without case).
-fn checked_tags(tags: &[(String, String)]) -> Result<()> {
+/// How an entity compares tag keys: users without case, policies with (as AWS does).
+#[derive(Clone, Copy)]
+enum TagKeys {
+    User,
+    Policy,
+}
+
+impl TagKeys {
+    fn same(self, a: &str, b: &str) -> bool {
+        match self {
+            Self::User => a.eq_ignore_ascii_case(b),
+            Self::Policy => a == b,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+/// Checks a request's tags: valid, no key twice.
+fn checked_tags(kind: TagKeys, tags: &[(String, String)]) -> Result<()> {
     for (key, value) in tags {
         rules::tag(key, value)?;
     }
     for (i, (key, _)) in tags.iter().enumerate() {
-        if tags[..i].iter().any(|(k, _)| k.eq_ignore_ascii_case(key)) {
+        if tags[..i].iter().any(|(k, _)| kind.same(k, key)) {
             return Err(IamError::InvalidInput(format!(
                 "Duplicate tag keys found: {key}"
             )));
@@ -225,8 +251,44 @@ fn checked_tags(tags: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
-fn too_many_tags() -> IamError {
-    IamError::LimitExceeded(format!("A user can have at most {MAX_TAGS} tags."))
+/// `tags` with `new` merged in (a key already there takes the new value and spelling),
+/// within the limit.
+fn merged(
+    kind: TagKeys,
+    tags: &[(String, String)],
+    new: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let mut tags = tags.to_vec();
+    for (key, value) in new {
+        tags.retain(|(k, _)| !kind.same(k, key));
+        tags.push((key.clone(), value.clone()));
+    }
+    if tags.len() > MAX_TAGS {
+        return Err(IamError::LimitExceeded(format!(
+            "A {} can have at most {MAX_TAGS} tags.",
+            kind.noun()
+        )));
+    }
+    // The order the store lists them in, so a reload changes nothing.
+    match kind {
+        TagKeys::User => tags.sort_by_cached_key(|(k, _)| k.to_ascii_lowercase()),
+        TagKeys::Policy => tags.sort(),
+    }
+    Ok(tags)
+}
+
+/// `tags` without `keys`, and the keys that were there.
+fn removed<'k>(
+    kind: TagKeys,
+    tags: &mut Vec<(String, String)>,
+    keys: &'k [String],
+) -> Vec<&'k String> {
+    let gone: Vec<&String> = keys
+        .iter()
+        .filter(|key| tags.iter().any(|(k, _)| kind.same(k, key)))
+        .collect();
+    tags.retain(|(k, _)| !keys.iter().any(|key| kind.same(k, key)));
+    gone
 }
 
 impl Draft<'_> {
@@ -390,10 +452,8 @@ impl Iam {
         rules::name("user name", name, rules::USER_NAME)?;
         let path = path.unwrap_or("/");
         rules::path(path)?;
-        checked_tags(tags)?;
-        if tags.len() > MAX_TAGS {
-            return Err(too_many_tags());
-        }
+        checked_tags(TagKeys::User, tags)?;
+        let tags = merged(TagKeys::User, &[], tags)?;
         self.change(|d| {
             if d.state.user_name_taken(name, None) {
                 return Err(IamError::EntityAlreadyExists(format!(
@@ -414,13 +474,13 @@ impl Iam {
                 path: path.to_owned(),
                 created_ms: d.now,
                 boundary,
-                tags: tags.to_vec(),
+                tags: tags.clone(),
                 inline: BTreeMap::new(),
                 attached: std::collections::BTreeSet::new(),
             };
             let id = user.id.clone();
             d.save_user(user);
-            for (key, value) in tags {
+            for (key, value) in &tags {
                 d.write(IamWrite::PutUserTag(id.clone(), key.clone(), value.clone()));
             }
             Ok(user_info(&d.state, &d.state.users[&id]))
@@ -512,23 +572,17 @@ impl Iam {
 
     /// Adds or replaces a user's tags; keys compare without case (`TagUser`).
     pub fn tag_user(&self, name: &str, tags: &[(String, String)]) -> Result<()> {
-        checked_tags(tags)?;
+        checked_tags(TagKeys::User, tags)?;
         self.change(|d| {
             let mut user = Arc::unwrap_or_clone(d.user(name)?);
+            user.tags = merged(TagKeys::User, &user.tags, tags)?;
             for (key, value) in tags {
-                user.tags.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
-                user.tags.push((key.clone(), value.clone()));
                 d.write(IamWrite::PutUserTag(
                     user.id.clone(),
                     key.clone(),
                     value.clone(),
                 ));
             }
-            if user.tags.len() > MAX_TAGS {
-                return Err(too_many_tags());
-            }
-            user.tags
-                .sort_by_cached_key(|(k, _)| k.to_ascii_lowercase());
             d.state.users.insert(user.id.clone(), Arc::new(user));
             Ok(())
         })
@@ -538,11 +592,8 @@ impl Iam {
     pub fn untag_user(&self, name: &str, keys: &[String]) -> Result<()> {
         self.change(|d| {
             let mut user = Arc::unwrap_or_clone(d.user(name)?);
-            for key in keys {
-                if user.tags.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)) {
-                    user.tags.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
-                    d.write(IamWrite::DeleteUserTag(user.id.clone(), key.clone()));
-                }
+            for key in removed(TagKeys::User, &mut user.tags, keys) {
+                d.write(IamWrite::DeleteUserTag(user.id.clone(), key.clone()));
             }
             d.state.users.insert(user.id.clone(), Arc::new(user));
             Ok(())
@@ -855,17 +906,15 @@ impl Iam {
         path: Option<&str>,
         description: Option<&str>,
         document: &str,
+        tags: &[(String, String)],
     ) -> Result<PolicyInfo> {
         rules::name("policy name", name, rules::OTHER_NAME)?;
+        checked_tags(TagKeys::Policy, tags)?;
+        let tags = merged(TagKeys::Policy, &[], tags)?;
         let path = path.unwrap_or("/");
         rules::path(path)?;
         let description = description.unwrap_or_default();
-        if description.chars().count() > rules::DESCRIPTION {
-            return Err(IamError::InvalidInput(format!(
-                "a description is at most {} characters",
-                rules::DESCRIPTION
-            )));
-        }
+        rules::description(description)?;
         let document = Document::parse(document)?;
         managed_size(&document)?;
         self.change(|d| {
@@ -909,12 +958,57 @@ impl Iam {
                     },
                 )]),
                 row,
+                tags,
             };
+            for (key, value) in &policy.tags {
+                d.write(IamWrite::PutPolicyTag(
+                    policy.row.id.clone(),
+                    key.clone(),
+                    value.clone(),
+                ));
+            }
             let info = policy_info(&d.state, &policy);
             d.state
                 .policies
                 .insert(policy.row.id.clone(), Arc::new(policy));
             Ok(info)
+        })
+    }
+
+    /// Adds or replaces a managed policy's tags; keys are case sensitive (`TagPolicy`).
+    pub fn tag_policy(&self, arn: &str, tags: &[(String, String)]) -> Result<()> {
+        checked_tags(TagKeys::Policy, tags)?;
+        self.change(|d| {
+            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
+            policy.tags = merged(TagKeys::Policy, &policy.tags, tags)?;
+            for (key, value) in tags {
+                d.write(IamWrite::PutPolicyTag(
+                    policy.row.id.clone(),
+                    key.clone(),
+                    value.clone(),
+                ));
+            }
+            d.state
+                .policies
+                .insert(policy.row.id.clone(), Arc::new(policy));
+            Ok(())
+        })
+    }
+
+    /// Removes a managed policy's tags; absent keys are ignored (`UntagPolicy`).
+    pub fn untag_policy(&self, arn: &str, keys: &[String]) -> Result<()> {
+        self.change(|d| {
+            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
+            for key in removed(TagKeys::Policy, &mut policy.tags, keys) {
+                d.write(IamWrite::DeletePolicyTag(
+                    policy.row.id.clone(),
+                    key.clone(),
+                ));
+            }
+            d.state
+                .policies
+                .insert(policy.row.id.clone(), Arc::new(policy));
+            Ok(())
         })
     }
 
@@ -1163,6 +1257,21 @@ impl Iam {
                 by_name(groups, |g: &GroupInfo| &g.name),
                 by_name(users, |u: &UserInfo| &u.name),
             ))
+        })
+    }
+
+    /// The users that have a managed policy as their permissions boundary, by name
+    /// (`ListEntitiesForPolicy` with `PolicyUsageFilter=PermissionsBoundary`).
+    pub fn users_with_boundary(&self, arn: &str) -> Result<Vec<UserInfo>> {
+        self.read(|s| {
+            let id = &s.policy_by_arn(arn)?.row.id;
+            let users = s
+                .users
+                .values()
+                .filter(|u| u.boundary.as_ref() == Some(id))
+                .map(|u| user_info(s, u))
+                .collect();
+            Ok(by_name(users, |u: &UserInfo| &u.name))
         })
     }
 

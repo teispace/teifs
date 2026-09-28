@@ -536,6 +536,7 @@ async fn groups_and_boundaries_apply() {
             None,
             None,
             &allow(r#""s3:GetObject""#, r#""arn:aws:s3:::photos/*""#),
+            &[],
         )
         .unwrap();
     assert_eq!(
