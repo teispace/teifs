@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$VERSION" ]; then
-            docker run --rm teifs:test --version | tee /dev/stderr | grep -qx "teifs $VERSION"
+            [ "$(docker run --rm teifs:test --version)" = "teifs $VERSION" ]
           fi
           docker volume create teifs-data
           docker volume create teifs-config
@@ -149,7 +149,9 @@ jobs:
           }
           run
           healthy
-          docker logs teifs 2>&1 | grep -q "Serving /data over S3"
+          # (Whole outputs, not `| grep -q`: under pipefail its early exit fails the pipe.)
+          logs=$(docker logs teifs 2>&1)
+          grep -q "Serving /data over S3" <<< "$logs" || { echo "$logs"; exit 1; }
           export AWS_ACCESS_KEY_ID=image-test AWS_SECRET_ACCESS_KEY=image-test-secret
           export AWS_DEFAULT_REGION=us-east-1 AWS_ENDPOINT_URL=http://127.0.0.1:9000
           echo "kept" > kept.txt
@@ -159,7 +161,7 @@ jobs:
           docker rm -f teifs
           run
           healthy
-          aws s3 cp s3://smoke/kept.txt - | grep -qx kept
+          [ "$(aws s3 cp s3://smoke/kept.txt -)" = kept ]
           docker exec teifs /usr/local/bin/teifs --version
           [ "$(docker exec teifs /usr/local/bin/teifs -q health && echo ok)" = ok ]
           [ "$(docker inspect -f '{{.Config.User}}' teifs)" = nonroot:nonroot ]

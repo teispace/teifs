@@ -145,10 +145,15 @@ jobs:
           set -euo pipefail
           exe="target/$TARGET/release/teifs"
           [ -f "$exe.exe" ] && exe="$exe.exe"
-          "$exe" --version | tee /dev/stderr | grep -qx "teifs $VERSION"
+          # (Whole outputs, not `| grep -q`: under pipefail its early exit fails the pipe.)
+          said=$("$exe" --version)
+          echo "$said"
+          [ "$said" = "teifs $VERSION" ]
           case "$TARGET" in
             *-linux-musl)
-              file "$exe" | tee /dev/stderr | grep -q "static"
+              kind=$(file "$exe")
+              echo "$kind"
+              [[ "$kind" == *static* ]]
               ;;
             *-linux-gnu)
               # The newest glibc symbol it needs.
