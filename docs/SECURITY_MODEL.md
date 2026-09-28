@@ -28,8 +28,11 @@ Requests must carry a valid AWS Signature V4 (headers or presigned URL), checked
 before any operation runs; chunked uploads verify each chunk's signature as it streams.
 Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
 `serve --allow-sigv2` for clients too old for V4.
-There's no anonymous access today. *Planned:* anonymous access only where a bucket policy
-grants it.
+The one unsigned request is the health check, `GET`/`HEAD /.teifs/health`: it answers
+`200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
+names never start with a dot), and on a virtual-hosted bucket's host the path is an
+ordinary key that needs a signature. Otherwise there's no anonymous access today.
+*Planned:* anonymous access only where a bucket policy grants it.
 
 ### 2. Every endpoint declares what it authorizes (*planned*)
 Admin, health and metrics endpoints will be registered in one route table where each
@@ -145,9 +148,12 @@ keyring on the drive itself. `--json` output and error records carry no secrets.
 ## Supply chain
 
 - `unsafe` code is forbidden in every crate (`unsafe_code = "forbid"`).
-- Dependencies are few and reviewed; *planned:* `cargo-deny` (advisories, licenses,
-  sources) in CI, GitHub Actions pinned by commit, and provenance attestations on
-  release artifacts.
+- Dependencies are few and reviewed; `cargo-deny` checks advisories, licenses, bans and
+  sources on every change, and GitHub Actions are pinned by commit.
+- Releases are built by `.github/workflows/release.yml` from a tag, with SHA256 checksums
+  and build provenance attestations for every file; the Docker image is built from the
+  release's own static binaries after verifying both, runs as a non-root user on a
+  distroless base pinned by digest, and carries its own provenance and SBOM.
 
 ## Reporting
 

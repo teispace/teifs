@@ -1,5 +1,5 @@
-//! `teifs init` and `teifs serve`'s announcement, through the real binary with a clean
-//! environment: what they create, what they refuse, and what programs can read.
+//! `teifs init`, `teifs serve`'s announcement and `teifs health`, through the real binary
+//! with a clean environment: what they create, what they refuse, and what programs read.
 
 #![allow(
     clippy::unwrap_used,
@@ -160,11 +160,16 @@ fn serve_announces_where_it_listens_for_programs() {
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
-    child.kill().unwrap();
-    child.wait().unwrap();
     let serving: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(serving["type"], "serving", "{line}");
     let endpoint = serving["endpoint"].as_str().unwrap();
+    // What a container's health check runs.
+    let healthy = teifs(home.path(), &["-q", "health", endpoint]);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(healthy.status.success(), "{}", text(&healthy.stderr));
+    let down = teifs(home.path(), &["health", endpoint, "--timeout", "2s"]);
+    assert_eq!(down.status.code(), Some(3), "{}", text(&down.stderr));
     assert!(endpoint.starts_with("http://127.0.0.1:"), "{endpoint}");
     assert!(!endpoint.ends_with(":0"), "the real port: {endpoint}");
     assert_eq!(serving["durability"], "strict");

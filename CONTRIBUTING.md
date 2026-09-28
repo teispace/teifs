@@ -65,6 +65,23 @@ cargo xtask verify
 - Describe what changed, why, and how you tested it (including the S3 client, if any).
 - CI must be green. A maintainer reviews every pull request.
 
+## Releases
+
+Maintainers release from `main`:
+
+```sh
+cargo xtask release 0.2.0     # version everywhere; CHANGELOG's Unreleased → 0.2.0 - date
+cargo xtask verify
+git commit -am "chore: release 0.2.0" && git tag v0.2.0 && git push && git push --tags
+```
+
+The tag starts `.github/workflows/release.yml`: binaries for Linux (glibc and static
+musl, x86_64 and arm64), macOS (universal) and Windows (x64 and arm64), each checked to
+run and serve; `SHA256SUMS.txt`; build provenance; and a draft release with the
+changelog's notes. A maintainer reviews and publishes it, then runs the Image workflow
+with the tag to publish `ghcr.io/teispace/teifs`. Run either workflow by hand for a dry
+run.
+
 ## License
 
 By contributing, you agree that your contribution is licensed under both the MIT and the

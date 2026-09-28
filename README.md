@@ -30,12 +30,19 @@ aims to be:
   versioned on-disk format, and every release opens every drive an earlier one wrote.
 - **One binary.** Server and command line in one program, for Linux, macOS and Windows.
 
+## Install
+
+Download `teifs` for Linux, macOS or Windows from
+[Releases](https://github.com/teispace/teifs/releases) (the static `linux-musl` build
+runs on any distribution), or build it with `cargo build --release`. Every release file
+has a checksum in `SHA256SUMS.txt` and build provenance you can check with
+`gh attestation verify FILE --repo teispace/teifs`.
+
 ## Quick start
 
 ```sh
-cargo build --release
-./target/release/teifs init ~/Drive    # asks a few questions on a terminal; flags answer instead
-./target/release/teifs serve ~/Drive
+teifs init ~/Drive    # asks a few questions on a terminal; flags answer instead
+teifs serve ~/Drive
 ```
 
 `teifs init` creates the drive's credentials in `~/Drive/.teifs/credentials.json`
@@ -67,6 +74,19 @@ To set the keys yourself (on servers and in containers), use `TEIFS_ACCESS_KEY` 
 (Docker and systemd secrets). The secret is never taken from the command line, so it
 never shows in a process list. Coming from MinIO, `MINIO_ROOT_USER` and
 `MINIO_ROOT_PASSWORD` work too when nothing else sets the keys.
+
+### In Docker
+
+```sh
+docker run -d --name teifs -p 9000:9000 \
+  -v teifs-data:/data -v teifs-config:/config \
+  -e TEIFS_ACCESS_KEY=admin -e TEIFS_SECRET_KEY_FILE=/run/secrets/teifs \
+  ghcr.io/teispace/teifs
+```
+
+`/data` is the drive and `/config` holds its encryption keyring: keep both volumes, and
+back up the keyring. The image runs as a non-root user and reports its health
+(`teifs health`, which asks `GET /.teifs/health`); load balancers can ask that path too.
 
 ### TeiFS as an S3 client
 
@@ -131,6 +151,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
+| `teifs health [ADDRESS] [--timeout 5s]` | Check that a server answers its health check |
 | `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
 

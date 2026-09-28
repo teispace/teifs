@@ -12,6 +12,7 @@ use std::{
 mod client;
 mod config;
 mod error;
+mod health;
 mod init;
 mod ui;
 mod units;
@@ -23,6 +24,10 @@ use teifs_server::{
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
+
+// Measured faster than the system allocator on macOS (and musl's is far slower still).
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 #[command(name = "teifs", version, about = "Your folders as a drive and as S3")]
@@ -73,6 +78,9 @@ enum Command {
     },
     #[command(flatten)]
     Client(client::Command),
+    /// Check that a TeiFS server answers its health check (exit code 0 when it does);
+    /// for container health checks and scripts.
+    Health(health::HealthArgs),
     /// Print the shell completion script for `shell`, for example
     /// `teifs completions zsh > ~/.zfunc/_teifs` or
     /// `teifs completions bash > ~/.local/share/bash-completion/completions/teifs`.
@@ -345,6 +353,7 @@ pub(crate) fn open(dir: &Path) -> Result<Store, error::Error> {
 async fn run(command: Command, sources: &config::Sources) -> Result<(), error::Error> {
     match command {
         Command::Init(args) => init::init(&args),
+        Command::Health(args) => health::health(&args).await,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut script = Vec::new();

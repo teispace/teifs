@@ -1,0 +1,227 @@
+name: Release
+
+# A release starts from a tag: the maintainer runs `cargo xtask release X.Y.Z`, commits
+# `chore: release X.Y.Z`, and pushes the tag vX.Y.Z. This builds every platform, checks
+# each binary runs, writes SHA256SUMS.txt and build provenance, and creates a DRAFT
+# release with the changelog's notes. Publishing it stays a person's decision; then
+# image.yml (run by hand with the tag) publishes the Docker image from its binaries.
+#
+# Run it by hand (Actions ▸ Release ▸ Run workflow) for a dry run: everything is built
+# and kept as a workflow artifact, and nothing is released. Pull requests that change
+# the release setup get the same dry run.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - xtask/src/release.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  notes:
+    name: Version and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The version, and the tag agrees
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "teifs") | .version')
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Release notes (from CHANGELOG.md)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            cargo xtask release-notes "$VERSION" > notes.md
+          else
+            echo "A dry run of $VERSION from $GITHUB_SHA; nothing was released." > notes.md
+          fi
+          cat notes.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notes
+          path: notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: notes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc builds on the oldest supported runner, so they run on older systems.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          # Static builds: any Linux, and the Docker image.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          # One file for Apple silicon and Intel Macs.
+          - target: universal-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.notes.outputs.version }}
+      # Baseline CPUs only (no target-cpu=native): aws-lc picks faster code at run time.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Targets and tools
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = universal-apple-darwin ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
+          case "$TARGET" in
+            *-linux-musl)
+              sudo apt-get update
+              sudo apt-get install -y musl-tools
+              # C code (aws-lc, SQLite, mimalloc) is built against musl too.
+              echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+              ;;
+            *-windows-msvc)
+              # No Visual C++ runtime to install: it's linked in.
+              echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+              ;;
+          esac
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = universal-apple-darwin ]; then
+            for arch in aarch64 x86_64; do
+              cargo build --release --locked -p teifs --target "$arch-apple-darwin"
+            done
+            mkdir -p "target/$TARGET/release"
+            lipo -create -output "target/$TARGET/release/teifs" \
+              target/aarch64-apple-darwin/release/teifs target/x86_64-apple-darwin/release/teifs
+            lipo -info "target/$TARGET/release/teifs"
+          else
+            cargo build --release --locked -p teifs --target "$TARGET"
+          fi
+      - name: It runs, and is what it says
+        run: |
+          set -euo pipefail
+          exe="target/$TARGET/release/teifs"
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --version | tee /dev/stderr | grep -qx "teifs $VERSION"
+          case "$TARGET" in
+            *-linux-musl)
+              file "$exe" | tee /dev/stderr | grep -q "static"
+              ;;
+            *-linux-gnu)
+              # The newest glibc symbol it needs.
+              objdump -T "$exe" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+              ;;
+          esac
+          # Serve a drive and answer the health check.
+          work=$(mktemp -d)
+          "$exe" serve "$work/drive" --listen 127.0.0.1:9000 --kms-keyring "$work/keys.json" &
+          server=$!
+          for _ in $(seq 50); do "$exe" -q health 127.0.0.1:9000 && break; sleep 0.2; done
+          "$exe" health 127.0.0.1:9000
+          kill "$server"
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="teifs-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          exe="target/$TARGET/release/teifs"
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          cp "$exe" LICENSE-MIT LICENSE-APACHE NOTICE README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          case "$TARGET" in
+            *-windows-*) 7z a -tzip -mx=9 "$name.zip" "$name" > /dev/null ;;
+            *) tar -czf "$name.tar.gz" "$name" ;;
+          esac
+          rm -rf "$name"
+          ls -l
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Checksums, provenance and the draft release
+    needs: [notes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.notes.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: notes
+      - name: Checksums
+        run: (cd dist && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Keep the dry run
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dry-run
+          path: dist/*
+      - name: The draft release
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          pre=()
+          [[ "$VERSION" == *-* ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag "${pre[@]}" --title "TeiFS $VERSION" --notes-file notes.md

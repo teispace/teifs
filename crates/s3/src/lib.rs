@@ -7,6 +7,7 @@ mod crc_combine;
 mod drive;
 mod encode;
 mod errors;
+mod health;
 mod limits;
 mod sse;
 mod tagging;
@@ -23,6 +24,7 @@ use teifs_store::{Layout, Store};
 
 pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
+pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
 
 /// How the S3 endpoint accepts requests.

@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
-pub use teifs_s3::LAYOUT_HEADER;
+pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 
 /// How to serve a drive.

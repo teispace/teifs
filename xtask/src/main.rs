@@ -2,8 +2,12 @@
 //!
 //! - `verify`: everything CI checks. Must pass before every commit.
 //! - `docs`: only the documentation check.
+//! - `release VERSION`: prepares a release (version, changelog, lock file).
+//! - `release-notes VERSION`: prints a release's notes, checking they're in place.
 
 #![allow(clippy::print_stdout, reason = "a task runner reports to the terminal")]
+
+mod release;
 
 use std::{
     env, fs,
@@ -12,13 +16,17 @@ use std::{
 };
 
 fn main() -> ExitCode {
-    let task = env::args().nth(1).unwrap_or_default();
+    let mut args = env::args().skip(1);
+    let task = args.next().unwrap_or_default();
+    let version = args.next();
     let root = root();
-    let result = match task.as_str() {
-        "verify" => verify(&root),
-        "docs" => check_docs(&root).and_then(|()| check_planning_ids(&root)),
+    let result = match (task.as_str(), version.as_deref()) {
+        ("verify", None) => verify(&root),
+        ("docs", None) => check_docs(&root).and_then(|()| check_planning_ids(&root)),
+        ("release", Some(version)) => release::prepare(&root, version),
+        ("release-notes", Some(version)) => release::notes(&root, version),
         _ => {
-            eprintln!("usage: cargo xtask <verify|docs>");
+            eprintln!("usage: cargo xtask <verify|docs|release VERSION|release-notes VERSION>");
             return ExitCode::from(2);
         }
     };

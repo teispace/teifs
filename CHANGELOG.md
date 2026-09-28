@@ -7,6 +7,15 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Release builds for Linux (glibc, and static musl for any distribution), macOS
+  (universal) and Windows (x64, arm64), with checksums and build provenance, and a Docker
+  image (`ghcr.io/teispace/teifs`): static binary on distroless, non-root, `/data` and
+  `/config` volumes, a health check.
+- A health check for load balancers and containers: `GET /.teifs/health` answers
+  `200 OK` without a signature, and `teifs health [ADDRESS]` asks it (exit code 0 when
+  healthy).
+- mimalloc as the memory allocator: about 4% faster uploads and up to 25% faster
+  downloads measured on macOS, and far faster than musl's allocator on Linux.
 - `teifs init` sets up a drive: its folder, keys, keyring (kept off the drive), settings
   and an alias, asking on a terminal or taking flags, then says what to run next.
   `teifs serve DIR` reads the drive's `.teifs/settings.toml` unless `--config` names

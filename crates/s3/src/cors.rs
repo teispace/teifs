@@ -16,7 +16,10 @@ use s3s::{
 };
 use teifs_store::{CorsRule, Store, StoreError};
 
-use crate::limits::{StallTimeout, refusal};
+use crate::{
+    health,
+    limits::{StallTimeout, refusal},
+};
 
 /// How many rules a bucket's CORS configuration may have.
 const MAX_RULES: usize = 100;
@@ -218,16 +221,19 @@ impl Service {
         self.s3.call(req).await
     }
 
+    /// The bucket named by a request's virtual host, if it's virtual-hosted.
+    fn virtual_bucket<B>(&self, req: &Request<B>) -> Option<String> {
+        let host = self.host.as_ref()?;
+        let name = header(req.headers(), "host").or_else(|| req.uri().host())?;
+        host.parse_host_header(name)
+            .ok()
+            .and_then(|vh| vh.bucket().map(str::to_owned))
+    }
+
     /// The bucket a request is for: from a virtual host, else the path's first segment.
     fn bucket_of<B>(&self, req: &Request<B>) -> Option<String> {
-        if let Some(host) = &self.host {
-            let name = header(req.headers(), "host").or_else(|| req.uri().host());
-            if let Some(bucket) = name
-                .and_then(|name| host.parse_host_header(name).ok())
-                .and_then(|vh| vh.bucket().map(str::to_owned))
-            {
-                return Some(bucket);
-            }
+        if let Some(bucket) = self.virtual_bucket(req) {
+            return Some(bucket);
         }
         req.uri()
             .path()
@@ -314,6 +320,11 @@ impl Service {
     async fn handle(self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
         if let Some(refused) = refusal(req.headers()) {
             return Ok(refused);
+        }
+        if health::is_health_check(req.method(), req.uri().path())
+            && self.virtual_bucket(&req).is_none()
+        {
+            return Ok(health::response(req.method()));
         }
         if req.method() == Method::OPTIONS {
             return Ok(self.preflight(&req).await);
