@@ -1,27 +1,27 @@
 //! The client commands.
 
-use std::{
-    collections::BTreeMap,
-    io::{IsTerminal, Write as _},
-    path::Path,
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use aws_sdk_s3::{
     Client,
+    operation::head_object::HeadObjectOutput,
     presigning::PresigningConfig,
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
 };
 use futures::{StreamExt, TryStreamExt, stream};
+use serde_json::json;
 
 use super::{
-    AliasAction, Command, Error, Kind,
+    AliasAction, Command, Error, Kind, SetAlias,
     alias::{self, Alias, Aliases, Origin},
     listing,
     target::{Remote, Target, folder_prefix},
     transfer::Object,
 };
-use crate::units::{date, size};
+use crate::{
+    ui,
+    units::{date, rfc3339, size},
+};
 
 /// The longest a presigned link can work (Signature V4's limit).
 const MAX_PRESIGN: Duration = Duration::from_hours(7 * 24);
@@ -47,13 +47,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
             recursive,
             force,
         } => {
-            if recursive && !force {
-                return Err(Error::usage(
-                    "`rm --recursive` deletes everything under each prefix: add --force to say you mean it",
-                ));
-            }
             for target in &targets {
-                rm(remote(target, "rm")?, recursive).await?;
+                rm(remote(target, "rm")?, recursive, force).await?;
             }
             Ok(())
         }
@@ -88,80 +83,17 @@ pub async fn run(command: Command) -> Result<(), Error> {
 
 async fn alias_command(action: AliasAction, aliases: &mut Aliases) -> Result<(), Error> {
     match action {
-        AliasAction::Set {
-            name,
-            url,
-            access_key,
-            secret_key_stdin,
-            drive,
-            region,
-            virtual_hosted,
-            no_check,
-        } => {
-            alias::check_name(&name).map_err(Error::usage)?;
-            let url = alias::check_url(&url).map_err(Error::usage)?;
-            let (access_key, secret_key) = match drive {
-                Some(dir) => drive_keys(&dir)?,
-                None => (
-                    access_key.map_or_else(ask_access_key, Ok)?,
-                    secret_key(secret_key_stdin)?,
-                ),
-            };
-            let alias = Alias {
-                url,
-                access_key,
-                secret_key,
-                region,
-                path_style: !virtual_hosted,
-            };
-            if !no_check {
-                alias.client().list_buckets().send().await.map_err(|e| {
-                    let err = Error::s3(format!("{} doesn't work with these keys", alias.url), &e);
-                    Error::new(
-                        err.kind,
-                        format!(
-                            "{}\n  Fix it, or save it anyway with --no-check.",
-                            err.message
-                        ),
-                    )
-                })?;
-            }
-            let url = alias.url.clone();
-            aliases.set(&name, alias)?;
-            println!(
-                "Added {name} for {url}; saved in {}",
-                aliases.path().display()
-            );
-            if let Some((_, Origin::Env)) = aliases.get(&name) {
-                println!(
-                    "Note: {}{} is set, and wins over the saved one.",
-                    alias::ENV_PREFIX,
-                    name.to_ascii_uppercase()
-                );
-            }
-            Ok(())
-        }
+        AliasAction::Set(set) => set_alias(set, aliases).await,
         AliasAction::Ls => {
-            let all = aliases.all();
-            if all.is_empty() {
-                println!("No aliases yet. Add one: teifs alias set NAME URL");
-            }
-            for (name, alias, origin) in all {
-                let from = match origin {
-                    Origin::File => String::new(),
-                    Origin::Env => format!(
-                        "  (from {}{})",
-                        alias::ENV_PREFIX,
-                        name.to_ascii_uppercase()
-                    ),
-                };
-                println!("{name:<12}  {:<32}  {}{from}", alias.url, alias.access_key);
-            }
+            list_aliases(aliases);
             Ok(())
         }
         AliasAction::Rm { name } => {
             if aliases.remove(&name)? {
-                println!("Removed {name}");
+                ui::done(
+                    format!("Removed {name}"),
+                    || json!({"type": "alias", "action": "remove", "name": name}),
+                );
                 Ok(())
             } else if let Some((_, Origin::Env)) = aliases.get(&name) {
                 Err(Error::usage(format!(
@@ -177,6 +109,92 @@ async fn alias_command(action: AliasAction, aliases: &mut Aliases) -> Result<(),
             }
         }
     }
+}
+
+async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
+    let SetAlias {
+        name,
+        url,
+        access_key,
+        secret_key_stdin,
+        drive,
+        region,
+        virtual_hosted,
+        no_check,
+    } = set;
+    alias::check_name(&name).map_err(Error::usage)?;
+    let url = alias::check_url(&url).map_err(Error::usage)?;
+    let (access_key, secret_key) = match drive {
+        Some(dir) => drive_keys(&dir)?,
+        None => (
+            access_key.map_or_else(ask_access_key, Ok)?,
+            secret_key(secret_key_stdin)?,
+        ),
+    };
+    let alias = Alias {
+        url,
+        access_key,
+        secret_key,
+        region,
+        path_style: !virtual_hosted,
+    };
+    if !no_check {
+        alias.client().list_buckets().send().await.map_err(|e| {
+            let err = Error::s3(format!("{} doesn't work with these keys", alias.url), &e);
+            let hint = err.hint.clone().map_or_else(
+                || "fix it, or save it anyway with --no-check".to_owned(),
+                |hint| format!("{hint}; or save it anyway with --no-check"),
+            );
+            err.with_hint(hint)
+        })?;
+    }
+    let url = alias.url.clone();
+    aliases.set(&name, alias)?;
+    let path = aliases.path().display().to_string();
+    ui::done(
+        format!("Added {name} for {url}"),
+        || json!({"type": "alias", "action": "set", "name": name, "url": url, "file": path}),
+    );
+    ui::note(format!("Saved in {path}. Try: teifs ls {name}"));
+    if let Some((_, Origin::Env)) = aliases.get(&name) {
+        ui::warn(format!(
+            "{}{} is set, and wins over the saved alias",
+            alias::ENV_PREFIX,
+            name.to_ascii_uppercase()
+        ));
+    }
+    Ok(())
+}
+
+fn list_aliases(aliases: &Aliases) {
+    let mut table = ui::Table::new(&["NAME", "URL", "ACCESS KEY", "FROM"]);
+    let mut records = Vec::new();
+    for (name, alias, origin) in aliases.all() {
+        let from = match origin {
+            Origin::File => "file".to_owned(),
+            Origin::Env => format!("{}{}", alias::ENV_PREFIX, name.to_ascii_uppercase()),
+        };
+        table.row(vec![
+            name.to_owned(),
+            alias.url.clone(),
+            alias.access_key.clone(),
+            from.clone(),
+        ]);
+        records.push(json!({
+            "type": "alias",
+            "name": name,
+            "url": alias.url,
+            "accessKey": alias.access_key,
+            "region": alias.region,
+            "pathStyle": alias.path_style,
+            "from": from,
+        }));
+    }
+    ui::rows(
+        &table,
+        &records,
+        "No aliases yet. Add one: teifs alias set NAME URL",
+    );
 }
 
 /// The keys of the TeiFS drive in `dir`.
@@ -197,12 +215,8 @@ fn drive_keys(dir: &Path) -> Result<(String, String), Error> {
     }
 }
 
-fn interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
 fn ask_access_key() -> Result<String, Error> {
-    if !interactive() {
+    if !ui::interactive() {
         return Err(Error::usage(
             "give the access key with --access-key or TEIFS_ACCESS_KEY",
         ));
@@ -230,7 +244,7 @@ fn secret_key(from_stdin: bool) -> Result<String, Error> {
         line.trim_end_matches(['\n', '\r']).to_owned()
     } else if let Some(secret) = crate::config::env("TEIFS_SECRET_KEY") {
         secret
-    } else if interactive() {
+    } else if ui::interactive() {
         inquire::Password::new("Secret key:")
             .without_confirmation()
             .with_display_mode(inquire::PasswordDisplayMode::Hidden)
@@ -250,30 +264,40 @@ fn secret_key(from_stdin: bool) -> Result<String, Error> {
 // ---------------------------------------------------------------------------------
 // Buckets and listings
 
+async fn list_buckets(client: &Client, alias_name: &str) -> Result<(), Error> {
+    let mut token = None;
+    loop {
+        let page = client
+            .list_buckets()
+            .max_buckets(1000)
+            .set_continuation_token(token)
+            .send()
+            .await
+            .map_err(|e| Error::s3(format!("can't list {alias_name}"), &e))?;
+        for bucket in page.buckets() {
+            let created = bucket
+                .creation_date()
+                .and_then(|t| std::time::SystemTime::try_from(*t).ok());
+            let name = bucket.name().unwrap_or_default();
+            ui::item(
+                || {
+                    let created = created.map_or_else(|| " ".repeat(19), date);
+                    format!("{}  {}", ui::dim(created), ui::folder(format!("{name}/")))
+                },
+                || json!({"type": "bucket", "name": name, "created": created.map(rfc3339)}),
+            );
+        }
+        token = page.continuation_token().map(str::to_owned);
+        if token.is_none() {
+            return Ok(());
+        }
+    }
+}
+
 async fn ls(remote: Remote, recursive: bool) -> Result<(), Error> {
     let client = remote.alias.client();
     let Some(bucket) = &remote.bucket else {
-        let mut token = None;
-        loop {
-            let page = client
-                .list_buckets()
-                .max_buckets(1000)
-                .set_continuation_token(token)
-                .send()
-                .await
-                .map_err(|e| Error::s3(format!("can't list {}", remote.alias_name), &e))?;
-            for bucket in page.buckets() {
-                let created = bucket
-                    .creation_date()
-                    .and_then(|t| std::time::SystemTime::try_from(*t).ok())
-                    .map_or_else(|| " ".repeat(19), date);
-                println!("{created}  {}/", bucket.name().unwrap_or_default());
-            }
-            token = page.continuation_token().map(str::to_owned);
-            if token.is_none() {
-                return Ok(());
-            }
-        }
+        return list_buckets(&client, &remote.alias_name).await;
     };
     let mut prefix = remote.key.clone();
     let delimiter = (!recursive).then_some("/");
@@ -309,31 +333,51 @@ async fn ls(remote: Remote, recursive: bool) -> Result<(), Error> {
     let mut any = false;
     while let Some(page) = pages.next().await {
         let page = page.map_err(|e| Error::s3(what(), &e))?;
-        let mut out = std::io::stdout().lock();
-        let mut lines: Vec<(&str, String)> = page
+        // Folders and objects, merged in key order.
+        let mut rows: Vec<(&str, Option<&aws_sdk_s3::types::Object>)> = page
             .common_prefixes()
             .iter()
-            .filter_map(|p| p.prefix())
-            .map(|p| (p, format!("{:19}  {:>10}  {}", "", "DIR", &p[shown_from..])))
-            .chain(page.contents().iter().filter_map(|o| {
-                let key = o.key()?;
-                let modified = o
-                    .last_modified()
-                    .and_then(|t| std::time::SystemTime::try_from(*t).ok())
-                    .map_or_else(|| " ".repeat(19), date);
-                let bytes = o.size().and_then(|s| u64::try_from(s).ok()).unwrap_or(0);
-                Some((
-                    key,
-                    format!("{modified}  {:>10}  {}", size(bytes), &key[shown_from..]),
-                ))
-            }))
+            .filter_map(|p| p.prefix().map(|p| (p, None)))
+            .chain(
+                page.contents()
+                    .iter()
+                    .filter_map(|o| o.key().map(|k| (k, Some(o)))),
+            )
             .collect();
-        lines.sort_by(|a, b| a.0.cmp(b.0));
-        any |= !lines.is_empty();
-        for (_, line) in lines {
-            if writeln!(out, "{line}").is_err() {
-                // A closed pipe (`| head`): stop quietly.
-                return Ok(());
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+        any |= !rows.is_empty();
+        for (key, object) in rows {
+            let name = &key[shown_from..];
+            match object {
+                None => ui::item(
+                    || format!("{:19}  {:>10}  {}", "", ui::dim("DIR"), ui::folder(name)),
+                    || json!({"type": "folder", "key": key}),
+                ),
+                Some(object) => {
+                    let modified = object
+                        .last_modified()
+                        .and_then(|t| std::time::SystemTime::try_from(*t).ok());
+                    let bytes = object
+                        .size()
+                        .and_then(|s| u64::try_from(s).ok())
+                        .unwrap_or(0);
+                    ui::item(
+                        || {
+                            let modified = modified.map_or_else(|| " ".repeat(19), date);
+                            let size = format!("{:>10}", size(bytes));
+                            format!("{}  {}  {name}", ui::dim(modified), ui::dim(size))
+                        },
+                        || {
+                            json!({
+                                "type": "object",
+                                "key": key,
+                                "size": bytes,
+                                "modified": modified.map(rfc3339),
+                                "etag": object.e_tag(),
+                            })
+                        },
+                    );
+                }
             }
         }
     }
@@ -381,7 +425,10 @@ async fn mb(
     };
     match result {
         Ok(_) => {
-            println!("Made {name}");
+            ui::done(
+                format!("Created {name}"),
+                || json!({"type": "bucket", "action": "make", "name": name}),
+            );
             Ok(())
         }
         Err(e) => {
@@ -390,7 +437,10 @@ async fn mb(
                 && err.kind == Kind::Conflict
                 && client.head_bucket().bucket(bucket).send().await.is_ok()
             {
-                println!("{name} is already there");
+                ui::done(
+                    format!("{name} is already there"),
+                    || json!({"type": "bucket", "action": "exists", "name": name}),
+                );
                 return Ok(());
             }
             Err(err)
@@ -421,25 +471,22 @@ async fn rb(remote: Remote, force: bool) -> Result<(), Error> {
         .map_err(|e| {
             let err = Error::s3(format!("can't remove {name}"), &e);
             if err.kind == Kind::Conflict && !force {
-                Error::new(
-                    err.kind,
-                    format!(
-                        "{}\n  To delete what's in it too, add --force.",
-                        err.message
-                    ),
-                )
+                err.with_hint("to delete what's in it too, add --force")
             } else {
                 err
             }
         })?;
-    println!("Removed {name}");
+    ui::done(
+        format!("Removed {name}"),
+        || json!({"type": "bucket", "action": "remove", "name": name}),
+    );
     Ok(())
 }
 
 // ---------------------------------------------------------------------------------
 // Objects
 
-async fn rm(remote: Remote, recursive: bool) -> Result<(), Error> {
+async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let client = remote.alias.client();
     let name = remote.display(&remote.key);
@@ -460,8 +507,16 @@ async fn rm(remote: Remote, recursive: bool) -> Result<(), Error> {
             return Err(Error::new(Kind::NotFound, format!("nothing at {name}")));
         }
         let count = keys.len();
+        let question = format!("Delete {count} object{} under {name}?", plural(count));
+        if !force && !ui::confirm(&question, "add --force to delete without asking")? {
+            ui::note("Nothing was deleted.");
+            return Ok(());
+        }
         delete_keys(&client, bucket, &name, keys).await?;
-        println!("Removed {count} object{} under {name}", plural(count));
+        ui::done(
+            format!("Removed {count} object{} under {name}", plural(count)),
+            || json!({"type": "remove", "prefix": name, "count": count}),
+        );
         return Ok(());
     }
     if remote.key.is_empty() {
@@ -480,7 +535,10 @@ async fn rm(remote: Remote, recursive: bool) -> Result<(), Error> {
         .send()
         .await
         .map_err(|e| Error::s3(format!("can't remove {name}"), &e))?;
-    println!("Removed {name}");
+    ui::done(
+        format!("Removed {name}"),
+        || json!({"type": "remove", "key": name, "count": 1}),
+    );
     Ok(())
 }
 
@@ -574,10 +632,13 @@ async fn stat(remote: Remote) -> Result<(), Error> {
             .send()
             .await
             .map_err(|e| Error::s3(format!("can't find {name}"), &e))?;
-        println!("Bucket:   {name}");
-        println!(
-            "Region:   {}",
-            out.bucket_region().unwrap_or(&remote.alias.region)
+        let region = out
+            .bucket_region()
+            .unwrap_or(&remote.alias.region)
+            .to_owned();
+        ui::details(
+            &[("Bucket", name.clone()), ("Region", region.clone())],
+            || json!({"type": "bucket", "name": name, "region": region}),
         );
         return Ok(());
     }
@@ -596,53 +657,83 @@ async fn stat(remote: Remote) -> Result<(), Error> {
             return Err(with_folder_hint(err, &client, bucket, &remote, "ls").await);
         }
     };
+    show_object(&remote.key, &name, &out);
+    Ok(())
+}
+
+/// `stat`'s details of an object.
+fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
     let bytes = out
         .content_length()
         .and_then(|n| u64::try_from(n).ok())
         .unwrap_or(0);
-    println!("Name:       {name}");
-    println!("Size:       {} ({bytes} bytes)", size(bytes));
-    if let Some(modified) = out
+    let modified = out
         .last_modified()
-        .and_then(|t| std::time::SystemTime::try_from(*t).ok())
-    {
-        println!("Modified:   {} UTC", date(modified));
-    }
-    let optional = [
-        ("ETag", out.e_tag()),
-        ("Type", out.content_type()),
-        ("Encoding", out.content_encoding()),
-        ("Cache", out.cache_control()),
-        ("Version", out.version_id()),
+        .and_then(|t| std::time::SystemTime::try_from(*t).ok());
+    let text = |value: Option<&str>| value.unwrap_or_default().to_owned();
+    let storage = out
+        .storage_class()
+        .map(aws_sdk_s3::types::StorageClass::as_str);
+    let encryption = out
+        .server_side_encryption()
+        .map(aws_sdk_s3::types::ServerSideEncryption::as_str);
+    let metadata: BTreeMap<&String, &String> = out
+        .metadata()
+        .map(|m| m.iter().collect())
+        .unwrap_or_default();
+    let mut fields = vec![
+        ("Name", name.to_owned()),
+        ("Size", format!("{} ({bytes} bytes)", size(bytes))),
         (
-            "Storage",
-            out.storage_class()
-                .map(aws_sdk_s3::types::StorageClass::as_str),
+            "Modified",
+            modified
+                .map(|t| format!("{} UTC", date(t)))
+                .unwrap_or_default(),
         ),
-        (
-            "Encryption",
-            out.server_side_encryption()
-                .map(aws_sdk_s3::types::ServerSideEncryption::as_str),
-        ),
-        ("KMS key", out.ssekms_key_id()),
-        ("CRC32", out.checksum_crc32()),
-        ("CRC32C", out.checksum_crc32_c()),
-        ("CRC64NVME", out.checksum_crc64_nvme()),
-        ("SHA1", out.checksum_sha1()),
-        ("SHA256", out.checksum_sha256()),
+        ("ETag", text(out.e_tag())),
+        ("Type", text(out.content_type())),
+        ("Encoding", text(out.content_encoding())),
+        ("Cache", text(out.cache_control())),
+        ("Version", text(out.version_id())),
+        ("Storage", text(storage)),
+        ("Encryption", text(encryption)),
+        ("KMS key", text(out.ssekms_key_id())),
+        ("CRC32", text(out.checksum_crc32())),
+        ("CRC32C", text(out.checksum_crc32_c())),
+        ("CRC64NVME", text(out.checksum_crc64_nvme())),
+        ("SHA1", text(out.checksum_sha1())),
+        ("SHA256", text(out.checksum_sha256())),
     ];
-    for (label, value) in optional {
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            println!("{:<11} {value}", format!("{label}:"));
-        }
-    }
-    if let Some(metadata) = out.metadata().filter(|m| !m.is_empty()) {
-        println!("Metadata:");
-        for (key, value) in metadata.iter().collect::<BTreeMap<_, _>>() {
-            println!("  {key}: {value}");
-        }
-    }
-    Ok(())
+    fields.extend(
+        metadata
+            .iter()
+            .map(|(k, v)| ("Metadata", format!("{k}: {v}"))),
+    );
+    ui::details(&fields, || {
+        json!({
+            "type": "object",
+            "key": key,
+            "name": name,
+            "size": bytes,
+            "modified": modified.map(rfc3339),
+            "etag": out.e_tag(),
+            "contentType": out.content_type(),
+            "contentEncoding": out.content_encoding(),
+            "cacheControl": out.cache_control(),
+            "versionId": out.version_id(),
+            "storageClass": storage,
+            "encryption": encryption,
+            "kmsKeyId": out.ssekms_key_id(),
+            "checksums": {
+                "crc32": out.checksum_crc32(),
+                "crc32c": out.checksum_crc32_c(),
+                "crc64nvme": out.checksum_crc64_nvme(),
+                "sha1": out.checksum_sha1(),
+                "sha256": out.checksum_sha256(),
+            },
+            "metadata": metadata,
+        })
+    });
 }
 
 async fn presign(remote: Remote, expires: Duration, put: bool) -> Result<(), Error> {
@@ -677,7 +768,11 @@ async fn presign(remote: Remote, expires: Duration, put: bool) -> Result<(), Err
             .await
             .map_err(|e| Error::s3(what(), &e))?
     };
-    println!("{}", request.uri());
+    let url = request.uri().to_owned();
+    ui::item(
+        || url.clone(),
+        || json!({"type": "link", "url": url, "method": if put { "PUT" } else { "GET" }, "expiresIn": expires.as_secs()}),
+    );
     Ok(())
 }
 
@@ -702,14 +797,8 @@ pub(super) async fn with_folder_hint(
         .await
         .is_ok_and(|out| !out.contents().is_empty());
     if has_children {
-        Error::new(
-            err.kind,
-            format!(
-                "{}\n  It's a folder: `teifs {command} {}`",
-                err.message,
-                remote.display(&folder)
-            ),
-        )
+        let folder = remote.display(&folder);
+        err.with_hint(format!("it's a folder: `teifs {command} {folder}`"))
     } else {
         err
     }

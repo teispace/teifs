@@ -7,6 +7,15 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `teifs init` sets up a drive: its folder, keys, keyring (kept off the drive), settings
+  and an alias, asking on a terminal or taking flags, then says what to run next.
+  `teifs serve DIR` reads the drive's `.teifs/settings.toml` unless `--config` names
+  another, and starts with a summary: endpoint, access key, keyring, and commands to try.
+- One look for every command: `✓` for what was done, `warning:` and `error:` with what
+  to do on the next line, aligned tables, and progress bars (bytes, speed, time left)
+  for copies. Plain output when piped, `--json` (JSON Lines, errors included) for
+  programs, `-q` for quiet, `-y` to answer questions, `--color` and `NO_COLOR`.
+  `rm -r` asks before deleting unless `--force` or `-y`.
 - `teifs` is an S3 client too, for TeiFS or any S3 service: `alias`, `ls`, `mb`, `rb`,
   `cp`, `mv`, `rm`, `cat`, `stat`, `presign` and `mirror` on `ALIAS/BUCKET/KEY` paths.
   Large files go in parallel parts, an interrupted upload resumes, downloads replace a

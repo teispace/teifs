@@ -398,7 +398,7 @@ async fn mirrors_copy_changes_and_remove_what_is_gone() {
     let out = cli.ok(&["mirror", "tree", "t/mirrored/copy"]).await;
     assert!(out.contains("Copied 5 files"), "{out}");
     let out = cli.ok(&["mirror", "tree", "t/mirrored/copy"]).await;
-    assert!(out.contains("Already the same."), "{out}");
+    assert!(out.contains("Nothing to do: already the same"), "{out}");
 
     // A change, a new file and a deleted one.
     fs::write(cli.path("tree/a/one.txt"), "one, longer now").unwrap();
@@ -427,7 +427,7 @@ async fn mirrors_copy_changes_and_remove_what_is_gone() {
     cli.ok(&["mirror", "t/mirrored/copy", "down"]).await;
     assert_eq!(read_tree(&cli.path("down")), read_tree(&cli.path("tree")));
     let out = cli.ok(&["mirror", "t/mirrored/copy", "down"]).await;
-    assert!(out.contains("Already the same."), "{out}");
+    assert!(out.contains("Nothing to do: already the same"), "{out}");
     cli.fails(&["mirror", "tree", "down"], 2).await;
 }
 
@@ -562,7 +562,12 @@ async fn aliases_keep_secrets_out_of_sight() {
         listed.contains("home") && listed.contains(ACCESS_KEY),
         "{listed}"
     );
-    assert!(listed.contains("(from TEIFS_ALIAS_T)"), "{listed}");
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.starts_with("t ") && line.ends_with("TEIFS_ALIAS_T")),
+        "{listed}"
+    );
     cli.ok(&["mb", "home/aliased"]).await;
 
     // Keys that don't work aren't saved, unless asked.
@@ -656,6 +661,10 @@ async fn failures_have_exit_codes_scripts_can_use() {
     let cli = Client::new(&server);
     cli.fails(&["ls", "t/missing"], 5).await;
     cli.fails(&["cat", "t/missing/key"], 5).await;
+    // A copy's one failure is said once.
+    fs::write(cli.path("f"), "x").unwrap();
+    let err = cli.fails(&["cp", "f", "t/missing/"], 5).await;
+    assert_eq!(err.matches("error:").count(), 1, "{err}");
     // `nowhere` isn't an alias, so it's a local path: ls needs a remote.
     let err = cli.fails(&["ls", "nowhere/b"], 2).await;
     assert!(err.contains("teifs alias ls"), "{err}");
@@ -664,4 +673,107 @@ async fn failures_have_exit_codes_scripts_can_use() {
     offline.env[0].1 = format!("http://{ACCESS_KEY}:{SECRET_KEY}@127.0.0.1:9");
     let err = offline.fails(&["ls", "t"], 3).await;
     assert!(err.contains("can't be reached"), "{err}");
+    // What to do is on a line of its own.
+    assert!(
+        err.lines()
+            .any(|line| line.starts_with("  → ") && line.contains("server is running")),
+        "{err}"
+    );
+}
+
+/// Each line of `--json` output, parsed; each must be an object with a `type`.
+fn records(out: &str) -> Vec<serde_json::Value> {
+    out.lines()
+        .map(|line| {
+            let record: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {line}"));
+            assert!(record["type"].is_string(), "no type: {line}");
+            record
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_output_is_one_record_per_line_for_programs() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    make_tree(&cli.path("tree"));
+
+    let made = records(&cli.ok(&["--json", "mb", "t/jsonb"]).await);
+    assert_eq!(made.len(), 1);
+    let copied = records(&cli.ok(&["--json", "cp", "-r", "tree", "t/jsonb/"]).await);
+    let each = copied.iter().filter(|r| r["type"] == "copy").count();
+    assert_eq!(each, 5, "{copied:?}");
+    let summary = copied.last().unwrap();
+    assert_eq!(summary["type"], "summary", "{summary}");
+    assert_eq!(summary["copied"], 5, "{summary}");
+
+    let listed = records(&cli.ok(&["--json", "ls", "-r", "t/jsonb"]).await);
+    let one = listed
+        .iter()
+        .find(|r| r["key"] == "a/one.txt")
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    assert_eq!(one["type"], "object");
+    assert_eq!(one["size"], 3);
+    assert!(one["modified"].as_str().unwrap().ends_with('Z'), "{one}");
+
+    let stat = records(&cli.ok(&["--json", "stat", "t/jsonb/a/one.txt"]).await);
+    assert_eq!(stat.len(), 1);
+    assert_eq!(stat[0]["size"], 3);
+
+    // Failures are a record too, with the exit code; the message stays on stderr.
+    let run = cli.run(&["--json", "cat", "t/jsonb/missing"]).await;
+    assert_eq!(run.code, 5);
+    let error = records(&run.stdout);
+    assert_eq!(error.len(), 1, "{}", run.stdout);
+    assert_eq!(error[0]["type"], "error");
+    assert_eq!(error[0]["kind"], "not_found");
+    assert_eq!(error[0]["exitCode"], 5);
+    assert!(run.stderr.starts_with("error: "), "{}", run.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_output_is_stable_for_scripts() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    fs::write(cli.path("note.txt"), "hello").unwrap();
+
+    // Without a terminal: no colors, no progress bars, results on stdout.
+    let run = cli.run(&["mb", "t/plain"]).await;
+    assert_eq!(
+        (run.stdout.as_str(), run.stderr.as_str()),
+        ("✓ Created t/plain\n", "")
+    );
+    let run = cli.run(&["cp", "note.txt", "t/plain/"]).await;
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines[0], "✓ note.txt → t/plain/note.txt", "{}", run.stdout);
+    assert!(
+        lines[1].starts_with("✓ Copied 1 file, 5 B in "),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        (lines.len(), run.stderr.as_str()),
+        (2, ""),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains('\u{1b}') && !run.stderr.contains('\u{1b}'));
+    // `--color always` colors them.
+    let colored = cli.ok(&["--color", "always", "ls", "t/plain"]).await;
+    assert!(colored.contains('\u{1b}'), "{colored:?}");
+    // `--quiet` leaves only results.
+    assert_eq!(
+        cli.ok(&["-q", "cp", "note.txt", "t/plain/again.txt"]).await,
+        ""
+    );
+    assert_eq!(cli.ok(&["-q", "cat", "t/plain/again.txt"]).await, "hello");
+
+    // Questions can't be asked without a terminal: say how to answer instead.
+    let err = cli.fails(&["rm", "-r", "t/plain/"], 2).await;
+    assert!(err.contains("--force"), "{err}");
+    assert!(cli.ok(&["ls", "t/plain"]).await.contains("note.txt"));
+    // `--yes` answers.
+    cli.ok(&["--yes", "rm", "-r", "t/plain/"]).await;
+    assert!(!cli.ok(&["ls", "t/plain"]).await.contains("note.txt"));
 }

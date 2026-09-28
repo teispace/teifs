@@ -45,7 +45,9 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
                                prints results. `src/client/` is its S3 client (aliases,
                                cp/mirror with parallel, resumable transfers) on the AWS
-                               SDK, for TeiFS or any S3 service.
+                               SDK, for TeiFS or any S3 service. `src/ui.rs` does all its
+                               output: styles, tables, progress bars, prompts, `--json`.
+                               `src/init.rs` is `teifs init`.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

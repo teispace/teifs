@@ -2,10 +2,18 @@
 
 #![allow(clippy::print_stdout, reason = "a command line prints its results")]
 
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 mod client;
 mod config;
+mod error;
+mod init;
+mod ui;
 mod units;
 
 use clap::{Parser, Subcommand};
@@ -14,17 +22,32 @@ use teifs_server::{
     credentials,
 };
 use teifs_store::{Layout, Store};
-use units::{date, from_ms, parse_count, parse_duration};
+use units::{date, from_ms, parse_count, parse_duration, rfc3339};
 
 #[derive(Parser)]
 #[command(name = "teifs", version, about = "Your folders as a drive and as S3")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Print results as JSON Lines (one object per line, each with a `type`).
+    #[arg(long, global = true)]
+    json: bool,
+    /// Print only results, warnings and errors.
+    #[arg(short, long, global = true)]
+    quiet: bool,
+    /// Answer yes to questions (like confirming a deletion).
+    #[arg(short, long, global = true)]
+    yes: bool,
+    /// When to use colors.
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    color: ui::ColorArg,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set up a drive: its folder, keys, keyring and settings, and an alias to reach it.
+    /// Asks on a terminal; flags answer instead.
+    Init(init::InitArgs),
     /// Serve a drive over the S3 API. Every folder in it is a bucket.
     Serve(ServeArgs),
     /// Show the settings `teifs serve` would use, and where each comes from.
@@ -193,6 +216,7 @@ enum KeyAction {
 enum BucketAction {
     /// List buckets.
     List {
+        /// The drive's folder (while `teifs serve` isn't using it).
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
@@ -202,12 +226,14 @@ enum BucketAction {
         /// How it stores objects: `object` (any key S3 allows) or `folder` (plain files).
         #[arg(long, value_enum, default_value = "object")]
         layout: LayoutArg,
+        /// The drive's folder (while `teifs serve` isn't using it).
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
     /// Remove an empty bucket.
     Remove {
         name: String,
+        /// The drive's folder (while `teifs serve` isn't using it).
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
         dir: PathBuf,
     },
@@ -215,11 +241,21 @@ enum BucketAction {
 
 /// A bucket layout on the command line.
 #[derive(Clone, Copy, clap::ValueEnum)]
-enum LayoutArg {
+pub(crate) enum LayoutArg {
     /// Objects stored by id under `.teifs`, with every key S3 allows.
     Object,
     /// A folder of plain files.
     Folder,
+}
+
+impl LayoutArg {
+    /// Its name on the command line and in settings.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Object => "object",
+            Self::Folder => "folder",
+        }
+    }
 }
 
 impl From<LayoutArg> for Layout {
@@ -244,8 +280,9 @@ fn main() -> ExitCode {
     let (cli, sources) = match config::parse(std::env::args_os()) {
         Ok(parsed) => parsed,
         Err(message) => {
-            eprintln!("teifs: {message}");
-            return ExitCode::FAILURE;
+            let err = error::Error::usage(message);
+            ui::error(&err);
+            return ExitCode::from(err.kind.code());
         }
     };
     // Commands run on a worker thread with a roomy stack: the AWS SDK's futures poll
@@ -255,6 +292,14 @@ fn main() -> ExitCode {
         .thread_stack_size(STACK_SIZE)
         .build()
         .expect("a Tokio runtime");
+    ui::init(
+        ui::Settings {
+            json: cli.json,
+            quiet: cli.quiet,
+            yes: cli.yes,
+        },
+        cli.color,
+    );
     let result = runtime.block_on(async move {
         match tokio::spawn(async move { run(cli.command, &sources).await }).await {
             Ok(result) => result,
@@ -264,8 +309,8 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("teifs: {err}");
-            ExitCode::from(err.kind as u8)
+            ui::error(&err);
+            ExitCode::from(err.kind.code())
         }
     }
 }
@@ -273,18 +318,29 @@ fn main() -> ExitCode {
 /// The stack of the threads commands run on.
 const STACK_SIZE: usize = 8 * 1024 * 1024;
 
-fn open(dir: &PathBuf) -> Result<Store, String> {
+pub(crate) fn open(dir: &Path) -> Result<Store, error::Error> {
+    use teifs_store::StoreError;
     Store::open(dir).map_err(|e| match e {
-        teifs_store::StoreError::DriveInUse => format!(
-            "the drive at {} is open in another TeiFS process (a running `teifs serve`?); stop it, or use an S3 client against it",
-            dir.display()
-        ),
-        e => format!("can't open the drive at {}: {e}", dir.display()),
+        StoreError::DriveInUse => error::Error::new(
+            error::Kind::Conflict,
+            format!(
+                "the drive at {} is open in another TeiFS process",
+                dir.display()
+            ),
+        )
+        .with_hint("stop `teifs serve`, or use an S3 client against it (`teifs ls ALIAS`)"),
+        StoreError::Io(err) if err.kind() == std::io::ErrorKind::NotFound => error::Error::new(
+            error::Kind::NotFound,
+            format!("there's no drive at {}", dir.display()),
+        )
+        .with_hint("make one with `teifs init`, or serve a folder with `teifs serve DIR`"),
+        e => error::Error::general(format!("can't open the drive at {}: {e}", dir.display())),
     })
 }
 
-async fn run(command: Command, sources: &config::Sources) -> Result<(), client::Error> {
+async fn run(command: Command, sources: &config::Sources) -> Result<(), error::Error> {
     match command {
+        Command::Init(args) => init::init(&args),
         Command::Serve(args) => Ok(serve(args).await?),
         Command::Config {
             action: ConfigAction::Show(args),
@@ -293,10 +349,19 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), client::
             let store = open(&dir)?;
             let (credentials, _) = credentials::load_or_create(store.root())
                 .map_err(|e| format!("can't read the credentials: {e}"))?;
-            println!("Access key: {}", credentials.access_key);
-            println!(
-                "Secret key: in {}",
-                credentials::path(store.root()).display()
+            let path = credentials::path(store.root()).display().to_string();
+            ui::details(
+                &[
+                    ("Access key", credentials.access_key.clone()),
+                    ("Secret key", format!("in {path}")),
+                ],
+                || {
+                    serde_json::json!({
+                        "type": "credentials",
+                        "accessKey": credentials.access_key,
+                        "secretKeyFile": path,
+                    })
+                },
             );
             Ok(())
         }
@@ -394,52 +459,124 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         from_minio: true, ..
     }) = &keys
     {
-        eprintln!("Using MINIO_ROOT_USER and MINIO_ROOT_PASSWORD as the access and secret key.");
-    }
-    if server.created_credentials() {
-        eprintln!(
-            "Created credentials for this drive in {}",
-            credentials::path(server.root()).display()
-        );
-    }
-    match server.kms() {
-        KmsLocation::Keyring {
-            path,
-            created: true,
-        } => eprintln!(
-            "Created the encryption keyring for this drive in {}\n  Back it up: encrypted objects can't be read without it.",
-            path.display()
-        ),
-        KmsLocation::Keyring { path, .. } => {
-            eprintln!("Encryption keys: {}", path.display());
-        }
-        KmsLocation::Transit(address) => eprintln!("Encryption keys: transit engine at {address}"),
-    }
-    match args.durability.into() {
-        Durability::Strict => {}
-        Durability::Relaxed => eprintln!(
-            "Durability: relaxed. A power cut can lose the last moments' writes (never corrupt the drive)."
-        ),
-        Durability::None => {
-            eprintln!("Durability: none. Nothing is synced to disk; use only for scratch data.");
-        }
+        ui::note("Using MINIO_ROOT_USER and MINIO_ROOT_PASSWORD as the access and secret key.");
     }
     let address = server.local_addr().map_err(|e| e.to_string())?;
-    eprintln!(
-        "Serving {} over S3 at http://{address}",
-        server.root().display()
-    );
-    let secret = keys.map_or_else(
-        || "`teifs credentials`".to_owned(),
-        |keys| keys.secret.describe(),
-    );
-    eprintln!("Access key: {}  (secret: {secret})", server.access_key());
+    announce(&server, address, keys.as_ref(), args.durability.into());
     server.run(shutdown_signal()).await;
-    eprintln!("Stopped.");
+    ui::note("Stopped.");
     Ok(())
 }
 
-async fn key(action: KeyAction) -> Result<(), String> {
+/// Says what `teifs serve` is serving and how to reach it: a block for people on
+/// standard error, or one `serving` record for `--json` (its endpoint is the one to use,
+/// even with `--listen 127.0.0.1:0`).
+fn announce(
+    server: &Server,
+    address: SocketAddr,
+    keys: Option<&config::Keys>,
+    durability: Durability,
+) {
+    let endpoint = format!("http://{}", announce_address(address));
+    let drive = server.root().display().to_string();
+    let secret = match keys {
+        Some(keys) => keys.secret.describe(),
+        None => format!("in {}", credentials::path(server.root()).display()),
+    };
+    let (keyring, created) = match server.kms() {
+        KmsLocation::Keyring { path, created } => (path.display().to_string(), *created),
+        KmsLocation::Transit(address) => (format!("the transit engine at {address}"), false),
+    };
+    let durability_name = match durability {
+        Durability::Strict => "strict",
+        Durability::Relaxed => "relaxed",
+        Durability::None => "none",
+    };
+    if ui::json() {
+        ui::emit(&serde_json::json!({
+            "type": "serving",
+            "endpoint": endpoint,
+            "listen": address.to_string(),
+            "drive": drive,
+            "accessKey": server.access_key(),
+            "keyring": keyring,
+            "durability": durability_name,
+        }));
+        return;
+    }
+    let alias = match keys {
+        None => format!(
+            "teifs alias set local {endpoint} --drive {}",
+            shell_word(&drive)
+        ),
+        Some(keys) => format!(
+            "teifs alias set local {endpoint} --access-key {}",
+            shell_word(&keys.access)
+        ),
+    };
+    ui::banner(
+        format!("Serving {drive} over S3"),
+        &[
+            ("Endpoint", endpoint.clone()),
+            ("Access key", server.access_key().to_owned()),
+            ("Secret key", secret),
+            ("Keyring", keyring.clone()),
+            ("Durability", durability_name.to_owned()),
+        ],
+        &[
+            alias,
+            "teifs ls local".to_owned(),
+            format!("aws --endpoint-url {endpoint} s3 ls"),
+        ],
+    );
+    if server.created_credentials() {
+        ui::note(format!(
+            "Created this drive's credentials in {}",
+            credentials::path(server.root()).display()
+        ));
+    }
+    if created {
+        ui::warn(format!(
+            "created the encryption keyring in {keyring}; back it up: encrypted objects can't be read without it"
+        ));
+    }
+    match durability {
+        Durability::Strict => {}
+        Durability::Relaxed => ui::warn(
+            "durability is relaxed: a power cut can lose the last moments' writes (never corrupt the drive)",
+        ),
+        Durability::None => {
+            ui::warn("durability is none: nothing is synced to disk; use it only for scratch data");
+        }
+    }
+}
+
+/// The address to reach a server listening on `address` from this machine: loopback
+/// for "every address".
+pub(crate) fn announce_address(address: SocketAddr) -> SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let ip = match address.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, address.port())
+}
+
+/// `text` as one word for a POSIX shell: as is when it's plain, else single-quoted.
+pub(crate) fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+async fn key(action: KeyAction) -> Result<(), error::Error> {
     use teifs_store::{Kms, LocalKms, TransitKms};
     let (KeyAction::List { keyring }
     | KeyAction::Create { keyring, .. }
@@ -469,30 +606,47 @@ async fn key(action: KeyAction) -> Result<(), String> {
     };
     match action {
         KeyAction::List { .. } => {
+            let mut table = ui::Table::new(&["NAME", ">VERSION", "CREATED"]);
+            let mut records = Vec::new();
             for key in kms.keys().await.map_err(|e| e.to_string())? {
-                println!(
-                    "{}  v{:<3}  {}",
-                    date(from_ms(key.created_ms)),
-                    key.version,
-                    key.name
-                );
+                let created = from_ms(key.created_ms);
+                table.row(vec![
+                    key.name.clone(),
+                    key.version.to_string(),
+                    date(created),
+                ]);
+                records.push(serde_json::json!({
+                    "type": "key",
+                    "name": key.name,
+                    "version": key.version,
+                    "created": rfc3339(created),
+                }));
             }
+            ui::rows(&table, &records, &format!("No keys in {place} yet."));
         }
         KeyAction::Create { name, .. } => {
             kms.create_key(&name).await.map_err(|e| e.to_string())?;
-            println!("Created key {name} in {place}");
+            ui::done(
+                format!("Created key {name} in {place}"),
+                || serde_json::json!({"type": "key", "name": name, "version": 1}),
+            );
         }
         KeyAction::Rotate { name, .. } => {
             let info = kms.rotate_key(&name).await.map_err(|e| e.to_string())?;
-            println!("Key {name} is now at version {}", info.version);
+            ui::done(
+                format!("Rotated {name}: new objects use version {}", info.version),
+                || serde_json::json!({"type": "key", "name": name, "version": info.version}),
+            );
         }
     }
     Ok(())
 }
 
-async fn bucket(action: BucketAction) -> Result<(), String> {
+async fn bucket(action: BucketAction) -> Result<(), error::Error> {
     match action {
         BucketAction::List { dir } => {
+            let mut table = ui::Table::new(&["NAME", "LAYOUT", "CREATED"]);
+            let mut records = Vec::new();
             for bucket in open(&dir)?
                 .list_buckets()
                 .await
@@ -502,22 +656,43 @@ async fn bucket(action: BucketAction) -> Result<(), String> {
                     Layout::Object => "object",
                     Layout::Folder => "folder",
                 };
-                println!("{}  {layout:<6}  {}", date(bucket.created), bucket.name);
+                table.row(vec![
+                    bucket.name.clone(),
+                    layout.to_owned(),
+                    date(bucket.created),
+                ]);
+                records.push(serde_json::json!({
+                    "type": "bucket",
+                    "name": bucket.name,
+                    "layout": layout,
+                    "created": rfc3339(bucket.created),
+                }));
             }
+            ui::rows(
+                &table,
+                &records,
+                "No buckets yet. Make one: teifs bucket create NAME",
+            );
         }
         BucketAction::Create { name, layout, dir } => {
             open(&dir)?
                 .create_bucket(&name, layout.into())
                 .await
                 .map_err(|e| format!("can't create {name}: {e}"))?;
-            println!("Created {name}");
+            ui::done(
+                format!("Created {name}"),
+                || serde_json::json!({"type": "bucket", "name": name, "created": true}),
+            );
         }
         BucketAction::Remove { name, dir } => {
             open(&dir)?
                 .delete_bucket(&name)
                 .await
                 .map_err(|e| format!("can't remove {name}: {e}"))?;
-            println!("Removed {name}");
+            ui::done(
+                format!("Removed {name}"),
+                || serde_json::json!({"type": "bucket", "name": name, "removed": true}),
+            );
         }
     }
     Ok(())
@@ -535,7 +710,7 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("Stopping…");
+    ui::note("Stopping…");
 }
 
 #[cfg(test)]

@@ -34,12 +34,15 @@ aims to be:
 
 ```sh
 cargo build --release
+./target/release/teifs init ~/Drive    # asks a few questions on a terminal; flags answer instead
 ./target/release/teifs serve ~/Drive
 ```
 
-The first run creates credentials in `~/Drive/.teifs/credentials.json` (readable only by
-you) and an encryption keyring in your config folder (back it up), and prints the access
-key. Then use any S3 client:
+`teifs init` creates the drive's credentials in `~/Drive/.teifs/credentials.json`
+(readable only by you), an encryption keyring in your config folder (back it up), the
+drive's settings, and an alias `local` for the client commands below. (`teifs serve` on
+its own does the same, without the alias.) `serve` prints the endpoint, the access key
+and commands to try. Then use any S3 client:
 
 ```sh
 export AWS_ENDPOINT_URL=http://127.0.0.1:9000
@@ -79,6 +82,11 @@ teifs cp home/photos/2026/cat.jpg .
 teifs presign home/photos/2026/cat.jpg --expires 1d
 ```
 
+Output is for people on a terminal (colors, progress bars, questions before deleting
+many objects) and plain when piped. `--json` prints JSON Lines, one object with a `type`
+per line, errors included; `-q` keeps only results and errors; `-y` answers questions
+(`rm -r`); `--color never` or `NO_COLOR` turns colors off.
+
 Aliases live in `aliases.toml` in your config folder, readable only by you (like
 `~/.aws/credentials`); secret keys are asked for hidden or read from standard input,
 never from the command line. `TEIFS_ALIAS_<NAME>=https://KEY:SECRET@host` sets one for a
@@ -89,7 +97,8 @@ single run. Exit codes: 1 other, 2 usage, 3 network, 4 keys refused, 5 not found
 
 Every `serve` flag can live in a TOML file instead, under the flag's name. Flags and
 `TEIFS_*` environment variables win over it; relative paths in it are relative to the
-file.
+file. `teifs serve DIR` reads the drive's own `DIR/.teifs/settings.toml` (written by
+`teifs init`) unless `--config` names another.
 
 ```toml
 # teifs.toml: teifs serve --config teifs.toml
@@ -108,19 +117,21 @@ each comes from. The secret key never goes in the file, and is never printed.
 
 | Command | What it does |
 |---|---|
+| `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
 | `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
-| `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
+| `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
 | `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys |
 | `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r]` | List buckets or objects |
 | `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `rb --force`) |
 | `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`) |
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way |
-| `teifs rm ALIAS/BUCKET/KEY… [-r --force]` | Delete objects |
+| `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`) |
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
+| Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
 
 ## S3 support today
 

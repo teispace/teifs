@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::{StreamExt, stream};
+use serde_json::json;
 
 use super::{
     CopyArgs, Error, Kind, TransferArgs,
@@ -17,7 +18,10 @@ use super::{
     target::{Target, base_name, local_path},
     transfer::{Head, Object, Transfers},
 };
-use crate::units::{rate, size};
+use crate::{
+    ui,
+    units::{rate, size},
+};
 
 /// One end of a copy.
 enum End {
@@ -43,17 +47,29 @@ struct Job {
     size: u64,
 }
 
-/// What a set of jobs came to.
-#[derive(Default)]
+/// What a command's jobs came to.
 struct Outcome {
+    started: Instant,
     copied: usize,
     bytes: u64,
+    removed: usize,
     failed: Vec<Error>,
 }
 
 impl Outcome {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            copied: 0,
+            bytes: 0,
+            removed: 0,
+            failed: Vec::new(),
+        }
+    }
+
+    /// Reports a failure; the command carries on and fails at the end.
     fn fail(&mut self, err: Error) {
-        eprintln!("✗ {err}");
+        ui::error(&err);
         self.failed.push(err);
     }
 }
@@ -66,7 +82,7 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
     let destination = Target::parse(destination, aliases)?;
     let many = sources.len() > 1;
     let mut jobs = Vec::new();
-    let mut planned = Outcome::default();
+    let mut planned = Outcome::new();
     for source in sources {
         let source = Target::parse(source, aliases)?;
         match plan_copy(
@@ -84,13 +100,9 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
             Err(err) => return Err(err),
         }
     }
-    let started = Instant::now();
-    let outcome = run_jobs(&Transfers::new(args.transfer), jobs, remove_source, planned).await;
-    finish(
-        &outcome,
-        if remove_source { "Moved" } else { "Copied" },
-        started,
-    )
+    let verb = if remove_source { "Moved" } else { "Copied" };
+    let outcome = run_jobs(args.transfer, jobs, remove_source, planned).await;
+    finish(&outcome, verb)
 }
 
 /// Adds the jobs that copy `source` to `destination`; a folder's entries that can't be
@@ -269,11 +281,15 @@ fn name_of(target: &Target) -> String {
 /// Runs `jobs`, several at once, adding to what `outcome` already holds; a failed one
 /// is reported and the rest carry on.
 async fn run_jobs(
-    transfers: &Transfers,
+    args: TransferArgs,
     jobs: Vec<Job>,
     remove_source: bool,
     mut outcome: Outcome,
 ) -> Outcome {
+    let total = jobs.iter().map(|job| job.size).sum();
+    let label = if remove_source { "Moving" } else { "Copying" };
+    let transfers = Transfers::new(args, ui::Progress::bytes(total, label));
+    let transfers = &transfers;
     let mut results = stream::iter(jobs)
         .map(|job| async move {
             let result = run_job(transfers, &job, remove_source).await;
@@ -289,6 +305,7 @@ async fn run_jobs(
             Err(err) => outcome.fail(err),
         }
     }
+    transfers.finish();
     outcome
 }
 
@@ -303,7 +320,15 @@ async fn run_job(transfers: &Transfers, job: &Job, remove_source: bool) -> Resul
     if remove_source {
         remove(&job.from).await?;
     }
-    println!("{} → {}", job.from.name(), job.to.name());
+    let (from, to) = (job.from.name(), job.to.name());
+    ui::done(format!("{from} → {to}"), || {
+        json!({
+            "type": if remove_source { "move" } else { "copy" },
+            "source": from,
+            "destination": to,
+            "size": job.size,
+        })
+    });
     Ok(())
 }
 
@@ -325,27 +350,58 @@ async fn remove(end: &End) -> Result<(), Error> {
 }
 
 /// Prints a summary, and fails (with the first failure's kind) if anything did.
-fn finish(outcome: &Outcome, verb: &str, started: Instant) -> Result<(), Error> {
-    let elapsed = started.elapsed();
+fn finish(outcome: &Outcome, verb: &str) -> Result<(), Error> {
+    let elapsed = outcome.started.elapsed();
+    let failed = outcome.failed.len();
+    let mut said = Vec::new();
     if outcome.copied > 0 {
-        println!(
+        said.push(format!(
             "{verb} {} file{}, {} in {:.1} s ({})",
             outcome.copied,
             plural(outcome.copied),
             size(outcome.bytes),
             elapsed.as_secs_f64(),
             rate(outcome.bytes, elapsed)
-        );
+        ));
+    }
+    if outcome.removed > 0 {
+        said.push(format!(
+            "removed {} file{}",
+            outcome.removed,
+            plural(outcome.removed)
+        ));
+    }
+    if said.is_empty() && failed == 0 {
+        said.push("Nothing to do: already the same".to_owned());
+    }
+    if !said.is_empty() {
+        let mut message = said.join("; ");
+        if let Some(first) = message.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        ui::done(message, || {
+            json!({
+                "type": "summary",
+                "action": verb.to_ascii_lowercase(),
+                "copied": outcome.copied,
+                "bytes": outcome.bytes,
+                "removed": outcome.removed,
+                "failed": failed,
+                "seconds": elapsed.as_secs_f64(),
+            })
+        });
     }
     match outcome.failed.as_slice() {
         [] => Ok(()),
-        [only] if outcome.copied == 0 => Err(Error::new(only.kind, only.message.clone())),
+        // The one failure, already shown: only its exit code is left to give.
+        [only] if outcome.copied == 0 && outcome.removed == 0 => {
+            Err(Error::new(only.kind, only.message.clone()).shown())
+        }
         [first, ..] => Err(Error::new(
             first.kind,
             format!(
-                "{} of {} failed (shown above)",
-                outcome.failed.len(),
-                outcome.failed.len() + outcome.copied
+                "{failed} of {} failed (shown above)",
+                failed + outcome.copied + outcome.removed
             ),
         )),
     }
@@ -408,20 +464,25 @@ pub async fn mirror(
     let to_local = matches!(destination, Target::Local(_));
     let plan = MirrorPlan::new(&wanted, &present, remove, to_local);
     if dry_run {
-        for entry in &plan.copy {
-            println!("would copy {}", entry.relative);
+        let plans = plan
+            .copy
+            .iter()
+            .map(|e| ("copy", e))
+            .chain(plan.remove.iter().map(|e| ("remove", e)));
+        for (action, entry) in plans {
+            ui::item(
+                || format!("would {action} {}", entry.relative),
+                || json!({"type": "plan", "action": action, "path": entry.relative, "size": entry.size}),
+            );
         }
-        for entry in &plan.remove {
-            println!("would remove {}", entry.relative);
-        }
-        println!(
+        ui::note(format!(
             "{} to copy, {} to remove; nothing changed (--dry-run)",
             plan.copy.len(),
             plan.remove.len()
-        );
+        ));
         return Ok(());
     }
-    let mut planned = Outcome::default();
+    let mut planned = Outcome::new();
     let mut jobs = Vec::new();
     for entry in &plan.copy {
         match folder_job(&source, &destination, entry) {
@@ -429,11 +490,9 @@ pub async fn mirror(
             Err(err) => planned.fail(err),
         }
     }
-    let started = Instant::now();
-    let mut outcome = run_jobs(&Transfers::new(transfer), jobs, false, planned).await;
-    let mut removed = 0;
+    let mut outcome = run_jobs(transfer, jobs, false, planned).await;
     if !outcome.failed.is_empty() && !plan.remove.is_empty() {
-        eprintln!("Nothing was removed, as some copies failed.");
+        ui::warn("nothing was removed, as some copies failed");
     } else {
         for entry in &plan.remove {
             // A name this system can't hold was never copied here: nothing to remove.
@@ -442,19 +501,18 @@ pub async fn mirror(
             };
             match self::remove(&end).await {
                 Ok(()) => {
-                    println!("removed {}", end.name());
-                    removed += 1;
+                    let name = end.name();
+                    ui::done(
+                        format!("Removed {name}"),
+                        || json!({"type": "remove", "key": name, "count": 1}),
+                    );
+                    outcome.removed += 1;
                 }
                 Err(err) => outcome.fail(err),
             }
         }
     }
-    if outcome.copied == 0 && removed == 0 && outcome.failed.is_empty() {
-        println!("Already the same.");
-    } else if removed > 0 {
-        println!("Removed {removed} file{}", plural(removed));
-    }
-    finish(&outcome, "Copied", started)
+    finish(&outcome, "Copied")
 }
 
 /// What's under a mirror's source or destination. A destination folder that isn't

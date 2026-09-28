@@ -41,6 +41,10 @@ uuid = { version = "1", features = ["v4", "v7"] }
 clap = { version = "4.6", features = ["derive", "env", "string"] }
 toml = "1.1"
 dirs = "6"
+anstream = "1"
+anstyle = "1"
+indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
+unicode-width = "0.2"
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
 async-trait = "0.1"
 base64 = "0.23"

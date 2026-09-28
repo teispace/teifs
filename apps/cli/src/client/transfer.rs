@@ -35,6 +35,7 @@ use tokio::{
 };
 
 use super::{Error, Kind, TransferArgs};
+use crate::ui::Progress;
 
 pub const KIB: u64 = 1024;
 pub const MIB: u64 = 1024 * KIB;
@@ -144,15 +145,23 @@ pub struct Transfers {
     parallel: usize,
     part_size: u64,
     permits: Arc<Semaphore>,
+    /// Bytes moved, as they're moved.
+    progress: Progress,
 }
 
 impl Transfers {
-    pub fn new(args: TransferArgs) -> Self {
+    pub fn new(args: TransferArgs, progress: Progress) -> Self {
         Self {
             parallel: args.parallel,
             part_size: args.part_size,
             permits: Arc::new(Semaphore::new(args.parallel)),
+            progress,
         }
+    }
+
+    /// Takes the progress bar away, once everything is done.
+    pub fn finish(&self) {
+        self.progress.finish();
     }
 
     /// How many files to work on at once (their requests share the budget).
@@ -188,6 +197,7 @@ impl Transfers {
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
+            self.progress.add(size);
             return Ok(());
         }
         let parts = ranges(size, part_size(size, self.part_size));
@@ -201,6 +211,11 @@ impl Transfers {
                 .map_err(|e| e.within(what()))?;
             (id, BTreeMap::new())
         };
+        for number in done.keys() {
+            if let Some(range) = usize::try_from(number - 1).ok().and_then(|i| parts.get(i)) {
+                self.progress.add(range.end - range.start);
+            }
+        }
         let sent = stream::iter(parts.iter().cloned().zip(1..))
             .filter(|(_, number)| std::future::ready(!done.contains_key(number)))
             .map(|(range, number)| {
@@ -226,7 +241,8 @@ impl Transfers {
                         .body(body)
                         .send()
                         .await
-                        .map_err(|e| resumable_failure(&Error::s3(what(), &e)))?;
+                        .map_err(|e| resumable_failure(Error::s3(what(), &e)))?;
+                    self.progress.add(range.end - range.start);
                     Ok::<_, Error>(
                         CompletedPart::builder()
                             .part_number(number)
@@ -331,12 +347,12 @@ impl Transfers {
             }
         }
         if !done.is_empty() {
-            eprintln!(
+            crate::ui::note(format!(
                 "Resuming the upload of {}: {} of {} parts are already there.",
                 to.name,
                 done.len(),
                 parts.len()
-            );
+            ));
         }
         Some((upload_id, done))
     }
@@ -368,7 +384,7 @@ impl Transfers {
                     .send()
                     .await
                     .map_err(|e| Error::s3(what(), &e))?;
-                write_body(file, got.body, head.size)
+                write_body(file, got.body, head.size, &self.progress)
                     .await
                     .map_err(|e| local(&e))?;
             } else {
@@ -388,7 +404,7 @@ impl Transfers {
                             file.seek(std::io::SeekFrom::Start(range.start))
                                 .await
                                 .map_err(|e| local(&e))?;
-                            write_body(file, body, range.end - range.start)
+                            write_body(file, body, range.end - range.start, &self.progress)
                                 .await
                                 .map_err(|e| local(&e))
                         }
@@ -456,6 +472,7 @@ impl Transfers {
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
+            self.progress.add(head.size);
             return Ok(());
         }
         // The object's type and metadata go too: they need a HEAD.
@@ -482,6 +499,7 @@ impl Transfers {
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
+            self.progress.add(head.size);
             return Ok(());
         }
         let upload_id = self
@@ -525,6 +543,7 @@ impl Transfers {
         );
         let mut parts = stream::iter(ranges(head.size, part).into_iter().zip(1..))
             .map(|(range, number)| async move {
+                let len = range.end - range.start;
                 let etag = if server_side {
                     let _permit = self.permit().await;
                     to.client
@@ -562,6 +581,7 @@ impl Transfers {
                         .map_err(|e| Error::s3("a part", &e))?
                         .e_tag
                 };
+                self.progress.add(len);
                 Ok::<_, Error>(
                     CompletedPart::builder()
                         .part_number(number)
@@ -625,14 +645,8 @@ impl Transfers {
 }
 
 /// A failed part: the upload stays, so the same command can carry on from it.
-fn resumable_failure(err: &Error) -> Error {
-    Error::new(
-        err.kind,
-        format!(
-            "{}\n  The parts sent so far are kept: run the same command again to resume.",
-            err.message
-        ),
-    )
+fn resumable_failure(err: Error) -> Error {
+    err.with_hint("the parts sent so far are kept: run the same command again to resume")
 }
 
 /// Where a download is written until it's complete: a hidden file beside it.
@@ -648,11 +662,13 @@ async fn write_body(
     mut file: tokio::fs::File,
     mut body: ByteStream,
     expected: u64,
+    progress: &Progress,
 ) -> Result<(), String> {
     let mut written = 0u64;
     while let Some(chunk) = body.try_next().await.map_err(|e| e.to_string())? {
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         written += chunk.len() as u64;
+        progress.add(chunk.len() as u64);
     }
     file.flush().await.map_err(|e| e.to_string())?;
     if written == expected {

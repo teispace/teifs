@@ -24,11 +24,33 @@ pub enum Kind {
     Conflict = 6,
 }
 
-/// A failure, with the message shown to the person.
+impl Kind {
+    /// The exit code.
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// Its name in `--json` output.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Usage => "usage",
+            Self::Network => "network",
+            Self::Auth => "auth",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// A failure: what went wrong, and (when there's something to do about it) what to do.
 #[derive(Debug)]
 pub struct Error {
     pub kind: Kind,
     pub message: String,
+    pub hint: Option<String>,
+    /// Already shown to the person as it happened; only the exit code is left.
+    pub shown: bool,
 }
 
 impl Error {
@@ -36,7 +58,23 @@ impl Error {
         Self {
             kind,
             message: message.into(),
+            hint: None,
+            shown: false,
         }
+    }
+
+    /// The same failure, marked as already shown.
+    #[must_use]
+    pub fn shown(mut self) -> Self {
+        self.shown = true;
+        self
+    }
+
+    /// The same failure, with what to do about it.
+    #[must_use]
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 
     pub fn general(message: impl Into<String>) -> Self {
@@ -52,7 +90,7 @@ impl Error {
     where
         E: ProvideErrorMetadata + std::error::Error + 'static,
     {
-        let (kind, why) = match err {
+        let (kind, why, hint) = match err {
             SdkError::DispatchFailure(e) => (
                 Kind::Network,
                 format!(
@@ -62,29 +100,43 @@ impl Error {
                             .map(|e| e as &(dyn std::error::Error + 'static)),
                     )
                 ),
+                Some("check the address, and that the server is running".to_owned()),
             ),
-            SdkError::TimeoutError(_) => {
-                (Kind::Network, "the endpoint didn't answer in time".into())
-            }
+            SdkError::TimeoutError(_) => (
+                Kind::Network,
+                "the endpoint didn't answer in time".into(),
+                None,
+            ),
             SdkError::ResponseError(_) => (
                 Kind::Network,
-                "the endpoint's answer couldn't be read (is it an S3 service?)".into(),
+                "the endpoint's answer couldn't be read".into(),
+                Some("check that the address is an S3 service".to_owned()),
             ),
             SdkError::ServiceError(service) => {
                 let status = service.raw().status().as_u16();
                 let code = service.err().code().unwrap_or_default();
                 let message = service.err().message().unwrap_or_default();
-                (kind_of(status, code), describe(status, code, message))
+                (
+                    kind_of(status, code),
+                    describe(status, code, message),
+                    hint_for(code).map(str::to_owned),
+                )
             }
-            _ => (Kind::General, source_chain(Some(err))),
+            _ => (Kind::General, source_chain(Some(err)), None),
         };
-        Self::new(kind, format!("{what}: {why}"))
+        Self {
+            hint,
+            ..Self::new(kind, format!("{what}: {why}"))
+        }
     }
 
     /// The same failure, said to have happened while doing `what`.
     #[must_use]
     pub fn within(self, what: impl fmt::Display) -> Self {
-        Self::new(self.kind, format!("{what}: {}", self.message))
+        Self {
+            message: format!("{what}: {}", self.message),
+            ..self
+        }
     }
 
     /// Whether this failure means the thing isn't there.
@@ -131,13 +183,17 @@ fn kind_of(status: u16, code: &str) -> Kind {
     }
 }
 
+/// What to do about an S3 error code, when there's something.
+fn hint_for(code: &str) -> Option<&'static str> {
+    match code {
+        "InvalidAccessKeyId" => Some("check the alias's access key: `teifs alias set`"),
+        "SignatureDoesNotMatch" => Some("check the alias's secret key: `teifs alias set`"),
+        "RequestTimeTooSkewed" => Some("this computer's clock is off: set it right"),
+        _ => None,
+    }
+}
+
 fn describe(status: u16, code: &str, message: &str) -> String {
-    let hint = match code {
-        "InvalidAccessKeyId" => " (check the alias's access key: `teifs alias set`)",
-        "SignatureDoesNotMatch" => " (check the alias's secret key: `teifs alias set`)",
-        "RequestTimeTooSkewed" => " (this computer's clock is off)",
-        _ => "",
-    };
     match (code, message) {
         ("", "") => match status {
             404 => "not found".to_owned(),
@@ -146,8 +202,8 @@ fn describe(status: u16, code: &str, message: &str) -> String {
             _ => format!("the endpoint answered {status}"),
         },
         ("", message) => message.to_owned(),
-        (code, "") => format!("{code}{hint}"),
-        (code, message) => format!("{message} ({code}){hint}"),
+        (code, "") => code.to_owned(),
+        (code, message) => format!("{message} ({code})"),
     }
 }
 
@@ -186,8 +242,14 @@ mod tests {
         assert_eq!(describe(404, "", ""), "not found");
         assert_eq!(
             describe(403, "InvalidAccessKeyId", "The key is unknown."),
-            "The key is unknown. (InvalidAccessKeyId) (check the alias's access key: `teifs alias set`)"
+            "The key is unknown. (InvalidAccessKeyId)"
         );
+        assert!(
+            hint_for("SignatureDoesNotMatch")
+                .unwrap()
+                .contains("teifs alias set")
+        );
+        assert_eq!(hint_for("NoSuchKey"), None);
         assert_eq!(describe(400, "Bad", ""), "Bad");
     }
 }

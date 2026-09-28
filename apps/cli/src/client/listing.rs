@@ -40,12 +40,12 @@ pub fn local(root: &Path) -> Result<Vec<Entry>, Error> {
             }
             // Follows a link to what it points at.
             let Ok(meta) = fs::metadata(&path) else {
-                eprintln!("Skipping {}: a broken link", path.display());
+                crate::ui::warn(format!("skipping {}: a broken link", path.display()));
                 continue;
             };
             if !meta.is_file() {
                 if !meta.is_dir() {
-                    eprintln!("Skipping {}: not a file", path.display());
+                    crate::ui::warn(format!("skipping {}: not a file", path.display()));
                 }
                 continue;
             }

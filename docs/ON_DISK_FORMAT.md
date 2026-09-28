@@ -20,7 +20,8 @@ it against a drive written by each released format.
 │   │   └── <aa>/<bb>/<object id>
 │   ├── tmp/                  bytes being written (emptied at every start)
 │   ├── uploads/<id>/<part>   parts of multipart uploads in progress
-│   └── credentials.json      generated credentials, readable only by the owner
+│   ├── credentials.json      generated credentials, readable only by the owner
+│   └── settings.toml         optional `teifs serve` settings (`teifs init`); never secrets
 ├── <bucket>/                 each folder is a folder bucket
 │   └── <key path>            each object is a plain file at its key's path
 └── …

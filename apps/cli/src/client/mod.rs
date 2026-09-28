@@ -1,10 +1,9 @@
 //! `teifs` as an S3 client, for TeiFS or any S3 service: aliases, and commands on
 //! `ALIAS/BUCKET/KEY` paths and local files (`ls`, `cp`, `mirror`, …).
 
-mod alias;
+pub(crate) mod alias;
 mod commands;
 mod copy;
-mod error;
 mod listing;
 mod target;
 mod transfer;
@@ -13,7 +12,7 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, Subcommand};
 
-pub use error::{Error, Kind};
+pub use crate::error::{Error, Kind};
 
 use crate::{LayoutArg, units::parse_duration};
 
@@ -70,7 +69,7 @@ pub enum Command {
         /// Everything under each key prefix.
         #[arg(short, long)]
         recursive: bool,
-        /// Needed with `--recursive`, to say you mean it.
+        /// With `--recursive`, delete without asking (as `--yes` does).
         #[arg(long)]
         force: bool,
     },
@@ -119,36 +118,40 @@ pub enum AliasAction {
     /// Add or replace an alias. The secret key is asked for (hidden) on a terminal, or
     /// read from standard input (`--secret-key-stdin`) or `TEIFS_SECRET_KEY`; never
     /// from the command line.
-    Set {
-        /// A short name: lowercase letters, digits, `-` and `_`.
-        name: String,
-        /// The endpoint, like `http://127.0.0.1:9000` or `https://s3.example.com`.
-        url: String,
-        /// The access key (or `TEIFS_ACCESS_KEY`; asked for on a terminal).
-        #[arg(long, env = "TEIFS_ACCESS_KEY")]
-        access_key: Option<String>,
-        /// Read the secret key from the first line of standard input.
-        #[arg(long)]
-        secret_key_stdin: bool,
-        /// Use the keys of the TeiFS drive in this folder (from `.teifs/credentials.json`),
-        /// whatever else sets keys.
-        #[arg(long)]
-        drive: Option<PathBuf>,
-        /// The region to sign for.
-        #[arg(long, default_value = alias::DEFAULT_REGION)]
-        region: String,
-        /// Address buckets as host names (`bucket.host`), as AWS prefers, instead of
-        /// as the first part of the path.
-        #[arg(long)]
-        virtual_hosted: bool,
-        /// Save it without checking that the endpoint and keys work.
-        #[arg(long)]
-        no_check: bool,
-    },
+    Set(SetAlias),
     /// List aliases (never their secret keys).
     Ls,
     /// Remove an alias.
     Rm { name: String },
+}
+
+/// `alias set`'s arguments.
+#[derive(Args)]
+pub struct SetAlias {
+    /// A short name: lowercase letters, digits, `-` and `_`.
+    name: String,
+    /// The endpoint, like `http://127.0.0.1:9000` or `https://s3.example.com`.
+    url: String,
+    /// The access key (or `TEIFS_ACCESS_KEY`; asked for on a terminal).
+    #[arg(long, env = "TEIFS_ACCESS_KEY")]
+    access_key: Option<String>,
+    /// Read the secret key from the first line of standard input.
+    #[arg(long)]
+    secret_key_stdin: bool,
+    /// Use the keys of the TeiFS drive in this folder (from `.teifs/credentials.json`),
+    /// whatever else sets keys.
+    #[arg(long)]
+    drive: Option<PathBuf>,
+    /// The region to sign for.
+    #[arg(long, default_value = alias::DEFAULT_REGION)]
+    region: String,
+    /// Address buckets as host names (`bucket.host`), as AWS prefers, instead of
+    /// as the first part of the path.
+    #[arg(long)]
+    virtual_hosted: bool,
+    /// Save it without checking that the endpoint and keys work.
+    #[arg(long)]
+    no_check: bool,
 }
 
 /// `cp` and `mv`.

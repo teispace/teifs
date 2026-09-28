@@ -29,6 +29,11 @@ const PATHS: [&str; 3] = ["dir", "kms_keyring", "secret_key_file"];
 /// The subcommands that take `serve`'s settings, by their path from the top.
 const SERVE_COMMANDS: [&[&str]; 2] = [&["serve"], &["config", "show"]];
 
+/// A drive's own settings file, which `teifs serve DIR` reads when no other is named.
+pub(crate) fn drive_settings(drive: &Path) -> PathBuf {
+    drive.join(teifs_store::SYSTEM_DIR).join("settings.toml")
+}
+
 /// Where each of `serve`'s settings came from.
 #[derive(Default)]
 pub(crate) struct Sources {
@@ -45,7 +50,12 @@ pub(crate) struct Sources {
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<(Cli, Sources), String> {
     let args: Vec<OsString> = args.into_iter().collect();
     let first = Cli::command().get_matches_from(&args);
-    let path = serve_matches(&first).and_then(|m| m.get_one::<PathBuf>("config").cloned());
+    let path = serve_matches(&first).and_then(|m| {
+        m.get_one::<PathBuf>("config").cloned().or_else(|| {
+            let own = drive_settings(m.get_one::<PathBuf>("dir")?);
+            own.is_file().then_some(own)
+        })
+    });
     let (matches, sources) = match path {
         None => {
             let sources = Sources {
@@ -306,21 +316,29 @@ pub(crate) fn show(args: &ServeArgs, sources: &Sources) -> Result<(), String> {
     }
     out.push_str(", then defaults.\n");
     let serve = serve_command();
+    let json = crate::ui::json();
     for arg in settings(&serve) {
         let id = arg.get_id().as_str();
         let name = key_name(arg);
         let Some(values) = matches.get_raw(id) else {
-            let _ = writeln!(out, "# {name}: not set");
+            if json {
+                crate::ui::emit(&serde_json::json!({
+                    "type": "setting", "name": name, "value": null, "source": null,
+                }));
+            } else {
+                let _ = writeln!(out, "# {name}: not set");
+            }
             continue;
         };
         let values: Vec<String> = values.map(|v| v.to_string_lossy().into_owned()).collect();
         let value = match arg.get_action() {
-            ArgAction::SetTrue | ArgAction::SetFalse => values.join(""),
+            ArgAction::SetTrue | ArgAction::SetFalse => {
+                toml::Value::Boolean(values.join("") == "true")
+            }
             ArgAction::Append => {
                 toml::Value::Array(values.into_iter().map(toml::Value::String).collect())
-                    .to_string()
             }
-            _ => toml::Value::String(values.join("")).to_string(),
+            _ => toml::Value::String(values.join("")),
         };
         let source = match matches.value_source(id) {
             Some(ValueSource::CommandLine) => "flag",
@@ -328,7 +346,26 @@ pub(crate) fn show(args: &ServeArgs, sources: &Sources) -> Result<(), String> {
             Some(ValueSource::DefaultValue) if sources.from_file.contains(id) => "file",
             _ => "default",
         };
-        let _ = writeln!(out, "{name} = {value}  # {source}");
+        if json {
+            crate::ui::emit(&serde_json::json!({
+                "type": "setting", "name": name, "value": value, "source": source,
+            }));
+        } else {
+            let _ = writeln!(out, "{name} = {value}  # {source}");
+        }
+    }
+    if json {
+        // Where the keys come from; never the secret itself.
+        let record = match keys(args, env)? {
+            Some(keys) => serde_json::json!({
+                "type": "keys",
+                "from": if keys.from_minio { "minio" } else { "settings" },
+                "secret": keys.secret.describe(),
+            }),
+            None => serde_json::json!({"type": "keys", "from": "drive", "secret": null}),
+        };
+        crate::ui::emit(&record);
+        return Ok(());
     }
     match keys(args, env)? {
         Some(keys) => {

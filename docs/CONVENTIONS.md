@@ -37,6 +37,11 @@ in the pull request.
 - `types` has no I/O. `meta` owns all SQL. `store` owns the disk layout. `s3` owns the S3
   semantics and is the only crate besides `server` that knows about s3s. `server` owns
   networking and startup. The command only parses, calls and prints.
+- The command prints only through `apps/cli/src/ui.rs`: results on standard output
+  (`ui::item`, `ui::done`, `ui::rows`, `ui::details`), with a JSON record for `--json`
+  alongside each; notes, warnings, errors and progress on standard error. Errors carry a
+  `Kind` (the exit code) and, when there's something to do, a hint. Questions are asked
+  only on a terminal, and every one has a flag that answers it.
 - A new crate is added only for a boundary that's needed now (another crate must use
   the code without the rest, or it must be embeddable on its own).
 

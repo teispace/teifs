@@ -126,8 +126,10 @@ renamed into place; secret keys come from a hidden prompt, standard input, the
 environment or a drive's own credentials file, never from the command line, and are
 never printed (`Debug` leaves them out). A download writes only below the folder it was
 given: keys with `..`, `.`, empty or absolute parts (and, on Windows, `\` or `:`) are
-refused instead of mapped to a path. Tests: `apps/cli/tests/client.rs`,
-`apps/cli/src/client/target.rs`.
+refused instead of mapped to a path. `teifs init` never prints the secret key (aliases
+read it from the drive's file), writes no secret into the drive's settings, and refuses a
+keyring on the drive itself. `--json` output and error records carry no secrets. Tests:
+`apps/cli/tests/client.rs`, `apps/cli/tests/init.rs`, `apps/cli/src/client/target.rs`.
 
 ## Data safety
 

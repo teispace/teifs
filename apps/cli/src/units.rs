@@ -70,6 +70,11 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` (RFC 3339, UTC), for `--json`.
+pub fn rfc3339(time: SystemTime) -> String {
+    date(time).replacen(' ', "T", 1) + "Z"
+}
+
 /// A size in bytes for people: `512 B`, `1.5 KiB`, `12.3 MiB`, `4.0 GiB`.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -113,6 +118,7 @@ mod tests {
         assert_eq!(date(SystemTime::UNIX_EPOCH), "1970-01-01 00:00:00");
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
         assert_eq!(date(t), "2026-09-21 14:13:20");
+        assert_eq!(rfc3339(t), "2026-09-21T14:13:20Z");
     }
 
     #[test]
