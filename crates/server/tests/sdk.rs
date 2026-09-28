@@ -10,71 +10,15 @@ use std::time::Duration;
 
 use aws_sdk_s3::{
     Client,
-    config::{Credentials, Region},
     error::ProvideErrorMetadata,
     presigning::PresigningConfig,
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart, Delete, MetadataDirective, ObjectIdentifier},
 };
-use teifs_server::{Config, Credentials as DriveCredentials, Server as TeiFS};
-use tempfile::TempDir;
-use tokio::sync::oneshot;
 
-const ACCESS_KEY: &str = "teifs-test";
-const SECRET_KEY: &str = "not-a-real-secret-only-for-tests";
+mod common;
 
-struct Server {
-    dir: TempDir,
-    _keys: TempDir,
-    endpoint: String,
-    _stop: oneshot::Sender<()>,
-}
-
-async fn start() -> Server {
-    let dir = tempfile::tempdir().unwrap();
-    let keys = tempfile::tempdir().unwrap();
-    let server = TeiFS::bind(Config {
-        dir: dir.path().to_owned(),
-        listen: "127.0.0.1:0".parse().unwrap(),
-        domains: Vec::new(),
-        credentials: Some(DriveCredentials {
-            access_key: ACCESS_KEY.into(),
-            secret_key: SECRET_KEY.into(),
-        }),
-        default_layout: teifs_store::Layout::Folder,
-        kms_keyring: Some(keys.path().join("keyring.json")),
-        kms_transit: None,
-        allow_sse_c: true,
-        plain_http_is_secure: None,
-        jobs: teifs_server::JobOptions::default(),
-        durability: teifs_server::Durability::Strict,
-        key_rules: teifs_server::KeyRules::Portable,
-    })
-    .await
-    .unwrap();
-    let endpoint = format!("http://{}", server.local_addr().unwrap());
-    let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(server.run(async {
-        let _ = stopped.await;
-    }));
-    Server {
-        dir,
-        _keys: keys,
-        endpoint,
-        _stop: stop,
-    }
-}
-
-fn client(server: &Server, secret: &str) -> Client {
-    let config = aws_sdk_s3::Config::builder()
-        .behavior_version_latest()
-        .region(Region::new("us-east-1"))
-        .endpoint_url(&server.endpoint)
-        .credentials_provider(Credentials::new(ACCESS_KEY, secret, None, None, "tests"))
-        .force_path_style(true)
-        .build();
-    Client::from_conf(config)
-}
+use common::{SECRET_KEY, client, start};
 
 async fn body(output: aws_sdk_s3::operation::get_object::GetObjectOutput) -> Vec<u8> {
     output.body.collect().await.unwrap().into_bytes().to_vec()

@@ -82,8 +82,15 @@ only when a rule names it.
 ### 11. Input is bounded
 Request bodies stream to disk instead of memory; listings are paged (1000 keys at most);
 `DeleteObjects` takes at most 1000 keys. `unwrap` is denied outside tests, so malformed
-input produces an error, not a crash. *Planned:* header, idle and body-stall timeouts and
-connection limits before the first release, fuzzing of every parser.
+input produces an error, not a crash. What one client can hold is bounded
+(`crates/server/src/serve.rs`, `crates/s3/src/limits.rs`, tested over raw connections in
+`crates/server/tests/limits.rs`): a client must send its headers within 30 s of
+connecting or of its last response (`--header-timeout`), so silent, slow-header and idle
+connections close; an upload body that stops arriving for 60 s fails with
+`RequestTimeout` (`--body-timeout`), counting only time the server waits on the client;
+at most 4096 connections are served at once, the rest wait in the system's queue
+(`--max-connections`); header sections over 16 KiB and user metadata over 2 KiB are
+refused before anything else looks at them. *Planned:* fuzzing of every parser.
 
 ### 12. Retention fails closed (*planned*)
 When Object Lock arrives, any error reading an object's retention denies the delete or

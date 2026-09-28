@@ -2578,6 +2578,8 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
  "hyper",
  "md-5",
  "s3s",

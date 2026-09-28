@@ -13,7 +13,7 @@ mod config;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Server, Transit,
+    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, Server, Transit,
     credentials,
 };
 use teifs_store::{Layout, ListQuery, Store};
@@ -131,6 +131,17 @@ pub(crate) struct ServeArgs {
     /// this system can hold). Object buckets take any S3 key either way.
     #[arg(long, value_enum, default_value = "portable", env = "TEIFS_KEY_NAMES")]
     key_names: KeyNamesArg,
+    /// How long a client has to send a request's headers; idle connections close
+    /// after it too.
+    #[arg(long, default_value = "30s", value_parser = parse_duration, env = "TEIFS_HEADER_TIMEOUT")]
+    header_timeout: Duration,
+    /// How long an upload's body may stop arriving before the request fails with
+    /// `RequestTimeout`.
+    #[arg(long, default_value = "60s", value_parser = parse_duration, env = "TEIFS_BODY_TIMEOUT")]
+    body_timeout: Duration,
+    /// The most connections served at once; more wait until one closes.
+    #[arg(long, default_value = "4096", value_parser = parse_count, env = "TEIFS_MAX_CONNECTIONS")]
+    max_connections: usize,
     /// A file holding the secret key, for use with the access key (Docker and
     /// systemd secrets). Or set `TEIFS_SECRET_KEY`; never on the command line.
     #[arg(long, env = "TEIFS_SECRET_KEY_FILE")]
@@ -232,8 +243,10 @@ impl From<LayoutArg> for Layout {
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
+            // s3s logs every refused request (a missing key, a bad signature) as an
+            // error; server errors are still logged by s3s and by TeiFS.
             tracing_subscriber::EnvFilter::try_from_env("TEIFS_LOG")
-                .unwrap_or_else(|_| "info".into()),
+                .unwrap_or_else(|_| "info,s3s::ops=off".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -328,38 +341,49 @@ impl From<DurabilityArg> for Durability {
 #[derive(Debug, Clone, Copy)]
 struct Expiry(Option<Duration>);
 
-/// Parses `never`, or a number with a unit: `s`, `m`, `h` or `d`.
+/// Parses `never`, or a duration ([`parse_duration`]).
 fn parse_expiry(text: &str) -> Result<Expiry, String> {
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("never") {
+    if text.trim().eq_ignore_ascii_case("never") {
         return Ok(Expiry(None));
     }
+    parse_duration(text)
+        .map(|duration| Expiry(Some(duration)))
+        .map_err(|e| format!("{e} (or say never)"))
+}
+
+/// Parses a positive number with a unit: `s`, `m`, `h` or `d` (`30s`, `12h`, `7d`).
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let text = text.trim();
     let split = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
     let (number, unit) = text.split_at(split);
     let number: u64 = number
         .parse()
-        .map_err(|_| format!("`{text}` isn't a duration like 30m, 12h or 7d, or never"))?;
+        .map_err(|_| format!("`{text}` isn't a duration like 30s, 12h or 7d"))?;
     let seconds = match unit {
         "s" => 1,
         "m" => 60,
         "h" => 60 * 60,
         "d" => 24 * 60 * 60,
-        _ => {
-            return Err(format!(
-                "`{text}` needs a unit: s, m, h or d (or say never)"
-            ));
-        }
+        _ => return Err(format!("`{text}` needs a unit: s, m, h or d")),
     };
     let duration = number
         .checked_mul(seconds)
         .map(Duration::from_secs)
         .ok_or_else(|| format!("`{text}` is too long"))?;
     if duration.is_zero() {
-        return Err("an expiry of zero would abort every upload; say never to keep them".into());
+        return Err(format!("`{text}` must be longer than zero"));
     }
-    Ok(Expiry(Some(duration)))
+    Ok(duration)
+}
+
+/// Parses a count of at least one.
+fn parse_count(text: &str) -> Result<usize, String> {
+    match text.trim().parse() {
+        Ok(0) | Err(_) => Err(format!("`{text}` isn't a whole number of at least 1")),
+        Ok(n) => Ok(n),
+    }
 }
 
 async fn serve(args: ServeArgs) -> Result<(), String> {
@@ -391,6 +415,11 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         },
         durability: args.durability.into(),
         key_rules: args.key_names.into(),
+        limits: Limits {
+            header_timeout: args.header_timeout,
+            body_timeout: args.body_timeout,
+            max_connections: args.max_connections,
+        },
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -624,6 +653,12 @@ mod tests {
             Some(Duration::from_mins(30))
         );
         assert_eq!(parse_expiry("NEVER").unwrap().0, None);
+        assert_eq!(parse_duration("45s"), Ok(Duration::from_secs(45)));
+        assert!(parse_duration("never").is_err());
+        assert_eq!(parse_count("4096"), Ok(4096));
+        for bad in ["0", "-1", "x", ""] {
+            assert!(parse_count(bad).is_err(), "{bad}");
+        }
         for bad in [
             "",
             "7",

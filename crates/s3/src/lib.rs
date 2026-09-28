@@ -7,6 +7,7 @@ mod crc_combine;
 mod drive;
 mod encode;
 mod errors;
+mod limits;
 mod sse;
 mod tagging;
 
@@ -15,6 +16,7 @@ use teifs_store::{Layout, Store};
 
 pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
+pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
 
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
@@ -30,6 +32,9 @@ pub struct Options {
     /// Whether plain HTTP counts as a secure connection for SSE-C keys: true for a server
     /// that only listens on this machine, or behind a proxy that terminates TLS.
     pub plain_http_is_secure: bool,
+    /// How long a request body may stop arriving before the request fails with
+    /// `RequestTimeout`; `None` waits for ever.
+    pub body_timeout: Option<std::time::Duration>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -48,5 +53,10 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         builder.set_host(MultiDomain::new(&options.domains)?);
         Some(MultiDomain::new(&options.domains)?)
     };
-    Ok(Service::new(builder.build(), store, host))
+    Ok(Service::new(
+        builder.build(),
+        store,
+        host,
+        options.body_timeout,
+    ))
 }

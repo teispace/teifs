@@ -85,8 +85,11 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
 }
 
 /// Maps an error reading a request body: a checksum or signature that didn't match, a
-/// body cut short, or one too large, keep their S3 codes.
+/// body cut short, too large, or stalled, keep their S3 codes.
 pub(crate) fn from_body(err: StdError) -> S3Error {
+    if crate::limits::is_stalled(&*err) {
+        return S3Error::with_source(S3ErrorCode::RequestTimeout, err);
+    }
     if err.is::<s3s::BodySizeLimitExceeded>() {
         return S3Error::with_source(S3ErrorCode::EntityTooLarge, err);
     }

@@ -7,6 +7,12 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Bounds on what a client can hold: headers must arrive within 30 s of connecting or of
+  the last response, so silent, slow and idle connections close (`--header-timeout`;
+  before, a connection that sent nothing was kept for ever); a stalled upload body fails
+  with `400 RequestTimeout` after 60 s (`--body-timeout`); at most 4096 connections at
+  once (`--max-connections`); user metadata over 2 KiB is `400 MetadataTooLarge` and a
+  header section over 16 KiB is refused. Refused requests no longer log as errors.
 - Settings file for `teifs serve` (`--config`, `TEIFS_CONFIG`): TOML under the flags'
   names, below flags and environment variables; `teifs config show` prints the effective
   settings and their sources. The secret key can come from a file

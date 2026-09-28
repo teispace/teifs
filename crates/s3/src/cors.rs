@@ -4,7 +4,7 @@
 //!
 //! s3s has no `OPTIONS` route, so this is a thin HTTP service around the S3 service.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures::future::BoxFuture;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
@@ -15,6 +15,8 @@ use s3s::{
     service::S3Service,
 };
 use teifs_store::{CorsRule, Store, StoreError};
+
+use crate::limits::{StallTimeout, refusal};
 
 /// How many rules a bucket's CORS configuration may have.
 const MAX_RULES: usize = 100;
@@ -163,7 +165,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 /// An S3 error answer that doesn't come from the S3 service.
-fn error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
+pub(crate) fn error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
     let body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>{message}</Message></Error>"
     );
@@ -182,6 +184,7 @@ pub struct Service {
     s3: S3Service,
     store: Store,
     host: Option<Arc<MultiDomain>>,
+    body_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for Service {
@@ -191,12 +194,28 @@ impl std::fmt::Debug for Service {
 }
 
 impl Service {
-    pub(crate) fn new(s3: S3Service, store: Store, host: Option<MultiDomain>) -> Self {
+    pub(crate) fn new(
+        s3: S3Service,
+        store: Store,
+        host: Option<MultiDomain>,
+        body_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             s3,
             store,
             host: host.map(Arc::new),
+            body_timeout,
         }
+    }
+
+    /// Passes a request to the S3 service, its body timed out if it stalls.
+    async fn s3(&self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
+        let timeout = self.body_timeout;
+        let req = req.map(|body| match timeout {
+            Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
+            None => s3s::Body::from(body),
+        });
+        self.s3.call(req).await
     }
 
     /// The bucket a request is for: from a virtual host, else the path's first segment.
@@ -293,11 +312,14 @@ impl Service {
     }
 
     async fn handle(self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
+        if let Some(refused) = refusal(req.headers()) {
+            return Ok(refused);
+        }
         if req.method() == Method::OPTIONS {
             return Ok(self.preflight(&req).await);
         }
         let Some(origin) = header(req.headers(), "origin").map(str::to_owned) else {
-            return hyper::service::Service::call(&self.s3, req).await;
+            return self.s3(req).await;
         };
         // S3-compatible servers match an actual request on Access-Control-Request-Method
         // when it's sent, else on the request's own method.
@@ -307,7 +329,7 @@ impl Service {
             Some(bucket) => self.store.bucket_cors(&bucket).await.ok().flatten(),
             None => None,
         };
-        let mut response = hyper::service::Service::call(&self.s3, req).await?;
+        let mut response = self.s3(req).await?;
         if let Some(rules) = rules {
             let headers = response.headers_mut();
             headers.insert(header::VARY, HeaderValue::from_static(VARY));

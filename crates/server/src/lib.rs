@@ -21,7 +21,7 @@ use teifs_store::{
 use tokio::net::TcpListener;
 
 pub use credentials::Credentials;
-pub use serve::{DRAIN, serve};
+pub use serve::{DRAIN, Limits, serve};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 
 /// How to serve a drive.
@@ -56,6 +56,8 @@ pub struct Config {
     pub durability: Durability,
     /// Which names folder buckets may create.
     pub key_rules: KeyRules,
+    /// Bounds on what clients can make the server hold.
+    pub limits: Limits,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -144,6 +146,7 @@ pub enum ServerError {
 pub struct Server {
     store: Store,
     jobs: JobOptions,
+    limits: Limits,
     service: teifs_s3::Service,
     listener: TcpListener,
     access_key: String,
@@ -243,6 +246,7 @@ impl Server {
                 plain_http_is_secure: config
                     .plain_http_is_secure
                     .unwrap_or_else(|| config.listen.ip().is_loopback()),
+                body_timeout: Some(config.limits.body_timeout),
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
@@ -256,6 +260,7 @@ impl Server {
         Ok(Self {
             store,
             jobs: config.jobs,
+            limits: config.limits,
             service,
             listener,
             access_key,
@@ -297,7 +302,7 @@ impl Server {
     /// lets open requests finish for up to [`DRAIN`] and stops the jobs.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let jobs = self.store.start_jobs(&self.jobs);
-        serve(self.listener, self.service, shutdown).await;
+        serve(self.listener, self.service, self.limits, shutdown).await;
         jobs.stop().await;
     }
 }
