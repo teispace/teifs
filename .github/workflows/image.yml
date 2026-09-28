@@ -6,8 +6,8 @@ name: Image
 # and latest when it's the latest release. Run it by hand (Actions ▸ Image ▸ Run
 # workflow, tag v0.1.0) once the release is published.
 #
-# Pull requests that change the image build it from source for linux/amd64 and check it
-# serves, is healthy and keeps its data, without pushing anything.
+# Pull requests and pushes to main that change the image build it from source for
+# linux/amd64 and check it serves, is healthy and keeps its data, without pushing it.
 
 on:
   workflow_dispatch:
@@ -16,9 +16,12 @@ on:
         description: Release tag, e.g. v0.1.0
         required: true
   pull_request:
-    paths:
+    paths: &image-paths
       - .github/workflows/image.yml
       - docker/Dockerfile
+  push:
+    branches: [main]
+    paths: *image-paths
 
 permissions:
   contents: read
@@ -82,7 +85,7 @@ jobs:
             echo "latest=$([ "$INPUT_TAG" = "$latest" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: A static binary from source (pull requests)
+      - name: A static binary from source (a check, not a release)
         if: env.PUBLISH != 'true'
         run: |
           set -euo pipefail
