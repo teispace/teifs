@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Settings file for `teifs serve` (`--config`, `TEIFS_CONFIG`): TOML under the flags'
+  names, below flags and environment variables; `teifs config show` prints the effective
+  settings and their sources. The secret key can come from a file
+  (`--secret-key-file`, `TEIFS_SECRET_KEY_FILE`), and `MINIO_ROOT_USER` /
+  `MINIO_ROOT_PASSWORD` are accepted when nothing else sets the keys.
 - Folder buckets only create names every system can hold (no `CON`, `NUL.txt`, `a:b`,
   trailing dots or spaces), so a drive can move between Windows, macOS and Linux;
   `serve --key-names host` allows them outside Windows. On Windows such keys could

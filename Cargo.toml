@@ -38,7 +38,8 @@ time = { version = "0.3", features = ["formatting"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v7"] }
-clap = { version = "4.6", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env", "string"] }
+toml = "1.1"
 dirs = "6"
 async-trait = "0.1"
 base64 = "0.23"

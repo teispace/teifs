@@ -48,8 +48,11 @@ changes.
 ### 5. No default secrets
 There is no built-in access key or password. The first run generates random credentials
 (256-bit secret) into `.teifs/credentials.json`, created with mode `0600`
-(`crates/server/src/credentials.rs`). The secret key is only read from the environment,
-never from a command-line flag, so it doesn't show in process lists.
+(`crates/server/src/credentials.rs`). A secret key set by the operator is only read from
+the environment or from a file of its own (`--secret-key-file`), never from a
+command-line flag or the settings file, so it doesn't show in process lists or in copies
+of the settings; `teifs config show` names its source and never prints it (tested in
+`apps/cli/tests/config.rs`). Secrets shorter than 8 characters are refused.
 
 ### 6. Secrets never reach logs
 Types holding secrets leave them out of `Debug` output (`Credentials`). *Planned:* a

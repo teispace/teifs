@@ -59,15 +59,37 @@ aws s3 sync ~/Pictures s3://pictures/                          # now ~/Drive/pic
 
 Any folder already in the drive is a folder bucket too.
 
-To set the keys yourself (on servers and in containers), use `TEIFS_ACCESS_KEY` and
-`TEIFS_SECRET_KEY`. The secret is only read from the environment, so it never shows in a
-process list.
+To set the keys yourself (on servers and in containers), use `TEIFS_ACCESS_KEY` with
+`TEIFS_SECRET_KEY`, or with `--secret-key-file` naming a file that holds the secret
+(Docker and systemd secrets). The secret is never taken from the command line, so it
+never shows in a process list. Coming from MinIO, `MINIO_ROOT_USER` and
+`MINIO_ROOT_PASSWORD` work too when nothing else sets the keys.
+
+### Settings file
+
+Every `serve` flag can live in a TOML file instead, under the flag's name. Flags and
+`TEIFS_*` environment variables win over it; relative paths in it are relative to the
+file.
+
+```toml
+# teifs.toml: teifs serve --config teifs.toml
+dir = "/srv/drive"
+listen = "0.0.0.0:9000"
+domains = ["s3.example.com"]
+access-key = "admin"
+secret-key-file = "/run/secrets/teifs"
+durability = "relaxed"
+```
+
+`teifs config show --config teifs.toml` prints the settings `serve` would use and where
+each comes from. The secret key never goes in the file, and is never printed.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
 | `teifs ls BUCKET [PREFIX] [-r]` | List objects |
