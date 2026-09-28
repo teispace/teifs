@@ -21,14 +21,14 @@ pub struct Server {
 }
 
 pub async fn start() -> Server {
-    start_with(teifs_server::Limits::default()).await
+    start_with(|_| {}).await
 }
 
-/// A server with `limits`.
-pub async fn start_with(limits: teifs_server::Limits) -> Server {
+/// A server whose configuration `adjust` changes first.
+pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let keys = tempfile::tempdir().unwrap();
-    let server = TeiFS::bind(Config {
+    let mut config = Config {
         dir: dir.path().to_owned(),
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
@@ -44,10 +44,11 @@ pub async fn start_with(limits: teifs_server::Limits) -> Server {
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,
-        limits,
-    })
-    .await
-    .unwrap();
+        allow_sig_v2: false,
+        limits: teifs_server::Limits::default(),
+    };
+    adjust(&mut config);
+    let server = TeiFS::bind(config).await.unwrap();
     let endpoint = format!("http://{}", server.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(server.run(async {

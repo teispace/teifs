@@ -58,6 +58,8 @@ pub struct Config {
     pub key_rules: KeyRules,
     /// Bounds on what clients can make the server hold.
     pub limits: Limits,
+    /// Accept Signature Version 2 (deprecated; off by default, as on AWS).
+    pub allow_sig_v2: bool,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -247,6 +249,7 @@ impl Server {
                     .plain_http_is_secure
                     .unwrap_or_else(|| config.listen.ip().is_loopback()),
                 body_timeout: Some(config.limits.body_timeout),
+                allow_sig_v2: config.allow_sig_v2,
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;

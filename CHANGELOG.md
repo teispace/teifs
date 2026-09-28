@@ -7,6 +7,12 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Signature V2 is refused unless `serve --allow-sigv2` turns it on, as AWS does for its
+  newer buckets. boto3 makes V2 presigned links by default; set
+  `signature_version="s3v4"` or allow V2.
+- A client matrix: the AWS CLI, rclone, restic, boto3, the Go and JavaScript SDKs and
+  Terraform's S3 backend run their everyday work against TeiFS on both bucket layouts
+  (`tests/clients/`), nightly, and the AWS CLI, boto3 and JavaScript on every change.
 - Bounds on what a client can hold: headers must arrive within 30 s of connecting or of
   the last response, so silent, slow and idle connections close (`--header-timeout`;
   before, a connection that sent nothing was kept for ever); a stalled upload body fails

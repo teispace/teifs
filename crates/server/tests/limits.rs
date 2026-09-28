@@ -24,10 +24,12 @@ use tokio::{
 const SHORT: Duration = Duration::from_millis(500);
 
 async fn server(max_connections: usize) -> Server {
-    start_with(Limits {
-        header_timeout: SHORT,
-        body_timeout: SHORT,
-        max_connections,
+    start_with(|config| {
+        config.limits = Limits {
+            header_timeout: SHORT,
+            body_timeout: SHORT,
+            max_connections,
+        };
     })
     .await
 }
@@ -112,11 +114,7 @@ async fn stalled_uploads_fail_with_request_timeout() {
 
 #[tokio::test]
 async fn connections_beyond_the_limit_wait_for_a_free_one() {
-    let server = start_with(Limits {
-        max_connections: 1,
-        ..Limits::default()
-    })
-    .await;
+    let server = start_with(|config| config.limits.max_connections = 1).await;
     let mut first = connect(&server).await;
     first
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")

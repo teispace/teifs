@@ -62,6 +62,7 @@ async fn objects_are_sealed_by_the_transit_engine() {
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,
+        allow_sig_v2: false,
         limits: teifs_server::Limits::default(),
     })
     .await

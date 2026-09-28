@@ -113,6 +113,11 @@ pub(crate) struct ServeArgs {
     /// AWS blocks it by default since April 2026.
     #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
     allow_sse_c: bool,
+    /// Accept Signature Version 2 (HMAC-SHA1) requests and links, for old clients and
+    /// boto3's default presigned links. AWS deprecated it and refuses it for newer
+    /// buckets; prefer configuring clients for Signature Version 4.
+    #[arg(long, env = "TEIFS_ALLOW_SIGV2")]
+    allow_sigv2: bool,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -408,6 +413,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             namespace: args.kms_transit_namespace,
         }),
         allow_sse_c: args.allow_sse_c,
+        allow_sig_v2: args.allow_sigv2,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,

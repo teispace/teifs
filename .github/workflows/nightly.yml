@@ -50,6 +50,58 @@ jobs:
             ${{ runner.temp }}/s3-tests/pytest.log
             ${{ runner.temp }}/s3-tests/server.log
 
+  clients:
+    # Real clients doing what people do with them (tests/clients): the AWS CLI, rclone,
+    # restic, boto3, the Go and JavaScript SDKs, and Terraform's S3 backend.
+    name: Clients, ${{ matrix.layout }} buckets
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [object, folder]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - run: tests/clients/install-ci.sh "$HOME/.local/bin" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: tests/clients/run.sh
+        env:
+          CLIENTS_REQUIRE: "1"
+          CLIENTS_LAYOUT: ${{ matrix.layout }}
+          CLIENTS_WORK: ${{ runner.temp }}/clients
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clients-logs-${{ matrix.layout }}
+          path: ${{ runner.temp }}/clients/*.log
+      - name: Report a failure as an issue
+        # One open issue per layout, commented on at each failing night.
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Client matrix fails on ${{ matrix.layout }} buckets"
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          number=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "Failed again: $RUN"
+          else
+            gh issue create --title "$TITLE" --body "The nightly client matrix failed: $RUN. Logs are attached to the run."
+          fi
+
   transit-kms:
     # Encryption with a real OpenBao transit engine as the KMS.
     name: Transit KMS (OpenBao)

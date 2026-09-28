@@ -26,6 +26,8 @@ Out of scope: an attacker who already controls the machine or the account TeiFS 
 ### 1. Every request is authenticated or explicitly public
 Requests must carry a valid AWS Signature V4 (headers or presigned URL), checked by s3s
 before any operation runs; chunked uploads verify each chunk's signature as it streams.
+Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
+`serve --allow-sigv2` for clients too old for V4.
 There's no anonymous access today. *Planned:* anonymous access only where a bucket policy
 grants it.
 

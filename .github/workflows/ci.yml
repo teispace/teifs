@@ -94,3 +94,8 @@ jobs:
           aws s3 cp "$RUNNER_TEMP/big.bin" s3://files/dir/big.bin
           cmp "$RUNNER_TEMP/big.bin" "$RUNNER_TEMP/drive/files/dir/big.bin"
           kill "$server"
+      - name: The quick clients (the nightly job runs them all)
+        run: tests/clients/run.sh aws boto3 js
+        env:
+          CLIENTS_REQUIRE: "1"
+          CLIENTS_WORK: ${{ runner.temp }}/clients

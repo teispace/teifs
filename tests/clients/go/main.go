@@ -1,0 +1,121 @@
+// The AWS SDK for Go v2 against TeiFS: what applications do with it.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
+
+func must(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed:", err)
+		os.Exit(1)
+	}
+}
+
+func check(ok bool, what string) {
+	if !ok {
+		fmt.Fprintln(os.Stderr, "failed:", what)
+		os.Exit(1)
+	}
+}
+
+func step(text string) { fmt.Println("==", text) }
+
+func main() {
+	ctx := context.Background()
+	bucket := aws.String(os.Getenv("BUCKET"))
+	cfg, err := config.LoadDefaultConfig(ctx)
+	must(err)
+	s3c := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(os.Getenv("ENDPOINT"))
+		o.UsePathStyle = true
+	})
+
+	step("bucket")
+	_, err = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: bucket})
+	must(err)
+
+	step("put with the SDK's default checksum, get, head")
+	small, err := os.ReadFile("small.txt")
+	must(err)
+	_, err = s3c.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: bucket, Key: aws.String("small.txt"), Body: bytes.NewReader(small),
+		Metadata: map[string]string{"owner": "go"},
+	})
+	must(err)
+	got, err := s3c.GetObject(ctx, &s3.GetObjectInput{Bucket: bucket, Key: aws.String("small.txt")})
+	must(err)
+	body, err := io.ReadAll(got.Body)
+	must(err)
+	check(bytes.Equal(body, small), "get returns what was put")
+	head, err := s3c.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: bucket, Key: aws.String("small.txt"), ChecksumMode: types.ChecksumModeEnabled,
+	})
+	must(err)
+	check(head.Metadata["owner"] == "go", "metadata kept")
+
+	step("multipart upload and download through the transfer manager")
+	big, err := os.ReadFile("big.bin")
+	must(err)
+	uploader := manager.NewUploader(s3c, func(u *manager.Uploader) { u.PartSize = 5 << 20 })
+	_, err = uploader.Upload(ctx, &s3.PutObjectInput{Bucket: bucket, Key: aws.String("big.bin"), Body: bytes.NewReader(big)})
+	must(err)
+	buf := manager.NewWriteAtBuffer(nil)
+	downloader := manager.NewDownloader(s3c, func(d *manager.Downloader) { d.PartSize = 5 << 20 })
+	_, err = downloader.Download(ctx, buf, &s3.GetObjectInput{Bucket: bucket, Key: aws.String("big.bin")})
+	must(err)
+	check(sha256.Sum256(buf.Bytes()) == sha256.Sum256(big), "multipart round trip")
+
+	step("copy, paginate, delete many")
+	_, err = s3c.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket: bucket, Key: aws.String("copy.txt"), CopySource: aws.String(*bucket + "/small.txt"),
+	})
+	must(err)
+	for i := 0; i < 12; i++ {
+		_, err = s3c.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: bucket, Key: aws.String(fmt.Sprintf("many/%03d", i)), Body: bytes.NewReader([]byte("x")),
+		})
+		must(err)
+	}
+	var ids []types.ObjectIdentifier
+	pages := s3.NewListObjectsV2Paginator(s3c, &s3.ListObjectsV2Input{Bucket: bucket, MaxKeys: aws.Int32(5)})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		must(err)
+		for _, o := range page.Contents {
+			ids = append(ids, types.ObjectIdentifier{Key: o.Key})
+		}
+	}
+	check(len(ids) == 15, fmt.Sprintf("15 objects listed, not %d", len(ids)))
+
+	step("presigned GET")
+	link, err := s3.NewPresignClient(s3c).PresignGetObject(ctx,
+		&s3.GetObjectInput{Bucket: bucket, Key: aws.String("small.txt")},
+		s3.WithPresignExpires(time.Minute))
+	must(err)
+	resp, err := http.Get(link.URL)
+	must(err)
+	linked, err := io.ReadAll(resp.Body)
+	must(err)
+	check(resp.StatusCode == 200 && bytes.Equal(linked, small), "presigned link")
+
+	step("empty and remove the bucket")
+	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
+	must(err)
+	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: bucket})
+	must(err)
+	fmt.Println("ok")
+}

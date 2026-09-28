@@ -11,7 +11,14 @@ mod limits;
 mod sse;
 mod tagging;
 
-use s3s::{auth::SimpleAuth, host::MultiDomain, service::S3ServiceBuilder};
+use std::sync::Arc;
+
+use s3s::{
+    auth::SimpleAuth,
+    config::{S3Config, StaticConfigProvider},
+    host::MultiDomain,
+    service::S3ServiceBuilder,
+};
 use teifs_store::{Layout, Store};
 
 pub use cors::Service;
@@ -35,6 +42,9 @@ pub struct Options {
     /// How long a request body may stop arriving before the request fails with
     /// `RequestTimeout`; `None` waits for ever.
     pub body_timeout: Option<std::time::Duration>,
+    /// Accept Signature Version 2 (HMAC-SHA1, deprecated by AWS and refused for its
+    /// newer buckets), for old clients and boto3's default presigned links.
+    pub allow_sig_v2: bool,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -44,6 +54,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.default_layout,
         options.plain_http_is_secure,
     ));
+    let mut config = S3Config::default();
+    config.enable_sig_v2 = options.allow_sig_v2;
+    builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some((access_key, secret_key)) = options.credentials {
         builder.set_auth(SimpleAuth::from_single(access_key, secret_key));
     }

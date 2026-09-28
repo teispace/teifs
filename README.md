@@ -88,7 +88,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 
 | Command | What it does |
 |---|---|
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove` | Manage buckets without a server |
@@ -104,7 +104,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
-| Auth | Signature V4 (headers and presigned URLs); path-style and virtual-hosted-style |
+| Auth | Signature V4 (headers and presigned URLs); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive

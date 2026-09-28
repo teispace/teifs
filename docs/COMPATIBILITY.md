@@ -12,9 +12,7 @@ here come only from tests; nothing is listed as supported because it "should wor
 | Store tests | Keys, paths, atomic writes, listings in S3 order, multipart, copies, outside changes, case and link safety | `crates/store/src/tests.rs` |
 | Format fixtures | Drives written by earlier releases open with all metadata | `crates/store/tests/format.rs` |
 | ceph/s3-tests | The standard S3 conformance suite, run nightly; every test is in one of three lists (passing, not yet implemented, excluded with a reason) | `tests/s3-tests/` |
-
-**Coming:** a client matrix in CI (AWS CLI, rclone, restic, boto3, the Go and JavaScript
-SDKs, the Terraform S3 backend).
+| Client matrix | Real clients doing what people do with them, on both bucket layouts: the AWS CLI, rclone, restic, boto3, the Go and JavaScript SDKs and Terraform's S3 backend with lock files, nightly (the AWS CLI, boto3 and JavaScript on every change) | `tests/clients/` |
 
 ## Operations
 
@@ -30,6 +28,7 @@ SDKs, the Terraform S3 backend).
 | Checksums: Content-MD5, CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, SHA-512, MD5, XXHASH64/3/128 | Supported, as headers or trailers; stored and returned with `x-amz-checksum-mode`; objects sent without one get CRC64NVME, as on AWS |
 | Multipart checksums: `x-amz-checksum-type` `FULL_OBJECT` (CRC32, CRC32C, CRC64NVME, combined from the parts) and `COMPOSITE` (checksum of the parts' checksums, `-N`), checked at Complete; `x-amz-mp-object-size`; a retried Complete answers again | Supported, with AWS's algorithm and type rules |
 | Signature V4 (headers, presigned, chunked, trailers); path-style and virtual-hosted-style | Supported |
+| Signature V2 | Refused by default, as AWS does for its newer buckets; `serve --allow-sigv2` accepts it for old clients. boto3 makes V2 presigned links unless the client sets `signature_version="s3v4"` |
 | Request limits: user metadata (`x-amz-meta-*` names and values) at most 2 KiB, `400 MetadataTooLarge`; a stalled upload body `400 RequestTimeout` | As AWS. Headers are limited to 16 KiB in all (`400 RequestHeaderSectionTooLarge`), more than AWS's 8 KiB for PUT, so long presigned or signed requests still fit |
 | Conditional writes on PutObject, CompleteMultipartUpload and CopyObject (`If-None-Match`, `If-Match`) | Supported; atomic on one server. `If-Match` on a missing object is `404 NoSuchKey`, as on AWS |
 | Conditional deletes: `If-Match` on DeleteObject, per-object ETag, size and modification time in DeleteObjects, `x-amz-if-match-size` and `x-amz-if-match-last-modified-time` | Supported; deleting a missing object succeeds whatever the condition, as on AWS |
