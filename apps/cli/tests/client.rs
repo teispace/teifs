@@ -44,7 +44,7 @@ impl Client {
         let work = tempfile::tempdir().unwrap();
         let address = server.endpoint.trim_start_matches("http://");
         let port = address.rsplit_once(':').unwrap().1;
-        let env = vec![
+        let mut env = vec![
             (
                 "TEIFS_ALIAS_T".to_owned(),
                 format!("http://{ACCESS_KEY}:{SECRET_KEY}@{address}"),
@@ -58,6 +58,10 @@ impl Client {
                 work.path().join("aliases.toml").display().to_string(),
             ),
         ];
+        // Windows can't open a socket without it.
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            env.push(("SystemRoot".to_owned(), root.to_string_lossy().into_owned()));
+        }
         Self { work, env }
     }
 
