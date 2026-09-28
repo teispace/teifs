@@ -43,7 +43,7 @@ clap = { version = "4.6", features = ["derive", "env", "string"] }
 clap_complete = "4.6"
 mimalloc = { version = "0.1.52", default-features = false }
 toml = "1.1"
-dirs = "6"
+dirs = "7"
 anstream = "1"
 anstyle = "1"
 indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
