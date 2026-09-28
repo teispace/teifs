@@ -307,9 +307,9 @@ async fn ls(remote: Remote, recursive: bool) -> Result<(), Error> {
         .into_paginator()
         .send();
     let mut any = false;
-    let mut out = std::io::stdout().lock();
     while let Some(page) = pages.next().await {
         let page = page.map_err(|e| Error::s3(what(), &e))?;
+        let mut out = std::io::stdout().lock();
         let mut lines: Vec<(&str, String)> = page
             .common_prefixes()
             .iter()

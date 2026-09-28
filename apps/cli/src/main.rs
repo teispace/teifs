@@ -248,8 +248,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime");
-    match runtime.block_on(run(cli.command, &sources)) {
+    // Commands run on a worker thread with a roomy stack: the AWS SDK's futures poll
+    // deep, and Windows gives the main thread only 1 MiB.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(STACK_SIZE)
+        .build()
+        .expect("a Tokio runtime");
+    let result = runtime.block_on(async move {
+        match tokio::spawn(async move { run(cli.command, &sources).await }).await {
+            Ok(result) => result,
+            Err(err) => std::panic::resume_unwind(err.into_panic()),
+        }
+    });
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("teifs: {err}");
@@ -257,6 +269,9 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// The stack of the threads commands run on.
+const STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn open(dir: &PathBuf) -> Result<Store, String> {
     Store::open(dir).map_err(|e| match e {
