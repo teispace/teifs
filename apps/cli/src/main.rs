@@ -283,9 +283,12 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             // s3s logs every refused request (a missing key, a bad signature) as an
-            // error; server errors are still logged by s3s and by TeiFS.
-            tracing_subscriber::EnvFilter::try_from_env("TEIFS_LOG")
-                .unwrap_or_else(|_| "info,s3s::ops=off".into()),
+            // error; server errors are still logged by s3s and by TeiFS. The AWS SDK
+            // warns that it can't check a multipart object's composite checksum on
+            // download; it checks every other kind, and there's nothing to do about it.
+            tracing_subscriber::EnvFilter::try_from_env("TEIFS_LOG").unwrap_or_else(|_| {
+                "info,s3s::ops=off,aws_sdk_s3::http_response_checksum=error".into()
+            }),
         )
         .with_writer(std::io::stderr)
         .init();

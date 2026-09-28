@@ -588,7 +588,7 @@ async fn delete_keys(
         .await
 }
 
-async fn cat(remote: Remote) -> Result<(), Error> {
+pub(super) async fn cat(remote: Remote) -> Result<(), Error> {
     use tokio::io::AsyncWriteExt;
     let bucket = remote.bucket()?;
     let name = remote.display(&remote.key);

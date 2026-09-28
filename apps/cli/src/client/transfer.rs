@@ -10,6 +10,10 @@
 //!   file beside the destination that's renamed over it when complete.
 //! - Copies within one endpoint are done by the server (`CopyObject`, or
 //!   `UploadPartCopy` above 5 GiB); between endpoints, each part is fetched and sent on.
+//! - Streams (standard input) of unknown length go in parts read one after another and
+//!   sent several at once, holding at most one part per request in memory; parts grow
+//!   as they go so the largest object S3 allows fits in 10,000 of them. A stream can't
+//!   be read again, so a failed one is aborted rather than left to resume.
 
 use std::{
     collections::BTreeMap,
@@ -30,8 +34,9 @@ use aws_sdk_s3::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
 };
 
 use super::{Error, Kind, TransferArgs};
@@ -50,6 +55,8 @@ pub const MAX_PARTS: u64 = 10_000;
 const READ_BUFFER: usize = 256 * 1024;
 /// Parts of a copy the server makes itself: nothing passes through here, so large.
 const COPY_PART: u64 = 512 * MIB;
+/// A stream's parts double in size after every this many.
+const STREAM_PARTS_PER_SIZE: u64 = 1000;
 
 /// Parses a part size: bytes, or a number with `KiB`, `MiB` or `GiB` (`K`, `M`, `G` too).
 pub fn parse_part_size(text: &str) -> Result<u64, String> {
@@ -260,6 +267,129 @@ impl Transfers {
         self.complete(to, &upload_id, all.into_values().collect())
             .await
             .map_err(|e| e.within(what()))
+    }
+
+    /// Uploads everything `input` gives until it ends to `to`; the bytes sent.
+    pub async fn upload_stream(
+        &self,
+        mut input: impl AsyncRead + Unpin,
+        to: &Object,
+    ) -> Result<u64, Error> {
+        let what = || format!("can't upload standard input to {}", to.name);
+        let read_failed = |e: std::io::Error| Error::general(format!("{}: reading: {e}", what()));
+        let first = read_part(&mut input, stream_part_size(self.part_size, 1))
+            .await
+            .map_err(read_failed)?;
+        let first_len = first.len() as u64;
+        if first_len < stream_part_size(self.part_size, 1) {
+            // It all fits in one request.
+            let _permit = self.permit().await;
+            to.client
+                .put_object()
+                .bucket(&to.bucket)
+                .key(&to.key)
+                .body(ByteStream::from(first))
+                .send()
+                .await
+                .map_err(|e| Error::s3(what(), &e))?;
+            self.progress.add(first_len);
+            return Ok(first_len);
+        }
+        let upload_id = self
+            .start_upload(to, None, None, true)
+            .await
+            .map_err(|e| e.within(what()))?;
+        let sent = self.send_stream(&mut input, first, &upload_id, to).await;
+        let sent = match sent {
+            Ok((parts, total)) => self.complete(to, &upload_id, parts).await.map(|()| total),
+            Err(err) => Err(err),
+        };
+        if sent.is_err() {
+            // Nothing can resume it: don't leave its parts behind.
+            let _ = to
+                .client
+                .abort_multipart_upload()
+                .bucket(&to.bucket)
+                .key(&to.key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        }
+        sent.map_err(|e| e.within(what()))
+    }
+
+    /// Sends `first`, then the rest of `input`, as parts of `upload_id`; the parts in
+    /// order, and the bytes sent.
+    async fn send_stream(
+        &self,
+        input: &mut (impl AsyncRead + Unpin),
+        first: Bytes,
+        upload_id: &str,
+        to: &Object,
+    ) -> Result<(Vec<CompletedPart>, u64), Error> {
+        let mut running = JoinSet::new();
+        let mut parts = Vec::new();
+        let (mut chunk, mut number, mut total) = (first, 1_u64, 0_u64);
+        loop {
+            total += chunk.len() as u64;
+            running.spawn(self.clone().send_part(
+                to.clone(),
+                upload_id.to_owned(),
+                i32::try_from(number).expect("at most 10,000 parts"),
+                chunk,
+            ));
+            // One part per request in memory, and one being read.
+            while running.len() >= self.parallel {
+                parts.push(joined(running.join_next().await)?);
+            }
+            let next = read_part(input, stream_part_size(self.part_size, number + 1))
+                .await
+                .map_err(|e| Error::general(format!("reading: {e}")))?;
+            if next.is_empty() {
+                break;
+            }
+            if number == MAX_PARTS {
+                return Err(Error::usage(
+                    "the input is larger than S3's largest object (10,000 parts)",
+                ));
+            }
+            (chunk, number) = (next, number + 1);
+        }
+        while let Some(result) = running.join_next().await {
+            parts.push(joined(Some(result))?);
+        }
+        parts.sort_by_key(CompletedPart::part_number);
+        Ok((parts, total))
+    }
+
+    /// Sends one part of a stream.
+    async fn send_part(
+        self,
+        to: Object,
+        upload_id: String,
+        number: i32,
+        body: Bytes,
+    ) -> Result<CompletedPart, Error> {
+        let len = body.len() as u64;
+        let _permit = self.permit().await;
+        let part = to
+            .client
+            .upload_part()
+            .bucket(&to.bucket)
+            .key(&to.key)
+            .upload_id(upload_id)
+            .part_number(number)
+            .checksum_algorithm(ChecksumAlgorithm::Crc32)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .map_err(|e| Error::s3(format!("sending part {number}"), &e))?;
+        self.progress.add(len);
+        Ok(CompletedPart::builder()
+            .part_number(number)
+            .set_e_tag(part.e_tag)
+            .set_checksum_crc32(part.checksum_crc32)
+            .build())
     }
 
     async fn complete(
@@ -645,6 +775,37 @@ impl Transfers {
 }
 
 /// A failed part: the upload stays, so the same command can carry on from it.
+/// The size of a stream's part `number` (from 1): `part_size`, doubling after every
+/// 1,000 parts, at most S3's largest part.
+fn stream_part_size(part_size: u64, number: u64) -> u64 {
+    let doublings = u32::try_from((number - 1) / STREAM_PARTS_PER_SIZE).unwrap_or(u32::MAX);
+    part_size
+        .checked_shl(doublings)
+        .map_or(MAX_PART, |size| size.min(MAX_PART))
+}
+
+/// Up to `limit` bytes of `input`: fewer only at its end.
+async fn read_part(input: &mut (impl AsyncRead + Unpin), limit: u64) -> std::io::Result<Bytes> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut part = bytes::BytesMut::with_capacity(limit);
+    while part.len() < limit {
+        if input.read_buf(&mut part).await? == 0 {
+            break;
+        }
+    }
+    Ok(part.freeze())
+}
+
+/// A finished part's result, or its task's panic passed on.
+fn joined(
+    result: Option<Result<Result<CompletedPart, Error>, tokio::task::JoinError>>,
+) -> Result<CompletedPart, Error> {
+    match result.expect("a part is running") {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err.into_panic()),
+    }
+}
+
 fn resumable_failure(err: Error) -> Error {
     err.with_hint("the parts sent so far are kept: run the same command again to resume")
 }

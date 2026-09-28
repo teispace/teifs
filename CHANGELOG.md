@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
+  parallel, holding one per request in memory; an upload that fails is aborted), and
+  `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.
+- Downloading a multipart object no longer logs a warning that its composite checksum
+  can't be checked.
 - Release builds for Linux (glibc, and static musl for any distribution), macOS
   (universal) and Windows (x64, arm64), with checksums and build provenance, and a Docker
   image (`ghcr.io/teispace/teifs`): static binary on distroless, non-root, `/data` and

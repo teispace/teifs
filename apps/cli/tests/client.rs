@@ -681,6 +681,75 @@ async fn failures_have_exit_codes_scripts_can_use() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_copy_from_standard_input_and_to_standard_output() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/streams"]).await;
+    // Three 5 MiB parts and a bit, sent two at a time.
+    let text = (0..700_000).fold(String::new(), |mut text, i| {
+        use std::fmt::Write as _;
+        let _ = writeln!(text, "{i:>22}");
+        text
+    });
+    let run = cli
+        .run_with(
+            &[
+                "cp",
+                "-",
+                "t/streams/big.txt",
+                "--part-size",
+                "5MiB",
+                "--parallel",
+                "2",
+            ],
+            &text,
+        )
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stdout
+            .starts_with("✓ Copied standard input to t/streams/big.txt")
+    );
+    let stat = cli.ok(&["stat", "t/streams/big.txt"]).await;
+    assert!(stat.contains(&format!("({} bytes)", text.len())), "{stat}");
+    assert!(stat.contains("-4\""), "four parts: {stat}");
+    // Back out, whole, with nothing but the object on stdout and nothing on stderr.
+    let run = cli.run(&["cp", "t/streams/big.txt", "-"]).await;
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    assert!(run.stdout == text, "the object came back different");
+
+    // Small and empty inputs are one request.
+    cli.run_with(&["cp", "-", "t/streams/small.txt"], "hello")
+        .await;
+    assert_eq!(cli.ok(&["cat", "t/streams/small.txt"]).await, "hello");
+    cli.run_with(&["cp", "-", "t/streams/empty"], "").await;
+    assert!(
+        cli.ok(&["stat", "t/streams/empty"])
+            .await
+            .contains("(0 bytes)")
+    );
+
+    // A stream needs an object name, one source, and can't be moved.
+    for args in [
+        &["cp", "-", "t/streams/"][..],
+        &["mv", "-", "t/streams/x"],
+        &["cp", "-", "-"],
+        &["cp", "-", "t/streams/small.txt", "t/streams/y"],
+        &["cp", "-r", "-", "t/streams/z"],
+    ] {
+        cli.fails(args, 2).await;
+    }
+    // No upload was left behind.
+    let uploads = client(&server, SECRET_KEY)
+        .list_multipart_uploads()
+        .bucket("streams")
+        .send()
+        .await
+        .unwrap();
+    assert!(uploads.uploads().is_empty());
+}
+
 /// Each line of `--json` output, parsed; each must be an object with a `type`.
 fn records(out: &str) -> Vec<serde_json::Value> {
     out.lines()

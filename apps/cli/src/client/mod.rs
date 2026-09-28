@@ -157,7 +157,8 @@ pub struct SetAlias {
 /// `cp` and `mv`.
 #[derive(Args)]
 pub struct CopyArgs {
-    /// What to copy, then where to (the last one).
+    /// What to copy, then where to (the last one). `-` is standard input (`tar c dir |
+    /// teifs cp - home/b/dir.tar`) or output (`teifs cp home/b/dir.tar - | tar x`).
     #[arg(required = true, num_args = 2..)]
     paths: Vec<String>,
     /// Copy folders and key prefixes with everything in them.

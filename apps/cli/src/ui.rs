@@ -392,17 +392,32 @@ pub struct Progress(Option<ProgressBar>);
 impl Progress {
     /// A bar for `total` bytes, labelled `label`.
     pub fn bytes(total: u64, label: &str) -> Self {
+        Self::new(
+            Some(total),
+            label,
+            "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes} {binary_bytes_per_sec} {eta}",
+        )
+    }
+
+    /// A counter of bytes, labelled `label`, for a stream whose length isn't known.
+    pub fn stream(label: &str) -> Self {
+        Self::new(
+            None,
+            label,
+            "{spinner} {msg} {binary_bytes} {binary_bytes_per_sec}",
+        )
+    }
+
+    fn new(total: Option<u64>, label: &str, template: &str) -> Self {
         let settings = settings();
         if settings.quiet || settings.json || !std::io::stderr().is_terminal() {
             return Self(None);
         }
-        let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
+        let bar = ProgressBar::with_draw_target(total, ProgressDrawTarget::stderr());
         bar.set_style(
-            ProgressStyle::with_template(
-                "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes} {binary_bytes_per_sec} {eta}",
-            )
-            .expect("the template is valid")
-            .progress_chars("━━─"),
+            ProgressStyle::with_template(template)
+                .expect("the template is valid")
+                .progress_chars("━━─"),
         );
         bar.set_message(label.to_owned());
         bar.enable_steady_tick(Duration::from_millis(120));

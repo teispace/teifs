@@ -100,6 +100,8 @@ teifs ls home/photos/2026
 teifs mirror ~/Documents home/docs --remove  # copy what changed, delete what's gone
 teifs cp home/photos/2026/cat.jpg .
 teifs presign home/photos/2026/cat.jpg --expires 1d
+tar c ~/Projects | teifs cp - home/backups/projects.tar   # a stream in, of any size
+teifs cp home/backups/projects.tar - | tar x               # and out
 ```
 
 Output is for people on a terminal (colors, progress bars, questions before deleting
@@ -145,7 +147,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys |
 | `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r]` | List buckets or objects |
 | `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `rb --force`) |
-| `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`) |
+| `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output |
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way |
 | `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`) |
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |

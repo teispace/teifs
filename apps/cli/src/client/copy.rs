@@ -79,6 +79,9 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
         .paths
         .split_last()
         .expect("clap requires two paths or more");
+    if destination == STDIO || sources.iter().any(|s| s == STDIO) {
+        return stdio(&args, remove_source, aliases).await;
+    }
     let destination = Target::parse(destination, aliases)?;
     let many = sources.len() > 1;
     let mut jobs = Vec::new();
@@ -103,6 +106,59 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
     let verb = if remove_source { "Moved" } else { "Copied" };
     let outcome = run_jobs(args.transfer, jobs, remove_source, planned).await;
     finish(&outcome, verb)
+}
+
+/// `-`: standard input as a source, standard output as a destination.
+const STDIO: &str = "-";
+
+/// `cp - ALIAS/BUCKET/KEY` (standard input to an object) and `cp ALIAS/BUCKET/KEY -`
+/// (an object to standard output).
+async fn stdio(args: &CopyArgs, remove_source: bool, aliases: &Aliases) -> Result<(), Error> {
+    let (destination, sources) = args.paths.split_last().expect("two paths or more");
+    let usage = || {
+        Error::usage(
+            "`-` copies one stream: `teifs cp - ALIAS/BUCKET/KEY` or `teifs cp ALIAS/BUCKET/KEY -`",
+        )
+    };
+    let [source] = sources else {
+        return Err(usage());
+    };
+    if remove_source {
+        return Err(Error::usage("a stream can't be moved: use `teifs cp`"));
+    }
+    if args.recursive || (source == STDIO) == (destination == STDIO) {
+        return Err(usage());
+    }
+    if destination == STDIO {
+        let remote = Target::parse(source, aliases)?.remote("copying to standard output")?;
+        return super::commands::cat(remote).await;
+    }
+    let remote = Target::parse(destination, aliases)?.remote("copying standard input")?;
+    remote.bucket()?;
+    if remote.is_folder() {
+        let example = remote.display(&format!("{}NAME", remote.folder_prefix()));
+        return Err(Error::usage(format!(
+            "standard input needs an object name, like `teifs cp - {example}`"
+        )));
+    }
+    let to = object(&remote, &remote.key);
+    let transfers = Transfers::new(args.transfer, ui::Progress::stream("Uploading"));
+    let started = Instant::now();
+    let sent = transfers.upload_stream(tokio::io::stdin(), &to).await;
+    transfers.finish();
+    let bytes = sent?;
+    let elapsed = started.elapsed();
+    ui::done(
+        format!(
+            "Copied standard input to {}: {} in {:.1} s ({})",
+            to.name,
+            size(bytes),
+            elapsed.as_secs_f64(),
+            rate(bytes, elapsed)
+        ),
+        || json!({"type": "copy", "from": STDIO, "to": to.name, "bytes": bytes}),
+    );
+    Ok(())
 }
 
 /// Adds the jobs that copy `source` to `destination`; a folder's entries that can't be
