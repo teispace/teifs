@@ -15,6 +15,7 @@ pub const SECRET_KEY: &str = "not-a-real-secret-only-for-tests";
 
 pub struct Server {
     pub dir: TempDir,
+    pub iam: std::sync::Arc<teifs_iam::Iam>,
     _keys: TempDir,
     pub endpoint: String,
     _stop: oneshot::Sender<()>,
@@ -50,12 +51,14 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     adjust(&mut config);
     let server = TeiFS::bind(config).await.unwrap();
     let endpoint = format!("http://{}", server.local_addr().unwrap());
+    let iam = server.iam().clone();
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(server.run(async {
         let _ = stopped.await;
     }));
     Server {
         dir,
+        iam,
         _keys: keys,
         endpoint,
         _stop: stop,
@@ -63,11 +66,16 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
 }
 
 pub fn client(server: &Server, secret: &str) -> Client {
+    client_as(server, ACCESS_KEY, secret)
+}
+
+/// A client signing with another access key (an IAM user's).
+pub fn client_as(server: &Server, access_key: &str, secret: &str) -> Client {
     let config = aws_sdk_s3::Config::builder()
         .behavior_version_latest()
         .region(Region::new("us-east-1"))
         .endpoint_url(&server.endpoint)
-        .credentials_provider(Credentials::new(ACCESS_KEY, secret, None, None, "tests"))
+        .credentials_provider(Credentials::new(access_key, secret, None, None, "tests"))
         .force_path_style(true)
         .build();
     Client::from_conf(config)

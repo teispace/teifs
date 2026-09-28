@@ -1,6 +1,7 @@
 //! The S3 API over a TeiFS store: any S3 client, SDK or tool (the AWS CLI, rclone,
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
+mod access;
 mod checksums;
 mod cors;
 mod crc_combine;
@@ -15,13 +16,14 @@ mod tagging;
 use std::sync::Arc;
 
 use s3s::{
-    auth::SimpleAuth,
     config::{S3Config, StaticConfigProvider},
     host::MultiDomain,
     service::S3ServiceBuilder,
 };
+use teifs_iam::Iam;
 use teifs_store::{Layout, Store};
 
+pub use access::Client;
 pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
@@ -30,9 +32,9 @@ pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// The access key and secret key requests must be signed with. `None` accepts
-    /// unsigned requests: only for a drive nobody else can reach.
-    pub credentials: Option<(String, String)>,
+    /// Who may sign requests and what each may do. `None` accepts unsigned requests
+    /// and decides nothing: only for a drive nobody else can reach.
+    pub iam: Option<Arc<Iam>>,
     /// Domains for virtual-hosted-style requests (`bucket.domain/key`), besides the
     /// path style (`domain/bucket/key`) that always works.
     pub domains: Vec<String>,
@@ -59,8 +61,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
-    if let Some((access_key, secret_key)) = options.credentials {
-        builder.set_auth(SimpleAuth::from_single(access_key, secret_key));
+    if let Some(iam) = options.iam {
+        builder.set_auth(access::Auth(iam.clone()));
+        builder.set_access(access::Access::new(iam));
     }
     let host = if options.domains.is_empty() {
         None

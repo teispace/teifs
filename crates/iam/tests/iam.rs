@@ -272,7 +272,14 @@ async fn access_keys_authenticate_until_deactivated_or_deleted() {
         iam.credential(&first.info.id).is_none(),
         "inactive keys don't authenticate"
     );
-    assert!(!iam.access_keys("alice").unwrap()[0].active);
+    assert!(
+        !iam.access_keys("alice")
+            .unwrap()
+            .iter()
+            .find(|k| k.id == first.info.id)
+            .unwrap()
+            .active
+    );
     iam.update_access_key("alice", &first.info.id, true)
         .unwrap();
     assert!(iam.credential(&first.info.id).is_some());

@@ -142,6 +142,13 @@ impl Principal {
         self.arn.as_deref()
     }
 
+    /// `aws:userid`: the account id for the root user, a user's unique id, `role-id:session`
+    /// for a session, `anonymous`.
+    #[must_use]
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
     /// The principal's account; none for anonymous.
     #[must_use]
     pub fn account(&self) -> Option<&str> {

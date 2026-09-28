@@ -2761,6 +2761,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "teifs-iam",
  "teifs-server",
  "teifs-store",
  "tempfile",
@@ -2843,6 +2844,8 @@ dependencies = [
  "md-5",
  "s3s",
  "serde_json",
+ "teifs-iam",
+ "teifs-policy",
  "teifs-store",
  "time",
  "tokio",
@@ -2864,6 +2867,7 @@ dependencies = [
  "s3s",
  "serde",
  "serde_json",
+ "teifs-iam",
  "teifs-s3",
  "teifs-store",
  "tempfile",
@@ -2871,6 +2875,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

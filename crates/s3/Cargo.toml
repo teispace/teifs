@@ -11,6 +11,8 @@ publish.workspace = true
 
 [dependencies]
 teifs-store.workspace = true
+teifs-iam.workspace = true
+teifs-policy.workspace = true
 s3s.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

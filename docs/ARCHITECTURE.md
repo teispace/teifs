@@ -98,6 +98,15 @@ drive's KMS under the context `{teifs:drive, teifs:purpose=iam}`. A stored polic
 no longer parses stops IAM from starting rather than being skipped, since skipping a
 Deny would widen access.
 
+`teifs-s3` enforces it (`access.rs`): `Auth` gives s3s each key's secret, and `Access`
+runs before every operation. It builds the request's condition context (the connection
+from `Client`, which the server sets per connection, the headers and query parameters that
+are condition keys, request and principal tags), asks `authorizations` what the operation
+needs and decides each permission for its bucket, object or copy/rename source. It leaves
+a `Caller` in the request's extensions for what operations decide themselves: each key of
+a `DeleteObjects`, optional details (tag counts, owners), who owns a multipart upload, and
+whether a missing key may be reported as missing. Root requests skip all of it.
+
 ### The protocol layer: s3s
 
 [s3s](https://github.com/s3s-project/s3s) turns HTTP requests into typed S3 operations and

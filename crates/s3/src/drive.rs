@@ -18,6 +18,7 @@ use teifs_store::{
 use tokio_util::io::ReaderStream;
 
 use crate::{
+    access,
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
@@ -30,7 +31,7 @@ const MAX_KEYS: i32 = 1000;
 /// The most buckets one `ListBuckets` page may ask for.
 const MAX_BUCKETS: usize = 10_000;
 /// The region every bucket is in (a drive has one).
-const REGION: &str = "us-east-1";
+pub(crate) const REGION: &str = "us-east-1";
 /// How many keys one `DeleteObjects` may name.
 const MAX_DELETE: usize = 1000;
 /// Read buffer for object bodies.
@@ -303,7 +304,7 @@ fn timestamp_seconds(timestamp: &Timestamp) -> i64 {
 
 /// The key `x-amz-rename-source` names, URL-decoded: `/bucket/key`, `bucket/key` or
 /// `/key` (the bucket must be the request's: renames stay in one bucket).
-fn rename_source(source: &str, bucket: &str) -> S3Result<String> {
+pub(crate) fn rename_source(source: &str, bucket: &str) -> S3Result<String> {
     let decoded = urlencoding_decode(source)?;
     let trimmed = decoded.strip_prefix('/').unwrap_or(&decoded);
     let key = match trimmed.split_once('/') {
@@ -320,7 +321,7 @@ fn rename_source(source: &str, bucket: &str) -> S3Result<String> {
 }
 
 /// Percent-decodes a header value.
-fn urlencoding_decode(value: &str) -> S3Result<String> {
+pub(crate) fn urlencoding_decode(value: &str) -> S3Result<String> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -440,21 +441,39 @@ fn user_metadata(attrs: &ObjectAttrs) -> Option<dto::Metadata> {
     (!attrs.user.is_empty()).then(|| attrs.user.clone().into_iter().collect())
 }
 
-fn check_owner(upload: &Upload, bucket: &str, key: &str, access_key: Option<&str>) -> S3Result<()> {
+/// Who starts and continues multipart uploads.
+struct Uploader {
+    /// What the upload records as its owner: the caller's `aws:userid` with IAM, else the
+    /// access key (`None` for unsigned requests).
+    id: Option<String>,
+    /// The account's root user, who may continue anyone's upload.
+    root: bool,
+}
+
+fn uploader<T>(req: &S3Request<T>) -> Uploader {
+    match access::caller(req) {
+        Some(caller) => Uploader {
+            id: Some(caller.id().to_owned()),
+            root: caller.is_root(),
+        },
+        None => Uploader {
+            id: req.credentials.as_ref().map(|c| c.access_key.clone()),
+            root: false,
+        },
+    }
+}
+
+fn check_owner(upload: &Upload, bucket: &str, key: &str, who: &Uploader) -> S3Result<()> {
     if upload.bucket != bucket || upload.key != key {
         return Err(s3_error!(NoSuchUpload));
     }
-    if upload.owner.as_deref() != access_key {
+    if !who.root && upload.owner != who.id {
         return Err(s3_error!(
             AccessDenied,
             "the upload was started by someone else"
         ));
     }
     Ok(())
-}
-
-fn access_key<T>(req: &S3Request<T>) -> Option<&str> {
-    req.credentials.as_ref().map(|c| c.access_key.as_str())
 }
 
 fn part_number(number: i32) -> S3Result<u32> {
@@ -629,6 +648,11 @@ fn header_tags(value: Option<&str>) -> S3Result<tagging::Tags> {
         None => Ok(tagging::Tags::new()),
     }
 }
+
+/// The permission that shows an object's tag count.
+const TAGGING: &str = "s3:GetObjectTagging";
+/// The permission that shows owners in listings.
+const READ_ACL: &str = "s3:GetObjectAcl";
 
 /// `x-amz-tagging-count`, when the object has tags.
 fn tag_count(attrs: &ObjectAttrs) -> Option<i32> {
@@ -1097,6 +1121,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::GetObjectInput>,
     ) -> S3Result<S3Response<dto::GetObjectOutput>> {
+        let caller = access::caller(&req).cloned();
         let input = req.input;
         check_version(input.version_id.as_deref())?;
         let customer = sse::customer_key(
@@ -1111,7 +1136,8 @@ impl S3 for Drive {
                 customer.as_ref(),
                 input.part_number,
             )
-            .await?;
+            .await
+            .map_err(|e| access::hide_missing(caller.as_ref(), &input.bucket, e))?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -1159,7 +1185,8 @@ impl S3 for Drive {
                 .or_else(|| info.attrs.expires.clone()),
             website_redirect_location: info.attrs.website_redirect_location.clone(),
             metadata: user_metadata(&info.attrs),
-            tag_count: tag_count(&info.attrs),
+            tag_count: tag_count(&info.attrs)
+                .filter(|_| caller.as_ref().is_none_or(|c| c.may(TAGGING))),
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1176,6 +1203,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::HeadObjectInput>,
     ) -> S3Result<S3Response<dto::HeadObjectOutput>> {
+        let caller = access::caller(&req).cloned();
         let input = req.input;
         check_version(input.version_id.as_deref())?;
         let customer = sse::customer_key(
@@ -1190,7 +1218,8 @@ impl S3 for Drive {
                 customer.as_ref(),
                 input.part_number,
             )
-            .await?;
+            .await
+            .map_err(|e| access::hide_missing(caller.as_ref(), &input.bucket, e))?;
         check_read(
             &info,
             input.if_match.as_ref(),
@@ -1214,7 +1243,8 @@ impl S3 for Drive {
             expires: info.attrs.expires.clone(),
             website_redirect_location: info.attrs.website_redirect_location.clone(),
             metadata: user_metadata(&info.attrs),
-            tag_count: tag_count(&info.attrs),
+            tag_count: tag_count(&info.attrs)
+                .filter(|_| caller.as_ref().is_none_or(|c| c.may(TAGGING))),
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1438,6 +1468,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::DeleteObjectsInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectsOutput>> {
+        let caller = access::caller(&req).cloned();
         let input = req.input;
         if input.delete.objects.len() > MAX_DELETE {
             return Err(s3_error!(
@@ -1460,7 +1491,21 @@ impl S3 for Drive {
                 if_modified_at: object.last_modified_time.as_ref().map(to_system_time),
                 ..Precondition::default()
             };
+            // Each key is decided on its own, as AWS does: a key the caller may not
+            // delete is reported in the answer and the others go ahead.
+            let action = if object.version_id.is_some() {
+                "s3:DeleteObjectVersion"
+            } else {
+                "s3:DeleteObject"
+            };
+            let allowed = caller.as_ref().is_none_or(|c| {
+                c.allows(
+                    action,
+                    &teifs_policy::object_arn(&input.bucket, &object.key),
+                )
+            });
             let result = match check_version(object.version_id.as_deref()) {
+                Ok(()) if !allowed => Err(s3_error!(AccessDenied, "Access Denied")),
                 Ok(()) => self
                     .store
                     .delete_if(&input.bucket, &object.key, precondition)
@@ -1594,6 +1639,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::ListObjectsV2Input>,
     ) -> S3Result<S3Response<dto::ListObjectsV2Output>> {
+        let show_owner = access::may(&req, READ_ACL);
         let mut input = req.input;
         // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
         input.delimiter = input.delimiter.filter(|d| !d.is_empty());
@@ -1629,7 +1675,7 @@ impl S3 for Drive {
             .as_ref()
             .is_some_and(|e| e.as_str() == dto::EncodingType::URL);
         let enc = |s: String| if url { encode::url(&s) } else { s };
-        let fetch_owner = input.fetch_owner.unwrap_or(false);
+        let fetch_owner = show_owner && input.fetch_owner.unwrap_or(false);
         let key_count = listing.objects.len() + listing.prefixes.len();
         let contents: Vec<dto::Object> = listing
             .objects
@@ -1674,6 +1720,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::ListObjectsInput>,
     ) -> S3Result<S3Response<dto::ListObjectsOutput>> {
+        let show_owner = access::may(&req, READ_ACL);
         let mut input = req.input;
         // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
         input.delimiter = input.delimiter.filter(|d| !d.is_empty());
@@ -1718,7 +1765,7 @@ impl S3 for Drive {
                 storage_class: Some(ObjectStorageClass::from_static(
                     ObjectStorageClass::STANDARD,
                 )),
-                owner: Some(owner()),
+                owner: show_owner.then(owner),
                 ..Default::default()
             })
             .collect();
@@ -1841,7 +1888,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<dto::CreateMultipartUploadOutput>> {
-        let owner = access_key(&req).map(str::to_owned);
+        let owner = uploader(&req).id;
         let mut input = req.input;
         let mut attrs = new_attrs!(input).into_attrs(BTreeMap::new());
         attrs.tags = header_tags(input.tagging.as_deref())?;
@@ -1901,7 +1948,7 @@ impl S3 for Drive {
         req: S3Request<dto::UploadPartInput>,
     ) -> S3Result<S3Response<dto::UploadPartOutput>> {
         let upload = self.store.upload(&req.input.upload_id).await.s3()?;
-        check_owner(&upload, &req.input.bucket, &req.input.key, access_key(&req))?;
+        check_owner(&upload, &req.input.bucket, &req.input.key, &uploader(&req))?;
         let mut input = req.input;
         let number = part_number(input.part_number)?;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
@@ -1966,7 +2013,7 @@ impl S3 for Drive {
         req: S3Request<dto::UploadPartCopyInput>,
     ) -> S3Result<S3Response<dto::UploadPartCopyOutput>> {
         let upload = self.store.upload(&req.input.upload_id).await.s3()?;
-        check_owner(&upload, &req.input.bucket, &req.input.key, access_key(&req))?;
+        check_owner(&upload, &req.input.bucket, &req.input.key, &uploader(&req))?;
         let input = req.input;
         let number = part_number(input.part_number)?;
         let CopySource::Bucket {
@@ -2053,7 +2100,7 @@ impl S3 for Drive {
         req: S3Request<dto::ListPartsInput>,
     ) -> S3Result<S3Response<dto::ListPartsOutput>> {
         let upload = self.store.upload(&req.input.upload_id).await.s3()?;
-        check_owner(&upload, &req.input.bucket, &req.input.key, access_key(&req))?;
+        check_owner(&upload, &req.input.bucket, &req.input.key, &uploader(&req))?;
         let input = req.input;
         let max_parts = input.max_parts.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
         let after = u32::try_from(input.part_number_marker.unwrap_or(0)).unwrap_or(0);
@@ -2168,7 +2215,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<dto::CompleteMultipartUploadOutput>> {
-        let who = access_key(&req).map(str::to_owned);
+        let who = uploader(&req);
         let input = req.input;
         let upload = match self.store.upload(&input.upload_id).await {
             // A retried Complete of a finished upload gets the same answer.
@@ -2191,7 +2238,7 @@ impl S3 for Drive {
             }
             other => other.s3()?,
         };
-        check_owner(&upload, &input.bucket, &input.key, who.as_deref())?;
+        check_owner(&upload, &input.bucket, &input.key, &who)?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -2246,7 +2293,7 @@ impl S3 for Drive {
         req: S3Request<dto::AbortMultipartUploadInput>,
     ) -> S3Result<S3Response<dto::AbortMultipartUploadOutput>> {
         let upload = self.store.upload(&req.input.upload_id).await.s3()?;
-        check_owner(&upload, &req.input.bucket, &req.input.key, access_key(&req))?;
+        check_owner(&upload, &req.input.bucket, &req.input.key, &uploader(&req))?;
         self.store.abort(&upload.id).await.s3()?;
         Ok(S3Response::new(dto::AbortMultipartUploadOutput::default()))
     }

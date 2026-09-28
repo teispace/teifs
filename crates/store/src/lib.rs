@@ -354,6 +354,12 @@ impl Store {
         &self.inner.root
     }
 
+    /// The drive's system database, which IAM keeps its state in too.
+    #[must_use]
+    pub fn system_db(&self) -> PathBuf {
+        self.inner.system_dir.join(format::SYSTEM_DB)
+    }
+
     /// Gives the store its KMS after opening (a keyring named by the drive's id can only
     /// be found once the drive is open). Fails if it already has one.
     pub fn attach_kms(&self, kms: Arc<dyn Kms>) -> Result<()> {

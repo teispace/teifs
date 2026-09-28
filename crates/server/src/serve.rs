@@ -64,9 +64,9 @@ pub async fn serve(
             slot = Arc::clone(&slots).acquire_owned() => slot.expect("the semaphore stays open"),
             () = shutdown.as_mut() => break,
         };
-        let socket = tokio::select! {
+        let (socket, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((socket, _)) => socket,
+                Ok(accepted) => accepted,
                 Err(err) => {
                     tracing::warn!(error = %err, "couldn't accept a connection");
                     // Out of file descriptors and the like: don't spin.
@@ -78,7 +78,11 @@ pub async fn serve(
         };
         let _ = socket.set_nodelay(true);
         let http = Arc::clone(&http);
-        let service = service.clone();
+        // TLS comes later; until then every connection is plain HTTP.
+        let service = service.for_client(teifs_s3::Client {
+            ip: Some(peer.ip()),
+            secure: false,
+        });
         let watcher = graceful.watcher();
         tokio::spawn(async move {
             let _slot = slot;

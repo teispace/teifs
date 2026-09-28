@@ -13,12 +13,14 @@ use std::{
 };
 
 use std::sync::Arc;
+use teifs_iam::{Iam, RootKey};
 use teifs_s3::Options;
 
 use teifs_store::{
     BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions, TransitKms,
 };
 use tokio::net::TcpListener;
+use zeroize::Zeroizing;
 
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
@@ -110,6 +112,9 @@ pub enum ServerError {
     /// The drive's credentials couldn't be read or created.
     #[error("can't read the credentials: {0}")]
     Credentials(io::Error),
+    /// IAM couldn't be opened.
+    #[error("can't open IAM: {0}")]
+    Iam(teifs_iam::IamError),
     /// A domain for virtual-hosted-style requests is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
@@ -152,6 +157,7 @@ pub struct Server {
     limits: Limits,
     service: teifs_s3::Service,
     listener: TcpListener,
+    iam: Arc<Iam>,
     access_key: String,
     created_credentials: bool,
     kms: KmsLocation,
@@ -231,19 +237,35 @@ impl Server {
             config.kms_keyring,
             &store.format().drive,
         )?;
-        store.attach_kms(kms).map_err(|source| ServerError::Open {
-            path: config.dir.clone(),
-            source,
-        })?;
+        store
+            .attach_kms(kms.clone())
+            .map_err(|source| ServerError::Open {
+                path: config.dir.clone(),
+                source,
+            })?;
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
         };
         let access_key = credentials.access_key.clone();
+        let root = RootKey {
+            access_key: credentials.access_key,
+            secret: Zeroizing::new(credentials.secret_key),
+        };
+        let iam = Arc::new(
+            Iam::open(
+                &store.system_db(),
+                &store.format().drive,
+                kms.as_ref(),
+                Some(root),
+            )
+            .await
+            .map_err(ServerError::Iam)?,
+        );
         let service = teifs_s3::service(
             store.clone(),
             Options {
-                credentials: Some((credentials.access_key, credentials.secret_key)),
+                iam: Some(iam.clone()),
                 domains: config.domains,
                 default_layout: config.default_layout,
                 plain_http_is_secure: config
@@ -267,6 +289,7 @@ impl Server {
             limits: config.limits,
             service,
             listener,
+            iam,
             access_key,
             created_credentials,
             kms: location,
@@ -284,10 +307,16 @@ impl Server {
         self.store.root()
     }
 
-    /// The access key requests must be signed with.
+    /// The root user's access key.
     #[must_use]
     pub fn access_key(&self) -> &str {
         &self.access_key
+    }
+
+    /// The drive's IAM: its users, access keys, groups and policies.
+    #[must_use]
+    pub fn iam(&self) -> &Arc<Iam> {
+        &self.iam
     }
 
     /// Where the KMS keys the drive's encrypted objects need are.

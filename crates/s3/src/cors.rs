@@ -188,6 +188,7 @@ pub struct Service {
     store: Store,
     host: Option<Arc<MultiDomain>>,
     body_timeout: Option<Duration>,
+    client: crate::Client,
 }
 
 impl std::fmt::Debug for Service {
@@ -208,12 +209,24 @@ impl Service {
             store,
             host: host.map(Arc::new),
             body_timeout,
+            client: crate::Client::default(),
+        }
+    }
+
+    /// The service for one connection: requests on it come from `client`.
+    #[must_use]
+    pub fn for_client(&self, client: crate::Client) -> Self {
+        Self {
+            client,
+            ..self.clone()
         }
     }
 
     /// Passes a request to the S3 service, its body timed out if it stalls.
     async fn s3(&self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
         let timeout = self.body_timeout;
+        let mut req = req;
+        req.extensions_mut().insert(self.client);
         let req = req.map(|body| match timeout {
             Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
             None => s3s::Body::from(body),

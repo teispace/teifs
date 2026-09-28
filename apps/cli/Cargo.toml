@@ -39,6 +39,7 @@ tracing-subscriber.workspace = true
 mimalloc.workspace = true
 
 [dev-dependencies]
+teifs-iam.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 

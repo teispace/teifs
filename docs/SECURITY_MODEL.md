@@ -40,7 +40,7 @@ route declares its action, and the server refuses to start a route without one. 
 walks the table and proves anonymous and under-privileged callers are rejected.
 Profiling and debug endpoints are off by default and admin-only.
 
-### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced with users and bucket policies*)
+### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced for IAM users; bucket policies planned*)
 `teifs-policy` has no I/O and decides in AWS's order: an explicit Deny in any policy
 wins, then the root user, then a resource policy naming the principal, then identity
 policies, which a permissions boundary and session policies can only narrow; anything
@@ -54,7 +54,20 @@ operation maps to the actions AWS documents for it (`…Version` actions for a v
 checked against AWS's own reference by a test; a rename needs read and delete on the
 source as well as write on the target.
 
-### 4. Credentials can't be escalated (*planned*)
+Every request signed with an IAM user's key is decided before its operation runs
+(`crates/s3/src/access.rs`), for exactly the bucket, key and copy or rename source the
+operation will act on (both parse them with the same functions). A permission TeiFS
+can't name a resource for is refused, never skipped. `DeleteObjects` decides each key on
+its own, and a denied key is reported in the answer while the others go ahead.
+Permissions that only add to an answer (a `GetObject`'s tag count, owners in a listing)
+are withheld without failing the request. Multipart uploads belong to the user who
+started them (any of their keys); only that user or the root user can continue them.
+A key that's deactivated or deleted stops working at the next request.
+
+### 4. Credentials can't be escalated (*secrets built; the rest planned*)
+IAM access keys' secrets are stored sealed (AES-256-GCM, each bound to its access key
+id) under an IAM key the drive's KMS seals, so `system.db` alone doesn't reveal them;
+they're never logged, and shown once, when the key is created.
 A key can only create keys with a subset of its own rights, never for another user; the
 root account has no service accounts; bulk import goes through the same checks as single
 changes.
@@ -111,8 +124,10 @@ When Object Lock arrives, any error reading an object's retention denies the del
 overwrite.
 
 ### 13. Authorization before existence
-*Planned with policies:* a caller without access learns nothing about whether an object
-exists, including through conditional requests.
+A caller without access learns nothing about whether an object exists: requests are
+authorized before they touch the drive, so conditional requests reveal nothing either,
+and reading a missing key answers `403 AccessDenied` instead of `404 NoSuchKey` to a
+caller who may not list the bucket, as AWS does.
 
 ### 14. Encryption at rest keeps its keys away from the data
 Objects in object buckets are encrypted by default (SSE-S3), as specified in
