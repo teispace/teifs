@@ -16,6 +16,12 @@ behaviour; the on-disk format is always upgraded automatically.
   over it. `teifs health` asks over HTTPS when the server speaks it.
 - SSE-C keys are refused on plain HTTP for every request, as on AWS: reads, `HEAD` and
   copy sources too, not only writes.
+- Reverse proxies: `teifs serve --trusted-proxy CIDR` (repeatable) lets the proxies there
+  say who their clients are (`aws:SourceIp`) and whether they came over HTTPS
+  (`aws:SecureTransport`, SSE-C), in `X-Forwarded-For` and `X-Forwarded-Proto`, or with
+  `--proxy-header` RFC 7239's `Forwarded` or `X-Real-IP`. The header is read right to
+  left, so what a client writes into it itself is never believed, and from anyone else
+  it changes nothing (MinIO believes it from anyone).
 - IAM, as AWS has it: users, access keys, groups, customer-managed policies with
   versions, inline policies, permissions boundaries and tags, with AWS's rules, quotas
   and error codes. Requests signed with a user's key do only what the user's policies

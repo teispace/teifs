@@ -38,13 +38,14 @@ use crate::{
     tagging,
 };
 
-/// The connection a request came in on, which the server records in the request's
-/// extensions (`aws:SourceIp`, `aws:SecureTransport`).
+/// Where a request came from, which the server records in the request's extensions
+/// (`aws:SourceIp`, `aws:SecureTransport`): its connection's, or what a trusted proxy
+/// says of its client.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Client {
-    /// The peer's address.
+    /// The client's address.
     pub ip: Option<IpAddr>,
-    /// Whether the connection is TLS.
+    /// Whether it came over TLS.
     pub secure: bool,
 }
 

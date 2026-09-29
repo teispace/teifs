@@ -333,6 +333,12 @@ pub struct ServerConfig {
     /// it serves plain HTTP.
     #[serde(default)]
     pub tls: Option<String>,
+    /// The reverse proxies trusted to name their clients (addresses and networks).
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// The header they name clients in, when any is trusted.
+    #[serde(default)]
+    pub proxy_header: Option<String>,
 }
 
 /// Where a server's KMS keys are.

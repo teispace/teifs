@@ -285,6 +285,13 @@ async fn config(client: &Client) -> Result<(), Error> {
                     .clone()
                     .unwrap_or_else(|| "off (plain HTTP)".to_owned()),
             ),
+            (
+                "Trusted proxies",
+                match &config.proxy_header {
+                    Some(header) => format!("{} ({header})", config.trusted_proxies.join(", ")),
+                    None => "none".to_owned(),
+                },
+            ),
             ("SSE-C allowed", yes_no(config.allow_sse_c)),
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),

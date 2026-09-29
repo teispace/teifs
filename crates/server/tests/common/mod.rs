@@ -49,6 +49,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         allow_sse_c: true,
         plain_http_is_secure: None,
         tls: None,
+        trusted_proxies: teifs_server::TrustedProxies::default(),
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,

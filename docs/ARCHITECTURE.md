@@ -46,8 +46,9 @@ crates/store    teifs-store    The storage engine: opening a drive (and upgradin
                                writes, reads (ObjectBody), listings in S3 order,
                                copies, multipart uploads.
 crates/s3       teifs-s3       The S3 operations: implements s3s's `S3` trait over a
-                               store; checksums, S3 errors, continuation tokens; CORS
-                               and the health check in front of it.
+                               store; checksums, S3 errors, continuation tokens; CORS,
+                               the health check and trusted proxies (`src/proxy.rs`,
+                               who the client is) in front of it.
 crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP/2,
                                plain or TLS: `src/tls.rs` loads certificates, picks one
                                per SNI name, reloads them), graceful shutdown, and

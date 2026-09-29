@@ -21,8 +21,8 @@ mod units;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, Server, TlsSource,
-    Transit, credentials,
+    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, ProxyHeader,
+    Server, TlsSource, Transit, TrustedProxies, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -131,6 +131,22 @@ pub(crate) struct ServeArgs {
     /// The private key (PEM) of `--tls-cert`.
     #[arg(long, env = "TEIFS_TLS_KEY", requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+    /// Trust the reverse proxy at this address or network (`10.0.0.5`, `10.0.0.0/8`;
+    /// repeatable) to say who its clients are, in `--proxy-header`, and whether they
+    /// came over HTTPS, in `X-Forwarded-Proto`. Nobody else can.
+    #[arg(
+        long = "trusted-proxy",
+        value_name = "CIDR",
+        env = "TEIFS_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        value_parser = parse_network
+    )]
+    trusted_proxies: Vec<String>,
+    /// The header trusted proxies name clients in: `x-forwarded-for` (nginx, HAProxy,
+    /// Traefik, Caddy, Envoy, AWS load balancers), `forwarded` (RFC 7239) or
+    /// `x-real-ip`. Choose one the proxy adds to or sets, never one it passes on.
+    #[arg(long, default_value = "x-forwarded-for", env = "TEIFS_PROXY_HEADER")]
+    proxy_header: ProxyHeader,
     /// A domain for virtual-hosted-style requests (bucket.domain); repeatable.
     #[arg(long = "domain", env = "TEIFS_DOMAINS", value_delimiter = ',')]
     domains: Vec<String>,
@@ -479,6 +495,12 @@ fn parse_expiry(text: &str) -> Result<Expiry, String> {
         .map_err(|e| format!("{e} (or say never)"))
 }
 
+/// Checks a trusted proxy's address or network.
+fn parse_network(text: &str) -> Result<String, String> {
+    TrustedProxies::new(&[text], ProxyHeader::default())?;
+    Ok(text.trim().to_owned())
+}
+
 /// Where `serve`'s certificates come from, if it serves HTTPS.
 fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
     match (&args.tls_cert, &args.tls_key, &args.certs_dir) {
@@ -519,6 +541,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
+        trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,
             ..JobOptions::default()

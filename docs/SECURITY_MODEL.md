@@ -203,8 +203,18 @@ before using it, so symbolic links inside a bucket and names that differ only in
 Unicode form (or an NTFS short name) are never followed or overwritten (`Inner::find` and `Inner::make_parents` in
 `crates/store/src/folder.rs`). *Planned:* fuzzing of the parser and the path mapping.
 
-### 8. Only trusted proxies can set the client's address (*planned*)
-`X-Forwarded-For` and similar headers will be read only from configured proxy addresses.
+### 8. Only trusted proxies can set the client's address
+Forwarding headers are read only when the connection's peer is a configured proxy
+(`--trusted-proxy`, none by default), and only the one header chosen
+(`--proxy-header`, `X-Forwarded-For` by default): a header the proxy passes on untouched
+would be the client's own word. It's read right to left, past trusted proxies, at most
+20 addresses; the first that isn't a trusted proxy is the client, and an unreadable
+entry stops the walk at the last trusted proxy, never at an address the client could
+have written (`crates/s3/src/proxy.rs`, tested in `crates/server/tests/proxy.rs`). The
+scheme a proxy reports (`X-Forwarded-Proto`, or `Forwarded`'s `proto`) decides
+`aws:SecureTransport` and SSE-C; a client that could lie about it would only weaken its
+own connection. With a proxy trusted, a server listening on loopback no longer counts
+plain HTTP as secure, since the proxy may be passing on plain HTTP from anywhere.
 
 ### 9. Untrusted content is never rendered in a privileged page (*planned*)
 Any web interface that previews files renders them from a separate, sandboxed origin.

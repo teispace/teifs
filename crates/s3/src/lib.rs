@@ -17,6 +17,7 @@ mod health;
 mod iam_api;
 mod limits;
 mod post_form;
+mod proxy;
 mod routes;
 mod sig_v2;
 mod sse;
@@ -38,6 +39,7 @@ pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
+pub use proxy::{ProxyHeader, TrustedProxies};
 pub use routes::{Api, EndpointInfo, endpoints};
 
 /// How the S3 endpoint accepts requests.
@@ -54,6 +56,8 @@ pub struct Options {
     /// Whether plain HTTP counts as a secure connection for SSE-C keys: true for a server
     /// that only listens on this machine, or behind a proxy that terminates TLS.
     pub plain_http_is_secure: bool,
+    /// The reverse proxies trusted to say who their clients are; none by default.
+    pub trusted_proxies: TrustedProxies,
     /// How long a request body may stop arriving before the request fails with
     /// `RequestTimeout`; `None` waits for ever.
     pub body_timeout: Option<std::time::Duration>,
@@ -120,5 +124,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         host,
         options.body_timeout,
         options.plain_http_is_secure,
+        options.trusted_proxies,
     ))
 }

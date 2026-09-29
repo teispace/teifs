@@ -209,3 +209,52 @@ fn minio_root_credentials_are_a_fallback() {
     let (ok, out) = show(&[], &minio[..1]);
     assert!(!ok && out.contains("MINIO_ROOT_PASSWORD"), "{out}");
 }
+
+#[test]
+fn proxies_and_certificates_are_settings_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = settings(
+        dir.path(),
+        r#"
+        trusted-proxies = ["10.0.0.0/8", "fd00::/8"]
+        proxy-header = "forwarded"
+        certs-dir = "certs"
+        "#,
+    );
+    let (ok, out) = show(&["--config", &file], &[]);
+    assert!(ok, "{out}");
+    assert_eq!(
+        line(&out, "trusted-proxies"),
+        r#"trusted-proxies = ["10.0.0.0/8", "fd00::/8"]  # file"#
+    );
+    assert_eq!(
+        line(&out, "proxy-header"),
+        r#"proxy-header = "forwarded"  # file"#
+    );
+    // Relative to the settings file.
+    let certs = dir.path().join("certs");
+    assert!(
+        line(&out, "certs-dir").contains(certs.to_str().unwrap()),
+        "{out}"
+    );
+    let (ok, out) = show(&[], &[("TEIFS_TRUSTED_PROXIES", "192.0.2.7,10.1.0.0/16")]);
+    assert!(ok, "{out}");
+    assert!(
+        line(&out, "trusted-proxies").contains("10.1.0.0/16"),
+        "{out}"
+    );
+
+    for (args, env) in [
+        (vec!["--trusted-proxy", "proxy.local"], vec![]),
+        (vec!["--trusted-proxy", "10.0.0.0/33"], vec![]),
+        (vec!["--proxy-header", "via"], vec![]),
+        (vec![], vec![("TEIFS_PROXY_HEADER", "x-client-ip")]),
+    ] {
+        let (ok, out) = show(&args, &env);
+        assert!(!ok, "{args:?} {env:?} was accepted:\n{out}");
+    }
+    let file = settings(dir.path(), "trusted-proxies = [\"everyone\"]\n");
+    let (ok, out) = show(&["--config", &file], &[]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("everyone"), "{out}");
+}

@@ -156,14 +156,39 @@ out on its own that a server speaks HTTPS.
 
 Over HTTPS, `aws:SecureTransport` is true, and SSE-C keys are accepted. On plain HTTP
 they're refused for every request (as on AWS), except on a server listening only on
-this machine, or with `--sse-c-over-http`.
+this machine (with no proxies trusted), or with `--sse-c-over-http`.
+
+### Behind a reverse proxy
+
+```sh
+teifs serve /srv/drive --trusted-proxy 10.0.0.0/8   # repeatable: addresses or networks
+```
+
+Only a trusted proxy can say who its clients are (`aws:SourceIp`) and whether they came
+over HTTPS (`aws:SecureTransport`, SSE-C); from anyone else those headers change
+nothing. Clients are read from `X-Forwarded-For` by default (`--proxy-header forwarded`
+or `x-real-ip` for the others), right to left: the first address that isn't a trusted
+proxy is the client, so whatever a client writes into the header itself doesn't count.
+The scheme comes from `X-Forwarded-Proto` (from `Forwarded`'s `proto` in that mode).
+The proxy must pass `Host` unchanged, since requests are signed with it:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:9000;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_request_buffering off;
+    client_max_body_size 0;
+}
+```
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |

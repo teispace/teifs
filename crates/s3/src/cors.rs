@@ -195,6 +195,8 @@ pub struct Service {
     body_timeout: Option<Duration>,
     /// Whether plain HTTP counts as secure for SSE-C keys.
     plain_http_is_secure: bool,
+    proxies: Arc<crate::TrustedProxies>,
+    /// The connection's peer.
     client: crate::Client,
 }
 
@@ -211,6 +213,7 @@ impl Service {
         host: Option<MultiDomain>,
         body_timeout: Option<Duration>,
         plain_http_is_secure: bool,
+        proxies: crate::TrustedProxies,
     ) -> Self {
         Self {
             s3,
@@ -218,6 +221,7 @@ impl Service {
             host: host.map(Arc::new),
             body_timeout,
             plain_http_is_secure,
+            proxies: Arc::new(proxies),
             client: crate::Client::default(),
         }
     }
@@ -237,8 +241,9 @@ impl Service {
             return Ok(refused);
         }
         let timeout = self.body_timeout;
+        let client = self.proxies.client(self.client, req.headers());
         let mut req = req;
-        req.extensions_mut().insert(self.client);
+        req.extensions_mut().insert(client);
         let req = req.map(|body| match timeout {
             Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
             None => s3s::Body::from(body),
@@ -255,7 +260,7 @@ impl Service {
             // SSE-C keys never travel in the clear, whatever the request does with them
             // (a form's fields are headers by now).
             Ok(req)
-                if !(self.client.secure || self.plain_http_is_secure)
+                if !(client.secure || self.plain_http_is_secure)
                     && crate::sse::names_customer_key(req.headers()) =>
             {
                 Ok(error(

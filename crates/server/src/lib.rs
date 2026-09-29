@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
-pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER};
+pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource};
 
@@ -54,8 +54,12 @@ pub struct Config {
     /// since April 2026).
     pub allow_sse_c: bool,
     /// Whether plain HTTP counts as secure for SSE-C keys; `None` decides by the listen
-    /// address (secure only on loopback).
+    /// address (secure only on loopback, and only with no proxies trusted: a proxy on
+    /// this machine may be passing on plain HTTP from anywhere).
     pub plain_http_is_secure: Option<bool>,
+    /// The reverse proxies trusted to say who their clients are (and whether they came
+    /// over HTTPS); none by default.
+    pub trusted_proxies: TrustedProxies,
     /// How the background jobs (upload expiry, cleanup) run.
     pub jobs: JobOptions,
     /// How hard writes are made to survive a power cut.
@@ -256,9 +260,9 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         }
         .into(),
         allow_sse_c: config.allow_sse_c,
-        plain_http_is_secure: config
-            .plain_http_is_secure
-            .unwrap_or_else(|| config.listen.ip().is_loopback()),
+        plain_http_is_secure: config.plain_http_is_secure.unwrap_or_else(|| {
+            config.listen.ip().is_loopback() && config.trusted_proxies.is_empty()
+        }),
         allow_sig_v2: config.allow_sig_v2,
         legacy_bucket_defaults: config.legacy_bucket_defaults,
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
@@ -267,6 +271,9 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         body_timeout_seconds: config.limits.body_timeout.as_secs(),
         max_connections: config.limits.max_connections,
         tls: config.tls.as_ref().map(ToString::to_string),
+        trusted_proxies: config.trusted_proxies.networks(),
+        proxy_header: (!config.trusted_proxies.is_empty())
+            .then(|| config.trusted_proxies.header().name().to_owned()),
     }
 }
 
@@ -355,6 +362,7 @@ impl Server {
                 domains: config.domains,
                 default_layout: config.default_layout,
                 plain_http_is_secure: admin_config.plain_http_is_secure,
+                trusted_proxies: config.trusted_proxies,
                 body_timeout: Some(config.limits.body_timeout),
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,

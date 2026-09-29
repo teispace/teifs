@@ -71,6 +71,7 @@ aws-sdk-s3control = { version = "1", default-features = false, features = ["beha
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"
+ipnet = "2.11"
 form_urlencoded = "1"
 percent-encoding = "2"
 
