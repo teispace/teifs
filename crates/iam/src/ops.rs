@@ -1,5 +1,6 @@
 //! IAM's operations, with AWS's rules and messages.
 
+mod oidc;
 mod roles;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -18,6 +19,7 @@ use crate::{
     state::{Document, Group, Key, Managed, Role, State, User, Version},
 };
 
+pub use oidc::{NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
 
 /// A user.
@@ -224,20 +226,23 @@ fn under(prefix: Option<&str>) -> Result<impl Fn(&str) -> bool + '_> {
 enum TagKeys {
     User,
     Policy,
+    /// An OpenID Connect provider's: without case, like a user's.
+    OidcProvider,
 }
 
 impl TagKeys {
     fn same(self, a: &str, b: &str) -> bool {
         match self {
-            Self::User => a.eq_ignore_ascii_case(b),
+            Self::User | Self::OidcProvider => a.eq_ignore_ascii_case(b),
             Self::Policy => a == b,
         }
     }
 
     fn noun(self) -> &'static str {
         match self {
-            Self::User => "user",
-            Self::Policy => "policy",
+            Self::User => "A user",
+            Self::Policy => "A policy",
+            Self::OidcProvider => "An OpenID Connect provider",
         }
     }
 }
@@ -271,13 +276,15 @@ fn merged(
     }
     if tags.len() > MAX_TAGS {
         return Err(IamError::LimitExceeded(format!(
-            "A {} can have at most {MAX_TAGS} tags.",
+            "{} can have at most {MAX_TAGS} tags.",
             kind.noun()
         )));
     }
     // The order the store lists them in, so a reload changes nothing.
     match kind {
-        TagKeys::User => tags.sort_by_cached_key(|(k, _)| k.to_ascii_lowercase()),
+        TagKeys::User | TagKeys::OidcProvider => {
+            tags.sort_by_cached_key(|(k, _)| k.to_ascii_lowercase());
+        }
         TagKeys::Policy => tags.sort(),
     }
     Ok(tags)
@@ -361,6 +368,7 @@ impl Draft<'_> {
                 && !self.state.groups.contains_key(&id)
                 && !self.state.roles.contains_key(&id)
                 && !self.state.policies.contains_key(&id)
+                && !self.state.oidc_providers.contains_key(&id)
             {
                 return id;
             }

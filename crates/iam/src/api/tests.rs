@@ -46,6 +46,7 @@ fn check_reference(service: &serde_json::Value, actions: &[Action]) {
             On::Group => Some("group"),
             On::Role => Some("role"),
             On::Policy => Some("policy"),
+            On::OidcProvider => Some("oidc-provider"),
             On::FederatedUser => Some("federated-user"),
         };
         assert_eq!(
@@ -88,10 +89,13 @@ fn actions_match_aws_service_reference() {
             .map(str::to_owned)
             .into()
     );
-    assert_eq!(
-        resource_keys("policy"),
-        ["aws:ResourceTag/${TagKey}".to_owned()].into()
-    );
+    for kind in ["policy", "oidc-provider"] {
+        assert_eq!(
+            resource_keys(kind),
+            ["aws:ResourceTag/${TagKey}".to_owned()].into(),
+            "{kind}"
+        );
+    }
     assert!(resource_keys("group").is_empty());
     assert_eq!(
         resource_keys("role"),
@@ -197,6 +201,21 @@ impl Drive {
 
     fn sts_code(&self, identity: &Identity, body: &str) -> String {
         code(&self.sts(identity, body), body)
+    }
+
+    fn oidc_arn(&self, name: &str) -> String {
+        format!("arn:aws:iam::{}:oidc-provider/{name}", self.account)
+    }
+
+    /// An OpenID Connect provider at `url`, for the audience `app`.
+    fn oidc(&self, url: &str) -> crate::OidcProviderInfo {
+        self.iam
+            .create_oidc_provider(&crate::NewOidcProvider {
+                url,
+                client_ids: &["app".to_owned()],
+                ..crate::NewOidcProvider::default()
+            })
+            .unwrap()
     }
 
     fn policy_arn(&self, name: &str) -> String {
@@ -430,9 +449,13 @@ fn every_parameter(d: &Drive, key: &str) -> String {
          &PolicyDocument={}&AccessKeyId={key}&Status=Inactive&VersionId=v1\
          &PermissionsBoundary={arn}&Tags.member.1.Key=k&Tags.member.1.Value=v\
          &TagKeys.member.1=k&NewPath=%2Fmoved%2F&AssumeRolePolicyDocument={}\
-         &Description=d&MaxSessionDuration=7200",
+         &Description=d&MaxSessionDuration=7200&OpenIDConnectProviderArn={}\
+         &Url=https%3A%2F%2Fidp.example.com&ClientID=app&ClientIDList.member.1=app\
+         &ThumbprintList.member.1={}",
         enc(ALLOW_ALL),
-        enc(&d.trust_account())
+        enc(&d.trust_account()),
+        enc(&d.oidc_arn("idp.example.com")),
+        "a".repeat(40)
     )
 }
 
@@ -443,6 +466,7 @@ async fn every_action_is_authorized() {
     let key = d.iam.create_access_key("target").unwrap().info.id;
     d.iam.create_group("group", None).unwrap();
     d.role("role");
+    d.oidc("https://idp.example.com");
     d.iam
         .create_policy("managed", None, None, ALLOW_ALL, &[])
         .unwrap();
@@ -1071,4 +1095,5 @@ async fn role_condition_keys_hold_back_escalation() {
     d.ok(&caller, "Action=DeleteRole&RoleName=unbounded");
 }
 
+mod oidc;
 mod sessions;

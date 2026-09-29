@@ -9,7 +9,7 @@
 use std::{path::Path, sync::Arc};
 
 use teifs_crypto::LocalKms;
-use teifs_iam::{Iam, IamError, NewRole, Owner, RootKey};
+use teifs_iam::{Iam, IamError, NewOidcProvider, NewRole, Owner, RootKey};
 use teifs_policy::{Context, Date, Decision, Policies, Request, evaluate};
 use zeroize::Zeroizing;
 
@@ -787,6 +787,18 @@ fn populate(iam: &Iam) {
         },
     )
     .unwrap();
+    iam.create_oidc_provider(&NewOidcProvider {
+        url: "https://idp.example.com/realms/main",
+        client_ids: &["app".to_owned(), "cli".to_owned()],
+        thumbprints: &["6938fd4d98bab03faadb97b34396831e3780aea1".to_owned()],
+        tags: &tags,
+    })
+    .unwrap();
+    iam.create_oidc_provider(&NewOidcProvider {
+        url: "http://localhost:5556/dex",
+        ..NewOidcProvider::default()
+    })
+    .unwrap();
 }
 
 #[tokio::test]
@@ -816,9 +828,10 @@ async fn an_export_imports_into_another_drive_as_it_was() {
             report.groups,
             report.users,
             report.roles,
+            report.oidc_providers,
             report.access_keys
         ),
-        (2, 1, 2, 2, 2)
+        (2, 1, 2, 2, 2, 2)
     );
     assert_eq!(
         export.roles.iter().map(|r| &*r.name).collect::<Vec<_>>(),
@@ -971,7 +984,19 @@ async fn an_import_is_refused_what_it_cannot_bring() {
     export.account = "210987654321".into();
     iam.import(&export, true).unwrap();
     assert_eq!(iam.account(), "210987654321");
-    // ...but only into an empty IAM.
+    // ...but only into an empty IAM: no provider either.
+    iam.create_oidc_provider(&NewOidcProvider {
+        url: "https://idp.example.com",
+        ..NewOidcProvider::default()
+    })
+    .unwrap();
+    assert_eq!(code(iam.import(&empty, false)), "EntityAlreadyExists");
+    iam.delete_oidc_provider(&format!(
+        "arn:aws:iam::{}:oidc-provider/idp.example.com",
+        iam.account()
+    ))
+    .unwrap();
+    iam.import(&empty, false).unwrap();
     iam.create_user("carol", None, &[], None).unwrap();
     assert_eq!(code(iam.import(&empty, false)), "EntityAlreadyExists");
     // No key may take the root's id, and a policy needs exactly one default version.
@@ -1000,7 +1025,11 @@ async fn an_import_is_refused_what_it_cannot_bring() {
     assert_eq!(code(iam.import(&export, false)), "InvalidInput");
     export.policies[read].versions.clear();
     assert_eq!(code(iam.import(&export, false)), "InvalidInput");
+    let mut export = from.export(true);
+    export.oidc_providers[0].url = "http://idp.example.com".into();
+    assert_eq!(code(iam.import(&export, false)), "InvalidInput");
     assert!(iam.users(None).unwrap().is_empty());
+    assert!(iam.oidc_providers().unwrap().is_empty());
 }
 
 fn root_key(id: &str, secret: &str) -> RootKey {

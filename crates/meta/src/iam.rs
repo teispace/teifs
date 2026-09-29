@@ -100,6 +100,24 @@ pub(crate) const ROLES_MIGRATION: &str = "
         PRIMARY KEY (role_id, key)
     ) WITHOUT ROWID;";
 
+/// OpenID Connect providers: migration 6. `name` is the URL without its scheme, the
+/// last part of the provider's ARN.
+pub(crate) const OIDC_MIGRATION: &str = "
+    CREATE TABLE iam_oidc_providers (
+        id          TEXT    PRIMARY KEY,
+        name        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+        url         TEXT    NOT NULL,
+        client_ids  TEXT    NOT NULL,
+        thumbprints TEXT    NOT NULL,
+        created_ms  INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE iam_oidc_provider_tags (
+        provider_id TEXT NOT NULL REFERENCES iam_oidc_providers (id) ON DELETE CASCADE,
+        key         TEXT NOT NULL COLLATE NOCASE,
+        value       TEXT NOT NULL,
+        PRIMARY KEY (provider_id, key)
+    ) WITHOUT ROWID;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -137,6 +155,23 @@ pub struct RoleRow {
     pub created_ms: i64,
     /// The id of the managed policy that is its permissions boundary.
     pub boundary: Option<String>,
+}
+
+/// An OpenID Connect identity provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcProviderRow {
+    /// Its unique id.
+    pub id: String,
+    /// Its URL without the scheme (`idp.example.com/realms/a`), unique without case.
+    pub name: String,
+    /// Its URL, as given: the issuer its tokens name.
+    pub url: String,
+    /// The audiences it's trusted for (JSON, which `teifs-iam` owns).
+    pub client_ids: String,
+    /// The thumbprints of the certificates it's pinned to (JSON).
+    pub thumbprints: String,
+    /// When it was created, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
 }
 
 /// A group.
@@ -240,6 +275,10 @@ pub struct IamRows {
     pub roles: Vec<RoleRow>,
     /// Roles' tags: (role id, key, value).
     pub role_tags: Vec<(String, String, String)>,
+    /// OpenID Connect providers.
+    pub oidc_providers: Vec<OidcProviderRow>,
+    /// Their tags: (provider id, key, value).
+    pub oidc_provider_tags: Vec<(String, String, String)>,
     /// Managed policies.
     pub policies: Vec<PolicyRow>,
     /// Their tags: (policy id, key, value); keys are case sensitive.
@@ -284,6 +323,14 @@ pub enum IamWrite {
     PutRoleTag(String, String, String),
     /// Removes a role's tag.
     DeleteRoleTag(String, String),
+    /// Adds or updates an OpenID Connect provider.
+    PutOidcProvider(OidcProviderRow),
+    /// Deletes an OpenID Connect provider (and its tags).
+    DeleteOidcProvider(String),
+    /// Sets a provider's tag (keys compare without case; the given case is kept).
+    PutOidcProviderTag(String, String, String),
+    /// Removes a provider's tag.
+    DeleteOidcProviderTag(String, String),
     /// Adds or updates a managed policy.
     PutPolicy(PolicyRow),
     /// Deletes a managed policy and its versions.
@@ -312,6 +359,7 @@ pub enum IamWrite {
 
 impl System {
     /// Everything IAM keeps.
+    #[allow(clippy::too_many_lines, reason = "one query per table")]
     pub fn iam_rows(&self) -> Result<IamRows> {
         let conn = &self.conn;
         let all = |sql: &str| conn.prepare(sql);
@@ -330,9 +378,10 @@ impl System {
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?,
-            user_tags: all("SELECT user_id, key, value FROM iam_user_tags ORDER BY user_id, key")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?,
+            user_tags: tag_rows(
+                conn,
+                "SELECT user_id, key, value FROM iam_user_tags ORDER BY user_id, key",
+            )?,
             groups: all("SELECT id, name, path, created_ms FROM iam_groups ORDER BY id")?
                 .query_map([], |r| {
                     Ok(GroupRow {
@@ -347,9 +396,16 @@ impl System {
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?,
             roles: roles(conn)?,
-            role_tags: all("SELECT role_id, key, value FROM iam_role_tags ORDER BY role_id, key")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?,
+            role_tags: tag_rows(
+                conn,
+                "SELECT role_id, key, value FROM iam_role_tags ORDER BY role_id, key",
+            )?,
+            oidc_providers: oidc_providers(conn)?,
+            oidc_provider_tags: tag_rows(
+                conn,
+                "SELECT provider_id, key, value FROM iam_oidc_provider_tags
+                 ORDER BY provider_id, key",
+            )?,
             policies: all(
                 "SELECT id, name, path, description, default_version, latest_version, created_ms,
                    updated_ms
@@ -368,11 +424,10 @@ impl System {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
-            policy_tags: all(
+            policy_tags: tag_rows(
+                conn,
                 "SELECT policy_id, key, value FROM iam_policy_tags ORDER BY policy_id, key",
-            )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?,
+            )?,
             versions: all(
                 "SELECT policy_id, version, document, created_ms FROM iam_policy_versions
                  ORDER BY policy_id, version",
@@ -423,6 +478,33 @@ impl System {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// (owner id, key, value) rows.
+fn tag_rows(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<(String, String, String)>> {
+    Ok(conn
+        .prepare(sql)?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+fn oidc_providers(conn: &rusqlite::Connection) -> Result<Vec<OidcProviderRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT id, name, url, client_ids, thumbprints, created_ms
+             FROM iam_oidc_providers ORDER BY id",
+        )?
+        .query_map([], |r| {
+            Ok(OidcProviderRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                url: r.get(2)?,
+                client_ids: r.get(3)?,
+                thumbprints: r.get(4)?,
+                created_ms: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn roles(conn: &rusqlite::Connection) -> Result<Vec<RoleRow>> {
@@ -519,6 +601,26 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::DeleteRoleTag(role, key) => run(
             "DELETE FROM iam_role_tags WHERE role_id = ?1 AND key = ?2",
             params![role, key],
+        ),
+        IamWrite::PutOidcProvider(p) => run(
+            "INSERT INTO iam_oidc_providers (id, name, url, client_ids, thumbprints, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (id) DO UPDATE SET client_ids = excluded.client_ids,
+               thumbprints = excluded.thumbprints",
+            params![p.id, p.name, p.url, p.client_ids, p.thumbprints, p.created_ms],
+        ),
+        IamWrite::DeleteOidcProvider(id) => {
+            run("DELETE FROM iam_oidc_providers WHERE id = ?1", params![id])
+        }
+        IamWrite::PutOidcProviderTag(provider, key, value) => run(
+            "INSERT INTO iam_oidc_provider_tags (provider_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (provider_id, key) DO UPDATE SET key = excluded.key,
+               value = excluded.value",
+            params![provider, key, value],
+        ),
+        IamWrite::DeleteOidcProviderTag(provider, key) => run(
+            "DELETE FROM iam_oidc_provider_tags WHERE provider_id = ?1 AND key = ?2",
+            params![provider, key],
         ),
         IamWrite::PutPolicy(p) => run(
             "INSERT INTO iam_policies
@@ -767,6 +869,64 @@ mod tests {
             .unwrap();
         let rows = system.iam_rows().unwrap();
         assert!(rows.roles.is_empty() && rows.role_tags.is_empty());
+    }
+
+    #[test]
+    fn oidc_providers_round_trip_and_keep_their_url() {
+        let (_dir, mut system) = open();
+        let provider = OidcProviderRow {
+            id: "P1".into(),
+            name: "idp.example.com/realms/a".into(),
+            url: "https://idp.example.com/realms/a".into(),
+            client_ids: r#"["app"]"#.into(),
+            thumbprints: "[]".into(),
+            created_ms: 7,
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutOidcProvider(provider.clone()),
+                IamWrite::PutOidcProviderTag("P1".into(), "Team".into(), "a".into()),
+            ])
+            .unwrap();
+        let changed = OidcProviderRow {
+            client_ids: r#"["app","cli"]"#.into(),
+            thumbprints: r#"["00"]"#.into(),
+            ..provider.clone()
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutOidcProvider(OidcProviderRow {
+                    // An update never moves a provider to another URL.
+                    url: "https://elsewhere".into(),
+                    ..changed.clone()
+                }),
+                IamWrite::PutOidcProviderTag("P1".into(), "team".into(), "b".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(rows.oidc_providers, [changed]);
+        assert_eq!(
+            rows.oidc_provider_tags,
+            [("P1".into(), "team".into(), "b".into())]
+        );
+        assert!(
+            system
+                .iam_apply(&[IamWrite::PutOidcProvider(OidcProviderRow {
+                    id: "P2".into(),
+                    name: "IDP.example.com/realms/a".into(),
+                    ..provider
+                })])
+                .is_err(),
+            "one provider per URL, without case"
+        );
+        system
+            .iam_apply(&[
+                IamWrite::DeleteOidcProviderTag("P1".into(), "TEAM".into()),
+                IamWrite::DeleteOidcProvider("P1".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert!(rows.oidc_providers.is_empty() && rows.oidc_provider_tags.is_empty());
     }
 
     #[test]

@@ -530,6 +530,99 @@ async fn the_aws_sdk_manages_roles() {
 }
 
 #[tokio::test]
+async fn the_aws_sdk_manages_openid_connect_providers() {
+    let server = start().await;
+    let iam = iam_as(&server, ACCESS_KEY, SECRET_KEY);
+    let account = server.iam.account();
+    let thumbprint = "6938fd4d98bab03faadb97b34396831e3780aea1";
+    let created = iam
+        .create_open_id_connect_provider()
+        .url("https://token.actions.githubusercontent.com")
+        .client_id_list("sts.amazonaws.com")
+        .thumbprint_list(thumbprint)
+        .tags(tag("team", "ci"))
+        .send()
+        .await
+        .unwrap();
+    let arn = created.open_id_connect_provider_arn.unwrap();
+    assert_eq!(
+        arn,
+        format!("arn:aws:iam::{account}:oidc-provider/token.actions.githubusercontent.com")
+    );
+    assert_eq!(created.tags.unwrap().len(), 1);
+
+    iam.add_client_id_to_open_id_connect_provider()
+        .open_id_connect_provider_arn(&arn)
+        .client_id("app")
+        .send()
+        .await
+        .unwrap();
+    iam.update_open_id_connect_provider_thumbprint()
+        .open_id_connect_provider_arn(&arn)
+        .thumbprint_list(thumbprint)
+        .thumbprint_list("a".repeat(40))
+        .send()
+        .await
+        .unwrap();
+    let got = iam
+        .get_open_id_connect_provider()
+        .open_id_connect_provider_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.url(), Some("token.actions.githubusercontent.com"));
+    assert_eq!(got.client_id_list(), ["sts.amazonaws.com", "app"]);
+    assert_eq!(got.thumbprint_list().len(), 2);
+    assert!(got.create_date().is_some());
+    assert_eq!(got.tags().len(), 1);
+
+    let listed = iam.list_open_id_connect_providers().send().await.unwrap();
+    let arns: Vec<_> = listed
+        .open_id_connect_provider_list()
+        .iter()
+        .filter_map(|p| p.arn())
+        .collect();
+    assert_eq!(arns, [arn.as_str()]);
+
+    iam.untag_open_id_connect_provider()
+        .open_id_connect_provider_arn(&arn)
+        .tag_keys("TEAM")
+        .send()
+        .await
+        .unwrap();
+    let tags = iam
+        .list_open_id_connect_provider_tags()
+        .open_id_connect_provider_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty() && !tags.is_truncated());
+
+    let taken = iam
+        .create_open_id_connect_provider()
+        .url("https://token.actions.githubusercontent.com")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(taken.code(), Some("EntityAlreadyExists"));
+
+    for _ in 0..2 {
+        iam.delete_open_id_connect_provider()
+            .open_id_connect_provider_arn(&arn)
+            .send()
+            .await
+            .unwrap();
+    }
+    let missing = iam
+        .get_open_id_connect_provider()
+        .open_id_connect_provider_arn(&arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), Some("NoSuchEntity"));
+}
+
+#[tokio::test]
 async fn users_manage_their_own_keys() {
     let server = start().await;
     let iam = iam_as(&server, ACCESS_KEY, SECRET_KEY);

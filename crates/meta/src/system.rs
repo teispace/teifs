@@ -30,6 +30,8 @@ const MIGRATIONS: &[&str] = &[
      ) WITHOUT ROWID;",
     // 5: IAM roles.
     crate::iam::ROLES_MIGRATION,
+    // 6: IAM OpenID Connect providers.
+    crate::iam::OIDC_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

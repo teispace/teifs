@@ -8,6 +8,7 @@
 //! ARNs compare with case, so a Deny can't be dodged by spelling a name differently.
 
 mod groups;
+mod oidc;
 mod params;
 mod policies;
 mod roles;
@@ -328,6 +329,7 @@ enum On {
     Group,
     Role,
     Policy,
+    OidcProvider,
     /// STS's `federated-user`.
     FederatedUser,
 }
@@ -450,6 +452,16 @@ actions! {
     GetRolePolicy: Role, &[], policies::get_role_inline;
     ListRolePolicies: Role, &[], policies::list_role_inline;
     DeleteRolePolicy: Role, BOUNDARY, policies::delete_role_inline;
+    CreateOpenIDConnectProvider: OidcProvider, TAGGING, oidc::create;
+    GetOpenIDConnectProvider: OidcProvider, &[], oidc::get;
+    ListOpenIDConnectProviders: Any, &[], oidc::list;
+    DeleteOpenIDConnectProvider: OidcProvider, &[], oidc::delete;
+    AddClientIDToOpenIDConnectProvider: OidcProvider, &[], oidc::add_client_id;
+    RemoveClientIDFromOpenIDConnectProvider: OidcProvider, &[], oidc::remove_client_id;
+    UpdateOpenIDConnectProviderThumbprint: OidcProvider, &[], oidc::update_thumbprint;
+    TagOpenIDConnectProvider: OidcProvider, TAGGING, oidc::tag;
+    UntagOpenIDConnectProvider: OidcProvider, TAG_KEYS, oidc::untag;
+    ListOpenIDConnectProviderTags: OidcProvider, &[], oidc::list_tags;
     GetAccountSummary: Any, &[], account_summary;
 }
 
@@ -526,7 +538,9 @@ impl Run<'_> {
             On::Group => "group",
             On::Role => "role",
             On::Policy => "policy",
-            On::Any | On::FederatedUser => unreachable!("only IAM's resources are made"),
+            On::Any | On::OidcProvider | On::FederatedUser => {
+                unreachable!("only IAM's entities with paths are made")
+            }
         };
         Resource {
             on,
@@ -629,6 +643,31 @@ impl Run<'_> {
             .flatten()
             .unwrap_or_else(|| Resource {
                 on: On::Policy,
+                arn: arn.to_owned(),
+                name: String::new(),
+                path: String::new(),
+                tags: Vec::new(),
+                boundary: None,
+            })
+    }
+
+    /// The OpenID Connect provider with this ARN, or the ARN as given.
+    fn oidc_provider(&self, arn: &str) -> Resource {
+        self.iam
+            .read(|s| {
+                Ok(s.oidc_provider_by_arn(arn).ok().map(|p| Resource {
+                    on: On::OidcProvider,
+                    arn: s.oidc_provider_arn(p),
+                    name: p.name().to_owned(),
+                    path: String::new(),
+                    tags: p.tags.clone(),
+                    boundary: None,
+                }))
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Resource {
+                on: On::OidcProvider,
                 arn: arn.to_owned(),
                 name: String::new(),
                 path: String::new(),

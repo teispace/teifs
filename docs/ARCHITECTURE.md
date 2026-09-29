@@ -89,7 +89,8 @@ narrows" on thousands of random policies.
 
 ### IAM
 
-`teifs-iam` keeps a drive's users, access keys, groups, roles and policies in `system.db` and
+`teifs-iam` keeps a drive's users, access keys, groups, roles, OpenID Connect providers
+and policies in `system.db` and
 the whole state in memory. A change (`Iam::change`) edits a copy of the state (entities
 are behind `Arc`s, so the copy is cheap), checks AWS's rules against it, writes every
 row it touched in one transaction, and only then swaps the copy in and rebuilds the
@@ -108,6 +109,10 @@ actions only, no `Resource` (it's the role). When it's set, the account's users 
 it names are resolved to their unique ids and kept with the role (`principals`), which
 is how AWS keeps a principal that's deleted and made again under the same name from
 inheriting the trust.
+
+An OpenID Connect provider (`ops/oidc.rs`) is the issuer URL a web identity token must
+name, the audiences it may be for and the certificate thumbprints it may be pinned to;
+its ARN ends in the URL without the scheme, which is also what makes it unique.
 
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
@@ -156,7 +161,7 @@ settings, which the store changes atomically so ACLs can't be disabled while the
 bucket's ACL grants others; an object's ACL is one of its attributes, never copied.
 
 IAM is managed with AWS's own API: `teifs-iam`'s `api` module speaks the Query protocol
-(a form body, answers in XML) for 70 IAM actions and STS's `AssumeRole` (AWS's, and
+(a form body, answers in XML) for 80 IAM actions and STS's `AssumeRole` (AWS's, and
 MinIO's without a role), `GetSessionToken`, `GetFederationToken`, `GetCallerIdentity`
 and `GetAccessKeyInfo` (`api/sts.rs`). Actions are tables (`api/mod.rs`,
 `api/sts.rs`) of name, resource kind and the condition keys they set; a test checks

@@ -73,6 +73,13 @@ impl Xml {
         })
     }
 
+    /// `<tag><member>text</member>…</tag>`.
+    pub(crate) fn list(&mut self, tag: &str, items: &[String]) -> &mut Self {
+        self.members(tag, items, |x, item| {
+            x.content(item);
+        })
+    }
+
     /// `<Tags>` as AWS lists them.
     pub(crate) fn tags(&mut self, tags: &[(String, String)]) -> &mut Self {
         self.members("Tags", tags, |x, (key, value)| {

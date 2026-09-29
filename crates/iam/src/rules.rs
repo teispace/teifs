@@ -20,6 +20,12 @@ pub(crate) const MAX_KEYS_PER_USER: usize = 2;
 pub(crate) const MAX_VERSIONS: usize = 5;
 /// Tags on one user, role or policy.
 pub(crate) const MAX_TAGS: usize = 50;
+/// OpenID Connect providers per account.
+pub(crate) const MAX_OIDC_PROVIDERS: usize = 100;
+/// Audiences (client ids) of one OpenID Connect provider.
+pub(crate) const MAX_CLIENT_IDS: usize = 100;
+/// Certificate thumbprints of one OpenID Connect provider.
+pub(crate) const MAX_THUMBPRINTS: usize = 5;
 
 /// The longest user or role name.
 pub(crate) const USER_NAME: usize = 64;
@@ -175,6 +181,101 @@ pub(crate) fn max_session(seconds: u32) -> Result<u32> {
     }
 }
 
+/// An OpenID Connect provider's URL: `https://` and a host, with an optional port and
+/// path but no user, query or fragment, at most 255 characters. `http://` is allowed for
+/// a loopback host only (an identity provider on the same machine), which AWS has no
+/// use for. Returns the URL without its scheme: the last part of the provider's ARN.
+pub(crate) fn oidc_url(url: &str) -> Result<&str> {
+    let bad = |why: &str| {
+        Err(IamError::InvalidInput(format!(
+            "The URL `{url}` isn't an OpenID Connect provider's: {why}."
+        )))
+    };
+    if url.is_empty() || url.len() > 255 {
+        return bad("it must be 1 to 255 characters");
+    }
+    let (secure, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return bad("it must start with https://");
+    };
+    if !rest.bytes().all(|b| b.is_ascii_graphic()) || rest.contains(['?', '#', '@', '\\']) {
+        return bad("it can't have spaces, a user, a query or a fragment");
+    }
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if path.contains("//") || path.split('/').any(|s| s == "." || s == "..") {
+        return bad("its path must be plain");
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((address, port)) if address.parse::<std::net::Ipv6Addr>().is_ok() => {
+                (&authority[..address.len() + 2], port)
+            }
+            _ => return bad("its host isn't an IPv6 address"),
+        },
+        None => authority.split_at(authority.find(':').unwrap_or(authority.len())),
+    };
+    let host_ok = host.starts_with('[')
+        || (!host.is_empty()
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }));
+    if !host_ok {
+        return bad("its host isn't a domain name or an IP address");
+    }
+    if let Some(port) = port.strip_prefix(':') {
+        if port.is_empty() || port.starts_with('0') || port.parse::<u16>().is_err() {
+            return bad("its port isn't 1 to 65535");
+        }
+    } else if !port.is_empty() {
+        return bad("its host isn't a domain name or an IP address");
+    }
+    if !secure && !is_loopback(host) {
+        return bad("it must start with https:// (http:// is only for this machine)");
+    }
+    Ok(rest)
+}
+
+/// Whether a URL's host is this machine: `localhost` or a loopback address.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// An OpenID Connect provider's client id (audience): 1 to 255 characters.
+pub(crate) fn client_id(id: &str) -> Result<()> {
+    if (1..=255).contains(&id.chars().count()) {
+        Ok(())
+    } else {
+        Err(IamError::InvalidInput(format!(
+            "The client id `{id}` must be 1 to 255 characters."
+        )))
+    }
+}
+
+/// A certificate thumbprint: the SHA-1 of the certificate, as 40 hex digits.
+pub(crate) fn thumbprint(thumbprint: &str) -> Result<()> {
+    if thumbprint.len() == 40 && thumbprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(IamError::InvalidInput(format!(
+            "The thumbprint `{thumbprint}` must be 40 hex digits."
+        )))
+    }
+}
+
 /// A policy version id: `v1`, `v2`, ….
 pub(crate) fn version_id(text: &str) -> Result<u32> {
     text.strip_prefix('v')
@@ -268,6 +369,88 @@ mod tests {
         }
         for bad in [0, 900, 3599, 43_201] {
             assert!(max_session(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn oidc_urls() {
+        for (url, name) in [
+            ("https://idp.example.com", "idp.example.com"),
+            ("https://idp.example.com/", "idp.example.com/"),
+            (
+                "https://idp.example.com:8443/realms/a",
+                "idp.example.com:8443/realms/a",
+            ),
+            (
+                "https://token.actions.githubusercontent.com",
+                "token.actions.githubusercontent.com",
+            ),
+            ("https://10.0.0.1", "10.0.0.1"),
+            ("https://[2001:db8::1]:443/x", "[2001:db8::1]:443/x"),
+            ("http://localhost:5556/dex", "localhost:5556/dex"),
+            ("http://127.0.0.1:9000", "127.0.0.1:9000"),
+            ("http://[::1]", "[::1]"),
+        ] {
+            assert_eq!(oidc_url(url).unwrap(), name, "{url}");
+        }
+        assert!(oidc_url(&format!("https://{}.com", "a".repeat(63))).is_ok());
+        assert!(
+            oidc_url(&format!("https://{}.com", "a".repeat(64))).is_err(),
+            "a label is at most 63"
+        );
+        let long = format!("https://a.com/{}", "p".repeat(241));
+        assert_eq!(long.len(), 255);
+        assert!(oidc_url(&long).is_ok());
+        assert!(oidc_url(&format!("{long}p")).is_err());
+        for bad in [
+            "",
+            "idp.example.com",
+            "ftp://idp.example.com",
+            "https://",
+            "https:///x",
+            "https://idp.example.com?x=1",
+            "https://idp.example.com/p?x=1",
+            "https://idp.example.com/p#x",
+            "https://idp.example.com/u@x",
+            "https://idp.example.com#x",
+            "https://user@idp.example.com",
+            "https://idp example.com",
+            "https://idp..example.com",
+            "https://-idp.example.com",
+            "https://idp.example.com:",
+            "https://idp.example.com:0",
+            "https://idp.example.com:08443",
+            "https://idp.example.com:65536",
+            "https://idp.example.com:x",
+            "https://[::1",
+            "https://[nope]",
+            "https://[::1]x",
+            "https://idp.example.com//x",
+            "https://idp.example.com/a/../b",
+            "https://idp.example.com/\\x",
+            "http://idp.example.com",
+            "http://10.0.0.1",
+            "https://idp.é.com",
+        ] {
+            assert!(oidc_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn client_ids_and_thumbprints() {
+        assert!(client_id("sts.amazonaws.com").is_ok());
+        assert!(client_id(&"é".repeat(255)).is_ok());
+        assert!(client_id("").is_err());
+        assert!(client_id(&"x".repeat(256)).is_err());
+        assert!(thumbprint("6938fd4d98bab03faadb97b34396831e3780aea1").is_ok());
+        assert!(thumbprint("6938FD4D98BAB03FAADB97B34396831E3780AEA1").is_ok());
+        for bad in [
+            "",
+            "6938fd4d98bab03faadb97b34396831e3780aea",
+            "6938fd4d98bab03faadb97b34396831e3780aea12",
+            "6938fd4d98bab03faadb97b34396831e3780aeg1",
+        ] {
+            assert!(thumbprint(bad).is_err(), "{bad}");
         }
     }
 

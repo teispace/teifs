@@ -10,7 +10,7 @@ behaviour; the on-disk format is always upgraded automatically.
 - IAM, as AWS has it: users, access keys, groups, customer-managed policies with
   versions, inline policies, permissions boundaries and tags, with AWS's rules, quotas
   and error codes. Requests signed with a user's key do only what the user's policies
-  allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (70
+  allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (80
   actions, each authorized with AWS's condition keys) and STS `GetCallerIdentity` are
   served on the S3 endpoint. Access key secrets are stored sealed by the drive's KMS.
 - IAM roles: CreateRole and the rest of AWS's role actions (trust policies, inline and
@@ -26,6 +26,10 @@ behaviour; the on-disk format is always upgraded automatically.
   browser upload's form, and do only what they were issued for; deleting a role or user
   ends its sessions at once. MinIO's `AssumeRole` without a role gives a user
   credentials for their own permissions, narrowed by a session policy.
+- IAM OpenID Connect providers: CreateOpenIDConnectProvider and the rest of AWS's
+  provider actions (audiences, certificate thumbprints, tags), with AWS's limits, and in
+  IAM export and import. A provider's URL may also have a port, and `http://` for an
+  identity provider on the same machine.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

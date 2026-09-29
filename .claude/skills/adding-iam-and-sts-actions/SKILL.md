@@ -29,7 +29,7 @@ a table, authorizes it and answers in AWS's XML.
    the resource and keys match AWS's (keys of other identity providers, such as
    `saml:…`, are left out for STS).
 3. **The handler** (`crates/iam/src/api/<entity>.rs`): resolve names to the entity's own
-   ARN and tags first (`r.user`, `r.role`, `r.group`, `r.policy`), build the context with
+   ARN and tags first (`r.user`, `r.role`, `r.group`, `r.policy`, `r.oidc_provider`), build the context with
    the action's keys, authorize, then run the operation:
 
    ```rust

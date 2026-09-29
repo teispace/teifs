@@ -370,12 +370,13 @@ async fn import(client: &Client, file: &Path, adopt_account: bool) -> Result<(),
     }
     ui::done(
         format!(
-            "Imported {} users, {} groups, {} roles, {} policies and {} access keys into \
-             account {}",
+            "Imported {} users, {} groups, {} roles, {} policies, {} OpenID Connect providers \
+             and {} access keys into account {}",
             report.users,
             report.groups,
             report.roles,
             report.policies,
+            report.oidc_providers,
             report.access_keys,
             report.account
         ),

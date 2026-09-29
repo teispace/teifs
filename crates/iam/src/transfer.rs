@@ -7,12 +7,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
-    ExportedGroup, ExportedKey, ExportedPolicy, ExportedRole, ExportedUser, ExportedVersion,
-    IAM_FORMAT, IamExport, ImportReport, Tag,
+    ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole, ExportedUser,
+    ExportedVersion, IAM_FORMAT, IamExport, ImportReport, Tag,
 };
 
 use crate::{
-    ACCOUNT, Draft, Iam, IamError, NewRole, Owner, Result,
+    ACCOUNT, Draft, Iam, IamError, NewOidcProvider, NewRole, Owner, Result,
     rules::MAX_KEYS_PER_USER,
     state::{Key, State},
 };
@@ -129,6 +129,17 @@ fn export(state: &State, secrets: bool) -> IamExport {
         })
         .collect();
     roles.sort_by_cached_key(|r| r.name.to_ascii_lowercase());
+    let mut oidc_providers: Vec<ExportedOidcProvider> = state
+        .oidc_providers
+        .values()
+        .map(|p| ExportedOidcProvider {
+            url: p.url.clone(),
+            client_ids: p.client_ids.clone(),
+            thumbprints: p.thumbprints.clone(),
+            tags: tags(&p.tags),
+        })
+        .collect();
+    oidc_providers.sort_by_cached_key(|p| p.url.to_ascii_lowercase());
     IamExport {
         format: IAM_FORMAT.to_owned(),
         account: state.account.to_string(),
@@ -136,6 +147,7 @@ fn export(state: &State, secrets: bool) -> IamExport {
         groups,
         users,
         roles,
+        oidc_providers,
     }
 }
 
@@ -151,9 +163,8 @@ impl Iam {
         export(&self.inner().state, secrets)
     }
 
-    /// Makes `export` in this IAM, which must have no users, groups, roles, policies or
-    /// keys;
-    /// with `adopt_account`, the account takes the export's id too. All or nothing.
+    /// Makes `export` in this IAM, which must have no users, groups, roles, policies,
+    /// OpenID Connect providers or keys; with `adopt_account`, the account takes the export's id too. All or nothing.
     pub fn import(&self, export: &IamExport, adopt_account: bool) -> Result<ImportReport> {
         if export.format != IAM_FORMAT {
             return Err(IamError::InvalidInput(format!(
@@ -172,11 +183,12 @@ impl Iam {
             if !(s.users.is_empty()
                 && s.groups.is_empty()
                 && s.roles.is_empty()
-                && s.policies.is_empty())
+                && s.policies.is_empty()
+                && s.oidc_providers.is_empty())
             {
                 return Err(IamError::EntityAlreadyExists(
-                    "IAM already has users, groups, roles or policies: import only into an \
-                     empty IAM."
+                    "IAM already has users, groups, roles, policies or OpenID Connect \
+                     providers: import only into an empty IAM."
                         .into(),
                 ));
             }
@@ -207,6 +219,7 @@ impl Iam {
                 groups: export.groups.len(),
                 users: export.users.len(),
                 roles: export.roles.len(),
+                oidc_providers: export.oidc_providers.len(),
                 access_keys: 0,
                 keys_without_secrets: Vec::new(),
             };
@@ -235,6 +248,15 @@ impl Iam {
                         report.keys_without_secrets.push(key.id.clone());
                     }
                 }
+            }
+            // Before the roles, whose trust policies may name them.
+            for provider in &export.oidc_providers {
+                d.create_oidc_provider(&NewOidcProvider {
+                    url: &provider.url,
+                    client_ids: &provider.client_ids,
+                    thumbprints: &provider.thumbprints,
+                    tags: &pairs(&provider.tags),
+                })?;
             }
             import_roles(d, &export.roles, &arn)?;
             Ok(report)

@@ -13,6 +13,8 @@ pub(crate) enum Kind {
     Group,
     Policy,
     Role,
+    /// An OpenID Connect provider, which AWS gives no id; this one is never shown.
+    OidcProvider,
 }
 
 /// A new unique id: the kind's prefix and 17 random base32 characters (21 in all).
@@ -22,6 +24,7 @@ pub(crate) fn unique(kind: Kind) -> String {
         Kind::Group => "AGPA",
         Kind::Policy => "ANPA",
         Kind::Role => "AROA",
+        Kind::OidcProvider => "AOPA",
     };
     format!("{prefix}{}", base32(17))
 }
@@ -77,6 +80,7 @@ mod tests {
         assert!(unique(Kind::Group).starts_with("AGPA"));
         assert!(unique(Kind::Policy).starts_with("ANPA"));
         assert!(unique(Kind::Role).starts_with("AROA"));
+        assert!(unique(Kind::OidcProvider).starts_with("AOPA"));
         let key = access_key();
         assert_eq!(key.len(), 20);
         assert!(key.starts_with("TKIA"));

@@ -8,7 +8,9 @@ use std::{
 };
 
 use teifs_crypto::DataKey;
-use teifs_meta::{AccessKeyRow, IamRows, InlineRow, PolicyRow, PolicyVersionRow, RoleRow};
+use teifs_meta::{
+    AccessKeyRow, IamRows, InlineRow, OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow,
+};
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
 
@@ -124,6 +126,43 @@ impl Role {
     }
 }
 
+/// An OpenID Connect identity provider: whose tokens `AssumeRoleWithWebIdentity` takes.
+#[derive(Debug, Clone)]
+pub(crate) struct OidcProvider {
+    pub(crate) id: String,
+    /// Its URL, as given: the issuer (`iss`) its tokens name.
+    pub(crate) url: String,
+    /// The audiences (`aud`) its tokens may be for.
+    pub(crate) client_ids: Vec<String>,
+    /// The SHA-1 thumbprints of the certificates it may serve its keys with.
+    pub(crate) thumbprints: Vec<String>,
+    pub(crate) created_ms: i64,
+    /// Keys compare without case, as for users.
+    pub(crate) tags: Vec<(String, String)>,
+}
+
+impl OidcProvider {
+    /// Its URL without the scheme: the last part of its ARN.
+    pub(crate) fn name(&self) -> &str {
+        self.url
+            .split_once("://")
+            .map_or(self.url.as_str(), |(_, name)| name)
+    }
+
+    /// The row that stores it.
+    pub(crate) fn row(&self) -> OidcProviderRow {
+        let json = |list: &Vec<String>| serde_json::to_string(list).expect("strings serialize");
+        OidcProviderRow {
+            id: self.id.clone(),
+            name: self.name().to_owned(),
+            url: self.url.clone(),
+            client_ids: json(&self.client_ids),
+            thumbprints: json(&self.thumbprints),
+            created_ms: self.created_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Version {
     pub(crate) document: Document,
@@ -177,6 +216,7 @@ pub(crate) struct State {
     pub(crate) users: BTreeMap<String, Arc<User>>,
     pub(crate) groups: BTreeMap<String, Arc<Group>>,
     pub(crate) roles: BTreeMap<String, Arc<Role>>,
+    pub(crate) oidc_providers: BTreeMap<String, Arc<OidcProvider>>,
     pub(crate) policies: BTreeMap<String, Arc<Managed>>,
     pub(crate) keys: BTreeMap<String, Arc<Key>>,
 }
@@ -188,6 +228,7 @@ impl State {
             account: account.into(),
             policies: load_policies(rows.policies, rows.versions, rows.policy_tags)?,
             keys: load_keys(rows.keys, key)?,
+            oidc_providers: load_oidc_providers(rows.oidc_providers, rows.oidc_provider_tags)?,
             ..Self::default()
         };
         let mut users: BTreeMap<String, User> = rows
@@ -298,6 +339,26 @@ impl State {
             })
     }
 
+    /// The OpenID Connect provider with this ARN (its URL compared without case).
+    pub(crate) fn oidc_provider_by_arn(&self, arn: &str) -> Result<&Arc<OidcProvider>> {
+        let name = arn
+            .strip_prefix("arn:aws:iam::")
+            .and_then(|rest| rest.split_once(':'))
+            .and_then(|(account, rest)| Some((account, rest.strip_prefix("oidc-provider/")?)))
+            .filter(|(_, name)| !name.is_empty());
+        let Some((account, name)) = name else {
+            return Err(IamError::InvalidInput(format!(
+                "`{arn}` isn't an OpenID Connect provider's ARN"
+            )));
+        };
+        self.oidc_providers
+            .values()
+            .find(|p| account == &*self.account && p.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                IamError::NoSuchEntity(format!("OpenIDConnect Provider not found for arn {arn}"))
+            })
+    }
+
     /// The managed policy with this ARN.
     pub(crate) fn policy_by_arn(&self, arn: &str) -> Result<&Arc<Managed>> {
         let missing =
@@ -378,6 +439,14 @@ impl State {
 
     pub(crate) fn role_arn(&self, role: &Role) -> String {
         arn(&self.account, "role", &role.path, &role.name)
+    }
+
+    pub(crate) fn oidc_provider_arn(&self, provider: &OidcProvider) -> String {
+        format!(
+            "arn:aws:iam::{}:oidc-provider/{}",
+            self.account,
+            provider.name()
+        )
     }
 
     pub(crate) fn policy_arn(&self, policy: &PolicyRow) -> String {
@@ -487,6 +556,40 @@ fn load_roles(
         }
     }
     Ok(roles)
+}
+
+fn load_oidc_providers(
+    rows: Vec<OidcProviderRow>,
+    tags: Vec<(String, String, String)>,
+) -> Result<BTreeMap<String, Arc<OidcProvider>>> {
+    let mut providers: BTreeMap<String, OidcProvider> = rows
+        .into_iter()
+        .map(|p| {
+            let list = |json: &str, what: &str| {
+                serde_json::from_str(json).map_err(|e| {
+                    IamError::Stored(format!("OpenID Connect provider {}'s {what}: {e}", p.url))
+                })
+            };
+            let provider = OidcProvider {
+                client_ids: list(&p.client_ids, "client ids")?,
+                thumbprints: list(&p.thumbprints, "thumbprints")?,
+                id: p.id.clone(),
+                url: p.url,
+                created_ms: p.created_ms,
+                tags: Vec::new(),
+            };
+            Ok((p.id, provider))
+        })
+        .collect::<Result<_>>()?;
+    for (provider, key, value) in tags {
+        if let Some(p) = providers.get_mut(&provider) {
+            p.tags.push((key, value));
+        }
+    }
+    Ok(providers
+        .into_iter()
+        .map(|(id, p)| (id, Arc::new(p)))
+        .collect())
 }
 
 fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, Arc<Key>>> {

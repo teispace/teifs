@@ -28,8 +28,8 @@ use teifs_meta::{IamWrite, MetaError, System};
 
 pub use api::{Call, Reply};
 pub use ops::{
-    AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, NewRole, Owner, PolicyInfo,
-    PolicyVersionInfo, RoleInfo, UserInfo,
+    AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, NewOidcProvider, NewRole,
+    OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo, RoleInfo, UserInfo,
 };
 pub use sessions::{AuthError, Issued};
 pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};

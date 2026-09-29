@@ -70,6 +70,9 @@ pub struct IamExport {
     /// Roles.
     #[serde(default)]
     pub roles: Vec<ExportedRole>,
+    /// OpenID Connect providers.
+    #[serde(default)]
+    pub oidc_providers: Vec<ExportedOidcProvider>,
 }
 
 /// A customer-managed policy.
@@ -175,6 +178,23 @@ pub struct ExportedRole {
     pub attached: Vec<String>,
 }
 
+/// An OpenID Connect identity provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedOidcProvider {
+    /// Its URL: the issuer its tokens name.
+    pub url: String,
+    /// The audiences its tokens may be for.
+    #[serde(default)]
+    pub client_ids: Vec<String>,
+    /// The thumbprints of the certificates it's pinned to.
+    #[serde(default)]
+    pub thumbprints: Vec<String>,
+    /// Its tags.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+}
+
 /// An access key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -227,6 +247,9 @@ pub struct ImportReport {
     /// Roles created.
     #[serde(default)]
     pub roles: usize,
+    /// OpenID Connect providers created.
+    #[serde(default)]
+    pub oidc_providers: usize,
     /// Access keys imported.
     pub access_keys: usize,
     /// Access keys skipped because the export has no secret for them.
