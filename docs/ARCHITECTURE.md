@@ -132,10 +132,23 @@ checks it against AWS's service reference (`crates/iam/tests/fixtures`). Each ac
 resolves the names it's given to the entity's own ARN and tags first, asks the caller's
 `Identity::allows` (the same decision S3 requests get), then runs the operation.
 `teifs-s3` serves it on the S3 endpoint (`iam_api.rs`): a signed `POST /` with a form is
-an s3s custom route, dispatched on the signature's service (`iam` or `sts`). SDKs don't
-send `x-amz-content-sha256` for the Query protocol, which s3s needs to check the
-signature, so `cors::Service` adds it from the body before s3s sees the request, and the
-route checks it again, so only the body that was signed is acted on.
+dispatched on the signature's service (`iam` or `sts`). SDKs don't send
+`x-amz-content-sha256` for the Query protocol, which s3s needs to check the signature,
+so `cors::Service` adds it from the body before s3s sees the request, and the route
+checks it again (`routes::signed_body`), so only the body that was signed is acted on.
+
+Everything that isn't an S3 operation goes through one table (`routes.rs`), because s3s
+hands such requests to a single custom route, before it parses a path as a bucket and
+key and after it checks the signature. Each entry names its method, path and what it
+needs of its caller (`Needs`: an action on a resource, or `PerCall` for the Query APIs,
+where IAM decides the action each call names), with no default, and the table refuses
+unsigned requests and unknown keys and decides the action before any handler runs. A
+test walks `teifs_s3::endpoints()` with an anonymous caller and a user without
+permissions. S3 Control (`control.rs`) is told apart from a bucket named `v20180820` by
+its `x-amz-account-id` header, answers errors in its own `ErrorResponse` format, and
+serves the account's Block Public Access, kept in `system.db`'s `settings` table: every
+bucket's rules combine it with the bucket's own (`PublicAccessBlock::or`), and changing
+it forgets every bucket's cached rules.
 
 ### The protocol layer: s3s
 

@@ -22,6 +22,12 @@ const MIGRATIONS: &[&str] = &[
      CREATE UNIQUE INDEX buckets_by_id ON buckets (id);",
     // 3: IAM (teifs-iam owns the rules; these tables only keep its state).
     crate::iam::MIGRATION,
+    // 4: the drive's own settings (JSON the store owns, by name), such as the account's
+    //    Block Public Access.
+    "CREATE TABLE settings (
+        name  TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+     ) WITHOUT ROWID;",
 ];
 
 /// How a bucket stores its objects.
@@ -142,6 +148,33 @@ impl System {
             .execute([name])?;
         Ok(())
     }
+
+    /// A drive setting (JSON the store owns), if it's set.
+    pub fn setting(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT value FROM settings WHERE name = ?1")?
+            .query_row([name], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Sets a drive setting, or removes it (`None`).
+    pub fn set_setting(&self, name: &str, value: Option<&str>) -> Result<()> {
+        match value {
+            Some(value) => self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO settings (name, value) VALUES (?1, ?2)
+                     ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                )?
+                .execute([name, value])?,
+            None => self
+                .conn
+                .prepare_cached("DELETE FROM settings WHERE name = ?1")?
+                .execute([name])?,
+        };
+        Ok(())
+    }
 }
 
 fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BucketRecord> {
@@ -184,5 +217,23 @@ mod tests {
         assert!(!system.set_bucket_config("missing", "{}").unwrap());
         system.forget_bucket("photos").unwrap();
         assert_eq!(system.bucket("photos").unwrap(), None);
+    }
+
+    #[test]
+    fn settings_are_set_replaced_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.db");
+        let system = System::open(&path).unwrap();
+        assert_eq!(system.setting("a").unwrap(), None);
+        system.set_setting("a", Some("1")).unwrap();
+        system.set_setting("a", Some("2")).unwrap();
+        system.set_setting("b", Some("3")).unwrap();
+        drop(system);
+        let system = System::open(&path).unwrap();
+        assert_eq!(system.setting("a").unwrap().as_deref(), Some("2"));
+        system.set_setting("a", None).unwrap();
+        system.set_setting("missing", None).unwrap();
+        assert_eq!(system.setting("a").unwrap(), None);
+        assert_eq!(system.setting("b").unwrap().as_deref(), Some("3"));
     }
 }

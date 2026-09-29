@@ -169,7 +169,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
 | Auth | Signature V4 (headers and presigned URLs); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS `GetCallerIdentity` on the S3 endpoint (`aws iam --endpoint-url …`) |
-| Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list |
+| Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list; account-wide Block Public Access (`aws s3control put-public-access-block`) |
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
@@ -178,7 +178,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** account-level Block Public Access, roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
+**Not yet:** roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

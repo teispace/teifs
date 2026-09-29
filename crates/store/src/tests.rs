@@ -940,6 +940,53 @@ async fn ownership_and_bucket_acls_guard_each_other() {
 }
 
 #[tokio::test]
+async fn the_account_block_public_access_applies_with_every_bucket() {
+    let (dir, store) = drive();
+    assert_eq!(store.account_public_access_block().await.unwrap(), None);
+    store
+        .create_bucket("objects", Layout::Object)
+        .await
+        .unwrap();
+    let access = store.bucket_access("objects").await.unwrap();
+    assert_eq!(access.account_public_access_block, None);
+    let policy_only = PublicAccessBlock {
+        block_public_policy: true,
+        ..PublicAccessBlock::default()
+    };
+    store
+        .set_account_public_access_block(Some(policy_only))
+        .await
+        .unwrap();
+    // A folder made by hand sees it too, and it survives a restart.
+    fs::create_dir(dir.path().join("by-hand")).unwrap();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    for bucket in ["objects", "by-hand"] {
+        let access = store.bucket_access(bucket).await.unwrap();
+        assert_eq!(access.account_public_access_block, Some(policy_only));
+    }
+    store.set_account_public_access_block(None).await.unwrap();
+    assert_eq!(store.account_public_access_block().await.unwrap(), None);
+
+    // Together, each setting is on where either has it.
+    let acls = PublicAccessBlock {
+        block_public_acls: true,
+        restrict_public_buckets: true,
+        ..PublicAccessBlock::default()
+    };
+    let both = PublicAccessBlock {
+        block_public_policy: true,
+        ..acls
+    };
+    assert_eq!(acls.or(policy_only), both);
+    assert_eq!(policy_only.or(acls), both);
+    assert_eq!(
+        PublicAccessBlock::default().or(PublicAccessBlock::ALL),
+        PublicAccessBlock::ALL
+    );
+}
+
+#[tokio::test]
 async fn copies_never_take_the_source_acl() {
     let (_dir, store) = drive();
     let acl = Some(Acl::private());

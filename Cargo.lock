@@ -239,6 +239,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-s3control"
+version = "1.132.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2867704692877aaeeb5d392f82b8907817eca6e6e3aeb854e508b5bd1c8f1f8"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http",
+ "md-5",
+ "regex-lite",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "aws-sdk-sts"
 version = "1.118.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2929,10 +2956,13 @@ dependencies = [
 name = "teifs-server"
 version = "0.1.0"
 dependencies = [
+ "aws-credential-types",
  "aws-lc-rs",
  "aws-sdk-iam",
  "aws-sdk-s3",
+ "aws-sdk-s3control",
  "aws-sdk-sts",
+ "aws-sigv4",
  "base64",
  "dirs",
  "hyper-util",

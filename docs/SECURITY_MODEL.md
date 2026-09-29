@@ -48,13 +48,19 @@ policy decided: an explicit Deny still wins, a permissions boundary still limits
 `BlockPublicAcls` refuses public ACLs while `IgnorePublicAcls` makes stored ones grant
 nothing. A copy never takes its source's ACL. `serve --legacy-bucket-defaults` makes new
 buckets as S3 did before April 2023 (ACLs enabled, no Block Public Access) for
-applications that upload with public ACLs; it is off by default.
+applications that upload with public ACLs; it is off by default. The account's Block
+Public Access settings (S3 Control) apply with every bucket's, each setting on where
+either has it, so one setting closes every bucket at once.
 
-### 2. Every endpoint declares what it authorizes (*planned*)
-Admin, health and metrics endpoints will be registered in one route table where each
-route declares its action, and the server refuses to start a route without one. A test
-walks the table and proves anonymous and under-privileged callers are rejected.
-Profiling and debug endpoints are off by default and admin-only.
+### 2. Every endpoint declares what it authorizes (*built for IAM, STS and S3 Control; admin endpoints next*)
+Everything served besides S3's operations is one table (`crates/s3/src/routes.rs`) in
+which each endpoint states what it needs: an action on a resource, or, for the IAM and
+STS Query APIs, the action each call names, which IAM decides. The field has no
+default, so an endpoint can't be added without it. The table refuses unsigned requests
+and unknown keys and decides the action before the handler runs; a test walks every
+endpoint as an anonymous caller and as a user without permissions. The health check is
+the one unsigned endpoint (above). Profiling and debug endpoints will be off by default
+and admin-only.
 
 ### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced for IAM users, bucket policies and anonymous requests*)
 `teifs-policy` has no I/O and decides in AWS's order: an explicit Deny in any policy

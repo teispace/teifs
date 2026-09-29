@@ -5,6 +5,7 @@ mod access;
 mod acl;
 mod bucket_access;
 mod checksums;
+mod control;
 mod cors;
 mod crc_combine;
 mod drive;
@@ -13,6 +14,7 @@ mod errors;
 mod health;
 mod iam_api;
 mod limits;
+mod routes;
 mod sse;
 mod tagging;
 
@@ -31,6 +33,7 @@ pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
+pub use routes::{EndpointInfo, endpoints};
 
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
@@ -75,8 +78,16 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));
-        builder.set_access(access::Access::new(iam.clone(), rules, store.clone()));
-        builder.set_route(iam_api::Route { iam });
+        builder.set_access(access::Access::new(
+            iam.clone(),
+            rules.clone(),
+            store.clone(),
+        ));
+        builder.set_route(routes::Routes {
+            iam,
+            store: store.clone(),
+            rules,
+        });
     }
     let host = if options.domains.is_empty() {
         None

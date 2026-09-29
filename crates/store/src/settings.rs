@@ -106,7 +106,22 @@ impl PublicAccessBlock {
         block_public_policy: true,
         restrict_public_buckets: true,
     };
+
+    /// Each setting on where either is: what applies when both the account and a bucket
+    /// have settings (the most restrictive).
+    #[must_use]
+    pub const fn or(self, other: Self) -> Self {
+        Self {
+            block_public_acls: self.block_public_acls || other.block_public_acls,
+            ignore_public_acls: self.ignore_public_acls || other.ignore_public_acls,
+            block_public_policy: self.block_public_policy || other.block_public_policy,
+            restrict_public_buckets: self.restrict_public_buckets || other.restrict_public_buckets,
+        }
+    }
 }
+
+/// The name the account's Block Public Access settings are kept under.
+const ACCOUNT_PUBLIC_ACCESS_BLOCK: &str = "accountPublicAccessBlock";
 
 /// S3 Object Ownership: whether a bucket's ACLs are enabled, and who owns objects others
 /// write (in a one-account drive, always the account).
@@ -165,6 +180,8 @@ pub struct BucketAccess {
     pub ownership: Option<ObjectOwnership>,
     /// The bucket's ACL; none is private.
     pub acl: Option<Acl>,
+    /// The account's Block Public Access settings, which apply with the bucket's.
+    pub account_public_access_block: Option<PublicAccessBlock>,
 }
 
 /// How a new bucket starts, beyond its layout. The default is AWS's: ACLs disabled and
@@ -276,15 +293,42 @@ impl Store {
             .await
     }
 
-    /// A bucket's policy and Block Public Access settings.
+    /// What decides who may reach a bucket: its policy, Block Public Access settings,
+    /// Object Ownership and ACL, and the account's Block Public Access settings.
     pub async fn bucket_access(&self, bucket: &str) -> Result<BucketAccess> {
-        let config = self.config(bucket).await?;
-        Ok(BucketAccess {
-            policy: config.policy,
-            public_access_block: config.public_access_block,
-            ownership: config.ownership,
-            acl: config.acl,
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            let system = inner.system();
+            let config = read_config(system.bucket_config(&name)?.as_deref())?;
+            Ok(BucketAccess {
+                policy: config.policy,
+                public_access_block: config.public_access_block,
+                ownership: config.ownership,
+                acl: config.acl,
+                account_public_access_block: account_block(&system)?,
+            })
         })
+        .await
+    }
+
+    /// The account's Block Public Access settings, if it has any.
+    pub async fn account_public_access_block(&self) -> Result<Option<PublicAccessBlock>> {
+        self.blocking(|inner| account_block(&inner.system())).await
+    }
+
+    /// Replaces the account's Block Public Access settings; `None` removes them.
+    pub async fn set_account_public_access_block(
+        &self,
+        block: Option<PublicAccessBlock>,
+    ) -> Result<()> {
+        let json = block.map(|b| serde_json::to_string(&b).expect("the settings serialize"));
+        self.blocking(move |inner| {
+            Ok(inner
+                .system()
+                .set_setting(ACCOUNT_PUBLIC_ACCESS_BLOCK, json.as_deref())?)
+        })
+        .await
     }
 
     /// Replaces a bucket's policy (checked by the caller); `None` removes it.
@@ -410,6 +454,13 @@ impl Inner {
         }
         Ok(())
     }
+}
+
+fn account_block(system: &teifs_meta::System) -> Result<Option<PublicAccessBlock>> {
+    system
+        .setting(ACCOUNT_PUBLIC_ACCESS_BLOCK)?
+        .map(|json| serde_json::from_str(&json).map_err(|_| StoreError::CorruptMetadata))
+        .transpose()
 }
 
 fn read_config(json: Option<&str>) -> Result<BucketConfig> {

@@ -56,6 +56,9 @@ tempfile = "3"
 aws-sdk-s3 = { version = "1.150", default-features = false, features = ["behavior-version-latest", "http-1x", "default-https-client", "rt-tokio"] }
 aws-sdk-iam = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sigv4 = { version = "1", default-features = false, features = ["http1"] }
+aws-credential-types = "1"
+aws-sdk-s3control = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"

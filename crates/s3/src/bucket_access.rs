@@ -27,7 +27,8 @@ pub(crate) struct BucketRules {
     pub(crate) policy: Option<Arc<Policy>>,
     /// Whether the policy is public.
     pub(crate) public: bool,
-    /// The bucket's Block Public Access settings (none when it has none).
+    /// The Block Public Access settings in force: the bucket's and the account's, each
+    /// setting on where either has it (none when neither has any).
     pub(crate) block: PublicAccessBlock,
     /// Its Object Ownership: a bucket made before the setting existed has ACLs, as
     /// `ObjectWriter`.
@@ -49,7 +50,10 @@ impl BucketRules {
         Self {
             public: policy.as_deref().is_some_and(Policy::is_public),
             policy,
-            block: access.public_access_block.unwrap_or_default(),
+            block: access
+                .public_access_block
+                .unwrap_or_default()
+                .or(access.account_public_access_block.unwrap_or_default()),
             ownership: access.ownership.unwrap_or(ObjectOwnership::ObjectWriter),
             acl: access.acl,
         }
@@ -120,6 +124,13 @@ impl Rules {
         let mut cache = self.cache.write().unwrap_or_else(PoisonError::into_inner);
         self.generation.fetch_add(1, Ordering::AcqRel);
         cache.remove(bucket);
+    }
+
+    /// Forgets every bucket's rules, after the account's settings changed.
+    pub(crate) fn forget_all(&self) {
+        let mut cache = self.cache.write().unwrap_or_else(PoisonError::into_inner);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        cache.clear();
     }
 }
 
@@ -276,6 +287,29 @@ mod tests {
         let second = rules.of("bkt").await.unwrap();
         assert!(second.public && second.restricted());
         assert_eq!(cached(), 1);
+
+        // The account's settings apply with the bucket's, once every bucket is forgotten.
+        store
+            .set_bucket_public_access_block("bkt", None)
+            .await
+            .unwrap();
+        let account = PublicAccessBlock {
+            ignore_public_acls: true,
+            ..PublicAccessBlock::default()
+        };
+        store
+            .set_account_public_access_block(Some(account))
+            .await
+            .unwrap();
+        assert!(
+            rules.of("bkt").await.unwrap().restricted(),
+            "until forgotten"
+        );
+        rules.forget_all();
+        assert_eq!(cached(), 0);
+        let third = rules.of("bkt").await.unwrap();
+        assert_eq!(third.block, account);
+        assert!(!third.restricted());
     }
 
     #[test]

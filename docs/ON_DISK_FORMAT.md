@@ -142,6 +142,9 @@ What can't be rebuilt from the files.
 |---|---|
 | `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL) |
 
+| `settings` | The drive's own settings, by `name`, each a JSON `value`: `accountPublicAccessBlock`, the account's Block Public Access settings |
+| `iam_*` | IAM's users, access keys (secrets sealed by the drive's KMS), groups, policies and their versions, attachments and tags |
+
 A bucket folder without a row is a folder bucket with default settings.
 
 ### Durability

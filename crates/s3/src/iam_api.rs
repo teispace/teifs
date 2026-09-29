@@ -9,23 +9,24 @@
 //! checks the hash against the body again itself, so a request whose body isn't what
 //! was signed (or that says `UNSIGNED-PAYLOAD`) is refused whatever s3s does with it.
 
-use std::sync::Arc;
-
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
-use s3s::{Body, S3Request, S3Response, S3Result, route::S3Route};
+use s3s::{Body, S3Request, S3Response};
 use teifs_iam::{Call, Iam, Reply};
 
-use crate::access::{Client, base_context};
+use crate::{
+    access::{Client, base_context},
+    routes::{INCOMPLETE, signed_body, unreadable},
+};
 
 /// The largest form accepted: AWS's largest (a policy document of 131 072 characters)
 /// percent-encoded three times over, with room to spare.
 pub(crate) const MAX_FORM_BYTES: usize = 512 * 1024;
 
-const CONTENT_SHA256: &str = "x-amz-content-sha256";
+pub(crate) const CONTENT_SHA256: &str = "x-amz-content-sha256";
 const FORM: &str = "application/x-www-form-urlencoded";
 
 /// Whether a request is a form posted to `/`: what the Query protocol sends.
-fn is_form_post(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
+pub(crate) fn is_form_post(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
     method == Method::POST
         && uri.path() == "/"
         && headers
@@ -35,7 +36,7 @@ fn is_form_post(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
             .is_some_and(|v| v.trim().eq_ignore_ascii_case(FORM))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes);
     digest
         .as_ref()
@@ -76,148 +77,67 @@ pub(crate) async fn with_payload_hash(
     Ok(req)
 }
 
-type Refusal = (StatusCode, &'static str, &'static str);
-
-/// A body that ended before its length.
-const INCOMPLETE: Refusal = (
-    StatusCode::BAD_REQUEST,
-    "IncompleteBody",
-    "You did not provide the number of bytes specified by the Content-Length HTTP header.",
-);
-
-/// A body that isn't what the signature's `x-amz-content-sha256` says.
-const NOT_SIGNED: Refusal = (
-    StatusCode::FORBIDDEN,
-    "SignatureDoesNotMatch",
-    "The request's body isn't the one its signature covers.",
-);
-
-/// Why a body couldn't be read: too large, stalled, or else `otherwise`.
-fn unreadable(
-    err: &(dyn std::error::Error + Send + Sync + 'static),
-    otherwise: Refusal,
-) -> Refusal {
-    let err: &(dyn std::error::Error + 'static) = err;
-    let too_large = std::iter::successors(Some(err), |e| e.source()).any(|e| {
-        e.is::<s3s::BodySizeLimitExceeded>() || e.is::<http_body_util::LengthLimitError>()
-    });
-    if too_large {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "EntityTooLarge",
-            "The request body is larger than an IAM request can be.",
-        )
-    } else if crate::limits::is_stalled(err) {
-        (
-            StatusCode::BAD_REQUEST,
-            "RequestTimeout",
-            "Your socket connection to the server was not read from or written to within the \
-             timeout period.",
-        )
-    } else {
-        otherwise
+/// Answers an IAM or STS request, in the Query protocol's format.
+pub(crate) async fn serve(iam: &Iam, mut req: S3Request<Body>) -> S3Response<Body> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let reply = answer(iam, &mut req, &request_id).await;
+    let mut response = S3Response::new(Body::from(reply.body));
+    response.status =
+        Some(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    response
+        .headers
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/xml"));
+    if let Ok(id) = HeaderValue::from_str(&request_id) {
+        response.headers.insert("x-amzn-requestid", id);
     }
+    response
 }
 
-/// The route s3s hands IAM and STS requests to.
-pub(crate) struct Route {
-    pub(crate) iam: Arc<Iam>,
-}
-
-#[async_trait::async_trait]
-impl S3Route for Route {
-    fn is_match(
-        &self,
-        method: &Method,
-        uri: &Uri,
-        headers: &HeaderMap,
-        _: &mut http::Extensions,
-    ) -> bool {
-        is_form_post(method, uri, headers)
-    }
-
-    /// Everything is decided in [`Self::call`], so refusals are in IAM's format.
-    async fn check_access(&self, _: &mut S3Request<Body>) -> S3Result<()> {
-        Ok(())
-    }
-
-    async fn call(&self, mut req: S3Request<Body>) -> S3Result<S3Response<Body>> {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let reply = self.answer(&mut req, &request_id).await;
-        let mut response = S3Response::new(Body::from(reply.body));
-        response.status =
-            Some(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-        response
-            .headers
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/xml"));
-        if let Ok(id) = HeaderValue::from_str(&request_id) {
-            response.headers.insert("x-amzn-requestid", id);
-        }
-        Ok(response)
-    }
-}
-
-impl Route {
-    async fn answer(&self, req: &mut S3Request<Body>, request_id: &str) -> Reply {
-        let refuse = |status: StatusCode, code: &str, message: &str| Reply {
-            status: status.as_u16(),
-            body: format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ErrorResponse><Error><Type>Sender</Type>\
+async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply {
+    let refuse = |status: StatusCode, code: &str, message: &str| Reply {
+        status: status.as_u16(),
+        body: format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ErrorResponse><Error><Type>Sender</Type>\
                  <Code>{code}</Code><Message>{message}</Message></Error>\
                  <RequestId>{request_id}</RequestId></ErrorResponse>"
-            ),
-        };
-        let Some(access_key) = req.credentials.as_ref().map(|c| c.access_key.clone()) else {
-            return refuse(
-                StatusCode::FORBIDDEN,
-                "MissingAuthenticationToken",
-                "Request is missing Authentication Token",
-            );
-        };
-        // A key deleted since its signature was checked is refused like any other.
-        let Some(credential) = self.iam.credential(&access_key) else {
-            return refuse(
-                StatusCode::FORBIDDEN,
-                "InvalidClientTokenId",
-                "The security token included in the request is invalid.",
-            );
-        };
-        // s3s checks a hash it was given while the body is read; a failure then is a
-        // body other than the one signed.
-        let body = match req.input.store_all_limited(MAX_FORM_BYTES).await {
-            Ok(body) => body,
-            Err(err) => {
-                let (status, code, message) = unreadable(err.as_ref(), NOT_SIGNED);
-                return refuse(status, code, message);
-            }
-        };
-        let signed = req
-            .headers
-            .get(CONTENT_SHA256)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|hash| hash.eq_ignore_ascii_case(&sha256_hex(&body)));
-        if !signed {
-            let (status, code, message) = NOT_SIGNED;
-            return refuse(status, code, message);
-        }
-        let client = req.extensions.get::<Client>().copied().unwrap_or_default();
-        let identity = &credential.identity;
-        let context = base_context(identity, &req.headers, client, &self.iam.account());
-        let call = Call {
-            identity,
-            context: &context,
-            body: &body,
-            request_id,
-        };
-        match req.service.as_deref() {
-            Some("iam") => self.iam.serve_iam(&call),
-            Some("sts") => self.iam.serve_sts(&call),
-            _ => refuse(
-                StatusCode::BAD_REQUEST,
-                "InvalidAction",
-                "A form posted to / is an IAM or STS request, signed for service iam or sts.",
-            ),
-        }
+        ),
+    };
+    let Some(access_key) = req.credentials.as_ref().map(|c| c.access_key.clone()) else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "MissingAuthenticationToken",
+            "Request is missing Authentication Token",
+        );
+    };
+    // A key deleted since its signature was checked is refused like any other.
+    let Some(credential) = iam.credential(&access_key) else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "InvalidClientTokenId",
+            "The security token included in the request is invalid.",
+        );
+    };
+    let body = match signed_body(req, MAX_FORM_BYTES).await {
+        Ok(body) => body,
+        Err((status, code, message)) => return refuse(status, code, message),
+    };
+    let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+    let identity = &credential.identity;
+    let context = base_context(identity, &req.headers, client, &iam.account());
+    let call = Call {
+        identity,
+        context: &context,
+        body: &body,
+        request_id,
+    };
+    match req.service.as_deref() {
+        Some("iam") => iam.serve_iam(&call),
+        Some("sts") => iam.serve_sts(&call),
+        _ => refuse(
+            StatusCode::BAD_REQUEST,
+            "InvalidAction",
+            "A form posted to / is an IAM or STS request, signed for service iam or sts.",
+        ),
     }
 }
 

@@ -25,6 +25,9 @@ behaviour; the on-disk format is always upgraded automatically.
   `AccessControlListNotSupported` instead of being accepted and ignored; enable ACLs on a
   bucket with PutBucketOwnershipControls, or start the server with
   `--legacy-bucket-defaults` to make new buckets as S3 did before April 2023.
+- Account-wide Block Public Access, with AWS's S3 Control API
+  (`aws s3control get|put|delete-public-access-block`): it applies with every bucket's
+  own settings, the most restrictive winning.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.
