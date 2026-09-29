@@ -165,7 +165,10 @@ fetched only from providers an administrator created, over `https` (or `http` to
 machine), from the `jwks_uri` of a discovery document whose issuer is the provider's,
 with no redirects, a 5-second timeout and at most 256 KiB read; a flood of tokens naming
 unknown keys asks a provider at most once in 30 seconds. A trust policy's `Federated`
-principal names one provider's ARN, without wildcards. Tests:
+principal names one provider's ARN, without wildcards. A token names managed policies
+for itself (MinIO's way, without a role) only for a provider an administrator tagged
+`teifs:policy-claim`, and only policies that exist; its session ends when the provider
+is deleted, and loses a policy that's deleted. Tests:
 `crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/api/tests/web_identity.rs`,
 `crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
 `crates/server/tests/admin.rs`.

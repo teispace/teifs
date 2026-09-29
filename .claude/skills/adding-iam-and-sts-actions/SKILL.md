@@ -49,7 +49,11 @@ a table, authorizes it and answers in AWS's XML.
    `sts::permitted` (STS) and `Session::may_manage` (IAM and the admin API) in
    `crates/iam/src/snapshot.rs`. What a session is made of is `sessions::Claims`; a
    change to it bumps `VERSION` only if older tokens can't be read the new way (a new
-   optional field with `#[serde(default)]`, as `web`, doesn't).
+   optional field with `#[serde(default)]`, as `web`, doesn't). A new kind of session is
+   a `sessions::Who` variant holding unique ids, resolved against IAM as it is now in
+   `Snapshot::build_session`, and a `SessionKind` that both places above must handle.
+   Every action that issues credentials takes `min_token_size(r)?` and issues with
+   `Iam::issue_at_least`, so `MinimumSessionTokenSize` works everywhere.
    An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`)
    is answered unsigned: `Iam::is_web_identity` picks it out in
    `crates/s3/src/iam_api.rs`, and `Iam::serve_web_identity` fetches what it needs

@@ -63,6 +63,10 @@ pub enum SessionKind {
     /// MinIO's `AssumeRole` without a role: the user's own permissions, narrowed by the
     /// session policy if there is one.
     User,
+    /// MinIO's `AssumeRoleWithWebIdentity` without a role: the managed policies a web
+    /// identity token's policy claim names, narrowed by the session policy if there is
+    /// one.
+    Web,
 }
 
 impl Session {
@@ -100,7 +104,10 @@ impl Session {
     /// TeiFS doesn't have, so only role sessions (and MinIO's) may.
     #[must_use]
     pub const fn may_manage(&self) -> bool {
-        matches!(self.kind, SessionKind::Role { .. } | SessionKind::User)
+        matches!(
+            self.kind,
+            SessionKind::Role { .. } | SessionKind::User | SessionKind::Web
+        )
     }
 }
 
@@ -345,6 +352,10 @@ pub(crate) struct Snapshot {
     users: HashMap<Box<str>, Arc<Identity>>,
     /// Every role, by unique id.
     roles: HashMap<Box<str>, RoleEntry>,
+    /// Every managed policy's default version, by unique id.
+    managed: HashMap<Box<str>, Arc<Policy>>,
+    /// Every OpenID Connect provider's unique id.
+    providers: std::collections::HashSet<Box<str>>,
     root: Arc<Identity>,
     /// Sessions' identities by access key id, until IAM next changes (a new snapshot).
     sessions: RwLock<HashMap<Box<str>, Cached>>,
@@ -418,11 +429,23 @@ impl Snapshot {
                 (role.id.as_str().into(), entry)
             })
             .collect();
+        let managed = state
+            .policies
+            .iter()
+            .map(|(id, p)| (id.as_str().into(), p.default_document().policy.clone()))
+            .collect();
+        let providers = state
+            .oidc_providers
+            .keys()
+            .map(|id| id.as_str().into())
+            .collect();
         Self {
             account: Arc::clone(&state.account),
             keys,
             users,
             roles,
+            managed,
+            providers,
             root: root_identity,
             sessions: RwLock::default(),
         }
@@ -526,6 +549,14 @@ impl Snapshot {
                 session: Some(session(SessionKind::User, false)),
                 ..Identity::clone(self.users.get(user.as_str())?)
             },
+            Who::Web {
+                provider,
+                sub,
+                policies,
+            } => Identity {
+                session: Some(session(SessionKind::Web, false)),
+                ..self.web_identity(provider, sub, policies, claims.web.as_ref()?)?
+            },
             Who::Federated { user, name } => {
                 let (policies, boundary, tags) = match user {
                     Some(user) => {
@@ -544,6 +575,35 @@ impl Snapshot {
                     session: Some(session(SessionKind::Federated, true)),
                 }
             }
+        })
+    }
+
+    /// Whom MinIO's `AssumeRoleWithWebIdentity` without a role makes a session for:
+    /// the web identity `sub` of the provider with unique id `provider`, with the
+    /// managed policies (by unique id) its token named. A deleted provider takes its
+    /// sessions with it; a deleted policy only its own permissions.
+    fn web_identity(
+        &self,
+        provider: &str,
+        sub: &str,
+        policies: &[String],
+        web: &crate::sessions::WebClaims,
+    ) -> Option<Identity> {
+        if !self.providers.contains(provider) {
+            return None;
+        }
+        Some(Identity {
+            principal: Principal::web_identity(&web.provider, sub).in_account(&self.account),
+            root: false,
+            tags: Box::default(),
+            policies: policies
+                .iter()
+                .filter_map(|id| self.managed.get(id.as_str()))
+                .cloned()
+                .collect(),
+            boundary: None,
+            entity: None,
+            session: None,
         })
     }
 }

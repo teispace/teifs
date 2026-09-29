@@ -786,3 +786,48 @@ async fn minio_assume_role_narrows_the_users_own_permissions() {
     ));
     assert_eq!(d.sts_code(&bob, "Action=AssumeRole"), "AccessDenied");
 }
+
+#[tokio::test]
+async fn session_tokens_are_padded_to_the_size_asked_for() {
+    let d = drive().await;
+    d.open_role("wide");
+    let alice = d.identity(&d.user("alice", ALLOW_ALL));
+    let token_of = |body: &str| between(body, "<SessionToken>", "</SessionToken>").len();
+    let utilization = |body: &str| {
+        between(
+            body,
+            "<SessionTokenUtilization>",
+            "</SessionTokenUtilization>",
+        )
+        .to_owned()
+    };
+    let requests = [
+        assuming(&d, "wide", "s1", ""),
+        "Action=AssumeRole&DurationSeconds=900".to_owned(),
+        "Action=GetSessionToken".to_owned(),
+        "Action=GetFederationToken&Name=bob".to_owned(),
+    ];
+    for request in &requests {
+        let plain = d.sts_ok(&alice, request);
+        for size in [0, 1, 1000, 4095, 4096] {
+            let body = format!("{request}&MinimumSessionTokenSize={size}");
+            let answer = d.sts_ok(&alice, &body);
+            let length = token_of(&answer);
+            assert!(length >= size, "{body}: {length}");
+            // As short as it can be: no more than one base64 group over.
+            assert!(length <= size.max(token_of(&plain)) + 3, "{body}: {length}");
+            assert_eq!(
+                between(&answer, "<SessionTokenSize>", "</SessionTokenSize>"),
+                length.to_string()
+            );
+            assert_eq!(utilization(&answer), utilization(&plain), "{body}");
+            // The padded token is a working one.
+            let session = d.session(&answer);
+            assert!(session.session().is_some());
+        }
+        for bad in ["4097", "-1", "big", "1.5"] {
+            let body = format!("{request}&MinimumSessionTokenSize={bad}");
+            assert_eq!(d.sts_code(&alice, &body), "ValidationError", "{body}");
+        }
+    }
+}

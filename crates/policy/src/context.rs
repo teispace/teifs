@@ -162,6 +162,15 @@ impl Principal {
         }
     }
 
+    /// The same web identity, with a session in `account`: MinIO's
+    /// `AssumeRoleWithWebIdentity` without a role, whose session acts as the web
+    /// identity itself (`aws:PrincipalAccount`).
+    #[must_use]
+    pub fn in_account(mut self, account: &str) -> Self {
+        self.account = Some(account.to_owned());
+        self
+    }
+
     /// The same principal, started by someone the identity provider `provider` vouched
     /// for (`aws:FederatedProvider`): a role session from `AssumeRoleWithWebIdentity`.
     #[must_use]

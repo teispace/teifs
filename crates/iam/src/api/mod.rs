@@ -258,6 +258,15 @@ impl ApiError {
         }
     }
 
+    /// A parameter that can't be used, as MinIO answers it.
+    pub(crate) fn invalid_parameter(message: String) -> Self {
+        Self {
+            status: 400,
+            code: "InvalidParameterValue",
+            message,
+        }
+    }
+
     pub(crate) fn invalid_value(name: &str, value: &str) -> Self {
         Self::validation(format!("Invalid value '{value}' for {name}."))
     }

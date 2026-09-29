@@ -26,6 +26,12 @@ const VERSION: u8 = 1;
 /// refused (`PackedPolicyTooLarge`), so a token always fits in a request's headers.
 pub(crate) const PACKED_LIMIT: usize = 6144;
 
+/// The largest `MinimumSessionTokenSize` STS takes, in bytes of token.
+pub(crate) const MAX_MIN_TOKEN: usize = 4096;
+
+/// The JSON the filler adds besides itself: `,"pad":""`.
+const FILLER_JSON: usize = 9;
+
 /// What a session token says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +57,10 @@ pub(crate) struct Claims {
     /// The web identity that started it (`AssumeRoleWithWebIdentity`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) web: Option<WebClaims>,
+    /// Filler that makes the token as long as the caller asked
+    /// (`MinimumSessionTokenSize`); it means nothing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) pad: String,
 }
 
 /// What a role session keeps of the web identity token that started it: the provider's
@@ -95,6 +105,14 @@ pub(crate) enum Who {
     Federated { user: Option<String>, name: String },
     /// MinIO's `AssumeRole` without a role.
     User { user: String },
+    /// MinIO's `AssumeRoleWithWebIdentity` without a role: the subject a provider (by
+    /// unique id) vouched for, with the managed policies (by unique id) its token's
+    /// policy claim named.
+    Web {
+        provider: String,
+        sub: String,
+        policies: Vec<String>,
+    },
 }
 
 impl Claims {
@@ -109,6 +127,7 @@ impl Claims {
             transitive: Vec::new(),
             source: None,
             web: None,
+            pad: String::new(),
         }
     }
 }
@@ -241,18 +260,48 @@ impl Iam {
     }
 
     /// New credentials for `claims`.
+    #[cfg(test)]
     pub(crate) fn issue(&self, claims: &Claims) -> Result<Issued, crate::IamError> {
-        let plain = Zeroizing::new(serde_json::to_vec(claims).expect("claims serialize"));
+        self.issue_at_least(claims, 0)
+    }
+
+    /// New credentials for `claims`, whose session token is at least `min_size`
+    /// characters (at most [`MAX_MIN_TOKEN`]): the claims are padded with filler, which
+    /// counts for neither the packed limit nor the utilization.
+    pub(crate) fn issue_at_least(
+        &self,
+        claims: &Claims,
+        min_size: usize,
+    ) -> Result<Issued, crate::IamError> {
+        debug_assert!(min_size <= MAX_MIN_TOKEN, "checked with the parameter");
         let access_key = ids::session_key();
-        let sealed = self.tokens.seal_token(access_key.as_bytes(), &plain);
+        let seal = |claims: &Claims| {
+            let plain = Zeroizing::new(serde_json::to_vec(claims).expect("claims serialize"));
+            self.tokens.seal_token(access_key.as_bytes(), &plain)
+        };
+        let mut sealed = seal(claims);
         if sealed.len() > PACKED_LIMIT {
             return Err(crate::IamError::PackedPolicyTooLarge);
+        }
+        let utilization = sealed.len() * 100 / PACKED_LIMIT;
+        // Base64 makes 4 characters of every 3 bytes (the last group padded), so the
+        // token is `min_size` characters from `3 * ceil(min_size / 4) - 2` bytes on. The
+        // filler's first try allows for its own JSON (`,"pad":""`); a second only ever
+        // adds what's still missing.
+        let wanted = (min_size.div_ceil(4) * 3).saturating_sub(2);
+        let mut filler = 0;
+        while sealed.len() < wanted {
+            let overhead = if filler == 0 { FILLER_JSON } else { 0 };
+            filler += (wanted - sealed.len()).saturating_sub(overhead).max(1);
+            let mut padded = claims.clone();
+            padded.pad = "0".repeat(filler);
+            sealed = seal(&padded);
         }
         Ok(Issued {
             secret: self.session_secret(&access_key),
             token: STANDARD.encode(&sealed),
             expires: claims.exp,
-            utilization: sealed.len() * 100 / PACKED_LIMIT,
+            utilization,
             access_key,
         })
     }

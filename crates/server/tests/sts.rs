@@ -629,6 +629,7 @@ async fn web_identities_assume_roles_through_the_aws_sdk() {
         .role_session_name("ci-42")
         .web_identity_token(&token)
         .duration_seconds(900)
+        .minimum_session_token_size(2048)
         .send()
         .await
         .unwrap();
@@ -644,6 +645,11 @@ async fn web_identities_assume_roles_through_the_aws_sdk() {
     );
     let credentials = answer.credentials().unwrap();
     assert!((890..=900).contains(&seconds_until(credentials.expiration())));
+    assert!(credentials.session_token().len() >= 2048);
+    assert_eq!(
+        answer.session_token_size(),
+        Some(i32::try_from(credentials.session_token().len()).unwrap())
+    );
 
     // The session signs S3 requests as the role, with the token's session tags.
     let keys = Keys::temporary(credentials);
@@ -684,4 +690,93 @@ async fn web_identities_assume_roles_through_the_aws_sdk() {
         .await
         .unwrap_err();
     assert_eq!(code::<(), _>(Err(err)), "InvalidIdentityToken");
+}
+
+/// The text between `start` and `end` in `body`.
+fn between<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+    let from = body.find(start).unwrap() + start.len();
+    &body[from..from + body[from..].find(end).unwrap()]
+}
+
+#[tokio::test]
+async fn minio_web_identities_take_the_policies_their_tokens_name() {
+    let server = start().await;
+    let idp = Idp::start().await;
+    let admin = iam(&server, &Keys::root());
+    let provider = admin
+        .create_open_id_connect_provider()
+        .url(&idp.url)
+        .client_id_list("sts.amazonaws.com")
+        .tags(
+            aws_sdk_iam::types::Tag::builder()
+                .key("teifs:policy-claim")
+                .value("")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .open_id_connect_provider_arn
+        .unwrap();
+    admin
+        .create_policy()
+        .policy_name("photos-read")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::photos/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let root = s3(&server, &Keys::root());
+    root.create_bucket().bucket("photos").send().await.unwrap();
+    assert_eq!(put(&root, "photos", "a.jpg").await, "ok");
+
+    // As MinIO's clients send it: an unsigned form with no role.
+    let token = idp.token("alice", r#","policy":"photos-read""#);
+    let response = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint))
+        .header("content-type", "application/x-www-form-urlencoded")
+        // A token is URL-safe as it is.
+        .body(format!(
+            "Action=AssumeRoleWithWebIdentity&Version=2011-06-15&DurationSeconds=86400\
+             &WebIdentityToken={token}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("<SubjectFromWebIdentityToken>alice<"),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("<Provider>{provider}</Provider>")),
+        "{body}"
+    );
+    let keys = Keys {
+        id: between(&body, "<AccessKeyId>", "<").to_owned(),
+        secret: between(&body, "<SecretAccessKey>", "<").to_owned(),
+        token: Some(between(&body, "<SessionToken>", "<").to_owned()),
+    };
+    let session = s3(&server, &keys);
+    assert_eq!(get(&session, "photos", "a.jpg").await, "ok");
+    assert_eq!(put(&session, "photos", "b.jpg").await, "AccessDenied");
+    let caller = sts(&server, &keys)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(caller.user_id(), Some(format!("{provider}:alice").as_str()));
+    assert_eq!(caller.account(), Some(server.iam.account().as_str()));
+
+    // A token that names no policy the account has gets nothing.
+    let err = sts_unsigned(&server)
+        .assume_role_with_web_identity()
+        .web_identity_token(idp.token("bob", r#","policy":"nothing""#))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(code::<(), _>(Err(err)), "InvalidParameterValue");
 }

@@ -246,6 +246,10 @@ async fn web_identities_assume_the_roles_their_trust_policies_allow() {
         "s3:PutObject",
         "arn:aws:s3:::b/k"
     ));
+    let body = assuming(&d, "ci", &token, "&MinimumSessionTokenSize=3000");
+    let answer = ok(d.web(&body), &body);
+    assert!(between(&answer, "<SessionToken>", "</SessionToken>").len() >= 3000);
+    d.session(&answer);
     let body = assuming(&d, "ci", &token, "&DurationSeconds=3601");
     assert_eq!(code(&d.web(&body), &body), "ValidationError");
 }
@@ -640,4 +644,186 @@ async fn unsigned_requests_fetch_the_providers_keys_first() {
         provider.requests.load(std::sync::atomic::Ordering::SeqCst),
         before
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn without_a_role_tokens_name_the_policies_as_minio_has_it() {
+    let d = drive().await;
+    let idp = Idp::new(&d);
+    let provider = provider_arn(&d);
+    let may = |name: &str, document: &str| {
+        d.iam
+            .create_policy(name, None, None, document, &[])
+            .unwrap();
+    };
+    may(
+        "reader",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#,
+    );
+    may(
+        "writer",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}"#,
+    );
+    let body = |token: &str, extra: &str| {
+        format!(
+            "Action=AssumeRoleWithWebIdentity&WebIdentityToken={}{extra}",
+            enc(token)
+        )
+    };
+    let refused = |body: &str, code_is: &str, message: &str| {
+        let reply = d.web(body);
+        assert_eq!(code(&reply, body), code_is);
+        assert!(reply.body.contains(message), "{message} in {}", reply.body);
+    };
+    let allows = |session: &Identity, action: &str| {
+        session.allows(&session.context(Date::now()), action, "arn:aws:s3:::b/k")
+    };
+
+    // A provider must let its tokens name policies; else a role is needed, as on AWS.
+    let named = idp.token("alice", r#""policy":"reader""#);
+    refused(&body(&named, ""), "ValidationError", "roleArn");
+    d.iam
+        .tag_oidc_provider(
+            &provider,
+            &[(crate::oidc::POLICY_CLAIM_TAG.to_owned(), String::new())],
+        )
+        .unwrap();
+
+    // The policies it names, as text separated by commas or a list, by name in any
+    // case or by ARN; the ones that don't exist count for nothing.
+    let answer = ok(
+        d.web(&body(
+            &idp.token("alice", r#""policy":"nothing, reader""#),
+            "",
+        )),
+        "reader",
+    );
+    for expected in [
+        "<SubjectFromWebIdentityToken>alice</SubjectFromWebIdentityToken>".to_owned(),
+        format!("<Provider>{provider}</Provider><Audience>app</Audience>"),
+    ] {
+        assert!(answer.contains(&expected), "{expected} in {answer}");
+    }
+    assert!(!answer.contains("AssumedRoleUser"), "{answer}");
+    let session = d.session(&answer);
+    assert!(allows(&session, "s3:GetObject"));
+    assert!(!allows(&session, "s3:PutObject"));
+    assert_eq!(session.session().unwrap().kind(), crate::SessionKind::Web);
+    assert!(session.session().unwrap().may_manage());
+    // It lasts as long as the token, unless asked.
+    assert!((590..=600).contains(&(session.session().unwrap().expires() - now_seconds())));
+    let principal = session.principal();
+    assert_eq!(principal.account(), Some(d.account.as_str()));
+    assert_eq!(principal.user_id(), format!("{provider}:alice"));
+    let both = idp.token(
+        "bob",
+        &format!(r#""policy":["READER","{}"]"#, d.policy_arn("writer")),
+    );
+    let answer = ok(d.web(&body(&both, "&DurationSeconds=31536000")), "both");
+    let session = d.session(&answer);
+    assert!(allows(&session, "s3:GetObject") && allows(&session, "s3:PutObject"));
+    assert!(session.session().unwrap().expires() - now_seconds() > 31_535_000);
+
+    // Its session may assume a role, as a role's session: a chain, of an hour at most.
+    may(
+        "assumer",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}"#,
+    );
+    let trust = d.trust_account();
+    d.iam
+        .create_role(
+            "target",
+            &NewRole {
+                trust: &trust,
+                max_session: Some(7200),
+                ..NewRole::default()
+            },
+        )
+        .unwrap();
+    let assumer = d.session(&ok(
+        d.web(&body(&idp.token("erin", r#""policy":"assumer""#), "")),
+        "assumer",
+    ));
+    let chain = format!(
+        "Action=AssumeRole&RoleArn={}&RoleSessionName=s2",
+        enc(&d.role_arn("target"))
+    );
+    d.sts_ok(&assumer, &chain);
+    assert_eq!(
+        d.sts_code(&assumer, &format!("{chain}&DurationSeconds=3601")),
+        "ValidationError"
+    );
+
+    // Session policies narrow it; the token may be padded.
+    let narrow = body(
+        &both,
+        &format!(
+            "&RoleSessionName=bob&MinimumSessionTokenSize=3000&Policy={}",
+            enc(
+                r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}"#
+            )
+        ),
+    );
+    let answer = ok(d.web(&narrow), "narrow");
+    assert!(between(&answer, "<SessionToken>", "</SessionToken>").len() >= 3000);
+    let narrowed = d.session(&answer);
+    assert!(!allows(&narrowed, "s3:GetObject") && allows(&narrowed, "s3:PutObject"));
+
+    // A deleted policy takes only its permissions; a deleted provider, the session.
+    let key = between(&answer, "<AccessKeyId>", "</AccessKeyId>").to_owned();
+    let token = between(&answer, "<SessionToken>", "</SessionToken>").to_owned();
+    d.iam.delete_policy(&d.policy_arn("writer")).unwrap();
+    let session = d.iam.identify(&key, Some(&token)).unwrap();
+    assert!(!allows(&session, "s3:PutObject"));
+
+    // Errors as MinIO's.
+    refused(
+        &body(&idp.token("carol", ""), ""),
+        "InvalidParameterValue",
+        "policy claim missing from the JWT token",
+    );
+    refused(
+        &body(&idp.token("carol", r#""policy":"nothing, ,""#), ""),
+        "InvalidParameterValue",
+        "None of the given policies are defined",
+    );
+    refused(
+        &body(&idp.token("carol", r#""policy":7"#), ""),
+        "InvalidParameterValue",
+        "a list of text",
+    );
+    refused(
+        &body(&named, "&RoleArn=arn:minio:iam:::role/dummy"),
+        "InvalidParameterValue",
+        "TeiFS has no MinIO role policies",
+    );
+    for extra in [
+        "&DurationSeconds=899",
+        "&DurationSeconds=31536001",
+        "&RoleSessionName=a",
+    ] {
+        refused(&body(&named, extra), "ValidationError", "");
+    }
+
+    // The tag's value names another claim.
+    d.iam
+        .tag_oidc_provider(
+            &provider,
+            &[(
+                crate::oidc::POLICY_CLAIM_TAG.to_owned(),
+                "groups".to_owned(),
+            )],
+        )
+        .unwrap();
+    refused(
+        &body(&named, ""),
+        "InvalidParameterValue",
+        "groups claim missing",
+    );
+    let grouped = idp.token("dave", r#""groups":["reader"]"#);
+    ok(d.web(&body(&grouped, "")), "groups");
+
+    d.iam.delete_oidc_provider(&provider).unwrap();
+    assert!(d.iam.identify(&key, Some(&token)).is_err());
 }

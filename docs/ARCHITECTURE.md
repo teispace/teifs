@@ -125,7 +125,11 @@ Fetching is async and the STS API is not, so the S3 layer calls
 `Iam::serve_web_identity`, which makes sure the keys the token needs are known before it
 answers the request as any other STS call. The request is served as the anonymous
 identity whatever signed it: the trust policy's `Federated` principal matches a
-`WebIdentityUser` principal of that provider, and nothing else.
+`WebIdentityUser` principal of that provider, and nothing else. Without a `RoleArn`,
+for a provider tagged `teifs:policy-claim` (`oidc::policy_claim`), the session is
+MinIO's: `Who::Web` keeps the provider's and the named managed policies' unique ids,
+and `Snapshot` resolves them on every request, so a deleted provider ends the session
+and a deleted policy drops out of it.
 
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
@@ -133,7 +137,8 @@ derived from the id under the IAM key (HKDF, then HMAC), so a signature can be c
 from the id alone; its session token is its claims (whom it acts as by unique id, when
 it was issued and expires, its session policies' documents, its tags, which of them are
 transitive, its source identity, and for a web identity's session the provider and the
-token's `aud`, `sub` and `amr`) as JSON sealed with AES-256-GCM under the IAM key and
+token's `aud`, `sub` and `amr`, and filler when `MinimumSessionTokenSize` asks for a
+longer token) as JSON sealed with AES-256-GCM under the IAM key and
 bound to the access key id, at most 6 KiB. A token works only with its own key and
 can't be forged or changed. Every request turns the claims into an `Identity` against
 IAM as it is now (`Snapshot::add_session`), so a role's or user's permissions changing

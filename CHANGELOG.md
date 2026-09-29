@@ -26,6 +26,8 @@ behaviour; the on-disk format is always upgraded automatically.
   browser upload's form, and do only what they were issued for; deleting a role or user
   ends its sessions at once. MinIO's `AssumeRole` without a role gives a user
   credentials for their own permissions, narrowed by a session policy.
+- `MinimumSessionTokenSize` on every STS action that issues credentials, as AWS added
+  it: the session token is padded to at least the size asked for (up to 4096 bytes).
 - IAM OpenID Connect providers: CreateOpenIDConnectProvider and the rest of AWS's
   provider actions (audiences, certificate thumbprints, tags), with AWS's limits, and in
   IAM export and import. A provider's URL may also have a port, and `http://` for an
@@ -40,6 +42,10 @@ behaviour; the on-disk format is always upgraded automatically.
   `:aud`, `:amr` and any other claim), `aws:FederatedProvider` and
   `sts:RoleAuthorizedByIdp`; session tags and a source identity come from the token's
   `https://aws.amazon.com/tags` and `source_identity` claims.
+- MinIO's `AssumeRoleWithWebIdentity` without a role: for a provider tagged
+  `teifs:policy-claim`, a token's `policy` claim (or the claim the tag names) lists the
+  managed policies its session gets, narrowed by a session policy, for as long as the
+  token lasts or up to 365 days. Deleting the provider ends its sessions.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

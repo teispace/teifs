@@ -25,6 +25,12 @@ pub(crate) const ROLES_CLAIM: &str = "https://aws.amazon.com/roles";
 pub(crate) const TAGS_CLAIM: &str = "https://aws.amazon.com/tags";
 pub(crate) const SOURCE_IDENTITY_CLAIM: &str = "https://aws.amazon.com/source_identity";
 
+/// The tag that lets a provider's tokens name the account's managed policies in a
+/// claim, for MinIO's `AssumeRoleWithWebIdentity` without a role: its value names the
+/// claim, and no value means MinIO's `policy`.
+pub(crate) const POLICY_CLAIM_TAG: &str = "teifs:policy-claim";
+const DEFAULT_POLICY_CLAIM: &str = "policy";
+
 /// Whether the issuer `a` is `b`: the same, or the same but for a trailing slash.
 pub(crate) fn same_issuer(a: &str, b: &str) -> bool {
     a == b || a.strip_suffix('/').unwrap_or(a) == b.strip_suffix('/').unwrap_or(b)
@@ -50,6 +56,11 @@ impl From<jwt::Invalid> for Refused {
 /// A token its provider vouches for.
 #[derive(Debug, Clone)]
 pub(crate) struct WebIdentity {
+    /// The provider's unique id.
+    pub(crate) id: String,
+    /// The claim that names managed policies, if the provider's tokens may
+    /// ([`POLICY_CLAIM_TAG`]).
+    pub(crate) policy_claim: Option<String>,
     /// The provider's ARN (`aws:FederatedProvider`, and `Provider` in the answer).
     pub(crate) provider: String,
     /// The provider's URL without its scheme: the prefix of its condition keys
@@ -57,6 +68,8 @@ pub(crate) struct WebIdentity {
     pub(crate) prefix: String,
     /// `sub`.
     pub(crate) subject: String,
+    /// `exp`, in seconds since the Unix epoch.
+    pub(crate) expires: i64,
     /// The client id it's for: `azp`, or else the `aud` that's one of the provider's.
     pub(crate) audience: String,
     /// Every claim.
@@ -123,6 +136,22 @@ fn seconds(token: &jwt::Token, name: &str) -> Result<Option<i64>, Refused> {
             "The token's {name} isn't a number."
         ))),
     }
+}
+
+/// The claim a provider's tokens name managed policies in, if they may
+/// ([`POLICY_CLAIM_TAG`]).
+pub(crate) fn policy_claim(provider: &OidcProvider) -> Option<&str> {
+    provider
+        .tags
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(POLICY_CLAIM_TAG))
+        .map(|(_, claim)| {
+            if claim.is_empty() {
+                DEFAULT_POLICY_CLAIM
+            } else {
+                claim.as_str()
+            }
+        })
 }
 
 impl State {
@@ -218,9 +247,12 @@ pub(crate) fn verify(
         _ => return Err(Refused::Invalid("The token names no subject (sub).".into())),
     };
     Ok(WebIdentity {
+        id: provider.id.clone(),
+        policy_claim: policy_claim(provider).map(str::to_owned),
         provider: state.oidc_provider_arn(provider),
         prefix: provider.name().to_owned(),
         subject: subject.clone(),
+        expires: exp,
         audience: audience.clone(),
         claims: token.claims,
     })
@@ -250,9 +282,12 @@ mod tests {
         )
         .unwrap();
         let web = WebIdentity {
+            id: "OIDC".into(),
+            policy_claim: None,
             provider: "arn:aws:iam::123456789012:oidc-provider/idp.example.com".into(),
             prefix: "idp.example.com".into(),
             subject: "repo:o/r:ref:refs/heads/main".into(),
+            expires: 0,
             audience: "app".into(),
             claims,
         };

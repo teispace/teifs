@@ -17,7 +17,7 @@ use crate::{
     IamError, Identity, Issued, Session, SessionKind,
     oidc::{self, jwt},
     rules,
-    sessions::{Claims, WebClaims, Who, now_seconds},
+    sessions::{Claims, MAX_MIN_TOKEN, WebClaims, Who, now_seconds},
     state::Role,
 };
 
@@ -95,7 +95,7 @@ pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
         return true;
     }
     match kind {
-        SessionKind::Role { .. } | SessionKind::User => {
+        SessionKind::Role { .. } | SessionKind::User | SessionKind::Web => {
             !matches!(action, "GetSessionToken" | "GetFederationToken")
         }
         SessionKind::SessionToken => matches!(action, "AssumeRole" | "GetCallerIdentity"),
@@ -133,6 +133,7 @@ fn assume_role(r: &Run<'_>) -> Out {
         Some(arn) if arn.starts_with("arn:aws:") => arn,
         _ => return assume_as_user(r),
     };
+    let min_token = min_token_size(r)?;
     no_mfa(r)?;
     let name = text(r, "RoleSessionName", 2..=64, NAME_CHARS, NAME_PATTERN)?
         .ok_or_else(|| ApiError::missing("RoleSessionName"))?;
@@ -161,7 +162,11 @@ fn assume_role(r: &Run<'_>) -> Out {
     };
 
     let caller = r.identity.session();
-    let chained = matches!(caller.map(Session::kind), Some(SessionKind::Role { .. }));
+    // A web identity's session is a role's for chaining, as on AWS.
+    let chained = matches!(
+        caller.map(Session::kind),
+        Some(SessionKind::Role { .. } | SessionKind::Web)
+    );
     let Inherited {
         tags: inherited,
         source,
@@ -197,7 +202,7 @@ fn assume_role(r: &Run<'_>) -> Out {
         .chain(transitive)
         .collect();
     claims.source = source.map(str::to_owned);
-    let issued = r.iam.issue(&claims)?;
+    let issued = r.iam.issue_at_least(&claims, min_token)?;
     let packed = !claims.policies.is_empty() || !claims.tags.is_empty();
     answer(|x| {
         credentials(x, &issued);
@@ -218,16 +223,37 @@ fn assume_role(r: &Run<'_>) -> Out {
     })
 }
 
-/// A role's session for someone an OpenID Connect provider vouches for, as AWS gives
-/// it: the token must be the provider's (its signature, issuer, audience and expiry),
-/// and then the role's trust policy decides, with the provider's keys
-/// (`idp.example.com:sub`), `sts:RoleAuthorizedByIdp`, and the session tags and source
-/// identity the token carries. Nothing about who signed the request counts.
+/// `AssumeRoleWithWebIdentity`: a role's session as AWS gives it, or without a role
+/// MinIO's session with the managed policies the token's policy claim names.
 fn assume_role_with_web_identity(r: &Run<'_>) -> Out {
-    let arn = text(r, "RoleArn", 20..=2048, ARN_CHARS, ARN_PATTERN)?
-        .ok_or_else(|| ApiError::missing("RoleArn"))?;
-    let name = text(r, "RoleSessionName", 2..=64, NAME_CHARS, NAME_PATTERN)?
-        .ok_or_else(|| ApiError::missing("RoleSessionName"))?;
+    let min_token = min_token_size(r)?;
+    match r.p.optional("RoleArn") {
+        None if names_policies(r)? => web_claim_session(r, min_token),
+        None => Err(ApiError::missing("RoleArn")),
+        Some(arn) if arn.starts_with("arn:aws:") => web_role_session(r, min_token),
+        Some(arn) => Err(ApiError::invalid_parameter(format!(
+            "{arn} isn't an IAM role ARN. TeiFS has no MinIO role policies: name an IAM \
+             role, or leave RoleArn out to use the policies the token's policy claim names."
+        ))),
+    }
+}
+
+/// Whether the token's issuer is a provider whose tokens may name policies: for any
+/// other, `RoleArn` is required as on AWS. The token is checked afterwards.
+fn names_policies(r: &Run<'_>) -> Result<bool, ApiError> {
+    let Some((iss, _)) = r.p.optional("WebIdentityToken").and_then(oidc::issuer) else {
+        return Ok(false);
+    };
+    Ok(r.iam.read(|s| {
+        Ok(s.oidc_provider_by_issuer(&iss)
+            .is_some_and(|p| oidc::policy_claim(p).is_some()))
+    })?)
+}
+
+/// A web identity token the caller gave, checked with the account's providers; and the
+/// session policies to narrow its session. Its signature, issuer, audience and expiry
+/// must be its provider's.
+fn web_identity(r: &Run<'_>) -> Result<(oidc::WebIdentity, Vec<String>), ApiError> {
     let token =
         r.p.optional("WebIdentityToken")
             .ok_or_else(|| ApiError::missing("WebIdentityToken"))?;
@@ -245,12 +271,35 @@ fn assume_role_with_web_identity(r: &Run<'_>) -> Out {
                 .into(),
         ));
     }
-    let requested = duration(r, SHORTEST..=ROLE_LONGEST)?;
     let policies = session_policies(r)?;
     let web = r
         .iam
         .read(|s| Ok(oidc::verify(s, &r.iam.web_keys, token, now_seconds())))?
         .map_err(refused)?;
+    Ok((web, policies))
+}
+
+/// What a session keeps of the web identity that started it.
+fn web_claims(web: &oidc::WebIdentity) -> WebClaims {
+    WebClaims {
+        provider: web.provider.clone(),
+        aud: web.audience.clone(),
+        sub: web.subject.clone(),
+        amr: web.amr(),
+    }
+}
+
+/// A role's session for someone an OpenID Connect provider vouches for, as AWS gives
+/// it: the role's trust policy decides, with the provider's keys
+/// (`idp.example.com:sub`), `sts:RoleAuthorizedByIdp`, and the session tags and source
+/// identity the token carries. Nothing about who signed the request counts.
+fn web_role_session(r: &Run<'_>, min_token: usize) -> Out {
+    let arn = text(r, "RoleArn", 20..=2048, ARN_CHARS, ARN_PATTERN)?
+        .ok_or_else(|| ApiError::missing("RoleArn"))?;
+    let name = text(r, "RoleSessionName", 2..=64, NAME_CHARS, NAME_PATTERN)?
+        .ok_or_else(|| ApiError::missing("RoleSessionName"))?;
+    let requested = duration(r, SHORTEST..=ROLE_LONGEST)?;
+    let (web, policies) = web_identity(r)?;
     let authorized = authorized_by_idp(&web, arn)?;
     let (tags, transitive) = web_tags(&web)?;
     let source = web_source(&web)?;
@@ -299,13 +348,8 @@ fn assume_role_with_web_identity(r: &Run<'_>) -> Out {
     claims.tags = tags;
     claims.transitive = transitive;
     claims.source = source.map(str::to_owned);
-    claims.web = Some(WebClaims {
-        provider: web.provider.clone(),
-        aud: web.audience.clone(),
-        sub: web.subject.clone(),
-        amr: web.amr(),
-    });
-    let issued = r.iam.issue(&claims)?;
+    claims.web = Some(web_claims(&web));
+    let issued = r.iam.issue_at_least(&claims, min_token)?;
     let packed = !claims.policies.is_empty() || !claims.tags.is_empty();
     answer(|x| {
         credentials(x, &issued);
@@ -327,6 +371,85 @@ fn assume_role_with_web_identity(r: &Run<'_>) -> Out {
             .text("Audience", &web.audience)
             .maybe("SourceIdentity", claims.source.as_deref());
     })
+}
+
+/// MinIO's session for a web identity without a role: the managed policies the token's
+/// policy claim names (a list, or text separated by commas; names or ARNs), narrowed by
+/// the session policies. Only a provider tagged [`oidc::POLICY_CLAIM_TAG`] may name
+/// policies; without one, a role is needed as on AWS. Unless asked, the session ends
+/// when the token does.
+fn web_claim_session(r: &Run<'_>, min_token: usize) -> Out {
+    text(r, "RoleSessionName", 2..=64, NAME_CHARS, NAME_PATTERN)?;
+    let requested = duration(r, SHORTEST..=MINIO_LONGEST)?;
+    let (web, policies) = web_identity(r)?;
+    let Some(claim) = &web.policy_claim else {
+        return Err(ApiError::missing("RoleArn"));
+    };
+    let names = policy_names(&web, claim)?;
+    let ids: Vec<String> = r.iam.read(|s| {
+        Ok(names
+            .iter()
+            .filter_map(|name| managed_policy(s, name))
+            .collect())
+    })?;
+    if ids.is_empty() {
+        return Err(ApiError::invalid_parameter(
+            "None of the given policies are defined, credentials will not be generated".into(),
+        ));
+    }
+    let seconds = requested.unwrap_or_else(|| {
+        let left = web.expires - now_seconds();
+        u32::try_from(left.clamp(1, i64::from(MINIO_LONGEST))).unwrap_or(MINIO_LONGEST)
+    });
+    let who = Who::Web {
+        provider: web.id.clone(),
+        sub: web.subject.clone(),
+        policies: ids,
+    };
+    let mut claims = claims(who, seconds);
+    claims.policies = policies;
+    claims.web = Some(web_claims(&web));
+    let issued = r.iam.issue_at_least(&claims, min_token)?;
+    answer(|x| {
+        credentials(x, &issued);
+        x.text("SubjectFromWebIdentityToken", &web.subject)
+            .text("Provider", &web.provider)
+            .text("Audience", &web.audience);
+    })
+}
+
+/// The policies a token's policy `claim` names, as MinIO reads it: a list, or text
+/// separated by commas.
+fn policy_names(web: &oidc::WebIdentity, claim: &str) -> Result<Vec<String>, ApiError> {
+    let Some(value) = web.claims.get(claim) else {
+        return Err(ApiError::invalid_parameter(format!(
+            "{claim} claim missing from the JWT token, credentials will not be generated"
+        )));
+    };
+    let Some(items) = oidc::strings(Some(value)) else {
+        return Err(ApiError::invalid_parameter(format!(
+            "The token's {claim} claim isn't text or a list of text."
+        )));
+    };
+    Ok(items
+        .iter()
+        .flat_map(|item| item.split(','))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The unique id of the managed policy `name` (or ARN) names, if there is one.
+fn managed_policy(s: &crate::state::State, name: &str) -> Option<String> {
+    let managed = if name.starts_with("arn:") {
+        s.policy_by_arn(name).ok()
+    } else {
+        s.policies
+            .values()
+            .find(|p| p.row.name.eq_ignore_ascii_case(name))
+    };
+    managed.map(|p| p.row.id.clone())
 }
 
 /// A token that isn't accepted, as AWS answers it.
@@ -545,6 +668,7 @@ fn assume_context(
 /// policy if there is one. Only a user's own access key may ask, and any user may unless
 /// a policy denies them `sts:AssumeRole`.
 fn assume_as_user(r: &Run<'_>) -> Out {
+    let min_token = min_token_size(r)?;
     let Some((arn, user)) = r
         .identity
         .entity()
@@ -568,25 +692,27 @@ fn assume_as_user(r: &Run<'_>) -> Out {
         seconds,
     );
     claims.policies = policies;
-    let issued = r.iam.issue(&claims)?;
+    let issued = r.iam.issue_at_least(&claims, min_token)?;
     answer(|x| credentials(x, &issued))
 }
 
 /// Credentials for the caller's own permissions: a user's, or the root user's for at
 /// most an hour.
 fn session_token(r: &Run<'_>) -> Out {
+    let min_token = min_token_size(r)?;
     no_mfa(r)?;
     let seconds = user_duration(r)?;
     let who = Who::SessionToken {
         user: caller_user(r),
     };
-    let issued = r.iam.issue(&claims(who, seconds))?;
+    let issued = r.iam.issue_at_least(&claims(who, seconds), min_token)?;
     answer(|x| credentials(x, &issued))
 }
 
 /// Credentials for a federated user `Name`: the caller's permissions, as far as the
 /// session policies allow (none allow nothing).
 fn federation_token(r: &Run<'_>) -> Out {
+    let min_token = min_token_size(r)?;
     let name = text(r, "Name", 2..=32, NAME_CHARS, NAME_PATTERN)?
         .ok_or_else(|| ApiError::missing("Name"))?;
     let seconds = user_duration(r)?;
@@ -604,7 +730,7 @@ fn federation_token(r: &Run<'_>) -> Out {
     let mut claims = claims(who, seconds);
     claims.policies = policies;
     claims.tags = tags;
-    let issued = r.iam.issue(&claims)?;
+    let issued = r.iam.issue_at_least(&claims, min_token)?;
     let packed = !claims.policies.is_empty() || !claims.tags.is_empty();
     answer(|x| {
         credentials(x, &issued);
@@ -638,6 +764,31 @@ fn access_key_info(r: &Run<'_>) -> Out {
     answer(|x| {
         x.text("Account", &r.account);
     })
+}
+
+/// `MinimumSessionTokenSize`: how long, at least, the session token must be (0 to
+/// 4096; none or 0 leaves it as it is).
+fn min_token_size(r: &Run<'_>) -> Result<usize, ApiError> {
+    const NAME: &str = "MinimumSessionTokenSize";
+    let Some(text) = r.p.optional(NAME) else {
+        return Ok(0);
+    };
+    let size: i64 = text
+        .parse()
+        .map_err(|_| ApiError::invalid_value(NAME, text))?;
+    match usize::try_from(size) {
+        Ok(size) if size <= MAX_MIN_TOKEN => Ok(size),
+        Ok(_) => Err(ApiError::constraint(
+            NAME,
+            text,
+            &format!("Member must have value less than or equal to {MAX_MIN_TOKEN}"),
+        )),
+        Err(_) => Err(ApiError::constraint(
+            NAME,
+            text,
+            "Member must have value greater than or equal to 0",
+        )),
+    }
 }
 
 fn claims(who: Who, seconds: u32) -> Claims {
