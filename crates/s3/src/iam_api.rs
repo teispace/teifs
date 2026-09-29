@@ -85,7 +85,7 @@ pub(crate) async fn with_payload_hash(
 pub(crate) async fn serve(iam: &Iam, mut req: S3Request<Body>) -> S3Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let reply = answer(iam, &mut req, &request_id).await;
-    let mut response = S3Response::new(Body::from(reply.body));
+    let mut response = S3Response::new(crate::routes::unlogged(reply.body));
     response.status =
         Some(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     response

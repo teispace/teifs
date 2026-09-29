@@ -206,9 +206,15 @@ of the settings; `teifs config show` names its source and never prints it (teste
 `apps/cli/tests/config.rs`). Secrets shorter than 8 characters are refused.
 
 ### 6. Secrets never reach logs
-Types holding secrets leave them out of `Debug` output (`Credentials`). *Planned:* a
-`Secret<T>` wrapper everywhere, and a test that runs a request cycle at the most verbose
-log level and searches the output for the secret.
+Types holding secrets leave them out of `Debug` output (credentials, access keys,
+sessions, KMS and transit keys, IAM state), and secrets are wiped from memory when
+dropped (`Zeroizing`). The S3 layer logs every response at `DEBUG`, so answers that carry
+secrets (IAM and STS answers with access keys or session tokens, the admin API's IAM
+exports) are sent as bodies that log only their size. A test runs a full cycle at
+`TRACE`, with an SSE-C key, an IAM user's new key, a session and its token, an IAM
+export and import with secrets and a wrongly signed request, and finds none of the
+secrets, nor the signing keys they give, in the log
+(`crates/server/tests/security/logs.rs`).
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,

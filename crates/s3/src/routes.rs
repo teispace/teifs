@@ -417,6 +417,13 @@ pub(crate) async fn signed_body(req: &mut S3Request<Body>, limit: usize) -> Resu
     if signed { Ok(body) } else { Err(NOT_SIGNED) }
 }
 
+/// An answer's body that s3s's request log shows by its size only, never its content: the
+/// IAM, STS and admin APIs answer with access keys, session tokens and IAM exports, and
+/// s3s logs whole responses at `DEBUG`.
+pub(crate) fn unlogged(bytes: impl Into<Bytes>) -> Body {
+    Body::http_body(http_body_util::Full::new(bytes.into()))
+}
+
 /// A refusal as an S3 error, for the APIs that answer in S3's format.
 pub(crate) fn s3_refusal((status, code, message): Refusal) -> S3Error {
     let mut err = S3Error::with_message(S3ErrorCode::Custom(code.into()), message);
@@ -427,6 +434,18 @@ pub(crate) fn s3_refusal((status, code, message): Refusal) -> S3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unlogged_bodies_show_their_size_only() {
+        let body = unlogged(b"<SecretAccessKey>wJalrXUtnFEMI</SecretAccessKey>".to_vec());
+        let shown = format!("{body:?}");
+        assert!(!shown.contains("wJalr"), "{shown}");
+        assert_eq!(
+            http_body::Body::size_hint(&body).exact(),
+            Some(48),
+            "{shown}"
+        );
+    }
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         pairs

@@ -53,7 +53,7 @@ pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
 /// An answer with `value` as its JSON body.
 fn json(value: &impl serde::Serialize) -> S3Response<Body> {
     let bytes = serde_json::to_vec(value).expect("the admin API's messages serialize");
-    let mut response = S3Response::new(Body::from(bytes));
+    let mut response = S3Response::new(crate::routes::unlogged(bytes));
     response.headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),

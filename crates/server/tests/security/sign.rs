@@ -265,14 +265,16 @@ pub fn sha256_base64(data: &[u8]) -> String {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
+    hex(digest(&SHA256, data).as_ref())
+}
+
+/// `bytes` in lowercase hex.
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    digest(&SHA256, data)
-        .as_ref()
-        .iter()
-        .fold(String::new(), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
 }
 
 /// `YYYYMMDD` and `HHMMSS` of `time`, in UTC.

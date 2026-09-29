@@ -21,6 +21,8 @@ behaviour; the on-disk format is always upgraded automatically.
   with its tags, for every action AWS evaluates them with (reads, `HEAD`, copies from
   it, its ACL and tagging). They were never present, so an Allow on a tag didn't apply
   and a Deny on a tag didn't either.
+- Security: IAM and STS answers and the admin API's IAM exports (access keys, session
+  tokens) no longer appear in the server's `DEBUG` log.
 - A body that doesn't match its signed `x-amz-content-sha256` is refused with AWS's
   `XAmzContentSHA256Mismatch` (was `BadDigest`).
 - SSE-C keys are refused on plain HTTP for every request, as on AWS: reads, `HEAD` and
