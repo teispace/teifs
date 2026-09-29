@@ -256,6 +256,17 @@ async fn trust_policies_decide_who_may_assume_a_role() {
         .tag_role("account", &[("team".into(), "red".into())])
         .unwrap();
     d.assume(&bob, "account", "");
+    // A trust policy must name the principal or its account: no identity policy, not
+    // even one that allows everything, lets anyone else in (nor tag the session or set
+    // its source identity).
+    let carol = d.identity(&d.user("carol", ALLOW_ALL));
+    denied(&carol, "named", "");
+    denied(
+        &carol,
+        "named",
+        "&Tags.member.1.Key=k&Tags.member.1.Value=v",
+    );
+    d.assume(&carol, "account", "");
     // The root user may not assume roles; a missing role is denied, not revealed.
     denied(&d.root(), "named", "");
     denied(&alice, "nobody", "");

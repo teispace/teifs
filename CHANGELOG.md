@@ -17,7 +17,8 @@ behaviour; the on-disk format is always upgraded automatically.
   attached policies, tags, permissions boundaries, maximum session length), in
   `ListEntitiesForPolicy`, `GetAccountSummary` and IAM export and import. A trust policy
   is checked as AWS checks it, and the users and roles it names are bound to their
-  unique ids.
+  unique ids. Only the principals it names (or, with their own policies' consent, its
+  account's) may assume the role: no identity policy alone lets anyone in.
 - Temporary credentials from STS, as AWS has them: `AssumeRole` (trust policies,
   external ids, session policies, session tags, transitive tags and source identity
   along role chains), `GetSessionToken`, `GetFederationToken` and `GetAccessKeyInfo`,

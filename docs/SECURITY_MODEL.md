@@ -142,8 +142,11 @@ rebuilds the session's permissions from IAM as it is now: a role's or user's pol
 changing reach their sessions at once, and deleting the role or user ends them, even
 if one of the same name is made again (sessions name it by unique id). A role session
 has only the role's permissions, narrowed by its session policies; `AssumeRole` is
-decided with the trust policy, `sts:TagSession` and `sts:SetSourceIdentity` too when
-tags or a source identity are asked for; the root user can't assume roles; a chain of
+decided by the trust policy, `sts:TagSession` and `sts:SetSourceIdentity` too when
+tags or a source identity are asked for, and the trust policy must name the principal
+(or its account, and then the principal's own policies must allow it too): an identity
+policy alone, even one that allows everything, never lets anyone assume a role, as on
+AWS; the root user can't assume roles; a chain of
 roles lasts at most an hour, and its source identity and transitive tags can't be
 changed along it. `GetSessionToken`'s and federated users' credentials can't call IAM or
 the admin API, nor start other sessions (federated users' only ask `GetCallerIdentity`);

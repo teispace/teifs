@@ -10,8 +10,13 @@
 //! 4. Otherwise an identity policy must allow, and the permissions boundary and
 //!    session policies (when there are any) must too.
 //! 5. Otherwise the request is implicitly denied.
+//!
+//! A role's trust policy is the exception AWS makes: it must allow the principal
+//! itself. One that names the account allows if an identity policy allows too (as step
+//! 4), but an identity policy alone never lets anyone assume a role the trust policy
+//! doesn't name them or their account for.
 
-use crate::{Policy, context::Context, policy::Grant};
+use crate::{Kind, Policy, context::Context, policy::Grant};
 
 /// A request to decide.
 #[derive(Debug, Clone, Copy)]
@@ -83,15 +88,22 @@ pub fn evaluate(policies: &Policies<'_>, request: &Request<'_>) -> Decision {
                 .session
                 .is_none_or(|session| session.iter().any(|policy| policy.allows(request)))
     };
+    let identity_allows = || {
+        policies
+            .identity
+            .iter()
+            .any(|policy| policy.allows(request))
+            && limits_allow()
+    };
+    let trust = policies
+        .resource
+        .is_some_and(|policy| policy.kind() == Kind::Trust);
     let allowed = match policies.resource.and_then(|policy| policy.grant(request)) {
         Some(Grant::Named) => true,
         Some(Grant::Limited) => limits_allow(),
-        Some(Grant::Account) | None => false,
-    } || (policies
-        .identity
-        .iter()
-        .any(|policy| policy.allows(request))
-        && limits_allow());
+        Some(Grant::Account) if trust => identity_allows(),
+        Some(Grant::Account) | None => !trust && identity_allows(),
+    };
     if allowed {
         Decision::Allow
     } else {
