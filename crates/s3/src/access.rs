@@ -154,7 +154,61 @@ impl Access {
                 && identity.within_boundary(context, action, arn),
         )
     }
+
+    /// For an action AWS decides with an object's own tags, `context` with the tags of the
+    /// object `(bucket, key)` as `s3:ExistingObjectTag`s (none when there's no such
+    /// object); `None` for other actions. Any other error refuses the request rather than
+    /// letting it be decided without them.
+    async fn with_existing_tags(
+        &self,
+        context: &Context,
+        action: &str,
+        (bucket, key): (&str, &str),
+    ) -> S3Result<Option<Context>> {
+        if !EXISTING_OBJECT_TAGS.contains(&action) {
+            return Ok(None);
+        }
+        let mut context = context.clone();
+        match self.store.head(bucket, key).await {
+            Ok(info) => {
+                for (name, value) in &info.attrs.tags {
+                    context = context.with_tag(TagKind::ExistingObject, name, value);
+                }
+                Ok(Some(context))
+            }
+            Err(StoreError::NoSuchKey | StoreError::NoSuchBucket) => Ok(Some(context)),
+            Err(err) => Err(from_store(err)),
+        }
+    }
 }
+
+/// The actions AWS decides with the object's own tags (`s3:ExistingObjectTag/…`), as its
+/// service authorization reference lists them.
+const EXISTING_OBJECT_TAGS: [&str; 23] = [
+    "s3:DeleteObjectAnnotation",
+    "s3:DeleteObjectTagging",
+    "s3:DeleteObjectVersionAnnotation",
+    "s3:DeleteObjectVersionTagging",
+    "s3:GetObject",
+    "s3:GetObjectAcl",
+    "s3:GetObjectAnnotation",
+    "s3:GetObjectAttributes",
+    "s3:GetObjectTagging",
+    "s3:GetObjectVersion",
+    "s3:GetObjectVersionAcl",
+    "s3:GetObjectVersionAnnotation",
+    "s3:GetObjectVersionAttributes",
+    "s3:GetObjectVersionTagging",
+    "s3:ListObjectAnnotations",
+    "s3:ListObjectVersionAnnotations",
+    "s3:PutObjectAcl",
+    "s3:PutObjectAnnotation",
+    "s3:PutObjectTagging",
+    "s3:PutObjectVersionAcl",
+    "s3:PutObjectVersionAnnotation",
+    "s3:PutObjectVersionTagging",
+    "s3:UpdateObjectEncryption",
+];
 
 /// The operations that make the object they name.
 const CREATING: [&str; 4] = [
@@ -374,6 +428,8 @@ impl S3Access for Access {
             if needs.is_none() && !identity.is_root() {
                 return Err(denied());
             }
+            let tests_tags =
+                tests_existing_tags(&identity, [rules.as_deref(), source_rules.as_deref()]);
             for need in needs.iter().flat_map(|needs| needs.iter()) {
                 let bucket = match need.target {
                     Target::Source => source_rules.as_deref(),
@@ -382,21 +438,20 @@ impl S3Access for Access {
                 };
                 match resource(need, path, operation, source.as_ref()) {
                     Resource::Arn(arn) => {
-                        let object = match (need.target, path) {
-                            (Target::Source, _) => {
-                                source.as_ref().map(|(b, k, _)| (b.as_str(), k.as_str()))
-                            }
-                            (Target::Object, S3Path::Object { bucket, key }) => {
-                                Some((bucket.as_ref(), key.as_ref()))
+                        let object = object_of(need.target, path, source.as_ref());
+                        let creating =
+                            need.target == Target::Object && CREATING.contains(&operation);
+                        let tagged = match object {
+                            Some(object) if tests_tags && !creating => {
+                                self.with_existing_tags(&context, need.action, object)
+                                    .await?
                             }
                             _ => None,
                         };
-                        let creating =
-                            need.target == Target::Object && CREATING.contains(&operation);
                         let allowed = self
                             .permits(
                                 &identity,
-                                &context,
+                                tagged.as_ref().unwrap_or(&context),
                                 (need.action, &arn),
                                 bucket,
                                 object,
@@ -454,6 +509,34 @@ fn posted(cx: &mut S3AccessContext<'_>) -> S3Result<(Option<Form>, Option<S3Path
         _ => None,
     };
     Ok((Some(form), path))
+}
+
+/// Whether a policy that decides the request tests an object's own tags, which are then
+/// read for the actions AWS decides with them (and only then).
+fn tests_existing_tags<'a>(
+    identity: &Identity,
+    rules: impl IntoIterator<Item = Option<&'a BucketRules>>,
+) -> bool {
+    identity.tests_tags(TagKind::ExistingObject)
+        || rules.into_iter().flatten().any(|rules| {
+            rules
+                .policy
+                .as_deref()
+                .is_some_and(|policy| policy.tests_tags(TagKind::ExistingObject))
+        })
+}
+
+/// The object `(bucket, key)` a need's action is on, if it's one.
+fn object_of<'a>(
+    target: Target,
+    path: &'a S3Path,
+    source: Option<&'a Source>,
+) -> Option<(&'a str, &'a str)> {
+    match (target, path) {
+        (Target::Source, _) => source.map(|(bucket, key, _)| (bucket.as_str(), key.as_str())),
+        (Target::Object, S3Path::Object { bucket, key }) => Some((bucket.as_ref(), key.as_ref())),
+        _ => None,
+    }
 }
 
 /// The object a copy or rename reads from: (bucket, key, whether a version is named).

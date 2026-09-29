@@ -283,6 +283,18 @@ impl Identity {
             })
     }
 
+    /// Whether a policy that decides its requests (its own, its boundary, its session's)
+    /// tests a tag of `kind`, which the caller then has to look up.
+    #[must_use]
+    pub fn tests_tags(&self, kind: TagKind) -> bool {
+        let session = self.session.as_ref().and_then(|s| s.policies.as_deref());
+        self.policies
+            .iter()
+            .chain(&self.boundary)
+            .chain(session.into_iter().flatten())
+            .any(|policy| policy.tests_tags(kind))
+    }
+
     fn session_policies(&self) -> Option<Vec<&Policy>> {
         self.session
             .as_ref()

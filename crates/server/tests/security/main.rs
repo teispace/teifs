@@ -12,4 +12,5 @@
 mod common;
 mod sign;
 
+mod policy;
 mod signatures;

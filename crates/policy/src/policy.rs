@@ -10,7 +10,7 @@ use crate::{
     context::Principal,
     evaluate::Request,
     json::Json,
-    key::Key,
+    key::{Key, TagKind},
     pattern::{self, Atom},
     template::Template,
 };
@@ -321,6 +321,16 @@ impl Policy {
             }
         }
         providers
+    }
+
+    /// Whether a condition tests a tag of `kind` (`s3:ExistingObjectTag/…`): whether the
+    /// tags a request doesn't carry need looking up before this policy decides it.
+    #[must_use]
+    pub fn tests_tags(&self, kind: TagKind) -> bool {
+        self.statements
+            .iter()
+            .flat_map(|statement| statement.conditions.iter())
+            .any(|condition| matches!(condition.key(), Key::Tag(k, _) if *k == kind))
     }
 
     /// The condition keys TeiFS doesn't know, which no request ever has: usually a typo.
@@ -1329,6 +1339,30 @@ mod tests {
         )
         .unwrap();
         assert!(not_s3.check_bucket("photos").is_err());
+    }
+
+    #[test]
+    fn tags_are_looked_up_only_for_policies_that_test_them() {
+        let policy = |condition: &str| {
+            Policy::parse(
+                &format!(
+                    r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Deny","Action":"s3:GetObject","Resource":"*"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{condition}}}]}}"#
+                ),
+                Kind::Identity,
+            )
+            .unwrap()
+        };
+        let existing = policy(r#"{"StringEquals":{"s3:ExistingObjectTag/team":"a"}}"#);
+        assert!(existing.tests_tags(TagKind::ExistingObject));
+        assert!(!existing.tests_tags(TagKind::Resource));
+        let negated = policy(r#"{"ForAnyValue:StringNotLike":{"s3:existingobjecttag/Team":"a*"}}"#);
+        assert!(
+            negated.tests_tags(TagKind::ExistingObject),
+            "any case, any operator"
+        );
+        let other = policy(r#"{"StringEquals":{"s3:RequestObjectTag/team":"a","s3:prefix":"x"}}"#);
+        assert!(!other.tests_tags(TagKind::ExistingObject));
+        assert!(other.tests_tags(TagKind::RequestObject));
     }
 
     #[test]
