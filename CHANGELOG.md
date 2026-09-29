@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are checked,
+  as on AWS: a request that expects another account to own the bucket (or a copy's
+  source) is refused with `AccessDenied`. They were ignored.
+
 - Attribute-based access control for buckets (ABAC), as AWS added it in November 2025:
   `PutBucketAbac` and `GetBucketAbac`; while it's on, a bucket's tags are
   `aws:ResourceTag` and `s3:BucketTag` in policies on the bucket and its objects, and

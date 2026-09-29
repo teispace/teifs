@@ -18,7 +18,7 @@ use aws_sdk_s3::{
 
 mod common;
 
-use common::{SECRET_KEY, client, start};
+use common::{SECRET_KEY, client, code, start};
 
 async fn body(output: aws_sdk_s3::operation::get_object::GetObjectOutput) -> Vec<u8> {
     output.body.collect().await.unwrap().into_bytes().to_vec()
@@ -1903,4 +1903,66 @@ async fn signature_v2_is_refused_unless_allowed() {
             assert!(answer.text().await.unwrap().contains("Signature Version 2"));
         }
     }
+}
+
+/// A request naming its bucket's owner is refused when another account owns it, as on
+/// AWS, whoever asks: its source's for a copy, and an owner that isn't an account id is
+/// an error.
+#[tokio::test]
+async fn requests_can_name_the_account_they_expect_to_own_the_bucket() {
+    let server = start().await;
+    let account = server.iam.account();
+    let other = "210987654321";
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("owned").send().await.unwrap();
+    let put = |owner: &str| {
+        s3.put_object()
+            .bucket("owned")
+            .key("a.txt")
+            .expected_bucket_owner(owner)
+            .body(ByteStream::from_static(b"a"))
+            .send()
+    };
+    assert_eq!(code(put(&account).await), "ok");
+    assert_eq!(code(put(other).await), "AccessDenied");
+    assert_eq!(
+        code(put("not-an-account").await),
+        "InvalidBucketOwnerAWSAccountID"
+    );
+    let list = |owner: &str| {
+        s3.list_objects_v2()
+            .bucket("owned")
+            .expected_bucket_owner(owner)
+            .send()
+    };
+    assert_eq!(code(list(&account).await), "ok");
+    assert_eq!(code(list(other).await), "AccessDenied");
+
+    let copy = |source: &str, destination: &str| {
+        s3.copy_object()
+            .bucket("owned")
+            .key("b.txt")
+            .copy_source("owned/a.txt")
+            .expected_source_bucket_owner(source)
+            .expected_bucket_owner(destination)
+            .send()
+    };
+    assert_eq!(code(copy(&account, &account).await), "ok");
+    assert_eq!(code(copy(other, &account).await), "AccessDenied");
+    assert_eq!(code(copy(&account, other).await), "AccessDenied");
+    let head = s3
+        .head_object()
+        .bucket("owned")
+        .key("b.txt")
+        .expected_bucket_owner(other)
+        .send();
+    assert_eq!(
+        head.await
+            .unwrap_err()
+            .raw_response()
+            .unwrap()
+            .status()
+            .as_u16(),
+        403
+    );
 }

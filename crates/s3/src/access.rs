@@ -405,6 +405,16 @@ impl S3Access for Access {
             S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
             S3Path::Root => None,
         };
+        // Whoever asks, a bucket owned by another account than the one named is refused.
+        if bucket_name.is_some() && operation != "CreateBucket" {
+            check_owner(field(cx, form.as_ref(), EXPECTED_OWNER), &self.account)?;
+        }
+        if source.is_some() {
+            check_owner(
+                field(cx, form.as_ref(), EXPECTED_SOURCE_OWNER),
+                &self.account,
+            )?;
+        }
         let rules = match &bucket_name {
             Some(bucket) => Some(self.rules.of(bucket).await?),
             None => None,
@@ -785,6 +795,29 @@ const GRANTS: [&str; 4] = [
     "x-amz-grant-write-acp",
 ];
 
+/// The account a request expects its bucket's owner to be.
+const EXPECTED_OWNER: &str = "x-amz-expected-bucket-owner";
+/// The account a copy expects its source bucket's owner to be.
+const EXPECTED_SOURCE_OWNER: &str = "x-amz-source-expected-bucket-owner";
+
+/// Checks an expected bucket owner, if the request names one, as S3 does: it must be an
+/// account id (12 digits), and the bucket's (every bucket on a drive is its account's).
+fn check_owner(expected: Option<&str>, account: &str) -> S3Result<()> {
+    match expected {
+        None => Ok(()),
+        Some(id) if id.len() != 12 || !id.bytes().all(|b| b.is_ascii_digit()) => {
+            let mut err = s3s::S3Error::with_message(
+                s3s::S3ErrorCode::Custom("InvalidBucketOwnerAWSAccountID".into()),
+                "The value of the expected bucket owner parameter must be an AWS Account ID.",
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            Err(err)
+        }
+        Some(id) if id == account => Ok(()),
+        Some(_) => Err(denied()),
+    }
+}
+
 /// A request header, or for a browser upload, the form field of that name (its headers
 /// say nothing about the object).
 fn field<'a>(cx: &'a S3AccessContext<'_>, form: Option<&'a Form>, name: &str) -> Option<&'a str> {
@@ -1007,6 +1040,30 @@ const fn signature_version(v4: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_drives_account_owns_its_buckets() {
+        let account = "123456789012";
+        assert!(check_owner(None, account).is_ok());
+        assert!(check_owner(Some(account), account).is_ok());
+        let other = check_owner(Some("210987654321"), account).unwrap_err();
+        assert_eq!(*other.code(), s3s::S3ErrorCode::AccessDenied);
+        for invalid in [
+            "",
+            "12345678901",
+            "1234567890123",
+            "12345678901a",
+            " 123456789012",
+        ] {
+            let err = check_owner(Some(invalid), account).unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                Some(http::StatusCode::BAD_REQUEST),
+                "{invalid:?}"
+            );
+            assert_eq!(err.code().as_str(), "InvalidBucketOwnerAWSAccountID");
+        }
+    }
 
     #[test]
     fn signature_v4_dates_give_an_age() {
