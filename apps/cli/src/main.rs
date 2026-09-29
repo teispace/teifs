@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+mod admin;
 mod client;
 mod config;
 mod error;
@@ -78,6 +79,12 @@ enum Command {
     },
     #[command(flatten)]
     Client(client::Command),
+    /// Manage a TeiFS server through its admin API: its info and configuration, its
+    /// IAM (export and import) and its root key.
+    Admin {
+        #[command(subcommand)]
+        action: admin::AdminAction,
+    },
     /// Check that a TeiFS server answers its health check (exit code 0 when it does);
     /// for container health checks and scripts.
     Health(health::HealthArgs),
@@ -401,6 +408,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Bucket { action } => Ok(bucket(action).await?),
         Command::Key { action } => Ok(key(action).await?),
         Command::Client(command) => client::run(command).await,
+        Command::Admin { action } => admin::run(action).await,
     }
 }
 

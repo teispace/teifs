@@ -130,6 +130,38 @@ impl Error {
         }
     }
 
+    /// An admin API request that failed, while doing `what`.
+    pub fn admin(what: impl fmt::Display, err: &teifs_client::ClientError) -> Self {
+        use teifs_client::ClientError;
+        let (kind, why, hint) = match err {
+            ClientError::Api {
+                status,
+                code,
+                message,
+                ..
+            } => (
+                kind_of(*status, code),
+                describe(*status, code, message),
+                hint_for(code).map(str::to_owned),
+            ),
+            ClientError::Transport(e) => (
+                Kind::Network,
+                format!("the endpoint can't be reached ({})", source_chain(Some(e))),
+                Some("check the address, and that the server is running".to_owned()),
+            ),
+            ClientError::Endpoint(_) => (Kind::Usage, err.to_string(), None),
+            ClientError::Answer(_) => (
+                Kind::General,
+                err.to_string(),
+                Some("check that the alias points at a TeiFS server".to_owned()),
+            ),
+        };
+        Self {
+            hint,
+            ..Self::new(kind, format!("{what}: {why}"))
+        }
+    }
+
     /// The same failure, said to have happened while doing `what`.
     #[must_use]
     pub fn within(self, what: impl fmt::Display) -> Self {
@@ -189,6 +221,10 @@ fn hint_for(code: &str) -> Option<&'static str> {
         "InvalidAccessKeyId" => Some("check the alias's access key: `teifs alias set`"),
         "SignatureDoesNotMatch" => Some("check the alias's secret key: `teifs alias set`"),
         "RequestTimeTooSkewed" => Some("this computer's clock is off: set it right"),
+        "RootKeyManagedElsewhere" => Some(
+            "the server was given its root key (TEIFS_ACCESS_KEY / TEIFS_SECRET_KEY, flags or \
+             a secret key file): change it there and restart the server",
+        ),
         _ => None,
     }
 }

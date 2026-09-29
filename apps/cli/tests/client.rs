@@ -9,135 +9,18 @@
 
 #[path = "../../../crates/server/tests/common/mod.rs"]
 mod common;
+mod harness;
 
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::{fs, path::Path};
 
 use aws_sdk_s3::{
     primitives::ByteStream,
     types::{ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart},
 };
-use common::{ACCESS_KEY, SECRET_KEY, Server, client, start, start_with};
-use tempfile::TempDir;
+use common::{ACCESS_KEY, SECRET_KEY, client, start, start_with};
+use harness::{Client, records};
 
 const MIB: usize = 1024 * 1024;
-
-/// A place to run `teifs` from, with alias `t` for the server (and `u`, the same
-/// server by another name, so copies between them pass through the client).
-struct Client {
-    work: TempDir,
-    env: Vec<(String, String)>,
-}
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl Client {
-    fn new(server: &Server) -> Self {
-        let work = tempfile::tempdir().unwrap();
-        let address = server.endpoint.trim_start_matches("http://");
-        let port = address.rsplit_once(':').unwrap().1;
-        let mut env = vec![
-            (
-                "TEIFS_ALIAS_T".to_owned(),
-                format!("http://{ACCESS_KEY}:{SECRET_KEY}@{address}"),
-            ),
-            (
-                "TEIFS_ALIAS_U".to_owned(),
-                format!("http://{ACCESS_KEY}:{SECRET_KEY}@localhost:{port}"),
-            ),
-            (
-                "TEIFS_CLIENT_CONFIG".to_owned(),
-                work.path().join("aliases.toml").display().to_string(),
-            ),
-        ];
-        // Windows can't open a socket without it.
-        if let Some(root) = std::env::var_os("SystemRoot") {
-            env.push(("SystemRoot".to_owned(), root.to_string_lossy().into_owned()));
-        }
-        Self { work, env }
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.work.path().join(name)
-    }
-
-    /// Runs `teifs ARGS` in the work folder, feeding it `stdin`.
-    async fn run_with(&self, args: &[&str], stdin: &str) -> Run {
-        let args: Vec<String> = args.iter().map(|&a| a.to_owned()).collect();
-        let (env, dir, stdin) = (
-            self.env.clone(),
-            self.work.path().to_owned(),
-            stdin.to_owned(),
-        );
-        tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_teifs"))
-                .args(&args)
-                .current_dir(dir)
-                .env_clear()
-                .envs(env)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(stdin.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            let run = Run {
-                code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            };
-            assert!(
-                !run.stdout.contains(SECRET_KEY) && !run.stderr.contains(SECRET_KEY),
-                "a secret was printed: {}{}",
-                run.stdout,
-                run.stderr
-            );
-            run
-        })
-        .await
-        .unwrap()
-    }
-
-    async fn run(&self, args: &[&str]) -> Run {
-        self.run_with(args, "").await
-    }
-
-    /// Runs `teifs ARGS`, which must succeed; its standard output.
-    async fn ok(&self, args: &[&str]) -> String {
-        let run = self.run(args).await;
-        assert_eq!(
-            run.code, 0,
-            "teifs {args:?} failed:\n{}{}",
-            run.stdout, run.stderr
-        );
-        run.stdout
-    }
-
-    /// Runs `teifs ARGS`, which must fail with exit code `code`; its error output.
-    async fn fails(&self, args: &[&str], code: i32) -> String {
-        let run = self.run(args).await;
-        assert_eq!(
-            run.code, code,
-            "teifs {args:?}:\n{}{}",
-            run.stdout, run.stderr
-        );
-        run.stderr
-    }
-}
 
 /// Bytes that differ from part to part, so a misplaced part shows.
 fn data(len: usize, seed: u8) -> Vec<u8> {
@@ -748,18 +631,6 @@ async fn streams_copy_from_standard_input_and_to_standard_output() {
         .await
         .unwrap();
     assert!(uploads.uploads().is_empty());
-}
-
-/// Each line of `--json` output, parsed; each must be an object with a `type`.
-fn records(out: &str) -> Vec<serde_json::Value> {
-    out.lines()
-        .map(|line| {
-            let record: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {line}"));
-            assert!(record["type"].is_string(), "no type: {line}");
-            record
-        })
-        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -27,6 +27,7 @@ dirs.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3.workspace = true
+teifs-client.workspace = true
 aws-sdk-iam.workspace = true
 aws-sdk-sts.workspace = true
 aws-sdk-s3control.workspace = true

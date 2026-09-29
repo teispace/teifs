@@ -26,7 +26,8 @@ S3 client ──HTTP──▶ teifs-server ──▶ s3s (HTTP ↔ S3, signature
 
 ```
 crates/types    teifs-types    Bucket names and object keys with their rules, object
-                               attributes, file stamps, ETags. No I/O.
+                               attributes, file stamps, ETags, and the admin API's
+                               messages (`admin`). No I/O.
 crates/meta     teifs-meta     SQLite: the object index (index.db) and the system
                                database (system.db). All SQL lives here.
 crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): data keys,
@@ -50,12 +51,15 @@ crates/s3       teifs-s3       The S3 operations: implements s3s's `S3` trait ov
 crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP/2),
                                graceful shutdown, and `Server::bind` / `run`, which the
                                command and embedders use.
+crates/client   teifs-client   A typed client for the admin API (reqwest, Signature V4),
+                               for `teifs admin` and apps that manage a server.
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
                                prints results. `src/client/` is its S3 client (aliases,
                                cp/mirror with parallel, resumable transfers) on the AWS
                                SDK, for TeiFS or any S3 service. `src/ui.rs` does all its
                                output: styles, tables, progress bars, prompts, `--json`.
-                               `src/init.rs` is `teifs init`.
+                               `src/init.rs` is `teifs init`; `src/admin.rs` is
+                               `teifs admin`, on `teifs-client`.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.
@@ -153,8 +157,10 @@ it forgets every bucket's cached rules. The admin API (`admin.rs`) is JSON under
 start with a dot); a virtual-hosted-style request (`bucket.domain/.teifs/…`) is that
 bucket's key, so the route compares the `Host` header with the served domains, which
 s3s doesn't pass to it. Its actions are `teifs:*`, or `Needs::Root` for what only the
-root user may do. Its messages are in `teifs_types::admin`, for the server and clients
-alike; the server hands the service its settings (`Options::config`), and the drive
+root user may do. Requests s3s refuses before the route (a signature that doesn't match,
+an unknown key) get S3's XML errors, everything after the admin API's JSON;
+`teifs-client` reads both. Its messages are in `teifs_types::admin`, for the server and
+clients alike; the server hands the service its settings (`Options::config`), and the drive
 keeps its jobs' status (`Store::job_status`) for whoever holds it. IAM's changing
 operations are methods of a `Draft` (a copy of the state and the writes to make), each
 with all of its checks; `Iam`'s public methods run one per change, and `Iam::import`

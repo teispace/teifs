@@ -2853,6 +2853,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "teifs-client",
  "teifs-iam",
  "teifs-server",
  "teifs-store",
@@ -2862,6 +2863,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+]
+
+[[package]]
+name = "teifs-client"
+version = "0.1.0"
+dependencies = [
+ "aws-credential-types",
+ "aws-sigv4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "teifs-types",
+ "thiserror",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2975,6 +2991,7 @@ dependencies = [
  "s3s",
  "serde",
  "serde_json",
+ "teifs-client",
  "teifs-iam",
  "teifs-s3",
  "teifs-store",

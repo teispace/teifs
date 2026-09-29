@@ -36,6 +36,9 @@ behaviour; the on-disk format is always upgraded automatically.
   and keys as JSON (with the keys' secrets from `iam/secrets`, for the root user only),
   and `PUT /.teifs/admin/v1/iam` imports an export into an empty IAM, all or nothing,
   with the IAM API's own checks; `?account=adopt` also takes the export's account id.
+- `teifs admin`: `info`, `config`, `iam export|import` and `root-key rotate` through an
+  alias, with `--json`; an export with secrets goes only to an owner-only file, and a
+  rotation updates the alias. `teifs-client` is the admin API as a Rust library.
 - Rotate the root key without a restart: `POST /.teifs/admin/v1/root-key` replaces a
   drive-generated root key, saves it in `.teifs/credentials.json` and answers it; the
   old key stops working at once.

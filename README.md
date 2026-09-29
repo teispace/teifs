@@ -154,6 +154,9 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
+| `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |
+| `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
+| `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs health [ADDRESS] [--timeout 5s]` | Check that a server answers its health check |
 | `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
@@ -184,7 +187,9 @@ signed like any S3 request:
 | `PUT iam[?account=adopt]` | Imports an export into an empty IAM, all or nothing; `adopt` also takes its account id | root user |
 | `POST root-key` | Replaces the root key the drive generated: answers the new one, saves it in `.teifs/credentials.json`, and the old one stops working at once | root user |
 
-The root user may call everything; users need the action in a policy. An import makes
+`teifs admin` calls them through an alias (`teifs admin info local`), and
+`teifs-client` is the same as a Rust library. The root user may call everything; users
+need the action in a policy. An import makes
 everything with the IAM API's own checks, gives users, groups and policies new unique
 ids (names and ARNs stay), numbers policy versions from `v1`, and skips keys exported
 without secrets. With curl, which reads the key from standard input so it stays off the

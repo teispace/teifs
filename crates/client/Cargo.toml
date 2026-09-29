@@ -1,0 +1,26 @@
+[package]
+name = "teifs-client"
+description = "A typed client for TeiFS's admin API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+teifs-types.workspace = true
+reqwest.workspace = true
+aws-sigv4 = { workspace = true, features = ["sign-http"] }
+aws-credential-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

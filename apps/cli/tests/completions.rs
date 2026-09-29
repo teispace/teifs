@@ -17,7 +17,15 @@ fn completions_know_every_command_in_every_shell() {
             .unwrap();
         assert!(output.status.success(), "{shell}");
         let script = String::from_utf8(output.stdout).unwrap();
-        for command in ["init", "serve", "alias", "mirror", "presign", "completions"] {
+        for command in [
+            "init",
+            "serve",
+            "alias",
+            "mirror",
+            "presign",
+            "admin",
+            "completions",
+        ] {
             assert!(script.contains(command), "{shell} lacks {command}");
         }
         assert!(!script.contains('\u{1b}'), "{shell}: no colors in a script");
