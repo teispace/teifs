@@ -116,7 +116,7 @@ are withheld without failing the request. Multipart uploads belong to the user w
 started them (any of their keys); only that user or the root user can continue them.
 A key that's deactivated or deleted stops working at the next request.
 
-### 4. Credentials can't be escalated (*built for IAM users; temporary credentials planned*)
+### 4. Credentials can't be escalated (*built for IAM users, roles and temporary credentials*)
 IAM access keys' secrets are stored sealed (AES-256-GCM, each bound to its access key
 id) under an IAM key the drive's KMS seals, so `system.db` alone doesn't reveal them;
 they're never logged, and shown once, when the key is created.
@@ -132,6 +132,27 @@ the users and roles it names to their unique ids when it's set, so deleting a pr
 and making another of the same name doesn't hand it the role. The root user's key belongs
 to the drive's configuration and can't be created or changed through IAM; bulk import
 will go through the same checks as single changes.
+
+Temporary credentials never have more than what they were issued for, and never outlive
+it. Nothing about a session is stored: its secret is derived from its access key id
+under the IAM key, and its session token is its claims sealed with AES-256-GCM under
+the same key and bound to the access key id, so a token can't be forged, changed or
+used with another key, and a long-term key sent with a token is refused. Every request
+rebuilds the session's permissions from IAM as it is now: a role's or user's policies
+changing reach their sessions at once, and deleting the role or user ends them, even
+if one of the same name is made again (sessions name it by unique id). A role session
+has only the role's permissions, narrowed by its session policies; `AssumeRole` is
+decided with the trust policy, `sts:TagSession` and `sts:SetSourceIdentity` too when
+tags or a source identity are asked for; the root user can't assume roles; a chain of
+roles lasts at most an hour, and its source identity and transitive tags can't be
+changed along it. `GetSessionToken`'s and federated users' credentials can't call IAM or
+the admin API, nor start other sessions (federated users' only ask `GetCallerIdentity`);
+a federated user has what both the caller's policies and the session policies allow,
+so none allows nothing. MinIO's `AssumeRole` without a role gives a user's own
+permissions narrowed, only to the user's own long-term key, and a policy may deny it.
+A session with an MFA code is refused, since TeiFS has no MFA devices. Tests:
+`crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/sessions.rs`,
+`crates/server/tests/sts.rs`, `crates/server/tests/admin.rs`.
 
 ### 5. No default secrets
 There is no built-in access key or password. The first run generates random credentials

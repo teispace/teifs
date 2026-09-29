@@ -2910,6 +2910,7 @@ dependencies = [
  "base64",
  "form_urlencoded",
  "percent-encoding",
+ "serde",
  "serde_json",
  "teifs-crypto",
  "teifs-meta",

@@ -171,6 +171,25 @@ keys! {
 }
 
 keys! {
+    /// STS's own keys (from AWS's Service Authorization Reference), except the
+    /// `sts:RequestContext/` family. Those with no STS feature in TeiFS are recognized
+    /// but never present.
+    StsKey {
+        AwsServiceName = "sts:AWSServiceName",
+        DurationSeconds = "sts:DurationSeconds",
+        ExternalId = "sts:ExternalId",
+        IdentityTokenAudience = "sts:IdentityTokenAudience",
+        RequestContextProviders = "sts:RequestContextProviders",
+        RoleAuthorizedByIdp = "sts:RoleAuthorizedByIdp",
+        RoleSessionName = "sts:RoleSessionName",
+        SigningAlgorithm = "sts:SigningAlgorithm",
+        SourceIdentity = "sts:SourceIdentity",
+        TaskPolicyArn = "sts:TaskPolicyArn",
+        TransitiveTagKeys = "sts:TransitiveTagKeys",
+    }
+}
+
+keys! {
     /// The keys that carry a tag key after a `/`: `aws:ResourceTag/team`.
     TagKind {
         Principal = "aws:PrincipalTag",
@@ -190,6 +209,7 @@ pub(crate) enum Key {
     Global(GlobalKey),
     S3(S3Key),
     Iam(IamKey),
+    Sts(StsKey),
     /// A tag family and the tag's key.
     Tag(TagKind, Box<str>),
     /// Any other name: never present in a request.
@@ -216,6 +236,7 @@ impl Key {
             .map(Self::Global)
             .or_else(|| S3Key::find(name).map(Self::S3))
             .or_else(|| IamKey::find(name).map(Self::Iam))
+            .or_else(|| StsKey::find(name).map(Self::Sts))
             .unwrap_or_else(|| Self::Unknown(name.into())))
     }
 }
@@ -256,6 +277,10 @@ mod tests {
             Key::Tag(TagKind::IamResource, "team".into())
         );
         assert_eq!(
+            Key::parse("STS:externalid").unwrap(),
+            Key::Sts(StsKey::ExternalId)
+        );
+        assert_eq!(
             Key::parse("s3:madeup").unwrap(),
             Key::Unknown("s3:madeup".into())
         );
@@ -275,6 +300,7 @@ mod tests {
             .map(|k| k.name())
             .chain(S3Key::ALL.iter().map(|k| k.name()))
             .chain(IamKey::ALL.iter().map(|k| k.name()))
+            .chain(StsKey::ALL.iter().map(|k| k.name()))
             .chain(TagKind::ALL.iter().map(|k| k.name()))
             .map(str::to_ascii_lowercase)
             .collect();

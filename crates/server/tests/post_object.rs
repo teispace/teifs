@@ -495,3 +495,84 @@ async fn fields_are_read_however_they_arrive_and_only_so_much() {
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("MaxPostPreDataLengthExceeded"), "{body}");
 }
+
+#[tokio::test]
+async fn sessions_sign_forms_with_their_token_in_the_form() {
+    let server = start().await;
+    bucket(&server, "photos").await;
+    let account = server.iam.account();
+    let trust = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{account}"}},"Action":"sts:AssumeRole"}}]}}"#
+    );
+    server
+        .iam
+        .create_role(
+            "uploader",
+            &teifs_iam::NewRole {
+                trust: &trust,
+                ..teifs_iam::NewRole::default()
+            },
+        )
+        .unwrap();
+    server
+        .iam
+        .put_inline(
+            teifs_iam::Owner::Role("uploader"),
+            "uploads",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::photos/*"}]}"#,
+        )
+        .unwrap();
+    server.iam.create_user("web", None, &[], None).unwrap();
+    server
+        .iam
+        .put_inline(
+            teifs_iam::Owner::User("web"),
+            "assume",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}"#,
+        )
+        .unwrap();
+    let key = server.iam.create_access_key("web").unwrap();
+    let sts = aws_sdk_sts::Client::from_conf(
+        aws_sdk_sts::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_sts::config::Region::new("us-east-1"))
+            .endpoint_url(&server.endpoint)
+            .credentials_provider(aws_sdk_sts::config::Credentials::new(
+                &key.info.id,
+                key.secret.as_str(),
+                None,
+                None,
+                "tests",
+            ))
+            .build(),
+    );
+    let out = sts
+        .assume_role()
+        .role_arn(format!("arn:aws:iam::{account}:role/uploader"))
+        .role_session_name("browser")
+        .send()
+        .await
+        .unwrap();
+    let credentials = out.credentials().unwrap();
+    let session = (credentials.access_key_id(), credentials.secret_access_key());
+    let token = credentials.session_token();
+    let form = |key: &str, fields: &[(&str, &str)], conditions: &[Value]| {
+        let mut all = vec![json!({"bucket": "photos"}), json!({"key": key})];
+        all.extend_from_slice(conditions);
+        let mut named = vec![("key", key)];
+        named.extend_from_slice(fields);
+        signed(session, FAR, &all, &named)
+    };
+
+    let with_token = form(
+        "a.jpg",
+        &[("x-amz-security-token", token)],
+        &[json!({"x-amz-security-token": token})],
+    );
+    let Answer { status, body, .. } = post(&server, "photos", &with_token, b"a").await;
+    assert_eq!(status, 204, "{body}");
+    assert_eq!(read(&server, "photos", "a.jpg").await, b"a");
+    let Answer { status, body, .. } = post(&server, "photos", &form("b.jpg", &[], &[]), b"b").await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("<Code>InvalidToken</Code>"), "{body}");
+}

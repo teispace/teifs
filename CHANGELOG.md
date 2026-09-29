@@ -10,7 +10,7 @@ behaviour; the on-disk format is always upgraded automatically.
 - IAM, as AWS has it: users, access keys, groups, customer-managed policies with
   versions, inline policies, permissions boundaries and tags, with AWS's rules, quotas
   and error codes. Requests signed with a user's key do only what the user's policies
-  allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (50
+  allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (70
   actions, each authorized with AWS's condition keys) and STS `GetCallerIdentity` are
   served on the S3 endpoint. Access key secrets are stored sealed by the drive's KMS.
 - IAM roles: CreateRole and the rest of AWS's role actions (trust policies, inline and
@@ -18,6 +18,14 @@ behaviour; the on-disk format is always upgraded automatically.
   `ListEntitiesForPolicy`, `GetAccountSummary` and IAM export and import. A trust policy
   is checked as AWS checks it, and the users and roles it names are bound to their
   unique ids.
+- Temporary credentials from STS, as AWS has them: `AssumeRole` (trust policies,
+  external ids, session policies, session tags, transitive tags and source identity
+  along role chains), `GetSessionToken`, `GetFederationToken` and `GetAccessKeyInfo`,
+  with AWS's durations, limits and error codes. They sign S3, IAM and STS requests with
+  their session token in the `x-amz-security-token` header, a presigned link or a
+  browser upload's form, and do only what they were issued for; deleting a role or user
+  ends its sessions at once. MinIO's `AssumeRole` without a role gives a user
+  credentials for their own permissions, narrowed by a session policy.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

@@ -1,6 +1,6 @@
-//! IAM's API as AWS has it: the Query protocol (`Action=CreateUser&UserName=…` in a form
-//! body, answers in XML) for the actions TeiFS's IAM supports, and STS's
-//! `GetCallerIdentity`, so the AWS CLI and SDKs manage a drive's IAM as they would AWS's.
+//! IAM's and STS's APIs as AWS has them: the Query protocol (`Action=CreateUser&UserName=…`
+//! in a form body, answers in XML) for the actions TeiFS supports, so the AWS CLI and SDKs
+//! manage a drive's IAM and get temporary credentials as they would from AWS.
 //!
 //! Every action is authorized before it runs, as on AWS: the caller's policies decide
 //! the action on the resource's ARN, with the condition keys AWS's service reference
@@ -11,6 +11,7 @@ mod groups;
 mod params;
 mod policies;
 mod roles;
+mod sts;
 mod users;
 mod xml;
 
@@ -52,42 +53,59 @@ const STS_VERSION: &str = "2011-06-15";
 const STS_NAMESPACE: &str = "https://sts.amazonaws.com/doc/2011-06-15/";
 
 impl Iam {
-    /// Answers a request to the IAM API.
+    /// Answers a request to the IAM API. Temporary credentials from
+    /// `GetSessionToken` or `GetFederationToken` can't call it, as on AWS without MFA.
     #[must_use]
     pub fn serve_iam(&self, call: &Call<'_>) -> Reply {
         serve(call, IAM_VERSION, IAM_NAMESPACE, |name, params| {
-            let action = ACTIONS
-                .iter()
-                .find(|a| a.name == name)
-                .ok_or_else(|| ApiError::invalid_action(name, IAM_VERSION))?;
-            let run = Run {
-                iam: self,
-                identity: call.identity,
-                base: call.context,
-                p: params,
-                account: self.account(),
-            };
-            (action.run)(&run).map(|result| (action.name, result))
+            let action = find(ACTIONS, name, IAM_VERSION)?;
+            if call.identity.session().is_some_and(|s| !s.may_manage()) {
+                return Err(ApiError::invalid_token());
+            }
+            self.run(call, action, params)
         })
     }
 
-    /// Answers a request to the STS API: `GetCallerIdentity`, which anyone signed may
-    /// call.
+    /// Answers a request to the STS API.
     #[must_use]
     pub fn serve_sts(&self, call: &Call<'_>) -> Reply {
-        serve(call, STS_VERSION, STS_NAMESPACE, |name, _| {
-            if name != "GetCallerIdentity" {
-                return Err(ApiError::invalid_action(name, STS_VERSION));
+        serve(call, STS_VERSION, STS_NAMESPACE, |name, params| {
+            let action = find(sts::ACTIONS, name, STS_VERSION)?;
+            if let Some(session) = call.identity.session()
+                && !sts::permitted(session.kind(), action.name)
+            {
+                return Err(ApiError::access_denied(format!(
+                    "Cannot call {} with session credentials",
+                    action.name
+                )));
             }
-            let principal = call.identity.principal();
-            answer(|x| {
-                x.maybe("Arn", principal.arn())
-                    .text("UserId", principal.user_id())
-                    .maybe("Account", principal.account());
-            })
-            .map(|result| ("GetCallerIdentity", result))
+            self.run(call, action, params)
         })
     }
+
+    fn run(
+        &self,
+        call: &Call<'_>,
+        action: &Action,
+        params: Params,
+    ) -> Result<(&'static str, Option<Xml>), ApiError> {
+        let run = Run {
+            iam: self,
+            identity: call.identity,
+            base: call.context,
+            p: params,
+            account: self.account(),
+        };
+        (action.run)(&run).map(|result| (action.name, result))
+    }
+}
+
+/// The action called `name` in `actions`.
+fn find<'a>(actions: &'a [Action], name: &str, version: &str) -> Result<&'a Action, ApiError> {
+    actions
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| ApiError::invalid_action(name, version))
 }
 
 /// Parses the form, runs the action `f` finds, and writes the answer or the error.
@@ -182,17 +200,37 @@ impl ApiError {
 
     /// A required parameter is missing, as AWS words it (`userName`).
     pub(crate) fn missing(name: &str) -> Self {
-        let mut chars = name.chars();
-        let camel: String = chars
-            .next()
-            .map(|c| c.to_ascii_lowercase())
-            .into_iter()
-            .chain(chars)
-            .collect();
         Self::validation(format!(
-            "1 validation error detected: Value null at '{camel}' failed to satisfy \
-             constraint: Member must not be null"
+            "1 validation error detected: Value null at '{}' failed to satisfy constraint: \
+             Member must not be null",
+            camel(name)
         ))
+    }
+
+    /// A parameter's value breaks a constraint, as AWS words it.
+    pub(crate) fn constraint(name: &str, value: &str, constraint: &str) -> Self {
+        Self::validation(format!(
+            "1 validation error detected: Value '{value}' at '{}' failed to satisfy \
+             constraint: {constraint}",
+            camel(name)
+        ))
+    }
+
+    pub(crate) fn access_denied(message: String) -> Self {
+        Self {
+            status: 403,
+            code: "AccessDenied",
+            message,
+        }
+    }
+
+    /// Temporary credentials that may not call the API at all.
+    fn invalid_token() -> Self {
+        Self {
+            status: 403,
+            code: "InvalidClientTokenId",
+            message: "The security token included in the request is invalid".into(),
+        }
     }
 
     pub(crate) fn invalid_value(name: &str, value: &str) -> Self {
@@ -217,14 +255,21 @@ impl ApiError {
 
     fn denied(identity: &Identity, action: &str, resource: &str) -> Self {
         let who = identity.principal().arn().unwrap_or("anonymous");
-        Self {
-            status: 403,
-            code: "AccessDenied",
-            message: format!(
-                "User: {who} is not authorized to perform: {action} on resource: {resource}"
-            ),
-        }
+        Self::access_denied(format!(
+            "User: {who} is not authorized to perform: {action} on resource: {resource}"
+        ))
     }
+}
+
+/// A parameter's name as AWS's messages give it: `userName`.
+fn camel(name: &str) -> String {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|c| c.to_ascii_lowercase())
+        .into_iter()
+        .chain(chars)
+        .collect()
 }
 
 impl From<IamError> for ApiError {
@@ -283,6 +328,8 @@ enum On {
     Group,
     Role,
     Policy,
+    /// STS's `federated-user`.
+    FederatedUser,
 }
 
 /// An action the API answers.
@@ -453,14 +500,7 @@ impl Run<'_> {
         let context = if resource.tags.is_empty() {
             context
         } else {
-            let mut c = context.clone();
-            for (key, value) in &resource.tags {
-                c = c.with_tag(TagKind::Resource, key, value);
-                if matches!(resource.on, On::User | On::Role) {
-                    c = c.with_tag(TagKind::IamResource, key, value);
-                }
-            }
-            tagged = c;
+            tagged = with_resource_tags(context.clone(), resource.on, &resource.tags);
             &tagged
         };
         if self.identity.allows(context, action, &resource.arn) {
@@ -486,7 +526,7 @@ impl Run<'_> {
             On::Group => "group",
             On::Role => "role",
             On::Policy => "policy",
-            On::Any => unreachable!("only named resources are made"),
+            On::Any | On::FederatedUser => unreachable!("only IAM's resources are made"),
         };
         Resource {
             on,
@@ -624,6 +664,17 @@ impl Run<'_> {
 fn with_request_tags(mut context: Context, tags: &[(String, String)]) -> Context {
     for (key, value) in tags {
         context = context.with_tag(TagKind::Request, key, value);
+    }
+    context
+}
+
+/// `aws:ResourceTag` of a resource's tags, and `iam:ResourceTag` for a user's or role's.
+fn with_resource_tags(mut context: Context, on: On, tags: &[(String, String)]) -> Context {
+    for (key, value) in tags {
+        context = context.with_tag(TagKind::Resource, key, value);
+        if matches!(on, On::User | On::Role) {
+            context = context.with_tag(TagKind::IamResource, key, value);
+        }
     }
     context
 }

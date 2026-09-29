@@ -558,6 +558,7 @@ impl PrincipalEntry {
             Self::Account(account) => {
                 (principal.account() == Some(account)).then_some(Grant::Account)
             }
+            Self::Arn(_) if !principal.is_bound() => None,
             Self::Arn(arn) => {
                 if principal.arn() == Some(arn) {
                     Some(Grant::Named)
@@ -581,7 +582,10 @@ impl PrincipalEntry {
                 principal.kind() == crate::PrincipalKind::Account
                     && principal.account() == Some(account)
             }
-            Self::Arn(arn) => principal.arn() == Some(arn) || principal.role_arn() == Some(arn),
+            Self::Arn(arn) => {
+                principal.is_bound()
+                    && (principal.arn() == Some(arn) || principal.role_arn() == Some(arn))
+            }
             Self::Canonical(id) => principal.canonical_id() == Some(id),
             Self::Never => false,
         }
@@ -763,6 +767,32 @@ mod tests {
             "actions compare without case"
         );
         assert_eq!(trust.grant(&request("sts:AssumeRole", &bob)), None);
+        // A principal the policy names as someone else's isn't reached by the name...
+        let stale = context(Principal::user("123456789012", "/", "alice", "AIDAC").unbound());
+        assert_eq!(trust.grant(&request("sts:AssumeRole", &stale)), None);
+        // ...but still by its account, and a NotPrincipal naming it doesn't spare it.
+        let both = Policy::parse(
+            &statement(
+                r#""Effect": "Allow", "Action": "sts:AssumeRole",
+                   "Principal": {"AWS": ["arn:aws:iam::123456789012:user/alice", "123456789012"]}"#,
+            ),
+            Kind::Trust,
+        )
+        .unwrap();
+        assert_eq!(
+            both.grant(&request("sts:AssumeRole", &stale)),
+            Some(Grant::Account)
+        );
+        let deny_others = Policy::parse(
+            &statement(
+                r#""Effect": "Deny", "Action": "sts:AssumeRole",
+                   "NotPrincipal": {"AWS": "arn:aws:iam::123456789012:user/alice"}"#,
+            ),
+            Kind::Trust,
+        )
+        .unwrap();
+        assert!(!deny_others.denies(&request("sts:AssumeRole", &alice)));
+        assert!(deny_others.denies(&request("sts:AssumeRole", &stale)));
         assert_eq!(trust.grant(&request("sts:SetSourceIdentity", &alice)), None);
 
         for (body, why) in [

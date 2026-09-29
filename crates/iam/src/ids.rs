@@ -32,6 +32,11 @@ pub(crate) fn access_key() -> String {
     format!("TKIA{}", base32(16))
 }
 
+/// A new temporary access key id: `TSIA` and 16 base32 characters (AWS's are `ASIA…`).
+pub(crate) fn session_key() -> String {
+    format!("{}{}", crate::sessions::PREFIX, base32(16))
+}
+
 /// A new secret key: 240 random bits as 40 base64 characters, like AWS's.
 pub(crate) fn secret_key() -> Zeroizing<String> {
     let salt = Zeroizing::new(teifs_crypto::random_salt());
@@ -75,6 +80,9 @@ mod tests {
         let key = access_key();
         assert_eq!(key.len(), 20);
         assert!(key.starts_with("TKIA"));
+        let session = session_key();
+        assert!(crate::sessions::is_session_key(&session), "{session}");
+        assert!(!crate::sessions::is_session_key(&key));
         let secret = secret_key();
         assert_eq!(secret.len(), 40);
         assert_ne!(*secret, *secret_key());

@@ -11,10 +11,10 @@
 
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use s3s::{Body, S3Request, S3Response};
-use teifs_iam::{Call, Iam, Reply};
+use teifs_iam::{AuthError, Call, Iam, Reply};
 
 use crate::{
-    access::{Client, base_context},
+    access::{Client, base_context, security_token},
     routes::{INCOMPLETE, signed_body, unreadable},
 };
 
@@ -109,23 +109,34 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
             "Request is missing Authentication Token",
         );
     };
-    // A key deleted since its signature was checked is refused like any other.
-    let Some(credential) = iam.credential(&access_key) else {
-        return refuse(
-            StatusCode::FORBIDDEN,
-            "InvalidClientTokenId",
-            "The security token included in the request is invalid.",
-        );
+    // A key deleted since its signature was checked is refused like any other, as is a
+    // session whose user or role is gone.
+    let token = security_token(&req.headers, &req.uri);
+    let identity = match iam.identify(&access_key, token.as_deref()) {
+        Ok(identity) => identity,
+        Err(AuthError::ExpiredToken) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "ExpiredToken",
+                "The security token included in the request is expired",
+            );
+        }
+        Err(AuthError::UnknownKey | AuthError::InvalidToken | AuthError::Revoked) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "InvalidClientTokenId",
+                "The security token included in the request is invalid.",
+            );
+        }
     };
     let body = match signed_body(req, MAX_FORM_BYTES).await {
         Ok(body) => body,
         Err((status, code, message)) => return refuse(status, code, message),
     };
     let client = req.extensions.get::<Client>().copied().unwrap_or_default();
-    let identity = &credential.identity;
-    let context = base_context(identity, &req.headers, client, &iam.account());
+    let context = base_context(&identity, &req.headers, client, &iam.account());
     let call = Call {
-        identity,
+        identity: &identity,
         context: &context,
         body: &body,
         request_id,

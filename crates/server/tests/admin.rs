@@ -371,3 +371,100 @@ async fn a_given_root_key_is_changed_where_it_was_given() {
             .is_none()
     );
 }
+
+/// Temporary credentials from STS, asked for by `key`: the access key, secret and token.
+async fn temporary(
+    server: &Server,
+    key: (&str, &str),
+    ask: impl AsyncFnOnce(&aws_sdk_sts::Client) -> Option<aws_sdk_sts::types::Credentials>,
+) -> (String, String, String) {
+    let sts = aws_sdk_sts::Client::from_conf(
+        aws_sdk_sts::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_sts::config::Region::new("us-east-1"))
+            .endpoint_url(&server.endpoint)
+            .credentials_provider(aws_sdk_sts::config::Credentials::new(
+                key.0, key.1, None, None, "tests",
+            ))
+            .build(),
+    );
+    let credentials = ask(&sts).await.unwrap();
+    (
+        credentials.access_key_id().to_owned(),
+        credentials.secret_access_key().to_owned(),
+        credentials.session_token().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn role_sessions_manage_the_drive_and_other_sessions_do_not() {
+    let server = start().await;
+    let account = server.iam.account();
+    let trust = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{account}"}},"Action":"sts:AssumeRole"}}]}}"#
+    );
+    server
+        .iam
+        .create_role(
+            "operator",
+            &teifs_iam::NewRole {
+                trust: &trust,
+                ..teifs_iam::NewRole::default()
+            },
+        )
+        .unwrap();
+    let info_only = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":["teifs:GetServerInfo","sts:AssumeRole"],"Resource":"*"}}"#;
+    server
+        .iam
+        .put_inline(teifs_iam::Owner::Role("operator"), "info", info_only)
+        .unwrap();
+    user(&server, "ops", Some(info_only));
+    let ops = server.iam.create_access_key("ops").unwrap();
+    let ops = (ops.info.id.as_str(), ops.secret.as_str());
+    let role = format!("arn:aws:iam::{account}:role/operator");
+
+    let (id, secret, token) = temporary(&server, ops, async |sts| {
+        let out = sts
+            .assume_role()
+            .role_arn(&role)
+            .role_session_name("ops-1")
+            .send()
+            .await;
+        out.unwrap().credentials
+    })
+    .await;
+    let session = (id.as_str(), secret.as_str());
+    let with_token = [("x-amz-security-token", token.as_str())];
+    let (status, _) = signed(&server, session, "GET", ADMIN_INFO, &with_token, b"").await;
+    assert_eq!(status, 200);
+    let (status, answer) = signed(&server, session, "GET", ADMIN_CONFIG, &with_token, b"").await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
+    // Without its token, or with a wrong one, the key isn't accepted.
+    let (status, _) = get(&server, session, ADMIN_INFO).await;
+    assert_eq!(status, 400);
+    let wrong = [("x-amz-security-token", "Zm9v")];
+    let (status, _) = signed(&server, session, "GET", ADMIN_INFO, &wrong, b"").await;
+    assert_eq!(status, 400);
+
+    // GetSessionToken's credentials don't manage the drive, even the root user's.
+    for key in [ops, ROOT] {
+        let (id, secret, token) = temporary(&server, key, async |sts| {
+            sts.get_session_token().send().await.unwrap().credentials
+        })
+        .await;
+        let with_token = [("x-amz-security-token", token.as_str())];
+        let (status, _) = signed(
+            &server,
+            (id.as_str(), secret.as_str()),
+            "GET",
+            ADMIN_INFO,
+            &with_token,
+            b"",
+        )
+        .await;
+        assert_eq!(status, 403, "{}", key.0);
+    }
+}

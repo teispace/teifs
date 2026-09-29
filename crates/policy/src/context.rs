@@ -5,7 +5,7 @@
 use std::{borrow::Cow, net::IpAddr};
 
 use crate::{
-    key::{GlobalKey, IamKey, Key, S3Key, TagKind},
+    key::{GlobalKey, IamKey, Key, S3Key, StsKey, TagKind},
     value::{Date, Number},
 };
 
@@ -18,6 +18,8 @@ pub enum PrincipalKind {
     User,
     /// A session of a role.
     AssumedRole,
+    /// A session a user started for someone else (`GetFederationToken`).
+    FederatedUser,
     /// An unsigned request.
     Anonymous,
 }
@@ -30,6 +32,7 @@ impl PrincipalKind {
             Self::Account => "Account",
             Self::User => "User",
             Self::AssumedRole => "AssumedRole",
+            Self::FederatedUser => "FederatedUser",
             Self::Anonymous => "Anonymous",
         }
     }
@@ -50,6 +53,9 @@ pub struct Principal {
     role_arn: Option<String>,
     session_name: Option<String>,
     canonical_id: Option<String>,
+    /// Whether a policy naming the principal's ARN (or a session's role) means this
+    /// principal; see [`Self::unbound`].
+    bound: bool,
 }
 
 impl Principal {
@@ -65,6 +71,7 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            bound: true,
         }
     }
 
@@ -81,6 +88,7 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            bound: true,
         }
     }
 
@@ -104,6 +112,23 @@ impl Principal {
             role_arn: Some(format!("arn:aws:iam::{account}:role{role_path}{role_name}")),
             session_name: Some(session_name.to_owned()),
             canonical_id: None,
+            bound: true,
+        }
+    }
+
+    /// A federated user called `name`, whom a user of `account` started a session for.
+    #[must_use]
+    pub fn federated(account: &str, name: &str) -> Self {
+        Self {
+            kind: PrincipalKind::FederatedUser,
+            arn: Some(format!("arn:aws:sts::{account}:federated-user/{name}")),
+            account: Some(account.to_owned()),
+            user_id: format!("{account}:{name}"),
+            username: None,
+            role_arn: None,
+            session_name: None,
+            canonical_id: None,
+            bound: true,
         }
     }
 
@@ -119,7 +144,19 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            bound: true,
         }
+    }
+
+    /// The same principal, for a policy that names its ARN (or its session's role) as
+    /// someone else's: one bound to a user or role since deleted and made again under
+    /// the same name. Statements naming the ARN don't reach it, as on AWS, where the
+    /// policy then names the old entity's unique id; its account and conditions still
+    /// do.
+    #[must_use]
+    pub const fn unbound(mut self) -> Self {
+        self.bound = false;
+        self
     }
 
     /// The same principal, with the canonical user id that ACLs and `CanonicalUser`
@@ -167,6 +204,10 @@ impl Principal {
 
     pub(crate) fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()
+    }
+
+    pub(crate) const fn is_bound(&self) -> bool {
+        self.bound
     }
 }
 
@@ -275,8 +316,10 @@ pub struct Context {
     region: Option<String>,
     resource_account: Option<String>,
     token_issue_time: Option<Date>,
+    source_identity: Option<String>,
     s3: Vec<(S3Key, Value)>,
     iam: Vec<(IamKey, Value)>,
+    sts: Vec<(StsKey, Value)>,
     /// Kind, tag key, tag value.
     tags: Vec<(TagKind, String, String)>,
     /// `aws:TagKeys`: the keys of the `aws:RequestTag`s.
@@ -300,8 +343,10 @@ impl Context {
             region: None,
             resource_account: None,
             token_issue_time: None,
+            source_identity: None,
             s3: Vec::new(),
             iam: Vec::new(),
+            sts: Vec::new(),
             tags: Vec::new(),
             request_tag_keys: Vec::new(),
             request_object_tag_keys: Vec::new(),
@@ -312,6 +357,13 @@ impl Context {
     #[must_use]
     pub const fn principal(&self) -> &Principal {
         &self.principal
+    }
+
+    /// The same request, as `principal` makes it.
+    #[must_use]
+    pub fn with_principal(mut self, principal: Principal) -> Self {
+        self.principal = principal;
+        self
     }
 
     /// `aws:SecureTransport`: whether the request came over TLS.
@@ -360,6 +412,21 @@ impl Context {
     #[must_use]
     pub const fn with_token_issue_time(mut self, issued: Date) -> Self {
         self.token_issue_time = Some(issued);
+        self
+    }
+
+    /// `aws:SourceIdentity`: who a session says started it (`SourceIdentity`).
+    #[must_use]
+    pub fn with_source_identity(mut self, identity: &str) -> Self {
+        self.source_identity = Some(identity.to_owned());
+        self
+    }
+
+    /// An STS key's value (`sts:ExternalId` of an `AssumeRole` request), replacing any
+    /// earlier one.
+    #[must_use]
+    pub fn with_sts(mut self, key: StsKey, value: impl Into<Value>) -> Self {
+        set(&mut self.sts, key, value.into());
         self
     }
 
@@ -412,6 +479,7 @@ impl Context {
             Key::S3(S3Key::ResourceAccount) => Values::text(self.resource_account.as_deref()),
             Key::S3(key) => get(&self.s3, key),
             Key::Iam(key) => get(&self.iam, key),
+            Key::Sts(key) => get(&self.sts, key),
             Key::Tag(kind, name) => self.tag(*kind, name),
             Key::Unknown(_) => Values::None,
         }
@@ -443,6 +511,7 @@ impl Context {
             GlobalKey::UserId => Values::One(Item::Str(&principal.user_id)),
             GlobalKey::Username => Values::text(principal.username.as_deref()),
             GlobalKey::RoleSessionName => Values::text(principal.session_name.as_deref()),
+            GlobalKey::SourceIdentity => Values::text(self.source_identity.as_deref()),
             GlobalKey::PrincipalIsAwsService | GlobalKey::ViaAwsService => {
                 Values::One(Item::Bool(false))
             }
@@ -461,7 +530,6 @@ impl Context {
             | GlobalKey::ResourceOrgPaths
             | GlobalKey::SourceAccount
             | GlobalKey::SourceArn
-            | GlobalKey::SourceIdentity
             | GlobalKey::SourceOrgId
             | GlobalKey::SourceOrgPaths
             | GlobalKey::SourceOwner
@@ -648,6 +716,40 @@ mod tests {
             first(&session, "aws:RoleSessionName").as_deref(),
             Some("job-7")
         );
+
+        let federated = Context::new(Principal::federated("123456789012", "bob"), at)
+            .with_source_identity("alice@example.com")
+            .with_sts(StsKey::ExternalId, "x-1")
+            .with_sts(
+                StsKey::TransitiveTagKeys,
+                vec!["team".to_owned(), "cost".to_owned()],
+            );
+        assert_eq!(
+            first(&federated, "aws:PrincipalType").as_deref(),
+            Some("FederatedUser")
+        );
+        assert_eq!(
+            first(&federated, "aws:PrincipalArn").as_deref(),
+            Some("arn:aws:sts::123456789012:federated-user/bob")
+        );
+        assert_eq!(
+            first(&federated, "aws:userid").as_deref(),
+            Some("123456789012:bob")
+        );
+        assert_eq!(first(&federated, "aws:username"), None);
+        assert_eq!(
+            first(&federated, "aws:SourceIdentity").as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(first(&federated, "sts:ExternalId").as_deref(), Some("x-1"));
+        assert_eq!(
+            federated
+                .lookup(&Key::parse("sts:TransitiveTagKeys").unwrap())
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(first(&session, "aws:SourceIdentity"), None);
 
         let anonymous = Context::new(Principal::anonymous(), at);
         assert_eq!(

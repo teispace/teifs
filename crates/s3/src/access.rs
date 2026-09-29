@@ -21,7 +21,7 @@ use s3s::{
     path::S3Path,
     s3_error,
 };
-use teifs_iam::{Iam, Identity};
+use teifs_iam::{AuthError, Iam, Identity};
 use teifs_policy::{
     Authorization, Context, Date, Decision, Facts, Number, PrincipalKind, S3_ACCOUNT_RESOURCE,
     S3Key, TagKind, Target, bucket_arn, object_arn,
@@ -55,10 +55,45 @@ pub(crate) struct Auth(pub(crate) Arc<Iam>);
 impl S3Auth for Auth {
     async fn get_secret_key(&self, access_key: &str) -> S3Result<SecretKey> {
         self.0
-            .credential(access_key)
-            .map(|c| SecretKey::from(c.secret.as_str().to_owned()))
+            .secret(access_key)
+            .map(|secret| SecretKey::from(secret.as_str().to_owned()))
             .ok_or_else(|| s3_error!(InvalidAccessKeyId))
     }
+}
+
+/// The header, query parameter and form field that carry temporary credentials' session
+/// token.
+const TOKEN: &str = "x-amz-security-token";
+const TOKEN_QUERY: &str = "X-Amz-Security-Token";
+
+/// The session token sent with a request: the `x-amz-security-token` header, or a
+/// presigned URL's `X-Amz-Security-Token` (or, as Signature V2 presigns it,
+/// `x-amz-security-token`).
+pub(crate) fn security_token(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    headers
+        .get(TOKEN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query_param(uri.query(), TOKEN_QUERY))
+        .or_else(|| query_param(uri.query(), TOKEN))
+}
+
+/// Who signed a request with `access_key` and `token`, as S3 refuses it if not anyone.
+pub(crate) fn identify(
+    iam: &Iam,
+    access_key: &str,
+    token: Option<&str>,
+) -> S3Result<Arc<Identity>> {
+    iam.identify(access_key, token).map_err(|err| match err {
+        AuthError::InvalidToken => s3_error!(
+            InvalidToken,
+            "The provided token is malformed or otherwise invalid."
+        ),
+        AuthError::ExpiredToken => s3_error!(ExpiredToken, "The provided token has expired."),
+        // A key deleted since its signature was checked, or a session whose user or role
+        // is gone, is refused like any other.
+        AuthError::UnknownKey | AuthError::Revoked => denied(),
+    })
 }
 
 /// Decides requests against IAM's policies and the buckets' own.
@@ -292,19 +327,19 @@ impl S3Access for Access {
             .copied()
             .unwrap_or_default();
         let signed = cx.credentials().is_some();
-        let identity = match cx.credentials() {
-            None => Arc::clone(&self.anonymous),
-            // A key deleted since its signature was checked is refused like any other.
-            Some(credentials) => {
-                let access_key = credentials.access_key.clone();
-                self.iam
-                    .credential(&access_key)
-                    .ok_or_else(denied)?
-                    .identity
-            }
-        };
         with_caps(cx, signed)?;
         let (form, posted) = posted(cx)?;
+        let identity = match cx.credentials() {
+            None => Arc::clone(&self.anonymous),
+            Some(credentials) => {
+                let token = form
+                    .as_ref()
+                    .and_then(|form| form.field(TOKEN))
+                    .map(str::to_owned)
+                    .or_else(|| security_token(cx.headers(), cx.uri()));
+                identify(&self.iam, &credentials.access_key, token.as_deref())?
+            }
+        };
         let operation = cx.s3_op().name();
         let path = posted.as_ref().unwrap_or_else(|| cx.s3_path());
         let source = source(operation, cx)?;
@@ -535,8 +570,12 @@ fn field<'a>(cx: &'a S3AccessContext<'_>, form: Option<&'a Form>, name: &str) ->
 
 /// The decoded value of a query parameter.
 fn query(cx: &S3AccessContext<'_>, name: &str) -> Option<String> {
-    let text = cx.uri().query()?;
-    text.split('&').find_map(|pair| {
+    query_param(cx.uri().query(), name)
+}
+
+/// The decoded value of the parameter `name` of `query`.
+fn query_param(query: Option<&str>, name: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         (key == name).then(|| {
             crate::drive::urlencoding_decode(&value.replace('+', " "))
@@ -584,8 +623,9 @@ const QUERY_KEYS: &[(&str, S3Key)] = &[
     ("versionId", S3Key::VersionId),
 ];
 
-/// What every signed request's context has, whatever the API: who and when, the
-/// connection, and the client's `User-Agent` and `Referer`.
+/// What every signed request's context has, whatever the API: who and when (with the
+/// principal's tags and a session's facts), the connection, and the client's
+/// `User-Agent` and `Referer`.
 pub(crate) fn base_context(
     identity: &Identity,
     headers: &http::HeaderMap,
@@ -593,7 +633,8 @@ pub(crate) fn base_context(
     account: &str,
 ) -> Context {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    let mut context = Context::new(identity.principal().clone(), Date::now())
+    let mut context = identity
+        .context(Date::now())
         .with_secure_transport(client.secure)
         .with_region(REGION)
         .with_resource_account(account);
@@ -605,9 +646,6 @@ pub(crate) fn base_context(
     }
     if let Some(referer) = header("referer") {
         context = context.with_referer(referer);
-    }
-    for (key, value) in identity.tags() {
-        context = context.with_tag(TagKind::Principal, key, value);
     }
     context
 }
@@ -699,4 +737,29 @@ fn is_sig_v4(cx: &S3AccessContext<'_>) -> bool {
 /// `s3:signatureversion` for Signature V4 or V2.
 const fn signature_version(v4: bool) -> &'static str {
     if v4 { "AWS4-HMAC-SHA256" } else { "AWS" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_tokens_come_from_the_header_or_a_presigned_query() {
+        let uri = |text: &str| text.parse::<http::Uri>().unwrap();
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(security_token(&headers, &uri("/b/k?x-id=GetObject")), None);
+        assert_eq!(
+            security_token(&headers, &uri("/b/k?X-Amz-Security-Token=a%2Bb%2Fc%3D&x=1")).as_deref(),
+            Some("a+b/c=")
+        );
+        assert_eq!(
+            security_token(&headers, &uri("/b/k?x-amz-security-token=v2")).as_deref(),
+            Some("v2")
+        );
+        headers.insert(TOKEN, http::HeaderValue::from_static("from+header="));
+        assert_eq!(
+            security_token(&headers, &uri("/b/k?X-Amz-Security-Token=query")).as_deref(),
+            Some("from+header=")
+        );
+    }
 }

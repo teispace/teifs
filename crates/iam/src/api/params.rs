@@ -76,13 +76,26 @@ impl Params {
 
     /// The list `Name.member.N`, in order.
     pub(crate) fn list(&self, name: &str) -> Result<Vec<&str>, ApiError> {
+        self.members(name, "")
+    }
+
+    /// The field `field` of each of the structures `Name.member.N` (`PolicyArns.member.1.arn`),
+    /// which have no other fields; `""` for a plain list.
+    pub(crate) fn members(&self, name: &str, field: &str) -> Result<Vec<&str>, ApiError> {
         self.indexed(&format!("{name}.member."))?
             .into_iter()
             .map(|(n, mut fields)| {
                 fields
-                    .remove("")
+                    .remove(field)
                     .filter(|_| fields.is_empty())
-                    .ok_or_else(|| ApiError::missing(&format!("{name}.member.{n}")))
+                    .ok_or_else(|| {
+                        let member = format!("{name}.member.{n}");
+                        ApiError::missing(&if field.is_empty() {
+                            member
+                        } else {
+                            format!("{member}.{field}")
+                        })
+                    })
             })
             .collect()
     }
@@ -222,6 +235,19 @@ mod tests {
         );
         assert_eq!(p.list("TagKeys").unwrap(), ["a", "b"]);
         assert!(p.list("Other").unwrap().is_empty());
+        let arns = params("PolicyArns.member.2.arn=b&PolicyArns.member.1.arn=a");
+        assert_eq!(arns.members("PolicyArns", "arn").unwrap(), ["a", "b"]);
+        for bad in [
+            "PolicyArns.member.1=a",
+            "PolicyArns.member.1.Arn=a",
+            "PolicyArns.member.1.arn=a&PolicyArns.member.1.other=b",
+        ] {
+            assert_eq!(
+                code(params(bad).members("PolicyArns", "arn")),
+                "ValidationError",
+                "{bad}"
+            );
+        }
         assert_eq!(
             p.tags().unwrap(),
             [("k".into(), "v".into()), ("e".into(), String::new())]

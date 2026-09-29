@@ -41,7 +41,7 @@ pub use actions::{ACTIONS, Authorization, Authorizations, Facts, Target, authori
 pub use arn::{S3_ACCOUNT_RESOURCE, bucket_arn, object_arn};
 pub use context::{Context, Principal, PrincipalKind, Value};
 pub use evaluate::{Decision, Policies, Request, evaluate};
-pub use key::{GlobalKey, IamKey, S3Key, TagKind};
+pub use key::{GlobalKey, IamKey, S3Key, StsKey, TagKind};
 pub use policy::{Kind, Policy, Version};
 pub use value::{Cidr, Date, Number};
 

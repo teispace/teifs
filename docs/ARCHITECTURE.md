@@ -109,8 +109,27 @@ it names are resolved to their unique ids and kept with the role (`principals`),
 is how AWS keeps a principal that's deleted and made again under the same name from
 inheriting the trust.
 
-`teifs-s3` enforces it (`access.rs`): `Auth` gives s3s each key's secret, and `Access`
-runs before every operation. It builds the request's condition context (the connection
+Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
+stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
+derived from the id under the IAM key (HKDF, then HMAC), so a signature can be checked
+from the id alone; its session token is its claims (whom it acts as by unique id, when
+it was issued and expires, its session policies' documents, its tags, which of them are
+transitive, its source identity) as JSON sealed with AES-256-GCM under the IAM key and
+bound to the access key id, at most 6 KiB. A token works only with its own key and
+can't be forged or changed. Every request turns the claims into an `Identity` against
+IAM as it is now (`Snapshot::add_session`), so a role's or user's permissions changing
+reaches its sessions at once, and a deleted one takes them with it (`Revoked`). The
+identity is cached per access key id, with the token it was built from, until IAM next
+changes (at most 4096, then the cache starts again). `Session::kind` says how it was
+made, which decides the APIs it may call: role and MinIO-style sessions may use IAM and
+the admin API; `GetSessionToken`'s and federated users' may not, as on AWS without MFA.
+Session policies narrow `Identity::decide` and `within_boundary` to what one of them
+allows (a federated user always has them, so none allows nothing).
+
+`teifs-s3` enforces it (`access.rs`): `Auth` gives s3s each key's secret (a temporary
+key's derived one), and `Access` runs before every operation, identifying the signer
+with `Iam::identify` and the session token from the `x-amz-security-token` header, a
+presigned URL's query or a browser upload's form. It builds the request's condition context (the connection
 from `Client`, which the server sets per connection, the headers and query parameters that
 are condition keys, request and principal tags), asks `authorizations` what the operation
 needs and decides each permission for its bucket, object or copy/rename source. It leaves
@@ -137,9 +156,14 @@ settings, which the store changes atomically so ACLs can't be disabled while the
 bucket's ACL grants others; an object's ACL is one of its attributes, never copied.
 
 IAM is managed with AWS's own API: `teifs-iam`'s `api` module speaks the Query protocol
-(a form body, answers in XML) for 50 actions and STS's `GetCallerIdentity`. Actions are
-a table (`api/mod.rs`) of name, resource kind and the condition keys it sets; a test
-checks it against AWS's service reference (`crates/iam/tests/fixtures`). Each action
+(a form body, answers in XML) for 70 IAM actions and STS's `AssumeRole` (AWS's, and
+MinIO's without a role), `GetSessionToken`, `GetFederationToken`, `GetCallerIdentity`
+and `GetAccessKeyInfo` (`api/sts.rs`). Actions are tables (`api/mod.rs`,
+`api/sts.rs`) of name, resource kind and the condition keys they set; a test checks
+both against AWS's service reference (`crates/iam/tests/fixtures`). `AssumeRole`
+decides `sts:AssumeRole` (and `sts:TagSession`, `sts:SetSourceIdentity` when asked
+for) with the role's trust policy as the resource policy, so a trust policy that names
+a user needs nothing from the user's own policies, and one that names the account does. Each action
 resolves the names it's given to the entity's own ARN and tags first, asks the caller's
 `Identity::allows` (the same decision S3 requests get), then runs the operation.
 `teifs-s3` serves it on the S3 endpoint (`iam_api.rs`): a signed `POST /` with a form is

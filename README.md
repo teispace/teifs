@@ -174,7 +174,8 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
 | Auth | Signature V4 (headers, presigned URLs and POST forms); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
-| IAM | users, access keys, groups, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS `GetCallerIdentity` on the S3 endpoint (`aws iam --endpoint-url …`) |
+| IAM | users, access keys, groups, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS on the S3 endpoint (`aws iam --endpoint-url …`) |
+| Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRole` for a user's own permissions; signed S3 requests, presigned links and browser uploads with the session token |
 | Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list; account-wide Block Public Access (`aws s3control put-public-access-block`) |
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
@@ -214,7 +215,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** temporary credentials (STS `AssumeRole` and the like), versioning, Object Lock, lifecycle rules, website
+**Not yet:** web identity and SAML federation (`AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`), versioning, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

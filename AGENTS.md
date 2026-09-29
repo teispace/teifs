@@ -81,6 +81,7 @@ Markdown any agent or person can follow.
 | Skill | For |
 |---|---|
 | `adding-s3-operations` | An S3 API TeiFS implements or changes |
+| `adding-iam-and-sts-actions` | An IAM or STS API, or how temporary credentials behave |
 | `changing-on-disk-format` | Anything written to `.teifs/`, a schema, or the file layout |
 | `verifying-changes` | Choosing and running the right checks before a commit |
 | `writing-docs` | README, contributor docs and the changelog |

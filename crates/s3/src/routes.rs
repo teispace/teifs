@@ -293,6 +293,11 @@ impl Routes {
     /// calls it.
     async fn serve(&self, api: Api, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
         let identity = self.authenticate(&req)?;
+        // Temporary credentials that may not use IAM (`GetSessionToken`'s, federated
+        // users') may not manage the drive either.
+        if api == Api::Admin && identity.session().is_some_and(|s| !s.may_manage()) {
+            return Err(denied());
+        }
         let endpoint = endpoint(api, &req.method, req.uri.path()).ok_or_else(|| match api {
             Api::Admin => admin::not_found(),
             Api::Control | Api::Query => S3Error::with_message(
@@ -339,13 +344,11 @@ impl Routes {
     }
 
     /// Who signed a request: refused when unsigned, or signed with a key IAM doesn't
-    /// know (one deleted since the signature was checked, say).
+    /// know (one deleted since the signature was checked, say) or a session that's over.
     fn authenticate(&self, req: &S3Request<Body>) -> S3Result<Arc<Identity>> {
         let credentials = req.credentials.as_ref().ok_or_else(denied)?;
-        self.iam
-            .credential(&credentials.access_key)
-            .map(|credential| credential.identity)
-            .ok_or_else(|| s3s::s3_error!(InvalidAccessKeyId))
+        let token = crate::access::security_token(&req.headers, &req.uri);
+        crate::access::identify(&self.iam, &credentials.access_key, token.as_deref())
     }
 }
 

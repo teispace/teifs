@@ -6,10 +6,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use teifs_crypto::LocalKms;
-use teifs_policy::{Context, Date, IamKey};
+use teifs_policy::{Date, IamKey};
 use zeroize::Zeroizing;
 
-use super::{ACTIONS, On};
+use super::{ACTIONS, Action, On};
 use crate::{Call, Iam, Identity, Owner, Reply, RootKey};
 
 const REFERENCE: &str = include_str!("../../tests/fixtures/iam-reference.json");
@@ -27,20 +27,26 @@ fn strings(value: &serde_json::Value) -> BTreeSet<String> {
         .collect()
 }
 
-#[test]
-fn actions_match_aws_service_reference() {
-    let reference: serde_json::Value = serde_json::from_str(REFERENCE).unwrap();
-    let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
-    assert_eq!(names.len(), ACTIONS.len(), "an action is listed twice");
-    for action in ACTIONS {
-        let entry = &reference["actions"][action.name];
-        assert!(entry.is_object(), "{} isn't an IAM action", action.name);
+/// The actions of `actions` are the service's, on the resources and with the condition
+/// keys its reference gives, but for the keys of other identity providers (`saml:…`,
+/// `accounts.google.com:…`), which no request signed with IAM credentials has.
+fn check_reference(service: &serde_json::Value, actions: &[Action]) {
+    let names: BTreeSet<&str> = actions.iter().map(|a| a.name).collect();
+    assert_eq!(names.len(), actions.len(), "an action is listed twice");
+    for action in actions {
+        let entry = &service["actions"][action.name];
+        assert!(
+            entry.is_object(),
+            "{} isn't the service's action",
+            action.name
+        );
         let on = match action.on {
             On::Any => None,
             On::User => Some("user"),
             On::Group => Some("group"),
             On::Role => Some("role"),
             On::Policy => Some("policy"),
+            On::FederatedUser => Some("federated-user"),
         };
         assert_eq!(
             strings(&entry["resources"]),
@@ -48,12 +54,22 @@ fn actions_match_aws_service_reference() {
             "{}'s resource",
             action.name
         );
-        assert_eq!(
-            strings(&entry["conditionKeys"]),
-            action.keys.iter().map(|k| (*k).to_owned()).collect(),
-            "{}'s condition keys",
-            action.name
-        );
+        let ours: BTreeSet<String> = action.keys.iter().map(|k| (*k).to_owned()).collect();
+        let theirs: BTreeSet<String> = strings(&entry["conditionKeys"])
+            .into_iter()
+            .filter(|k| ["aws:", "iam:", "sts:"].iter().any(|p| k.starts_with(p)))
+            .collect();
+        assert_eq!(theirs, ours, "{}'s condition keys", action.name);
+    }
+}
+
+#[test]
+fn actions_match_aws_service_reference() {
+    let reference: serde_json::Value = serde_json::from_str(REFERENCE).unwrap();
+    check_reference(&reference, ACTIONS);
+    check_reference(&reference["sts"], super::sts::ACTIONS);
+    let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
+    for action in ACTIONS {
         // What else the operation needs (`CreateUser` with tags needs `TagUser`) is an
         // action the API checks too.
         for needed in strings(&reference["operations"][action.name]) {
@@ -94,7 +110,13 @@ fn actions_match_aws_service_reference() {
         .filter(|k| k.starts_with("iam:"))
         .collect();
     assert_eq!(ours, theirs);
-    assert!(strings(&reference["sts"]["actions"]["GetCallerIdentity"]["resources"]).is_empty());
+    // And every `sts:` key but `sts:RequestContext/…`, which only `SetContext` sets.
+    let ours: BTreeSet<String> = teifs_policy::StsKey::ALL
+        .iter()
+        .map(|k| k.name().to_owned())
+        .chain(["sts:RequestContext/${ContextKey}".to_owned()])
+        .collect();
+    assert_eq!(ours, strings(&reference["sts"]["conditionKeys"]));
 }
 
 struct Drive {
@@ -139,26 +161,42 @@ impl Drive {
         self.iam.create_access_key(name).unwrap().info.id
     }
 
-    fn call(&self, identity: &Identity, body: &str) -> Reply {
-        let context = Context::new(identity.principal().clone(), Date::now());
-        self.iam.serve_iam(&Call {
+    fn serve(&self, api: Api, identity: &Identity, body: &str) -> Reply {
+        let context = identity.context(Date::now());
+        let call = Call {
             identity,
             context: &context,
             body: body.as_bytes(),
             request_id: "req-1",
-        })
+        };
+        match api {
+            Api::Iam => self.iam.serve_iam(&call),
+            Api::Sts => self.iam.serve_sts(&call),
+        }
+    }
+
+    fn call(&self, identity: &Identity, body: &str) -> Reply {
+        self.serve(Api::Iam, identity, body)
     }
 
     fn ok(&self, identity: &Identity, body: &str) -> String {
-        let reply = self.call(identity, body);
-        assert_eq!(reply.status, 200, "{body}: {}", reply.body);
-        reply.body
+        ok(self.call(identity, body), body)
     }
 
     fn code(&self, identity: &Identity, body: &str) -> String {
-        let reply = self.call(identity, body);
-        assert_ne!(reply.status, 200, "{body} succeeded");
-        between(&reply.body, "<Code>", "</Code>").to_owned()
+        code(&self.call(identity, body), body)
+    }
+
+    fn sts(&self, identity: &Identity, body: &str) -> Reply {
+        self.serve(Api::Sts, identity, body)
+    }
+
+    fn sts_ok(&self, identity: &Identity, body: &str) -> String {
+        ok(self.sts(identity, body), body)
+    }
+
+    fn sts_code(&self, identity: &Identity, body: &str) -> String {
+        code(&self.sts(identity, body), body)
     }
 
     fn policy_arn(&self, name: &str) -> String {
@@ -185,6 +223,22 @@ impl Drive {
             )
             .unwrap()
     }
+}
+
+#[derive(Clone, Copy)]
+enum Api {
+    Iam,
+    Sts,
+}
+
+fn ok(reply: Reply, body: &str) -> String {
+    assert_eq!(reply.status, 200, "{body}: {}", reply.body);
+    reply.body
+}
+
+fn code(reply: &Reply, body: &str) -> String {
+    assert_ne!(reply.status, 200, "{body} succeeded");
+    between(&reply.body, "<Code>", "</Code>").to_owned()
 }
 
 /// A trust policy that lets `principal` assume the role.
@@ -288,17 +342,8 @@ async fn answers_are_shaped_as_aws_answers() {
         "<User><UserId>{0}</UserId><Arn>arn:aws:iam::{0}:root</Arn></User>",
         d.account
     )));
-    let sts = |identity: &Identity, body: &str| {
-        let context = Context::new(identity.principal().clone(), Date::now());
-        d.iam.serve_sts(&Call {
-            identity,
-            context: &context,
-            body: body.as_bytes(),
-            request_id: "req-2",
-        })
-    };
     let bob = d.user("bob", NOTHING);
-    let reply = sts(
+    let reply = d.sts(
         &d.identity(&bob),
         "Action=GetCallerIdentity&Version=2011-06-15",
     );
@@ -314,7 +359,9 @@ async fn answers_are_shaped_as_aws_answers() {
         "{}",
         reply.body
     );
-    assert_eq!(sts(&root, "Action=AssumeRole").status, 400);
+    assert_eq!(d.sts_code(&root, "Action=AssumeRoot"), "InvalidAction");
+    assert_eq!(d.sts_code(&root, "Action=ListUsers"), "InvalidAction");
+    assert_eq!(d.code(&root, "Action=GetCallerIdentity"), "InvalidAction");
 }
 
 #[tokio::test]
@@ -1023,3 +1070,5 @@ async fn role_condition_keys_hold_back_escalation() {
     d.ok(&caller, "Action=GetRole&RoleName=UNBOUNDED");
     d.ok(&caller, "Action=DeleteRole&RoleName=unbounded");
 }
+
+mod sessions;

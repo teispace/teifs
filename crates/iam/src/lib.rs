@@ -12,6 +12,7 @@ mod api;
 mod ids;
 mod ops;
 mod rules;
+mod sessions;
 mod snapshot;
 mod state;
 mod transfer;
@@ -30,7 +31,8 @@ pub use ops::{
     AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, NewRole, Owner, PolicyInfo,
     PolicyVersionInfo, RoleInfo, UserInfo,
 };
-pub use snapshot::{Credential, Identity, RootKey};
+pub use sessions::{AuthError, Issued};
+pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};
 
 use crate::{snapshot::Snapshot, state::State};
 
@@ -55,6 +57,9 @@ pub enum IamError {
     /// A policy document is invalid.
     #[error("{0}")]
     MalformedPolicyDocument(String),
+    /// A session's policies and tags don't fit in its token.
+    #[error("Packed size of session policies and tags exceeds the limit.")]
+    PackedPolicyTooLarge,
     /// What's stored can't be read back (IAM refuses to start rather than guess).
     #[error("IAM's stored state is damaged: {0}")]
     Stored(String),
@@ -80,6 +85,7 @@ impl IamError {
             Self::LimitExceeded(_) => "LimitExceeded",
             Self::InvalidInput(_) => "InvalidInput",
             Self::MalformedPolicyDocument(_) => "MalformedPolicyDocument",
+            Self::PackedPolicyTooLarge => "PackedPolicyTooLarge",
             Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => {
                 "ServiceFailure"
             }
@@ -92,7 +98,9 @@ impl IamError {
         match self {
             Self::NoSuchEntity(_) => 404,
             Self::EntityAlreadyExists(_) | Self::DeleteConflict(_) | Self::LimitExceeded(_) => 409,
-            Self::InvalidInput(_) | Self::MalformedPolicyDocument(_) => 400,
+            Self::InvalidInput(_)
+            | Self::MalformedPolicyDocument(_)
+            | Self::PackedPolicyTooLarge => 400,
             Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => 500,
         }
     }
@@ -109,6 +117,8 @@ const SEALED_KEY: &str = "key";
 pub struct Iam {
     inner: Mutex<Inner>,
     snapshot: RwLock<Arc<Snapshot>>,
+    /// IAM's key, which seals session tokens and derives their secrets.
+    tokens: DataKey,
 }
 
 struct Inner {
@@ -166,6 +176,7 @@ impl Iam {
         let state = State::load(&account, rows, &key)?;
         let snapshot = Snapshot::build(&state, root.as_ref());
         Ok(Self {
+            tokens: key.clone(),
             inner: Mutex::new(Inner {
                 db,
                 state,
@@ -182,13 +193,20 @@ impl Iam {
         self.inner().state.account.to_string()
     }
 
-    /// The secret and identity of an active access key (the root's included).
+    /// The secret and identity of an active long-term access key (the root's
+    /// included).
     #[must_use]
     pub fn credential(&self, access_key: &str) -> Option<Credential> {
-        self.snapshot
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .credential(access_key)
+        self.snapshot().credential(access_key)
+    }
+
+    fn snapshot(&self) -> Arc<Snapshot> {
+        Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
