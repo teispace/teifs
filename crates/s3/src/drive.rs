@@ -1,6 +1,6 @@
 //! The S3 operations.
 
-use std::{collections::BTreeMap, time::SystemTime};
+use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
 use futures::StreamExt;
 use s3s::{
@@ -19,6 +19,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     access,
+    bucket_access::{self, Rules},
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
@@ -52,6 +53,8 @@ pub struct Drive {
     /// Whether requests over plain HTTP count as secure for SSE-C (a server that only
     /// listens on this machine, or behind a proxy that terminates TLS).
     plain_http_is_secure: bool,
+    /// The buckets' policies and Block Public Access settings, as requests read them.
+    rules: Arc<Rules>,
 }
 
 impl Drive {
@@ -59,10 +62,16 @@ impl Drive {
     #[must_use]
     pub fn new(store: Store, default_layout: Layout, plain_http_is_secure: bool) -> Self {
         Self {
+            rules: Arc::new(Rules::new(store.clone())),
             store,
             default_layout,
             plain_http_is_secure,
         }
+    }
+
+    /// The rules requests are decided with, shared with [`crate::access::Access`].
+    pub(crate) fn rules(&self) -> Arc<Rules> {
+        Arc::clone(&self.rules)
     }
 
     /// Reads an object. As in S3, a part number the object doesn't have is reported
@@ -821,6 +830,7 @@ impl S3 for Drive {
             .create_bucket(&req.input.bucket, layout)
             .await
             .s3()?;
+        self.rules.forget(&req.input.bucket);
         Ok(S3Response::new(dto::CreateBucketOutput {
             location: Some(format!("/{}", req.input.bucket)),
             ..Default::default()
@@ -840,6 +850,7 @@ impl S3 for Drive {
         req: S3Request<dto::DeleteBucketInput>,
     ) -> S3Result<S3Response<dto::DeleteBucketOutput>> {
         self.store.delete_bucket(&req.input.bucket).await.s3()?;
+        self.rules.forget(&req.input.bucket);
         Ok(S3Response::new(dto::DeleteBucketOutput::default()))
     }
 
@@ -1396,6 +1407,109 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteBucketCorsOutput::default()))
+    }
+
+    async fn get_bucket_policy(
+        &self,
+        req: S3Request<dto::GetBucketPolicyInput>,
+    ) -> S3Result<S3Response<dto::GetBucketPolicyOutput>> {
+        let access = self.store.bucket_access(&req.input.bucket).await.s3()?;
+        let policy = access.policy.ok_or_else(bucket_access::no_policy)?;
+        Ok(S3Response::new(dto::GetBucketPolicyOutput {
+            policy: Some(policy),
+        }))
+    }
+
+    async fn get_bucket_policy_status(
+        &self,
+        req: S3Request<dto::GetBucketPolicyStatusInput>,
+    ) -> S3Result<S3Response<dto::GetBucketPolicyStatusOutput>> {
+        self.store.head_bucket(&req.input.bucket).await.s3()?;
+        let rules = self.rules.of(&req.input.bucket).await?;
+        if rules.policy.is_none() {
+            return Err(bucket_access::no_policy());
+        }
+        Ok(S3Response::new(dto::GetBucketPolicyStatusOutput {
+            policy_status: Some(dto::PolicyStatus {
+                is_public: Some(rules.public),
+            }),
+        }))
+    }
+
+    async fn put_bucket_policy(
+        &self,
+        req: S3Request<dto::PutBucketPolicyInput>,
+    ) -> S3Result<S3Response<dto::PutBucketPolicyOutput>> {
+        let input = req.input;
+        self.store.head_bucket(&input.bucket).await.s3()?;
+        let policy = bucket_access::parse_policy(&input.bucket, &input.policy)?;
+        let rules = self.rules.of(&input.bucket).await?;
+        if rules.block.block_public_policy && policy.is_public() {
+            return Err(s3_error!(
+                AccessDenied,
+                "Access Denied: the bucket's Block Public Access settings (BlockPublicPolicy) \
+                 refuse a public policy"
+            ));
+        }
+        self.store
+            .set_bucket_policy(&input.bucket, Some(input.policy))
+            .await
+            .s3()?;
+        self.rules.forget(&input.bucket);
+        Ok(S3Response::new(dto::PutBucketPolicyOutput::default()))
+    }
+
+    async fn delete_bucket_policy(
+        &self,
+        req: S3Request<dto::DeleteBucketPolicyInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketPolicyOutput>> {
+        self.store
+            .set_bucket_policy(&req.input.bucket, None)
+            .await
+            .s3()?;
+        self.rules.forget(&req.input.bucket);
+        Ok(S3Response::new(dto::DeleteBucketPolicyOutput::default()))
+    }
+
+    async fn get_public_access_block(
+        &self,
+        req: S3Request<dto::GetPublicAccessBlockInput>,
+    ) -> S3Result<S3Response<dto::GetPublicAccessBlockOutput>> {
+        let access = self.store.bucket_access(&req.input.bucket).await.s3()?;
+        let block = access
+            .public_access_block
+            .ok_or_else(bucket_access::no_public_access_block)?;
+        Ok(S3Response::new(dto::GetPublicAccessBlockOutput {
+            public_access_block_configuration: Some(bucket_access::block_to_dto(block)),
+        }))
+    }
+
+    async fn put_public_access_block(
+        &self,
+        req: S3Request<dto::PutPublicAccessBlockInput>,
+    ) -> S3Result<S3Response<dto::PutPublicAccessBlockOutput>> {
+        let input = req.input;
+        let block = bucket_access::block_from_dto(&input.public_access_block_configuration);
+        self.store
+            .set_bucket_public_access_block(&input.bucket, Some(block))
+            .await
+            .s3()?;
+        self.rules.forget(&input.bucket);
+        Ok(S3Response::new(dto::PutPublicAccessBlockOutput::default()))
+    }
+
+    async fn delete_public_access_block(
+        &self,
+        req: S3Request<dto::DeletePublicAccessBlockInput>,
+    ) -> S3Result<S3Response<dto::DeletePublicAccessBlockOutput>> {
+        self.store
+            .set_bucket_public_access_block(&req.input.bucket, None)
+            .await
+            .s3()?;
+        self.rules.forget(&req.input.bucket);
+        Ok(S3Response::new(
+            dto::DeletePublicAccessBlockOutput::default(),
+        ))
     }
 
     async fn get_bucket_tagging(

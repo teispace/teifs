@@ -301,6 +301,12 @@ impl Cidr {
         let address = address.to_canonical();
         address.is_ipv4() == self.network.is_ipv4() && mask(address, self.prefix) == self.network
     }
+
+    /// Whether S3 counts the block as a fixed set of addresses rather than the public:
+    /// at most a `/8` of IPv4, a `/32` of IPv6.
+    pub(crate) fn is_narrow(&self) -> bool {
+        self.prefix >= if self.network.is_ipv4() { 8 } else { 32 }
+    }
 }
 
 fn mask(address: IpAddr, prefix: u8) -> IpAddr {
@@ -444,6 +450,9 @@ mod tests {
         assert!(six.contains(ip("2001:db8:ffff::1")) && !six.contains(ip("2001:db9::1")));
         assert!(Cidr::parse("0.0.0.0/0").unwrap().contains(ip("8.8.8.8")));
         assert!(!Cidr::parse("0.0.0.0/0").unwrap().contains(ip("::1")));
+        let narrow = |text: &str| Cidr::parse(text).unwrap().is_narrow();
+        assert!(narrow("10.0.0.0/8") && narrow("203.0.113.9") && narrow("2001:db8::/32"));
+        assert!(!narrow("0.0.0.0/7") && !narrow("2001::/31") && !narrow("::ffff:0.0.0.0/100"));
         assert!(
             Cidr::parse("::ffff:10.0.0.0/104")
                 .unwrap()

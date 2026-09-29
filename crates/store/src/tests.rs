@@ -767,6 +767,62 @@ async fn bucket_tags_are_kept_in_its_settings() {
 }
 
 #[tokio::test]
+async fn new_buckets_block_public_access() {
+    let (dir, store) = drive();
+    let blocked = BucketAccess {
+        policy: None,
+        public_access_block: Some(PublicAccessBlock::ALL),
+    };
+    for (name, layout) in [("objects", Layout::Object), ("folder", Layout::Folder)] {
+        store.create_bucket(name, layout).await.unwrap();
+        assert_eq!(store.bucket_access(name).await.unwrap(), blocked);
+    }
+    // A folder made by hand is as new, before and after its settings are first written.
+    fs::create_dir(dir.path().join("by-hand")).unwrap();
+    assert_eq!(store.bucket_access("by-hand").await.unwrap(), blocked);
+    let policy = r#"{"Statement":[]}"#.to_owned();
+    store
+        .set_bucket_policy("by-hand", Some(policy.clone()))
+        .await
+        .unwrap();
+    let access = store.bucket_access("by-hand").await.unwrap();
+    assert_eq!(access.policy, Some(policy));
+    assert_eq!(access.public_access_block, Some(PublicAccessBlock::ALL));
+
+    let open = PublicAccessBlock {
+        block_public_policy: true,
+        ..PublicAccessBlock::default()
+    };
+    store
+        .set_bucket_public_access_block("by-hand", Some(open))
+        .await
+        .unwrap();
+    store.set_bucket_policy("by-hand", None).await.unwrap();
+    assert_eq!(
+        store.bucket_access("by-hand").await.unwrap(),
+        BucketAccess {
+            policy: None,
+            public_access_block: Some(open),
+        }
+    );
+    store
+        .set_bucket_public_access_block("by-hand", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.bucket_access("by-hand").await.unwrap(),
+        BucketAccess::default()
+    );
+    for result in [
+        store.bucket_access("nope").await.map(drop),
+        store.set_bucket_policy("nope", None).await,
+        store.set_bucket_public_access_block("nope", None).await,
+    ] {
+        assert!(matches!(result, Err(StoreError::NoSuchBucket)));
+    }
+}
+
+#[tokio::test]
 async fn large_folders_list_the_same_from_the_cache() {
     let (dir, store) = drive();
     store.create_bucket("big", Layout::Folder).await.unwrap();

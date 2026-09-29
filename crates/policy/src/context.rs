@@ -464,6 +464,7 @@ impl Context {
             | GlobalKey::SourceIdentity
             | GlobalKey::SourceOrgId
             | GlobalKey::SourceOrgPaths
+            | GlobalKey::SourceOwner
             | GlobalKey::SourceVpc
             | GlobalKey::SourceVpce
             | GlobalKey::VpcSourceIp => Values::None,

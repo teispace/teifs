@@ -41,7 +41,9 @@ pub use format::{DriveFormat, FORMAT};
 pub use jobs::{JobOptions, JobStatus, Jobs};
 pub use list::{After, ListQuery, Listing};
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
-pub use settings::{BucketEncryption, CorsRule, DefaultEncryption};
+pub use settings::{
+    BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, PublicAccessBlock,
+};
 pub use sse::Encryption;
 pub use staged::Staged;
 pub use teifs_crypto::{
@@ -421,12 +423,15 @@ impl Store {
                     sync_dir(&inner.system_dir.join(BUCKETS_DIR))?;
                 }
             }
-            inner.system().record_bucket(&BucketRecord {
-                id,
-                name,
-                layout,
-                created_ms: now_ms(),
-            })?;
+            inner.system().record_bucket(
+                &BucketRecord {
+                    id,
+                    name,
+                    layout,
+                    created_ms: now_ms(),
+                },
+                &settings::new_bucket_config(),
+            )?;
             Ok(())
         })
         .await

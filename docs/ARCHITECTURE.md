@@ -105,7 +105,14 @@ are condition keys, request and principal tags), asks `authorizations` what the 
 needs and decides each permission for its bucket, object or copy/rename source. It leaves
 a `Caller` in the request's extensions for what operations decide themselves: each key of
 a `DeleteObjects`, optional details (tag counts, owners), who owns a multipart upload, and
-whether a missing key may be reported as missing. Root requests skip all of it.
+whether a missing key may be reported as missing. Unsigned requests are decided the same
+way as `Identity::anonymous()`. Each permission is decided with the bucket's rules
+(`bucket_access.rs`): the bucket policy, parsed, whether it's public, and its Block
+Public Access settings, read from the bucket's settings in `system.db` once and cached
+until the drive changes them (a generation counter keeps a read that raced a change
+from being cached; buckets that don't exist aren't cached). `decide` applies
+`RestrictPublicBuckets` and the root user's policy rescue, then
+`Identity::allows_with`. Root requests on buckets without a policy skip all of it.
 
 IAM is managed with AWS's own API: `teifs-iam`'s `api` module speaks the Query protocol
 (a form body, answers in XML) for 50 actions and STS's `GetCallerIdentity`. Actions are

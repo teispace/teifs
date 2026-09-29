@@ -1,8 +1,10 @@
-//! Who may do what. With IAM, a request is signed with a key IAM knows ([`Auth`]), and
-//! before the operation runs, [`Access`] decides every permission the operation needs
-//! (`teifs_policy::authorizations`) against the signer's policies. The decision reads
-//! only what TeiFS knows about the request: its operation, the bucket and key s3s parsed,
-//! the headers and query the condition keys name, and the connection ([`Client`]).
+//! Who may do what. With IAM, a request is signed with a key IAM knows ([`Auth`]) or not
+//! signed at all (anonymous), and before the operation runs, [`Access`] decides every
+//! permission the operation needs (`teifs_policy::authorizations`) against the caller's
+//! policies and the bucket's policy, under the bucket's Block Public Access settings
+//! ([`BucketRules`]). The decision reads only what TeiFS knows about the request: its
+//! operation, the bucket and key s3s parsed, the headers and query the condition keys
+//! name, and the connection ([`Client`]).
 //!
 //! What's checked is what's acted on: copy and rename sources are parsed by the same
 //! functions the operations use. Permissions that only add to a response (the tag count
@@ -20,11 +22,15 @@ use s3s::{
 };
 use teifs_iam::{Iam, Identity};
 use teifs_policy::{
-    Authorization, Context, Date, Facts, Number, S3_ACCOUNT_RESOURCE, S3Key, TagKind, Target,
-    bucket_arn, object_arn,
+    Authorization, Context, Date, Facts, Number, PrincipalKind, S3_ACCOUNT_RESOURCE, S3Key,
+    TagKind, Target, bucket_arn, object_arn,
 };
 
-use crate::{drive::REGION, tagging};
+use crate::{
+    bucket_access::{BucketRules, Rules},
+    drive::REGION,
+    tagging,
+};
 
 /// The connection a request came in on, which the server records in the request's
 /// extensions (`aws:SourceIp`, `aws:SecureTransport`).
@@ -49,17 +55,55 @@ impl S3Auth for Auth {
     }
 }
 
-/// Decides requests against IAM's policies.
+/// Decides requests against IAM's policies and the buckets' own.
 pub(crate) struct Access {
     iam: Arc<Iam>,
+    rules: Arc<Rules>,
     account: Arc<str>,
+    anonymous: Arc<Identity>,
 }
 
 impl Access {
-    pub(crate) fn new(iam: Arc<Iam>) -> Self {
+    pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>) -> Self {
         let account = iam.account().into();
-        Self { iam, account }
+        Self {
+            iam,
+            rules,
+            account,
+            anonymous: Arc::new(Identity::anonymous()),
+        }
     }
+}
+
+/// What only the bucket owner's account may do, and what its root user may always do,
+/// whatever the bucket policy says, so a policy can't lock the owner out.
+const OWNER_ONLY: [&str; 3] = [
+    "s3:GetBucketPolicy",
+    "s3:PutBucketPolicy",
+    "s3:DeleteBucketPolicy",
+];
+
+/// Whether `identity` may do `action` on `resource`, which is in the bucket `rules`
+/// describe (`None`: not in a bucket, or one that doesn't exist).
+fn decide(
+    identity: &Identity,
+    context: &Context,
+    action: &str,
+    resource: &str,
+    rules: Option<&BucketRules>,
+) -> bool {
+    let Some(rules) = rules else {
+        return identity.allows(context, action, resource);
+    };
+    if identity.principal().kind() == PrincipalKind::Anonymous
+        && (rules.restricted() || OWNER_ONLY.contains(&action))
+    {
+        return false;
+    }
+    if identity.is_root() && OWNER_ONLY.contains(&action) {
+        return true;
+    }
+    identity.allows_with(context, action, resource, rules.policy.as_deref())
 }
 
 /// Who a request is from, for the operations: in the request's extensions whenever IAM
@@ -68,6 +112,8 @@ impl Access {
 pub(crate) struct Caller {
     identity: Arc<Identity>,
     context: Arc<Context>,
+    /// The rules of the bucket the request is on.
+    rules: Option<Arc<BucketRules>>,
     /// The permissions the request may go without that it doesn't have.
     withheld: Vec<&'static str>,
 }
@@ -87,7 +133,13 @@ impl Caller {
     /// Whether the caller may do `action` on `resource` (for operations that name
     /// several objects, such as `DeleteObjects`).
     pub(crate) fn allows(&self, action: &str, resource: &str) -> bool {
-        self.identity.allows(&self.context, action, resource)
+        decide(
+            &self.identity,
+            &self.context,
+            action,
+            resource,
+            self.rules.as_deref(),
+        )
     }
 
     /// Whether the request has an optional permission (`s3:GetObjectTagging` for the tag
@@ -126,35 +178,64 @@ fn denied() -> s3s::S3Error {
 #[async_trait::async_trait]
 impl S3Access for Access {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
-        // Unsigned requests are for bucket policies, which come later; until then only
-        // signed requests get anywhere.
-        let access_key = cx.credentials().ok_or_else(denied)?.access_key.clone();
-        // A key deleted since its signature was checked is refused like any other.
-        let identity = self
-            .iam
-            .credential(&access_key)
-            .ok_or_else(denied)?
-            .identity;
         let client = cx
             .extensions_mut()
             .get::<Client>()
             .copied()
             .unwrap_or_default();
+        let signed = cx.credentials().is_some();
+        let identity = match cx.credentials() {
+            None => Arc::clone(&self.anonymous),
+            // A key deleted since its signature was checked is refused like any other.
+            Some(credentials) => {
+                let access_key = credentials.access_key.clone();
+                self.iam
+                    .credential(&access_key)
+                    .ok_or_else(denied)?
+                    .identity
+            }
+        };
+        let operation = cx.s3_op().name();
+        let source = source(operation, cx)?;
+        let bucket_name = match cx.s3_path() {
+            S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
+            S3Path::Root => None,
+        };
+        let rules = match &bucket_name {
+            Some(bucket) => Some(self.rules.of(bucket).await?),
+            None => None,
+        };
+        let source_rules = match &source {
+            Some((bucket, ..)) if bucket_name.as_ref() == Some(bucket) => rules.clone(),
+            Some((bucket, ..)) => Some(self.rules.of(bucket).await?),
+            None => None,
+        };
         let mut withheld = Vec::new();
-        // The root user is never restricted, so needs no context to decide with.
-        let context = if identity.is_root() {
+        // The root user is restricted only by a bucket policy, so without one needs no
+        // context to decide with.
+        let unrestricted = identity.is_root()
+            && [&rules, &source_rules]
+                .iter()
+                .all(|r| r.as_ref().is_none_or(|r| r.policy.is_none()));
+        let context = if unrestricted {
             Context::new(identity.principal().clone(), Date::now())
         } else {
-            let operation = cx.s3_op().name();
-            let source = source(operation, cx)?;
-            let context = context(&identity, cx, client, &self.account)?;
+            let context = context(&identity, cx, client, &self.account, signed)?;
             let facts = facts(cx, source.as_ref());
             // An operation with no action is one only the root user may make.
-            let needs = teifs_policy::authorizations(operation, &facts).ok_or_else(denied)?;
-            for need in needs.iter() {
+            let needs = teifs_policy::authorizations(operation, &facts);
+            if needs.is_none() && !identity.is_root() {
+                return Err(denied());
+            }
+            for need in needs.iter().flat_map(|needs| needs.iter()) {
+                let bucket = match need.target {
+                    Target::Source => source_rules.as_deref(),
+                    Target::Account | Target::Other => None,
+                    Target::Bucket | Target::Object => rules.as_deref(),
+                };
                 match resource(need, cx.s3_path(), operation, source.as_ref()) {
                     Resource::Arn(arn) => {
-                        if !identity.allows(&context, need.action, &arn) {
+                        if !decide(&identity, &context, need.action, &arn, bucket) {
                             if need.required {
                                 return Err(denied());
                             }
@@ -172,6 +253,7 @@ impl S3Access for Access {
         cx.extensions_mut().insert(Caller {
             identity,
             context: Arc::new(context),
+            rules,
             withheld,
         });
         Ok(())
@@ -357,6 +439,7 @@ fn context(
     cx: &S3AccessContext<'_>,
     client: Client,
     account: &str,
+    signed: bool,
 ) -> S3Result<Context> {
     let headers = cx.headers();
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
@@ -377,10 +460,28 @@ fn context(
     if let Some(date) = header("x-amz-object-lock-retain-until-date").and_then(Date::parse) {
         context = context.with(S3Key::ObjectLockRetainUntilDate, date);
     }
+    if signed {
+        context = with_signature(context, cx);
+    }
+    if let Some(value) = header("x-amz-tagging") {
+        for (key, value) in tagging::from_header(value)? {
+            context = context.with_tag(TagKind::RequestObject, &key, &value);
+        }
+    }
+    Ok(context)
+}
+
+/// How a signed request was signed (`s3:authType`, `s3:signatureversion`); an anonymous
+/// request has neither.
+fn with_signature(context: Context, cx: &S3AccessContext<'_>) -> Context {
     let presigned = query(cx, "X-Amz-Signature").is_some() || query(cx, "Signature").is_some();
     let sig_v4 = query(cx, "X-Amz-Algorithm").is_some()
-        || header("authorization").is_some_and(|a| a.starts_with("AWS4-"));
-    context = context
+        || cx
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.starts_with("AWS4-"));
+    context
         .with(
             S3Key::AuthType,
             if presigned {
@@ -393,11 +494,5 @@ fn context(
         .with(
             S3Key::SignatureVersion,
             if sig_v4 { "AWS4-HMAC-SHA256" } else { "AWS" }.to_owned(),
-        );
-    if let Some(value) = header("x-amz-tagging") {
-        for (key, value) in tagging::from_header(value)? {
-            context = context.with_tag(TagKind::RequestObject, &key, &value);
-        }
-    }
-    Ok(context)
+        )
 }

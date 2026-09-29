@@ -31,8 +31,15 @@ Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
 The one unsigned request is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
-ordinary key that needs a signature. Otherwise there's no anonymous access today.
-*Planned:* anonymous access only where a bucket policy grants it.
+ordinary key that needs a signature. Any other unsigned request is anonymous: it's
+decided like any other, as `Principal: *`, so it gets only what a bucket policy grants
+everyone. A new bucket blocks public access (all four Block Public Access settings on,
+as on AWS), so a bucket becomes public only when its owner turns that off and writes a
+public policy. With `RestrictPublicBuckets` on, a public policy grants anonymous
+requests nothing, and the check sits in the one decision every operation goes through,
+so no read or list path escapes it (the known bypass, anonymous `ListObjectVersions`,
+has its own test with 15 other paths). Anonymous requests can never read or change a
+bucket's policy.
 
 ### 2. Every endpoint declares what it authorizes (*planned*)
 Admin, health and metrics endpoints will be registered in one route table where each
@@ -40,7 +47,7 @@ route declares its action, and the server refuses to start a route without one. 
 walks the table and proves anonymous and under-privileged callers are rejected.
 Profiling and debug endpoints are off by default and admin-only.
 
-### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced for IAM users; bucket policies planned*)
+### 3. Policies are evaluated by a pure, heavily tested engine (*built; enforced for IAM users, bucket policies and anonymous requests*)
 `teifs-policy` has no I/O and decides in AWS's order: an explicit Deny in any policy
 wins, then the root user, then a resource policy naming the principal, then identity
 policies, which a permissions boundary and session policies can only narrow; anything
@@ -53,6 +60,13 @@ goes only with Deny, and an account named in it spares only its root user. Every
 operation maps to the actions AWS documents for it (`…Version` actions for a version),
 checked against AWS's own reference by a test; a rename needs read and delete on the
 source as well as write on the target.
+
+A bucket policy is checked when it's stored (`MalformedPolicy`: the policy language,
+S3 actions and condition keys only, resources only in its own bucket, at most 20 KB)
+and read with every request to its bucket, and with a copy's source bucket's policy for
+the source. Its Deny binds the root user too, except for reading, replacing and deleting
+the policy itself, so a policy can't lock the owner out. A stored policy that can no
+longer be read denies everything but that rescue, rather than being skipped.
 
 Every request signed with an IAM user's key is decided before its operation runs
 (`crates/s3/src/access.rs`), for exactly the bucket, key and copy or rename source the

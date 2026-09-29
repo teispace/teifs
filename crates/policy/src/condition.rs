@@ -22,7 +22,7 @@ use crate::{
     Error, arn,
     context::{Context, Item, parse_bool},
     json::Json,
-    key::Key,
+    key::{GlobalKey, Key, S3Key},
     pattern,
     policy::Version,
     template::Template,
@@ -150,6 +150,33 @@ const OPERATORS: &[(&str, bool, Base)] = &[
     ("Null", false, Base::Null),
 ];
 
+/// Keys that name the caller, or where its request comes from, which an anonymous
+/// request never has: a fixed value of one limits a statement to known callers.
+const PINNING_KEYS: &[GlobalKey] = &[
+    GlobalKey::PrincipalAccount,
+    GlobalKey::PrincipalArn,
+    GlobalKey::PrincipalOrgId,
+    GlobalKey::SourceAccount,
+    GlobalKey::SourceArn,
+    GlobalKey::SourceOwner,
+    GlobalKey::SourceVpc,
+    GlobalKey::SourceVpce,
+    GlobalKey::UserId,
+];
+
+/// An access point ARN whose account is fixed; its name may have wildcards
+/// (`arn:aws:s3:us-west-2:123456789012:accesspoint/*`).
+fn fixed_access_point_account(value: &Template) -> bool {
+    let (prefix, _) = value.literal_prefix();
+    let mut fields = prefix.splitn(6, ':');
+    let head: Vec<&str> = fields.by_ref().take(5).collect();
+    matches!(head.as_slice(), ["arn", _, "s3", _, account]
+        if account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()))
+        && fields
+            .next()
+            .is_some_and(|name| name.starts_with("accesspoint/"))
+}
+
 /// Reads a `Condition` element: operator → key → value or list of values.
 pub(crate) fn parse(json: &Json, version: Version) -> Result<Vec<Condition>, Error> {
     let Json::Object(operators) = json else {
@@ -267,6 +294,34 @@ impl Condition {
 
     pub(crate) fn key(&self) -> &Key {
         &self.key
+    }
+
+    /// Whether the condition holds only for requests from callers or places named by
+    /// fixed values: what S3 needs to count a statement for everyone (`"Principal": "*"`)
+    /// as not public. Anything else (a negated or `…IfExists` operator, a wildcard, a
+    /// variable, a key anyone can satisfy) doesn't.
+    pub(crate) fn pins_caller(&self) -> bool {
+        if self.negated || self.if_exists || self.set == Some(Set::AllValues) {
+            return false;
+        }
+        match (&self.key, &self.expected) {
+            (Key::Global(GlobalKey::SourceIp), Expected::Cidrs(blocks)) => {
+                blocks.iter().all(Cidr::is_narrow)
+            }
+            (Key::Global(key), Expected::Strings(_, values) | Expected::Arns(values))
+                if PINNING_KEYS.contains(key) =>
+            {
+                values.iter().all(|value| value.literal_prefix().1)
+            }
+            (Key::S3(S3Key::DataAccessPointAccount), Expected::Strings(_, values)) => {
+                values.iter().all(|value| value.literal_prefix().1)
+            }
+            (
+                Key::S3(S3Key::DataAccessPointArn),
+                Expected::Strings(_, values) | Expected::Arns(values),
+            ) => values.iter().all(fixed_access_point_account),
+            _ => false,
+        }
     }
 
     /// Whether the condition holds for the request.

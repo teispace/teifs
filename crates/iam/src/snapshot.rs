@@ -50,19 +50,46 @@ impl Identity {
         self.boundary.as_deref()
     }
 
+    /// Whoever sends a request without signing it: no policies of its own, so only a
+    /// resource policy that allows everyone lets it do anything.
+    #[must_use]
+    pub fn anonymous() -> Self {
+        Self {
+            principal: Principal::anonymous(),
+            root: false,
+            tags: Box::default(),
+            policies: Box::default(),
+            boundary: None,
+        }
+    }
+
     /// Whether this identity may do `action` on `resource` in `context`: always for the
     /// root user, else as its policies and boundary decide.
     #[must_use]
     pub fn allows(&self, context: &Context, action: &str, resource: &str) -> bool {
-        if self.root {
+        self.allows_with(context, action, resource, None)
+    }
+
+    /// [`Self::allows`], with the resource's own policy (a bucket policy) too: its
+    /// `Deny` binds even the root user; its `Allow` grants as AWS's evaluation says.
+    #[must_use]
+    pub fn allows_with(
+        &self,
+        context: &Context,
+        action: &str,
+        resource: &str,
+        resource_policy: Option<&Policy>,
+    ) -> bool {
+        if self.root && resource_policy.is_none() {
             return true;
         }
         let policies: Vec<&Policy> = self.policies.iter().map(Arc::as_ref).collect();
         evaluate(
             &Policies {
                 identity: &policies,
+                resource: resource_policy,
                 boundary: self.boundary(),
-                ..Policies::default()
+                session: None,
             },
             &Request {
                 action,

@@ -106,6 +106,22 @@ impl Template {
         None
     }
 
+    /// The text before the first wildcard (`*`, `?`) or variable, and whether that's all
+    /// of it: a fixed value.
+    pub(crate) fn literal_prefix(&self) -> (&str, bool) {
+        let (text, whole) = match self {
+            Self::Static { text, .. } => (&**text, true),
+            Self::Dynamic(parts) => match parts.first() {
+                Some(Part::Text(text)) => (&**text, false),
+                _ => ("", false),
+            },
+        };
+        match text.find(['*', '?']) {
+            Some(end) => (&text[..end], false),
+            None => (text, whole),
+        }
+    }
+
     /// The literal text, for operators without wildcards.
     pub(crate) fn text<'a>(&'a self, context: &Context) -> Option<Cow<'a, str>> {
         match self {
@@ -309,6 +325,23 @@ mod tests {
         let plain = Template::plain("${aws:username}*");
         assert_eq!(plain.text(&alice()).as_deref(), Some("${aws:username}*"));
         assert_eq!(plain.colons_before_variable(), None);
+    }
+
+    #[test]
+    fn literal_prefixes_stop_at_wildcards_and_variables() {
+        let prefix = |text: &str| {
+            let template = Template::parse(text).unwrap();
+            let (prefix, whole) = template.literal_prefix();
+            (prefix.to_owned(), whole)
+        };
+        assert_eq!(prefix("vpc-1"), ("vpc-1".into(), true));
+        assert_eq!(prefix("vpc-*"), ("vpc-".into(), false));
+        assert_eq!(prefix("a?c"), ("a".into(), false));
+        assert_eq!(prefix("b/${aws:username}"), ("b/".into(), false));
+        assert_eq!(prefix("${aws:username}"), (String::new(), false));
+        // `${*}` is a literal star, but still not a value S3 counts as fixed.
+        assert_eq!(prefix("a${*}"), ("a".into(), false));
+        assert_eq!(Template::plain("x*").literal_prefix(), ("x", false));
     }
 
     #[test]

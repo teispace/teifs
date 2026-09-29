@@ -67,6 +67,7 @@ keys! {
         SourceIp = "aws:SourceIp",
         SourceOrgId = "aws:SourceOrgID",
         SourceOrgPaths = "aws:SourceOrgPaths",
+        SourceOwner = "aws:SourceOwner",
         SourceVpc = "aws:SourceVpc",
         SourceVpce = "aws:SourceVpce",
         TagKeys = "aws:TagKeys",

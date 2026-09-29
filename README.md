@@ -10,8 +10,8 @@ that is also a bucket for the AWS CLI, rclone, restic, boto3 and every other S3 
 
 > **Early development.** The S3 core, encryption and both bucket kinds work and are
 > tested with the official AWS SDK, the AWS CLI and the ceph/s3-tests suite. IAM users,
-> groups and policies work, managed with `aws iam`. Bucket policies, versioning, Object
-> Lock and lifecycle rules are next. Don't store data you can't afford to lose with it
+> groups, policies and bucket policies work, managed with `aws iam` and `aws s3api`.
+> Versioning, Object Lock and lifecycle rules are next. Don't store data you can't afford to lose with it
 > yet.
 
 ## Why
@@ -169,6 +169,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
 | Auth | Signature V4 (headers and presigned URLs); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS `GetCallerIdentity` on the S3 endpoint (`aws iam --endpoint-url …`) |
+| Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list |
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
@@ -176,7 +177,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** bucket policies, roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
+**Not yet:** ACLs, account-level Block Public Access, roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

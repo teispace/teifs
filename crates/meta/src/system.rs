@@ -79,19 +79,22 @@ impl System {
         })
     }
 
-    /// Records a bucket TeiFS just created.
-    pub fn record_bucket(&self, record: &BucketRecord) -> Result<()> {
+    /// Records a bucket TeiFS just created, with its first settings (`config`), in one
+    /// statement: a new bucket never exists without them.
+    pub fn record_bucket(&self, record: &BucketRecord, config: &str) -> Result<()> {
         self.conn
             .prepare_cached(
-                "INSERT INTO buckets (id, name, layout, created_ms) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO buckets (id, name, layout, created_ms, config)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (name) DO UPDATE SET id = excluded.id, layout = excluded.layout,
-                   created_ms = excluded.created_ms",
+                   created_ms = excluded.created_ms, config = excluded.config",
             )?
             .execute(params![
                 record.id,
                 record.name,
                 record.layout.as_str(),
-                record.created_ms
+                record.created_ms,
+                config
             ])?;
         Ok(())
     }
@@ -166,12 +169,12 @@ mod tests {
             layout: Layout::Object,
             created_ms: 42,
         };
-        system.record_bucket(&record).unwrap();
+        system.record_bucket(&record, r#"{"b":2}"#).unwrap();
         assert_eq!(system.bucket("photos").unwrap(), Some(record.clone()));
         assert_eq!(system.buckets().unwrap(), [record]);
         assert_eq!(
             system.bucket_config("photos").unwrap().as_deref(),
-            Some("{}")
+            Some(r#"{"b":2}"#)
         );
         assert!(system.set_bucket_config("photos", r#"{"a":1}"#).unwrap());
         assert_eq!(

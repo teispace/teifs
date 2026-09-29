@@ -13,6 +13,11 @@ behaviour; the on-disk format is always upgraded automatically.
   allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (50
   actions, each authorized with AWS's condition keys) and STS `GetCallerIdentity` are
   served on the S3 endpoint. Access key secrets are stored sealed by the drive's KMS.
+- Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
+  GetBucketPolicyStatus, checked when stored and applied to every request, the root
+  user's included (who can always fix the policy). Unsigned requests get what a policy
+  grants everyone, and nothing else. Block Public Access per bucket
+  (Put/Get/DeletePublicAccessBlock), with all four settings on for every new bucket.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.

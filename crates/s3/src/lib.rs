@@ -2,6 +2,7 @@
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
 mod access;
+mod bucket_access;
 mod checksums;
 mod cors;
 mod crc_combine;
@@ -54,11 +55,13 @@ pub struct Options {
 
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
-    let mut builder = S3ServiceBuilder::new(Drive::new(
+    let drive = Drive::new(
         store.clone(),
         options.default_layout,
         options.plain_http_is_secure,
-    ));
+    );
+    let rules = drive.rules();
+    let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
     config.sig_v4_allowed_services = ["s3", "iam", "sts"].map(str::to_owned).into();
@@ -66,7 +69,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));
-        builder.set_access(access::Access::new(iam.clone()));
+        builder.set_access(access::Access::new(iam.clone(), rules));
         builder.set_route(iam_api::Route { iam });
     }
     let host = if options.domains.is_empty() {

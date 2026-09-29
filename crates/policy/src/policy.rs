@@ -235,6 +235,49 @@ impl Policy {
         Ok(())
     }
 
+    /// Checks a bucket policy for `bucket`: [`Self::check_s3`], and every `Resource` can
+    /// be the bucket or its objects (a policy on one bucket can't grant another).
+    pub fn check_bucket(&self, bucket: &str) -> Result<(), Error> {
+        self.check_s3()?;
+        let arn = crate::bucket_arn(bucket);
+        let objects = format!("{arn}/");
+        for (i, statement) in self.statements.iter().enumerate() {
+            if statement.resources.negated {
+                continue;
+            }
+            for template in &statement.resources.templates {
+                let (prefix, whole) = template.literal_prefix();
+                let within = prefix.starts_with(&objects)
+                    || if whole {
+                        prefix == arn
+                    } else {
+                        objects.starts_with(prefix)
+                    };
+                if !within {
+                    return Err(Error::new(format!(
+                        "Policy has invalid resource: `{prefix}…` isn't bucket {bucket} or its objects"
+                    ))
+                    .within(format!("Statement {}", i + 1)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether S3 counts the policy as public: some `Allow` reaches everyone
+    /// (`"Principal": "*"`) without a condition that pins it to fixed callers or places
+    /// (`aws:SourceIp` no broader than a `/8`, `aws:SourceVpc`, `aws:PrincipalArn`…).
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.statements.iter().any(|s| {
+            s.effect == Effect::Allow
+                && s.principal
+                    .as_ref()
+                    .is_some_and(|p| p.entries.contains(&PrincipalEntry::Anyone))
+                && !s.conditions.iter().any(Condition::pins_caller)
+        })
+    }
+
     /// The condition keys TeiFS doesn't know, which no request ever has: usually a typo.
     pub fn unknown_condition_keys(&self) -> impl Iterator<Item = &str> {
         self.statements
@@ -909,6 +952,146 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn public_is_everyone_without_a_fixed_caller() {
+        let public = |principal: &str, condition: &str| {
+            let condition = if condition.is_empty() {
+                String::new()
+            } else {
+                format!(r#", "Condition": {condition}"#)
+            };
+            Policy::parse(
+                &statement(&format!(
+                    r#""Effect": "Allow", "Principal": {principal}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"{condition}"#
+                )),
+                Kind::Resource,
+            )
+            .unwrap()
+            .is_public()
+        };
+        let everyone = r#""*""#;
+        // AWS's own examples.
+        assert!(public(everyone, ""));
+        assert!(public(
+            everyone,
+            r#"{"StringLike": {"aws:SourceVpc": "vpc-*"}}"#
+        ));
+        assert!(!public(
+            everyone,
+            r#"{"StringEquals": {"aws:SourceVpc": "vpc-91237329"}}"#
+        ));
+        assert!(public(r#"{"AWS": "*"}"#, ""));
+        for named in [
+            r#"{"AWS": "123456789012"}"#,
+            r#"{"AWS": "arn:aws:iam::123456789012:user/alice"}"#,
+            r#"{"Service": "cloudtrail.amazonaws.com"}"#,
+            r#"{"CanonicalUser": "abc"}"#,
+        ] {
+            assert!(!public(named, ""), "{named}");
+        }
+        assert!(public(r#"{"AWS": ["123456789012", "*"]}"#, ""));
+        for pinned in [
+            r#"{"IpAddress": {"aws:SourceIp": ["203.0.113.0/24", "10.0.0.0/8", "2001:db8::/32"]}}"#,
+            r#"{"StringEquals": {"aws:PrincipalOrgID": "o-123"}}"#,
+            r#"{"StringEquals": {"aws:PrincipalAccount": "123456789012"}}"#,
+            r#"{"ArnEquals": {"aws:PrincipalArn": "arn:aws:iam::123456789012:user/a"}}"#,
+            r#"{"ArnLike": {"aws:SourceArn": "arn:aws:s3:::logs"}}"#,
+            r#"{"StringEquals": {"aws:SourceAccount": "123456789012"}}"#,
+            r#"{"StringEquals": {"aws:SourceOwner": "123456789012"}}"#,
+            r#"{"StringEquals": {"aws:SourceVpce": "vpce-1"}}"#,
+            r#"{"StringEquals": {"aws:userid": "AIDAEXAMPLE"}}"#,
+            r#"{"StringEquals": {"s3:DataAccessPointAccount": "123456789012"}}"#,
+            r#"{"StringLike": {"s3:DataAccessPointArn": "arn:aws:s3:us-west-2:123456789012:accesspoint/*"}}"#,
+            r#"{"ForAnyValue:StringEquals": {"aws:SourceVpc": ["vpc-1", "vpc-2"]}}"#,
+            // One pinning condition is enough; the others only narrow it further.
+            r#"{"Bool": {"aws:SecureTransport": "true"}, "StringEquals": {"aws:SourceVpc": "vpc-1"}}"#,
+        ] {
+            assert!(!public(everyone, pinned), "{pinned}");
+        }
+        for open in [
+            r#"{"IpAddress": {"aws:SourceIp": "0.0.0.0/1"}}"#,
+            r#"{"IpAddress": {"aws:SourceIp": ["203.0.113.0/24", "0.0.0.0/7"]}}"#,
+            r#"{"IpAddress": {"aws:SourceIp": "2001::/16"}}"#,
+            r#"{"NotIpAddress": {"aws:SourceIp": "203.0.113.0/24"}}"#,
+            r#"{"StringNotEquals": {"aws:SourceVpc": "vpc-1"}}"#,
+            r#"{"StringEqualsIfExists": {"aws:SourceVpc": "vpc-1"}}"#,
+            r#"{"ForAllValues:StringEquals": {"aws:SourceVpc": "vpc-1"}}"#,
+            r#"{"StringEquals": {"aws:SourceVpc": "${aws:username}"}}"#,
+            r#"{"StringLike": {"aws:userid": "AROAEXAMPLE:*"}}"#,
+            r#"{"StringLike": {"s3:DataAccessPointArn": "arn:aws:s3:us-west-2:*:accesspoint/x"}}"#,
+            r#"{"StringEquals": {"aws:PrincipalOrgPaths": "o-1/r-1/"}}"#,
+            r#"{"Bool": {"aws:SecureTransport": "true"}}"#,
+            r#"{"StringEquals": {"s3:prefix": "home/"}}"#,
+            r#"{"Null": {"aws:SourceVpc": "false"}}"#,
+        ] {
+            assert!(public(everyone, open), "{open}");
+        }
+        let deny = Policy::parse(
+            &statement(
+                r#""Effect": "Deny", "Principal": "*", "Action": "s3:*", "Resource": "arn:aws:s3:::b/*""#,
+            ),
+            Kind::Resource,
+        )
+        .unwrap();
+        assert!(!deny.is_public(), "a Deny makes nothing public");
+    }
+
+    #[test]
+    fn bucket_policies_are_about_their_bucket() {
+        let check = |resource: &str| {
+            Policy::parse(
+                &statement(&format!(
+                    r#""Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": {resource}"#
+                )),
+                Kind::Resource,
+            )
+            .unwrap()
+            .check_bucket("photos")
+        };
+        for fine in [
+            r#""arn:aws:s3:::photos""#,
+            r#""arn:aws:s3:::photos/*""#,
+            r#""arn:aws:s3:::photos/a/b.jpg""#,
+            r#""arn:aws:s3:::photos/${aws:username}/*""#,
+            r#""arn:aws:s3:::pho*""#,
+            r#""arn:aws:s3:::photo?/*""#,
+            r#""*""#,
+            r#"["arn:aws:s3:::photos", "arn:aws:s3:::photos/*"]"#,
+        ] {
+            assert!(check(fine).is_ok(), "{fine}");
+        }
+        for wrong in [
+            r#""arn:aws:s3:::photosx""#,
+            r#""arn:aws:s3:::photosx/*""#,
+            r#""arn:aws:s3:::other/*""#,
+            r#""arn:aws:s3:::Photos/*""#,
+            r#"["arn:aws:s3:::photos/*", "arn:aws:s3:::other"]"#,
+            r#""arn:aws:iam::123456789012:user/a""#,
+        ] {
+            let err = check(wrong).unwrap_err().to_string();
+            assert!(
+                err.contains("Policy has invalid resource"),
+                "{wrong}: {err}"
+            );
+        }
+        let everything_else = Policy::parse(
+            &statement(
+                r#""Effect": "Deny", "Principal": "*", "Action": "s3:*", "NotResource": "arn:aws:s3:::other/*""#,
+            ),
+            Kind::Resource,
+        )
+        .unwrap();
+        assert!(everything_else.check_bucket("photos").is_ok());
+        let not_s3 = Policy::parse(
+            &statement(
+                r#""Effect": "Allow", "Principal": "*", "Action": "iam:GetUser", "Resource": "arn:aws:s3:::photos""#,
+            ),
+            Kind::Resource,
+        )
+        .unwrap();
+        assert!(not_s3.check_bucket("photos").is_err());
     }
 
     #[test]

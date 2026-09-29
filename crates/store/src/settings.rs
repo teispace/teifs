@@ -18,6 +18,10 @@ struct BucketConfig {
     tags: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cors: Option<Vec<CorsRule>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_access_block: Option<PublicAccessBlock>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -68,6 +72,58 @@ pub struct CorsRule {
     /// How long browsers may cache a preflight answer, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_seconds: Option<i32>,
+}
+
+/// S3 Block Public Access: what a bucket refuses to make public, and whether it ignores
+/// what already is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "S3's four independent settings, as its API names them"
+)]
+pub struct PublicAccessBlock {
+    /// Writes that give an object a public ACL are refused.
+    pub block_public_acls: bool,
+    /// Public ACLs grant nothing.
+    pub ignore_public_acls: bool,
+    /// A public bucket policy is refused.
+    pub block_public_policy: bool,
+    /// While the bucket's policy is public, it grants nothing to anyone outside the
+    /// account: anonymous requests are refused.
+    pub restrict_public_buckets: bool,
+}
+
+impl PublicAccessBlock {
+    /// Every setting on: what every new bucket has, as on AWS since 2023-04.
+    pub const ALL: Self = Self {
+        block_public_acls: true,
+        ignore_public_acls: true,
+        block_public_policy: true,
+        restrict_public_buckets: true,
+    };
+}
+
+/// What decides who may reach a bucket, read together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BucketAccess {
+    /// The bucket policy, as it was given.
+    pub policy: Option<String>,
+    /// The bucket's Block Public Access settings.
+    pub public_access_block: Option<PublicAccessBlock>,
+}
+
+/// A new bucket's settings, which a folder bucket made outside TeiFS has too.
+fn new_bucket() -> BucketConfig {
+    BucketConfig {
+        public_access_block: Some(PublicAccessBlock::ALL),
+        ..BucketConfig::default()
+    }
+}
+
+/// A new bucket's settings, to record with it.
+pub(crate) fn new_bucket_config() -> String {
+    serde_json::to_string(&new_bucket()).expect("the config serializes")
 }
 
 impl BucketEncryption {
@@ -135,12 +191,33 @@ impl Store {
 
     /// Replaces a bucket's CORS rules; `None` removes them.
     pub async fn set_bucket_cors(&self, bucket: &str, rules: Option<Vec<CorsRule>>) -> Result<()> {
-        let name = bucket.to_owned();
-        self.blocking(move |inner| {
-            inner.bucket(&name)?;
-            inner.update_config(&name, |config| config.cors = rules)
+        self.change_config(bucket, move |config| config.cors = rules)
+            .await
+    }
+
+    /// A bucket's policy and Block Public Access settings.
+    pub async fn bucket_access(&self, bucket: &str) -> Result<BucketAccess> {
+        let config = self.config(bucket).await?;
+        Ok(BucketAccess {
+            policy: config.policy,
+            public_access_block: config.public_access_block,
         })
-        .await
+    }
+
+    /// Replaces a bucket's policy (checked by the caller); `None` removes it.
+    pub async fn set_bucket_policy(&self, bucket: &str, policy: Option<String>) -> Result<()> {
+        self.change_config(bucket, move |config| config.policy = policy)
+            .await
+    }
+
+    /// Replaces a bucket's Block Public Access settings; `None` removes them.
+    pub async fn set_bucket_public_access_block(
+        &self,
+        bucket: &str,
+        block: Option<PublicAccessBlock>,
+    ) -> Result<()> {
+        self.change_config(bucket, move |config| config.public_access_block = block)
+            .await
     }
 
     async fn config(&self, bucket: &str) -> Result<BucketConfig> {
@@ -158,10 +235,20 @@ impl Store {
         bucket: &str,
         tags: Option<BTreeMap<String, String>>,
     ) -> Result<()> {
+        self.change_config(bucket, move |config| config.tags = tags)
+            .await
+    }
+
+    /// Changes an existing bucket's settings.
+    async fn change_config(
+        &self,
+        bucket: &str,
+        change: impl FnOnce(&mut BucketConfig) + Send + 'static,
+    ) -> Result<()> {
         let name = bucket.to_owned();
         self.blocking(move |inner| {
             inner.bucket(&name)?;
-            inner.update_config(&name, |config| config.tags = tags)
+            inner.update_config(&name, change)
         })
         .await
     }
@@ -172,12 +259,15 @@ impl Inner {
     fn update_config(&self, name: &str, change: impl FnOnce(&mut BucketConfig)) -> Result<()> {
         let system = self.system();
         if system.bucket(name)?.is_none() {
-            system.record_bucket(&BucketRecord {
-                id: uuid::Uuid::new_v4().simple().to_string(),
-                name: name.to_owned(),
-                layout: Layout::Folder,
-                created_ms: now_ms(),
-            })?;
+            system.record_bucket(
+                &BucketRecord {
+                    id: uuid::Uuid::new_v4().simple().to_string(),
+                    name: name.to_owned(),
+                    layout: Layout::Folder,
+                    created_ms: now_ms(),
+                },
+                &new_bucket_config(),
+            )?;
         }
         let mut config = read_config(system.bucket_config(name)?.as_deref())?;
         change(&mut config);
@@ -191,7 +281,7 @@ impl Inner {
 
 fn read_config(json: Option<&str>) -> Result<BucketConfig> {
     match json {
-        None => Ok(BucketConfig::default()),
+        None => Ok(new_bucket()),
         Some(json) => serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata),
     }
 }
