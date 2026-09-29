@@ -29,6 +29,16 @@ pub(crate) fn from_header(value: &str) -> S3Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// Parses a tag set as XML (`<Tagging><TagSet>…`), as a form's `tagging` field has it.
+pub(crate) fn from_xml(xml: &[u8]) -> S3Result<Vec<(String, String)>> {
+    use s3s::xml::Deserialize;
+    let mut d = s3s::xml::Deserializer::new(xml);
+    let tagging = dto::Tagging::deserialize(&mut d)
+        .and_then(|tagging| d.expect_eof().map(|()| tagging))
+        .map_err(|_| s3_error!(MalformedXML, "The tagging field isn't a tag set"))?;
+    Ok(from_dto(tagging))
+}
+
 /// A tag set from a request body.
 pub(crate) fn from_dto(tagging: dto::Tagging) -> Vec<(String, String)> {
     tagging

@@ -33,6 +33,7 @@ use crate::{
     bucket_access::{BucketRules, Rules},
     drive::REGION,
     errors::from_store,
+    post_form::{self, Form},
     tagging,
 };
 
@@ -82,7 +83,8 @@ impl Access {
     }
 
     /// Whether `identity` may do `action` on `arn`: [`allows`], then the ACL of the
-    /// object `(bucket, key)` the request is on, if any.
+    /// object `(bucket, key)` the request is on, if any. `creating`: the request makes the
+    /// object (see [`acl_for`]).
     async fn permits(
         &self,
         identity: &Identity,
@@ -90,17 +92,18 @@ impl Access {
         (action, arn): (&str, &str),
         rules: Option<&BucketRules>,
         object: Option<(&str, &str)>,
+        creating: bool,
     ) -> S3Result<bool> {
         let decision = decide(identity, context, action, arn, rules);
         let (Decision::ImplicitDeny, Some(rules)) = (decision, rules) else {
             return Ok(decision.is_allowed());
         };
-        if bucket_acl_allows(identity, context, (action, arn), rules) {
+        if bucket_acl_allows(identity, context, (action, arn), rules, creating) {
             return Ok(true);
         }
         // The object's ACL, read only when the bucket's ACLs apply.
         let (Some((AclOf::Object, permission)), Some((bucket, key))) =
-            (acl_for(action, rules), object)
+            (acl_for(action, rules, creating), object)
         else {
             return Ok(false);
         };
@@ -115,6 +118,14 @@ impl Access {
         )
     }
 }
+
+/// The operations that make the object they name.
+const CREATING: [&str; 4] = [
+    "PutObject",
+    "PostObject",
+    "CopyObject",
+    "CreateMultipartUpload",
+];
 
 /// What only the bucket owner's account may do, and what its root user may always do,
 /// whatever the bucket policy says, so a policy can't lock the owner out.
@@ -157,8 +168,18 @@ fn is_signed(identity: &Identity) -> bool {
     identity.principal().kind() != PrincipalKind::Anonymous
 }
 
-/// The ACL that could allow `action` in a bucket whose ACLs apply.
-fn acl_for(action: &str, rules: &BucketRules) -> Option<(AclOf, teifs_store::Permission)> {
+/// The ACL that could allow `action` in a bucket whose ACLs apply. A request that makes
+/// an object (`creating`) sets the new object's ACL and tags as part of making it: the
+/// bucket's `WRITE`, which allows the object, allows them too, as on AWS.
+fn acl_for(
+    action: &str,
+    rules: &BucketRules,
+    creating: bool,
+) -> Option<(AclOf, teifs_store::Permission)> {
+    let action = match action {
+        "s3:PutObjectAcl" | "s3:PutObjectTagging" if creating => "s3:PutObject",
+        action => action,
+    };
     acl::permission_for(action).filter(|_| rules.acls_apply())
 }
 
@@ -168,8 +189,9 @@ fn bucket_acl_allows(
     context: &Context,
     (action, arn): (&str, &str),
     rules: &BucketRules,
+    creating: bool,
 ) -> bool {
-    matches!(acl_for(action, rules), Some((AclOf::Bucket, permission))
+    matches!(acl_for(action, rules, creating), Some((AclOf::Bucket, permission))
         if rules.acl.as_ref().is_some_and(|acl| acl.grants(permission, is_signed(identity))))
         && identity.within_boundary(context, action, arn)
 }
@@ -185,8 +207,9 @@ fn allows(
     match decide(identity, context, action, resource, rules) {
         Decision::Allow => true,
         Decision::ExplicitDeny => false,
-        Decision::ImplicitDeny => rules
-            .is_some_and(|rules| bucket_acl_allows(identity, context, (action, resource), rules)),
+        Decision::ImplicitDeny => rules.is_some_and(|rules| {
+            bucket_acl_allows(identity, context, (action, resource), rules, false)
+        }),
     }
 }
 
@@ -279,9 +302,11 @@ impl S3Access for Access {
                     .identity
             }
         };
+        let (form, posted) = posted(cx)?;
         let operation = cx.s3_op().name();
+        let path = posted.as_ref().unwrap_or_else(|| cx.s3_path());
         let source = source(operation, cx)?;
-        let bucket_name = match cx.s3_path() {
+        let bucket_name = match path {
             S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
             S3Path::Root => None,
         };
@@ -304,8 +329,8 @@ impl S3Access for Access {
         let context = if unrestricted {
             Context::new(identity.principal().clone(), Date::now())
         } else {
-            let context = context(&identity, cx, client, &self.account, signed)?;
-            let facts = facts(cx, source.as_ref());
+            let context = context(&identity, cx, form.as_ref(), client, &self.account, signed)?;
+            let facts = facts(cx, form.as_ref(), source.as_ref());
             // An operation with no action is one only the root user may make.
             let needs = teifs_policy::authorizations(operation, &facts);
             if needs.is_none() && !identity.is_root() {
@@ -317,9 +342,9 @@ impl S3Access for Access {
                     Target::Account | Target::Other => None,
                     Target::Bucket | Target::Object => rules.as_deref(),
                 };
-                match resource(need, cx.s3_path(), operation, source.as_ref()) {
+                match resource(need, path, operation, source.as_ref()) {
                     Resource::Arn(arn) => {
-                        let object = match (need.target, cx.s3_path()) {
+                        let object = match (need.target, path) {
                             (Target::Source, _) => {
                                 source.as_ref().map(|(b, k, _)| (b.as_str(), k.as_str()))
                             }
@@ -328,8 +353,17 @@ impl S3Access for Access {
                             }
                             _ => None,
                         };
+                        let creating =
+                            need.target == Target::Object && CREATING.contains(&operation);
                         let allowed = self
-                            .permits(&identity, &context, (need.action, &arn), bucket, object)
+                            .permits(
+                                &identity,
+                                &context,
+                                (need.action, &arn),
+                                bucket,
+                                object,
+                                creating,
+                            )
                             .await?;
                         if !allowed {
                             if need.required {
@@ -354,6 +388,24 @@ impl S3Access for Access {
         });
         Ok(())
     }
+}
+
+/// A browser upload's form and the object it names (its path names only the bucket);
+/// `None` for other requests. A browser upload without its form is refused.
+fn posted(cx: &mut S3AccessContext<'_>) -> S3Result<(Option<Form>, Option<S3Path>)> {
+    if cx.s3_op().name() != "PostObject" {
+        return Ok((None, None));
+    }
+    let form = cx
+        .extensions_mut()
+        .get::<Form>()
+        .cloned()
+        .ok_or_else(post_form::too_large)?;
+    let path = match (cx.s3_path(), form.key()) {
+        (S3Path::Bucket { bucket }, Some(key)) => Some(S3Path::object(bucket, key)),
+        _ => None,
+    };
+    Ok((Some(form), path))
 }
 
 /// The object a copy or rename reads from: (bucket, key, whether a version is named).
@@ -425,28 +477,47 @@ fn resource(
     }
 }
 
-fn facts(cx: &S3AccessContext<'_>, source: Option<&Source>) -> Facts {
-    let has = |name: &str| cx.headers().contains_key(name);
-    let is_true = |name: &str| {
-        cx.headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+fn facts(cx: &S3AccessContext<'_>, form: Option<&Form>, source: Option<&Source>) -> Facts {
+    let has = |name: &str| field(cx, form, name).is_some();
+    let is_true =
+        |name: &str| field(cx, form, name).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let grants = match form {
+        Some(form) => GRANTS.iter().any(|name| form.field(name).is_some()),
+        None => cx
+            .headers()
+            .keys()
+            .any(|h| h.as_str().starts_with("x-amz-grant-")),
     };
     Facts {
         version_id: query(cx, "versionId").is_some(),
         source_version_id: source.is_some_and(|(_, _, version)| *version),
-        tagging: has("x-amz-tagging"),
-        acl: has("x-amz-acl")
-            || cx
-                .headers()
-                .keys()
-                .any(|h| h.as_str().starts_with("x-amz-grant-")),
+        tagging: match form {
+            Some(form) => form.field("tagging").is_some() || has("x-amz-tagging"),
+            None => has("x-amz-tagging"),
+        },
+        acl: form.map_or_else(|| has("x-amz-acl"), |form| form.acl().is_some()) || grants,
         retention: has("x-amz-object-lock-mode") || has("x-amz-object-lock-retain-until-date"),
         legal_hold: has("x-amz-object-lock-legal-hold"),
         bypass_governance: is_true("x-amz-bypass-governance-retention"),
         object_lock: is_true("x-amz-bucket-object-lock-enabled"),
         ownership: has("x-amz-object-ownership"),
+    }
+}
+
+/// The grants a form may carry, as s3s reads them into an upload.
+const GRANTS: [&str; 4] = [
+    "x-amz-grant-full-control",
+    "x-amz-grant-read",
+    "x-amz-grant-read-acp",
+    "x-amz-grant-write-acp",
+];
+
+/// A request header, or for a browser upload, the form field of that name (its headers
+/// say nothing about the object).
+fn field<'a>(cx: &'a S3AccessContext<'_>, form: Option<&'a Form>, name: &str) -> Option<&'a str> {
+    match form {
+        Some(form) => form.field(name),
+        None => cx.headers().get(name).and_then(|v| v.to_str().ok()),
     }
 }
 
@@ -533,12 +604,13 @@ pub(crate) fn base_context(
 fn context(
     identity: &Identity,
     cx: &S3AccessContext<'_>,
+    form: Option<&Form>,
     client: Client,
     account: &str,
     signed: bool,
 ) -> S3Result<Context> {
     let headers = cx.headers();
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let header = |name: &str| field(cx, form, name);
     let mut context = base_context(identity, headers, client, account);
     for (name, key) in HEADER_KEYS {
         if let Some(value) = header(name) {
@@ -556,13 +628,27 @@ fn context(
     if let Some(date) = header("x-amz-object-lock-retain-until-date").and_then(Date::parse) {
         context = context.with(S3Key::ObjectLockRetainUntilDate, date);
     }
-    if signed {
-        context = with_signature(context, cx);
-    }
-    if let Some(value) = header("x-amz-tagging") {
-        for (key, value) in tagging::from_header(value)? {
-            context = context.with_tag(TagKind::RequestObject, &key, &value);
+    let tags = if let Some(form) = form {
+        if let Some(acl) = form.acl() {
+            context = context.with(S3Key::Acl, acl.to_owned());
         }
+        if signed {
+            context = context.with(S3Key::AuthType, "POST".to_owned()).with(
+                S3Key::SignatureVersion,
+                signature_version(form.signed_v4()).to_owned(),
+            );
+        }
+        form.tags()?
+    } else {
+        if signed {
+            context = with_signature(context, cx);
+        }
+        header("x-amz-tagging")
+            .map(tagging::from_header)
+            .transpose()?
+    };
+    for (key, value) in tags.into_iter().flatten() {
+        context = context.with_tag(TagKind::RequestObject, &key, &value);
     }
     Ok(context)
 }
@@ -589,6 +675,11 @@ fn with_signature(context: Context, cx: &S3AccessContext<'_>) -> Context {
         )
         .with(
             S3Key::SignatureVersion,
-            if sig_v4 { "AWS4-HMAC-SHA256" } else { "AWS" }.to_owned(),
+            signature_version(sig_v4).to_owned(),
         )
+}
+
+/// `s3:signatureversion` for Signature V4 or V2.
+const fn signature_version(v4: bool) -> &'static str {
+    if v4 { "AWS4-HMAC-SHA256" } else { "AWS" }
 }

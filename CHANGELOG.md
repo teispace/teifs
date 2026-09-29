@@ -25,6 +25,16 @@ behaviour; the on-disk format is always upgraded automatically.
   `AccessControlListNotSupported` instead of being accepted and ignored; enable ACLs on a
   bucket with PutBucketOwnershipControls, or start the server with
   `--legacy-bucket-defaults` to make new buckets as S3 did before April 2023.
+- Browser uploads (PostObject): a web page can upload straight to a bucket with a
+  `POST` form signed by the server's owner, whose policy decides the bucket, key, size
+  and every other field, as on AWS. The form's `acl`, `tagging`, metadata and redirect
+  fields work; the upload is authorized like a PutObject on the key the form names, and
+  anonymous forms get only what a bucket policy grants.
+- Presigned links refuse `x-amz-*` headers that weren't signed, so whoever holds a link
+  can't add an ACL, tags, metadata or encryption to what it uploads (tested).
+- With `--allow-sigv2`, requests for a whole bucket (creating, listing, its settings)
+  work: they are signed over `/bucket/` as AWS and boto3 sign them. A Signature V2
+  request without a valid date is `403 AccessDenied`, as on AWS.
 - Account-wide Block Public Access, with AWS's S3 Control API
   (`aws s3control get|put|delete-public-access-block`): it applies with every bucket's
   own settings, the most restrictive winning.

@@ -460,6 +460,58 @@ async fn presigned_links_work_without_credentials() {
 }
 
 #[tokio::test]
+async fn presigned_uploads_take_only_the_headers_they_signed() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("inbox").send().await.unwrap();
+    let link = s3
+        .put_object()
+        .bucket("inbox")
+        .key("upload.txt")
+        .content_type("text/plain")
+        .presigned(PresigningConfig::expires_in(Duration::from_secs(60)).unwrap())
+        .await
+        .unwrap();
+    let put = |extra: Option<(&'static str, &'static str)>| {
+        let mut request = reqwest::Client::new()
+            .put(link.uri())
+            .header("content-type", "text/plain")
+            .body("hello");
+        if let Some((name, value)) = extra {
+            request = request.header(name, value);
+        }
+        request.send()
+    };
+    // Whoever holds the link can't make the upload public, tag it or add metadata.
+    for extra in [
+        ("x-amz-acl", "public-read"),
+        ("x-amz-tagging", "a=b"),
+        ("x-amz-meta-note", "added"),
+        ("x-amz-server-side-encryption", "aws:kms"),
+    ] {
+        let response = put(Some(extra)).await.unwrap();
+        assert_eq!(response.status(), 403, "{extra:?}");
+        assert!(
+            response.text().await.unwrap().contains("AccessDenied"),
+            "{extra:?}"
+        );
+    }
+    assert_eq!(put(None).await.unwrap().status(), 200);
+    let head = s3
+        .head_object()
+        .bucket("inbox")
+        .key("upload.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.content_type(), Some("text/plain"));
+    assert!(
+        head.metadata()
+            .is_none_or(std::collections::HashMap::is_empty)
+    );
+}
+
+#[tokio::test]
 async fn files_added_by_hand_are_objects() {
     let server = start().await;
     let s3 = client(&server, SECRET_KEY);
@@ -1786,8 +1838,9 @@ async fn folder_buckets_refuse_names_other_systems_cant_hold() {
     assert_eq!(device.unwrap_err().code(), Some("InvalidBucketName"));
 }
 
-/// A Signature Version 2 presigned GET link, as boto3 makes by default.
-fn sig_v2_link(server: &common::Server, bucket: &str, key: &str) -> String {
+/// A Signature Version 2 presigned GET link to `path`, signed over `resource`, as boto3
+/// makes by default.
+fn sig_v2_link(server: &common::Server, path: &str, resource: &str) -> String {
     use aws_lc_rs::hmac;
     use base64::Engine as _;
     let expires = std::time::SystemTime::now()
@@ -1795,7 +1848,6 @@ fn sig_v2_link(server: &common::Server, bucket: &str, key: &str) -> String {
         .unwrap()
         .as_secs()
         + 60;
-    let resource = format!("/{bucket}/{key}");
     let signed = hmac::sign(
         &hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, SECRET_KEY.as_bytes()),
         format!("GET\n\n\n{expires}\n{resource}").as_bytes(),
@@ -1811,7 +1863,7 @@ fn sig_v2_link(server: &common::Server, bucket: &str, key: &str) -> String {
         })
         .collect();
     format!(
-        "{}{resource}?AWSAccessKeyId={}&Expires={expires}&Signature={signature}",
+        "{}{path}?AWSAccessKeyId={}&Expires={expires}&Signature={signature}",
         server.endpoint,
         common::ACCESS_KEY
     )
@@ -1830,12 +1882,22 @@ async fn signature_v2_is_refused_unless_allowed() {
             .send()
             .await
             .unwrap();
-        let answer = reqwest::get(sig_v2_link(&server, "legacy", "v2.txt"))
+        let object = "/legacy/v2.txt";
+        let answer = reqwest::get(sig_v2_link(&server, object, object))
             .await
             .unwrap();
         if allowed {
             assert_eq!(answer.status(), 200);
             assert_eq!(answer.text().await.unwrap(), "old client");
+            // A bucket's resource is `/bucket/`, whether its path ends in `/` or not, as
+            // botocore signs it.
+            for path in ["/legacy", "/legacy/"] {
+                let answer = reqwest::get(sig_v2_link(&server, path, "/legacy/"))
+                    .await
+                    .unwrap();
+                assert_eq!(answer.status(), 200, "{path}");
+                assert!(answer.text().await.unwrap().contains("<Key>v2.txt</Key>"));
+            }
         } else {
             assert_eq!(answer.status(), 403);
             assert!(answer.text().await.unwrap().contains("Signature Version 2"));

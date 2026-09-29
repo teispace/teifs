@@ -282,3 +282,14 @@ fn condition_keys_are_the_references() {
         .collect();
     assert_eq!(ours, listed);
 }
+
+#[test]
+fn a_browser_upload_needs_what_a_put_does() {
+    for facts in every_facts() {
+        assert_eq!(
+            actions("PostObject", facts),
+            actions("PutObject", facts),
+            "{facts:?}"
+        );
+    }
+}

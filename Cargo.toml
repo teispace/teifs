@@ -24,6 +24,8 @@ teifs-iam = { path = "crates/iam" }
 teifs-client = { path = "crates/client" }
 
 s3s = "0.17"
+# s3s's form parser: the same one reads a browser upload's fields before s3s does.
+s3s-multipart = "0.17"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal", "sync", "time", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }

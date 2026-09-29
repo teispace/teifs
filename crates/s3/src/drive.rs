@@ -25,6 +25,7 @@ use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
+    post_form::{self, Form},
     sse::{self, set_sse},
     tagging,
 };
@@ -1128,6 +1129,34 @@ impl S3 for Drive {
         set_checksums!(out, &computed);
         set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
         Ok(S3Response::new(out))
+    }
+
+    async fn post_object(
+        &self,
+        req: S3Request<dto::PostObjectInput>,
+    ) -> S3Result<S3Response<dto::PostObjectOutput>> {
+        let form = req
+            .extensions
+            .get::<Form>()
+            .cloned()
+            .ok_or_else(post_form::too_large)?;
+        // Only the object whose upload was authorized.
+        if form.key() != Some(req.input.key.as_str()) {
+            return Err(s3_error!(AccessDenied, "Access Denied"));
+        }
+        let tags = form.tags()?;
+        let req = req.map_input(|x| post_form::into_put(x, &form, tags));
+        let mut response = self.put_object(req).await?.map_output(post_form::from_put);
+        // As AWS answers a form: the ETag as a header, and quoted where s3s writes it (a
+        // redirect's `etag` and the 201 answer's body).
+        if let Some(etag) = response.output.e_tag.take() {
+            let quoted = format!("\"{}\"", etag.value());
+            if let Ok(value) = http::HeaderValue::from_str(&quoted) {
+                response.headers.insert(http::header::ETAG, value);
+            }
+            response.output.e_tag = Some(ETag::Strong(quoted));
+        }
+        Ok(response)
     }
 
     async fn rename_object(

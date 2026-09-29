@@ -28,6 +28,13 @@ Requests must carry a valid AWS Signature V4 (headers or presigned URL), checked
 before any operation runs; chunked uploads verify each chunk's signature as it streams.
 Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
 `serve --allow-sigv2` for clients too old for V4.
+Every `x-amz-*` header of a signed request must be signed, presigned links included:
+whoever holds a link can't add an ACL, tags, metadata or encryption to it.
+A browser upload (`POST` with a form) is signed by its policy, which must name every
+field the form sends. Its fields are read before any decision, at most 64 KiB of them,
+and the upload is authorized on the key the form names, as a PutObject would be; a form
+that couldn't be read is refused, never decided as if it had no fields. Error messages
+that quote a request are XML-escaped.
 The one unsigned request is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an

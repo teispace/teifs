@@ -167,8 +167,13 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// An S3 error answer that doesn't come from the S3 service.
+/// An S3 error answer that doesn't come from the S3 service. The message is escaped: it
+/// may quote what the request sent.
 pub(crate) fn error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
+    let message = message
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     let body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>{message}</Message></Error>"
     );
@@ -224,6 +229,9 @@ impl Service {
 
     /// Passes a request to the S3 service, its body timed out if it stalls.
     async fn s3(&self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
+        if let Some(refused) = crate::sig_v2::refusal(req.headers()) {
+            return Ok(refused);
+        }
         let timeout = self.body_timeout;
         let mut req = req;
         req.extensions_mut().insert(self.client);
@@ -231,7 +239,15 @@ impl Service {
             Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
             None => s3s::Body::from(body),
         });
-        match crate::iam_api::with_payload_hash(req).await {
+        let req = match crate::iam_api::with_payload_hash(req).await {
+            Ok(req) => req,
+            Err(refused) => return Ok(*refused),
+        };
+        let mut req = req;
+        let virtual_hosted = self.virtual_bucket(&req).is_some();
+        crate::sig_v2::canonical_bucket_path(&mut req, virtual_hosted);
+        let bucket = self.bucket_of(&req);
+        match crate::post_form::with_form(req, bucket.as_deref()).await {
             Ok(req) => self.s3.call(req).await,
             Err(refused) => Ok(*refused),
         }

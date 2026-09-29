@@ -15,7 +15,9 @@ mod errors;
 mod health;
 mod iam_api;
 mod limits;
+mod post_form;
 mod routes;
+mod sig_v2;
 mod sse;
 mod tagging;
 
@@ -84,6 +86,10 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     config.sig_v4_allowed_services = ["s3", "iam", "sts"].map(str::to_owned).into();
     // Each route reads at most its own limit, after deciding the caller may call it.
     config.custom_route_max_body_size = Some(admin::MAX_IMPORT_BYTES as u64);
+    // Forms are parsed with the limits TeiFS reads their fields with.
+    config.form_max_field_size = post_form::MAX_FIELDS_BYTES;
+    config.form_max_fields_size = post_form::MAX_FIELDS_BYTES;
+    config.form_max_parts = post_form::MAX_PARTS;
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));

@@ -37,6 +37,12 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    }
    ```
 
+   **Authorization**: every operation needs its entry in `crates/policy/src/actions.rs`
+   (the actions and resources `Access::check` in `crates/s3/src/access.rs` asks for), and a
+   test in `crates/policy/tests/reference.rs`. When the request's path doesn't name what
+   is acted on (PostObject names its key in the form body), read it in `cors::Service`
+   before s3s runs, pass it as a request extension (as `post_form::Form`), and refuse the
+   operation in `Access` when the extension is missing.
 5. **Tests**:
    - store behaviour in `crates/store/src/tests.rs`;
    - the operation end to end with the official AWS SDK in `crates/server/tests/sdk.rs`

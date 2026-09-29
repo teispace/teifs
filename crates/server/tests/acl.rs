@@ -306,6 +306,30 @@ async fn public_acls_open_what_they_grant() {
             403
         );
         assert_eq!(anonymous(&server, Method::GET, "/photos?acl").await, 403);
+        // Making an object sets its ACL and tags with it, which the bucket's WRITE allows
+        // as it allows the object; changing an existing object's ACL it doesn't.
+        let put = |path: &'static str| {
+            reqwest::Client::new()
+                .put(format!("{}{path}", server.endpoint))
+                .header("x-amz-acl", "public-read")
+                .header("x-amz-tagging", "team=web")
+                .body("shared")
+                .send()
+        };
+        assert_eq!(put("/photos/shared.jpg").await.unwrap().status(), 200);
+        assert_eq!(
+            anonymous(&server, Method::GET, "/photos/shared.jpg").await,
+            200
+        );
+        let tags = root
+            .get_object_tagging()
+            .bucket("photos")
+            .key("shared.jpg")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tags.tag_set()[0].value(), "web");
+        assert_eq!(put("/photos/private.jpg?acl").await.unwrap().status(), 403);
 
         // A copy doesn't take its source's ACL.
         root.copy_object()

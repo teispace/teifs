@@ -40,7 +40,9 @@ reason in the pull request.
 The suite was written for S3 before AWS's 2023 and 2026 defaults: it makes buckets with
 public ACLs and uploads with SSE-C keys. The server it runs therefore starts with
 `--legacy-bucket-defaults` (new buckets have ACLs enabled and no Block Public Access)
-and `--allow-sse-c`. TeiFS's own tests prove the current AWS defaults.
+and `--allow-sse-c`, and with Signature V2 allowed (`TEIFS_ALLOW_SIGV2`), because the
+suite signs its POST forms and some requests with it. TeiFS's own tests prove the
+current AWS defaults.
 
 ## One set of credentials
 

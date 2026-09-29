@@ -84,3 +84,8 @@ test_bucket_policy_put_obj_s3_noenc  # encryption at rest: folder buckets store 
 test_encryption_sse_c_deny_algo_with_bucket_policy  # encryption at rest: folder buckets store plain files
 test_encryption_sse_c_enforced_with_bucket_policy  # encryption at rest: folder buckets store plain files
 test_bucket_create_special_key_names  # stores ' ' and '_ ': portable folder names can't end in a space
+test_post_object_escaped_field_values  # stores '\$foo.txt': a backslash separates folders on Windows (portable key names)
+test_encryption_sse_c_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
+test_sse_kms_default_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
+test_sse_kms_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
+test_sse_s3_default_post_object_authenticated_request  # encryption at rest: folder buckets store plain files

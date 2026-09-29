@@ -177,6 +177,20 @@ back: routing, XML, SigV4 (headers, presigned URLs, chunked and trailer bodies) 
 S3 error format. TeiFS implements the `S3` trait in `teifs-s3` (`drive.rs`). Nothing
 outside `teifs-s3` and `teifs-server` knows about s3s.
 
+`cors::Service` sees each request before s3s does, for what s3s answers differently from
+AWS or can't tell TeiFS. `sig_v2.rs` refuses a Signature V2 request without a valid date
+as AWS does, and gives a path-style V2 request for a whole bucket the `/` its signature
+covers (`/bucket/`, as AWS and botocore sign it; s3s signs the path as sent). `post_form.rs` reads a browser upload's form fields (everything before the
+file, at most 64 KiB) with s3s's own multipart parser, the same way s3s reads them, and
+puts the bytes back in front of the body, so s3s parses exactly what TeiFS read. The
+fields go into the request's extensions as a `Form`: `Access` authorizes the key it names
+(the path names only the bucket) with its ACL, tags and `s3:authType` `POST`, and
+`post_object` in `drive.rs` checks the key again and makes the upload a PutObject with
+the fields s3s doesn't map (`acl`, `tagging` as XML). A PostObject that reaches `Access`
+without a `Form` is refused, so no form is ever decided without being read. s3s checks
+the signature, the policy and every field against it; `post_form.rs` checks the policy's
+conditions again only to answer `403 AccessDenied` as AWS does.
+
 ## Two layouts, one API
 
 `Store` resolves a bucket name to `Bucket::Folder` (a folder at the root) or

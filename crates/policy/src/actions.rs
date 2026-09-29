@@ -161,7 +161,8 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
             ],
         ),
         "GetObjectAttributes" => needs.read(facts, &[]),
-        "PutObject" | "CreateMultipartUpload" => needs.write(facts),
+        // A browser upload (a form; not in the SDK's reference) is a PutObject.
+        "PutObject" | "PostObject" | "CreateMultipartUpload" => needs.write(facts),
         "CopyObject" => {
             needs.source(facts);
             needs.write(facts);
