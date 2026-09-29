@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use aws_sdk_s3::primitives::ByteStream;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, AdminError, IamExport, ImportReport,
-    KmsConfig, ServerConfig, ServerInfo,
+    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY, AdminError, IamExport,
+    ImportReport, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
 };
 
 mod common;
@@ -300,4 +300,74 @@ async fn imports_are_checked_before_anything_changes() {
     );
     let (_, now) = get(&server, ROOT, ADMIN_IAM_SECRETS).await;
     assert!(now.contains("carol"));
+}
+
+#[tokio::test]
+async fn a_generated_root_key_is_replaced_at_once_and_on_the_drive() {
+    let server = start_with(|config| config.credentials = None).await;
+    let old = teifs_server::credentials::load(server.dir.path())
+        .unwrap()
+        .unwrap();
+    let old = (old.access_key.as_str(), old.secret_key.as_str());
+    user(
+        &server,
+        "admin",
+        Some(
+            r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"teifs:*","Resource":"*"}}"#,
+        ),
+    );
+    let admin = server.iam.create_access_key("admin").unwrap();
+    let admin = (admin.info.id.as_str(), admin.secret.as_str());
+    let (status, answer) = signed(&server, admin, "POST", ADMIN_ROOT_KEY, &[], b"").await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
+
+    let answer = signed_response(&server, old, "POST", ADMIN_ROOT_KEY, &[], b"").await;
+    assert_eq!(answer.status().as_u16(), 200);
+    assert_eq!(answer.headers()["cache-control"], "no-store");
+    let new: RootKeyRotated = answer.json().await.unwrap();
+    assert_ne!(new.access_key, old.0);
+    // The drive keeps the new key for the next start...
+    let kept = teifs_server::credentials::load(server.dir.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (kept.access_key.as_str(), kept.secret_key.as_str()),
+        (new.access_key.as_str(), new.secret_key.as_str())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = teifs_server::credentials::path(server.dir.path());
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // ...the old one stops working now, and users' keys keep working.
+    let refused = client_as(&server, old.0, old.1).list_buckets().send().await;
+    assert_eq!(common::code(refused), "InvalidAccessKeyId");
+    let root = client_as(&server, &new.access_key, &new.secret_key);
+    root.create_bucket().bucket("photos").send().await.unwrap();
+    let new = (new.access_key.as_str(), new.secret_key.as_str());
+    assert_eq!(get(&server, new, ADMIN_INFO).await.0, 200);
+    assert_eq!(get(&server, admin, ADMIN_INFO).await.0, 200);
+}
+
+#[tokio::test]
+async fn a_given_root_key_is_changed_where_it_was_given() {
+    let server = start().await;
+    let (status, answer) = signed(&server, ROOT, "POST", ADMIN_ROOT_KEY, &[], b"").await;
+    let answer = error(&answer);
+    assert_eq!(
+        (status, answer.code.as_str()),
+        (409, "RootKeyManagedElsewhere")
+    );
+    assert!(answer.message.contains("environment"), "{}", answer.message);
+    assert_eq!(get(&server, ROOT, ADMIN_INFO).await.0, 200);
+    assert!(
+        teifs_server::credentials::load(server.dir.path())
+            .unwrap()
+            .is_none()
+    );
 }

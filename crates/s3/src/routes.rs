@@ -18,7 +18,8 @@ use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3
 use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX, ServerConfig,
+    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX, ADMIN_ROOT_KEY,
+    ServerConfig,
 };
 
 use crate::{
@@ -83,6 +84,7 @@ enum Handler {
     ExportIam,
     ExportIamSecrets,
     ImportIam,
+    RotateRootKey,
 }
 
 /// One endpoint.
@@ -169,6 +171,13 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Root,
         handler: Handler::ImportIam,
     },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Post,
+        path: ADMIN_ROOT_KEY,
+        needs: Needs::Root,
+        handler: Handler::RotateRootKey,
+    },
 ];
 
 /// One endpoint, as [`endpoints`] describes it.
@@ -240,6 +249,8 @@ pub(crate) struct Routes {
     pub(crate) started: SystemTime,
     /// How the server was started, for the admin API.
     pub(crate) config: Option<Arc<ServerConfig>>,
+    /// Where the root key is kept, if the admin API may replace it.
+    pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
 }
 
 #[async_trait::async_trait]
@@ -320,6 +331,9 @@ impl Routes {
             Handler::ExportIam => Ok(admin::export(&self.iam, false)),
             Handler::ExportIamSecrets => Ok(admin::export(&self.iam, true)),
             Handler::ImportIam => admin::import(&self.iam, req).await,
+            Handler::RotateRootKey => {
+                admin::rotate_root_key(&self.iam, self.root_keys.as_ref()).await
+            }
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

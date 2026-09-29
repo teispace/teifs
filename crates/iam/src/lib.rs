@@ -64,6 +64,9 @@ pub enum IamError {
     /// The KMS couldn't seal or unseal IAM's key.
     #[error("IAM's key couldn't be used: {0}")]
     Crypto(#[from] CryptoError),
+    /// A new root key couldn't be kept where the server reads it.
+    #[error("the new root key couldn't be saved: {0}")]
+    Persist(std::io::Error),
 }
 
 impl IamError {
@@ -77,7 +80,9 @@ impl IamError {
             Self::LimitExceeded(_) => "LimitExceeded",
             Self::InvalidInput(_) => "InvalidInput",
             Self::MalformedPolicyDocument(_) => "MalformedPolicyDocument",
-            Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) => "ServiceFailure",
+            Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => {
+                "ServiceFailure"
+            }
         }
     }
 
@@ -88,7 +93,7 @@ impl IamError {
             Self::NoSuchEntity(_) => 404,
             Self::EntityAlreadyExists(_) | Self::DeleteConflict(_) | Self::LimitExceeded(_) => 409,
             Self::InvalidInput(_) | Self::MalformedPolicyDocument(_) => 400,
-            Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) => 500,
+            Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => 500,
         }
     }
 }
@@ -104,20 +109,19 @@ const SEALED_KEY: &str = "key";
 pub struct Iam {
     inner: Mutex<Inner>,
     snapshot: RwLock<Arc<Snapshot>>,
-    root: Option<RootKey>,
 }
 
 struct Inner {
     db: System,
     state: State,
     key: DataKey,
+    /// The root user's access key, if requests are signed at all.
+    root: Option<RootKey>,
 }
 
 impl std::fmt::Debug for Iam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Iam")
-            .field("root", &self.root)
-            .finish_non_exhaustive()
+        f.debug_struct("Iam").finish_non_exhaustive()
     }
 }
 
@@ -162,9 +166,13 @@ impl Iam {
         let state = State::load(&account, rows, &key)?;
         let snapshot = Snapshot::build(&state, root.as_ref());
         Ok(Self {
-            inner: Mutex::new(Inner { db, state, key }),
+            inner: Mutex::new(Inner {
+                db,
+                state,
+                key,
+                root,
+            }),
             snapshot: RwLock::new(Arc::new(snapshot)),
-            root,
         })
     }
 
@@ -198,25 +206,67 @@ impl Iam {
     /// the database takes all of it does the copy become the state.
     fn change<T>(&self, f: impl FnOnce(&mut Draft<'_>) -> Result<T>) -> Result<T> {
         let mut inner = self.inner();
-        let Inner { db, state, key } = &mut *inner;
+        let Inner {
+            db,
+            state,
+            key,
+            root,
+        } = &mut *inner;
         let mut draft = Draft {
             state: state.clone(),
             writes: Vec::new(),
             key,
-            root: self.root.as_ref().map(|r| r.access_key.as_str()),
+            root: root.as_ref().map(|r| r.access_key.as_str()),
             now: now_ms(),
         };
         let out = f(&mut draft)?;
         if !draft.writes.is_empty() {
             db.iam_apply(&draft.writes)?;
             *state = draft.state;
-            let snapshot = Arc::new(Snapshot::build(state, self.root.as_ref()));
-            *self
-                .snapshot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+            self.publish(state, root.as_ref());
         }
         Ok(out)
+    }
+
+    /// Makes `state` and `root` what authentication sees.
+    fn publish(&self, state: &State, root: Option<&RootKey>) {
+        let snapshot = Arc::new(Snapshot::build(state, root));
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+    }
+
+    /// Replaces the root user's access key. `persist` keeps the new key where the server
+    /// reads it when it starts; only once it has does the old key stop working, so a
+    /// failure leaves the old key in use everywhere.
+    pub fn replace_root_key(
+        &self,
+        new: RootKey,
+        persist: impl FnOnce(&RootKey) -> std::io::Result<()>,
+    ) -> Result<()> {
+        let mut inner = self.inner();
+        if inner.root.is_none() {
+            return Err(IamError::InvalidInput(
+                "This server accepts unsigned requests: it has no root key to replace.".into(),
+            ));
+        }
+        if inner.state.keys.contains_key(&new.access_key)
+            || inner
+                .root
+                .as_ref()
+                .is_some_and(|r| r.access_key == new.access_key)
+        {
+            return Err(IamError::EntityAlreadyExists(format!(
+                "The access key {} is already in use.",
+                new.access_key
+            )));
+        }
+        persist(&new).map_err(IamError::Persist)?;
+        let Inner { state, root, .. } = &mut *inner;
+        *root = Some(new);
+        self.publish(state, root.as_ref());
+        Ok(())
     }
 }
 

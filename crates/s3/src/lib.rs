@@ -30,6 +30,7 @@ use teifs_iam::Iam;
 use teifs_store::{Layout, Store};
 
 pub use access::Client;
+pub use admin::RootKeyStore;
 pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
@@ -63,6 +64,9 @@ pub struct Options {
     /// How the server was started, as the admin API reports it; `None` when whoever
     /// embeds the service doesn't say.
     pub config: Option<teifs_types::admin::ServerConfig>,
+    /// Where the root key is kept, if the admin API may replace it (a key the drive
+    /// generated); `None` answers that it's managed elsewhere.
+    pub root_keys: Option<Arc<dyn RootKeyStore>>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -95,6 +99,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             domains: options.domains.clone(),
             started: std::time::SystemTime::now(),
             config: options.config.map(Arc::new),
+            root_keys: options.root_keys,
         });
     }
     let host = if options.domains.is_empty() {

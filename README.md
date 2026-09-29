@@ -182,6 +182,7 @@ signed like any S3 request:
 | `GET iam` | The account's users, groups, policies and keys (without secrets), as JSON | `teifs:ExportIAM` |
 | `GET iam/secrets` | The same with the keys' secrets, to move IAM to another drive | root user |
 | `PUT iam[?account=adopt]` | Imports an export into an empty IAM, all or nothing; `adopt` also takes its account id | root user |
+| `POST root-key` | Replaces the root key the drive generated: answers the new one, saves it in `.teifs/credentials.json`, and the old one stops working at once | root user |
 
 The root user may call everything; users need the action in a policy. An import makes
 everything with the IAM API's own checks, gives users, groups and policies new unique
@@ -194,7 +195,10 @@ printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
   curl --config - --aws-sigv4 aws:amz:us-east-1:s3 http://127.0.0.1:9000/.teifs/admin/v1/info
 ```
 
-The export with secrets holds every user's keys: keep it like the credentials file.
+The export with secrets holds every user's keys: keep it like the credentials file. A
+root key given through `TEIFS_ACCESS_KEY`/`TEIFS_SECRET_KEY`, flags or a secret key file
+is changed there instead (`POST root-key` answers `409`). Aliases copy the key when
+they're set, so after a rotation set them again (`teifs alias set local URL --drive DIR`).
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive

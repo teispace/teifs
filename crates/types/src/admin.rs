@@ -25,6 +25,30 @@ pub const ADMIN_IAM: &str = "/.teifs/admin/v1/iam";
 /// `GET`: the account's IAM with access keys' secrets (root user only).
 pub const ADMIN_IAM_SECRETS: &str = "/.teifs/admin/v1/iam/secrets";
 
+/// `POST`: replaces the root user's access key and answers the new one, a
+/// [`RootKeyRotated`] (root user only). Only for a key the drive generated: one given
+/// through the environment, a flag or a file is changed there.
+pub const ADMIN_ROOT_KEY: &str = "/.teifs/admin/v1/root-key";
+
+/// The root user's new access key, shown only in this answer and the drive's
+/// credentials file.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootKeyRotated {
+    /// The access key id.
+    pub access_key: String,
+    /// The secret key.
+    pub secret_key: String,
+}
+
+impl std::fmt::Debug for RootKeyRotated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RootKeyRotated")
+            .field("access_key", &self.access_key)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The format of an [`IamExport`]; a server refuses any other.
 pub const IAM_FORMAT: &str = "teifs-iam/1";
 
@@ -283,7 +307,13 @@ mod tests {
 
     #[test]
     fn paths_are_under_the_prefix_and_never_a_bucket() {
-        for path in [ADMIN_INFO, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS] {
+        for path in [
+            ADMIN_INFO,
+            ADMIN_CONFIG,
+            ADMIN_IAM,
+            ADMIN_IAM_SECRETS,
+            ADMIN_ROOT_KEY,
+        ] {
             assert!(path.starts_with(ADMIN_PREFIX), "{path}");
         }
         let first = ADMIN_PREFIX.trim_start_matches('/').split('/').next();
@@ -299,6 +329,11 @@ mod tests {
             secret: Some("do-not-print".into()),
         };
         assert!(!format!("{key:?}").contains("do-not-print"));
+        let rotated = RootKeyRotated {
+            access_key: "TFROOT".into(),
+            secret_key: "do-not-print".into(),
+        };
+        assert!(!format!("{rotated:?}").contains("do-not-print"));
         let json = serde_json::to_value(ExportedKey {
             secret: None,
             ..key

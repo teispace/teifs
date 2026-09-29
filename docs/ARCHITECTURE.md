@@ -159,7 +159,9 @@ keeps its jobs' status (`Store::job_status`) for whoever holds it. IAM's changin
 operations are methods of a `Draft` (a copy of the state and the writes to make), each
 with all of its checks; `Iam`'s public methods run one per change, and `Iam::import`
 (`transfer.rs`) runs many in one, so an import is checked exactly as the IAM API is and
-lands in one transaction or not at all.
+lands in one transaction or not at all. The root key is part of IAM's locked state:
+`Iam::replace_root_key` saves a new one through the server's `RootKeyStore` (only for
+drive-generated credentials) before swapping it into the credential lookup.
 
 ### The protocol layer: s3s
 

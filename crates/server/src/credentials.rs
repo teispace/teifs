@@ -56,6 +56,34 @@ pub fn load_or_create(drive: &Path) -> io::Result<(Credentials, bool)> {
     Ok((credentials, true))
 }
 
+/// The drive's generated credentials, which the admin API may replace.
+#[derive(Debug)]
+pub(crate) struct DriveKeys {
+    /// The drive's folder.
+    pub(crate) drive: PathBuf,
+}
+
+impl teifs_s3::RootKeyStore for DriveKeys {
+    fn generate(&self) -> teifs_iam::RootKey {
+        let credentials = generate();
+        teifs_iam::RootKey {
+            access_key: credentials.access_key,
+            secret: zeroize::Zeroizing::new(credentials.secret_key),
+        }
+    }
+
+    fn save(&self, key: &teifs_iam::RootKey) -> io::Result<()> {
+        let json = zeroize::Zeroizing::new(
+            serde_json::to_vec_pretty(&Credentials {
+                access_key: key.access_key.clone(),
+                secret_key: key.secret.to_string(),
+            })
+            .expect("credentials serialize"),
+        );
+        teifs_store::replace_private(&path(&self.drive), &json)
+    }
+}
+
 fn generate() -> Credentials {
     let random = || uuid::Uuid::new_v4().simple().to_string();
     Credentials {
@@ -82,6 +110,19 @@ mod tests {
         assert!(!created);
         assert_eq!(second.secret_key, first.secret_key);
         assert!(!format!("{first:?}").contains(&first.secret_key));
+        // A replaced key is what the drive reads next time.
+        let keys = DriveKeys {
+            drive: dir.path().to_owned(),
+        };
+        let new = teifs_s3::RootKeyStore::generate(&keys);
+        assert_ne!(new.access_key, first.access_key);
+        teifs_s3::RootKeyStore::save(&keys, &new).unwrap();
+        let (third, created) = load_or_create(dir.path()).unwrap();
+        assert!(!created);
+        assert_eq!(
+            (third.access_key.as_str(), third.secret_key.as_str()),
+            (new.access_key.as_str(), new.secret.as_str())
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -36,6 +36,9 @@ behaviour; the on-disk format is always upgraded automatically.
   and keys as JSON (with the keys' secrets from `iam/secrets`, for the root user only),
   and `PUT /.teifs/admin/v1/iam` imports an export into an empty IAM, all or nothing,
   with the IAM API's own checks; `?account=adopt` also takes the export's account id.
+- Rotate the root key without a restart: `POST /.teifs/admin/v1/root-key` replaces a
+  drive-generated root key, saves it in `.teifs/credentials.json` and answers it; the
+  old key stops working at once.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.

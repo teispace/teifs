@@ -310,6 +310,12 @@ impl Server {
                 source,
             })?;
         let admin_config = admin_config(&config, &location, listen);
+        let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
+            config.credentials.is_none().then(|| {
+                Arc::new(credentials::DriveKeys {
+                    drive: store.root().to_owned(),
+                }) as _
+            });
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
@@ -340,6 +346,7 @@ impl Server {
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
                 config: Some(admin_config),
+                root_keys,
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
@@ -367,7 +374,8 @@ impl Server {
         self.store.root()
     }
 
-    /// The root user's access key.
+    /// The root user's access key as the server started (the admin API may replace a
+    /// generated one while it runs).
     #[must_use]
     pub fn access_key(&self) -> &str {
         &self.access_key

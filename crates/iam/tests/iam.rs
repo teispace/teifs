@@ -966,3 +966,55 @@ async fn an_import_is_refused_what_it_cannot_bring() {
     assert_eq!(code(iam.import(&export, false)), "InvalidInput");
     assert!(iam.users(None).unwrap().is_empty());
 }
+
+fn root_key(id: &str, secret: &str) -> RootKey {
+    RootKey {
+        access_key: id.into(),
+        secret: Zeroizing::new(secret.into()),
+    }
+}
+
+#[tokio::test]
+async fn the_root_key_is_replaced_only_once_it_is_saved() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    iam.create_user("alice", None, &[], None).unwrap();
+    let alice = iam.create_access_key("alice").unwrap();
+    // A failed save changes nothing.
+    let failed = iam.replace_root_key(root_key("TFNEWROOTKEY", "new-secret"), |_| {
+        Err(std::io::Error::other("disk full"))
+    });
+    assert_eq!(code(failed), "ServiceFailure");
+    assert!(iam.credential("TFROOTKEY").is_some());
+    assert!(iam.credential("TFNEWROOTKEY").is_none());
+    // A key that's taken is refused before anything is saved.
+    for taken in [alice.info.id.as_str(), "TFROOTKEY"] {
+        let result = iam.replace_root_key(root_key(taken, "s"), |_| panic!("saved"));
+        assert_eq!(code(result), "EntityAlreadyExists", "{taken}");
+    }
+    let mut saved = None;
+    iam.replace_root_key(root_key("TFNEWROOTKEY", "new-secret"), |key| {
+        saved = Some(key.access_key.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(saved.as_deref(), Some("TFNEWROOTKEY"));
+    assert!(iam.credential("TFROOTKEY").is_none());
+    let root = iam.credential("TFNEWROOTKEY").unwrap();
+    assert_eq!(root.secret.as_str(), "new-secret");
+    assert!(root.identity.is_root());
+    // Users' keys are untouched, and none may take the new root's id later.
+    assert!(iam.credential(&alice.info.id).is_some());
+    iam.create_user("bob", None, &[], None).unwrap();
+    iam.create_access_key("bob").unwrap();
+}
+
+#[tokio::test]
+async fn a_server_without_a_root_key_has_none_to_replace() {
+    let drive = Drive::new();
+    let kms = LocalKms::open(drive.keyring()).unwrap();
+    let iam = Iam::open(&drive.db(), "drive-1", &kms, None).await.unwrap();
+    let result = iam.replace_root_key(root_key("TFNEWROOTKEY", "s"), |_| Ok(()));
+    assert_eq!(code(result), "InvalidInput");
+    assert!(iam.credential("TFNEWROOTKEY").is_none());
+}

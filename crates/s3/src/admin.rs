@@ -10,11 +10,22 @@ use std::{
 
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
-use teifs_iam::{Iam, IamError};
+use teifs_iam::{Iam, IamError, RootKey};
 use teifs_store::{JobStatus, Store};
-use teifs_types::admin::{AdminError, IamExport, JobInfo, ServerConfig, ServerInfo};
+use teifs_types::admin::{
+    AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo,
+};
 
 use crate::routes::{s3_refusal, signed_body};
+
+/// Where the root user's access key is kept, when the server may change it: a key the
+/// drive generated, which the server reads from the drive at start.
+pub trait RootKeyStore: Send + Sync + std::fmt::Debug + 'static {
+    /// A new key, made as the server makes them.
+    fn generate(&self) -> RootKey;
+    /// Keeps `key` where the server reads it when it starts, replacing the old one.
+    fn save(&self, key: &RootKey) -> std::io::Result<()>;
+}
 
 /// The largest IAM import accepted: AWS's quotas filled with the largest documents
 /// (1 500 policies of five 6 KiB versions) fit, with room for users and groups.
@@ -62,7 +73,7 @@ fn error(status: StatusCode, code: &str, message: impl Into<String>) -> S3Error 
 fn iam_error(err: IamError) -> S3Error {
     let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if status.is_server_error() {
-        tracing::error!(error = %err, "an IAM import failed");
+        tracing::error!(error = %err, "an admin request failed in IAM");
         return S3Error::internal_error(err);
     }
     error(status, err.code(), err.to_string())
@@ -191,6 +202,40 @@ pub(crate) async fn import(iam: &Arc<Iam>, mut req: S3Request<Body>) -> S3Result
         .map_err(S3Error::internal_error)?
         .map_err(iam_error)?;
     Ok(json(&report))
+}
+
+/// `POST root-key`: never cached, since the answer holds the new secret.
+pub(crate) async fn rotate_root_key(
+    iam: &Arc<Iam>,
+    keys: Option<&Arc<dyn RootKeyStore>>,
+) -> S3Result<S3Response<Body>> {
+    let keys = keys.cloned().ok_or_else(|| {
+        error(
+            StatusCode::CONFLICT,
+            "RootKeyManagedElsewhere",
+            "The root key comes from the environment, a flag or a secret key file: change it \
+             there and restart the server.",
+        )
+    })?;
+    let iam = Arc::clone(iam);
+    let rotated = tokio::task::spawn_blocking(move || {
+        let key = keys.generate();
+        let rotated = RootKeyRotated {
+            access_key: key.access_key.clone(),
+            secret_key: key.secret.to_string(),
+        };
+        iam.replace_root_key(key, |key| keys.save(key))
+            .map(|()| rotated)
+    })
+    .await
+    .map_err(S3Error::internal_error)?
+    .map_err(iam_error)?;
+    tracing::info!(access_key = %rotated.access_key, "the root key was replaced");
+    let mut response = json(&rotated);
+    response
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -62,7 +62,11 @@ returns secrets unless an endpoint says so and only the root user may call it: t
 export with secrets (sent `Cache-Control: no-store`) and the import, which sets secrets
 and may change the account's id. An import goes through the same checks as the IAM API
 (names, documents, quotas; imported secrets must be at least 32 printable characters;
-no key may take the root's id), only into an empty IAM, in one transaction. The table refuses unsigned requests
+no key may take the root's id), only into an empty IAM, in one transaction. The root
+user can replace a root key the drive generated (`POST root-key`): the new key is saved
+to the owner-only credentials file first (written beside it and renamed over it), and
+only then does the old key stop working, so a failure leaves the old key in use. A key
+given through the environment, flags or a file is never rewritten by the server. The table refuses unsigned requests
 and unknown keys and decides the action before the handler runs; a test walks every
 endpoint as an anonymous caller and as a user without permissions. The health check is
 the one unsigned endpoint (above). Profiling and debug endpoints will be off by default
