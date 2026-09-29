@@ -46,13 +46,26 @@ pub(crate) struct WriteRequest<'a> {
     pub customer: Option<CustomerKey>,
 }
 
+/// Whether a request carries an SSE-C key or its details, for itself or a copy source:
+/// such requests are refused over connections that aren't secure, whatever they do, so
+/// keys never travel in the clear.
+pub(crate) fn names_customer_key(headers: &http::HeaderMap) -> bool {
+    headers.keys().any(|name| {
+        let name = name.as_str();
+        name.starts_with("x-amz-server-side-encryption-customer-")
+            || name.starts_with("x-amz-copy-source-server-side-encryption-customer-")
+    })
+}
+
+/// S3's answer to an SSE-C key sent over plain HTTP.
+pub(crate) const CUSTOMER_KEY_NEEDS_TLS: &str = "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection.";
+
 /// Decides a write's encryption: what the request asks for, else the bucket's default.
-/// `secure` is whether the request came over TLS (or a trusted local connection):
-/// SSE-C keys never travel in the clear.
+/// (Whether the connection may carry an SSE-C key was decided before: see
+/// [`names_customer_key`].)
 pub(crate) fn for_write(
     request: WriteRequest<'_>,
     bucket: Option<&BucketEncryption>,
-    secure: bool,
 ) -> S3Result<Encryption> {
     if let Some(key) = request.customer {
         if request.sse.is_some() || request.kms_key.is_some() {
@@ -71,12 +84,6 @@ pub(crate) fn for_write(
             return Err(s3_error!(
                 AccessDenied,
                 "SSE-C is blocked for this bucket; PutBucketEncryption can allow it"
-            ));
-        }
-        if !secure {
-            return Err(s3_error!(
-                InvalidRequest,
-                "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection."
             ));
         }
         return Ok(Encryption::Customer(key));
@@ -235,11 +242,11 @@ mod tests {
     fn writes_follow_the_request_then_the_bucket() {
         let default = BucketEncryption::aws_default();
         assert!(matches!(
-            for_write(request(None), Some(&default), true).unwrap(),
+            for_write(request(None), Some(&default)).unwrap(),
             Encryption::S3
         ));
         assert!(matches!(
-            for_write(request(None), None, true).unwrap(),
+            for_write(request(None), None).unwrap(),
             Encryption::None
         ));
         let kms = dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AWS_KMS);
@@ -248,27 +255,26 @@ mod tests {
             ..request(Some(&kms))
         };
         assert!(matches!(
-            for_write(with_key, Some(&default), true).unwrap(),
+            for_write(with_key, Some(&default)).unwrap(),
             Encryption::Kms { key: Some(k), .. } if k == "photos"
         ));
     }
 
     #[test]
-    fn sse_c_is_blocked_by_default_and_needs_a_secure_connection() {
+    fn sse_c_is_blocked_by_default() {
         let (k, m) = key();
         let customer = || WriteRequest {
             customer: customer_key(Some("AES256"), Some(&k), Some(&m)).unwrap(),
             ..request(None)
         };
         let default = BucketEncryption::aws_default();
-        assert!(for_write(customer(), Some(&default), true).is_err());
+        assert!(for_write(customer(), Some(&default)).is_err());
         let allowed = BucketEncryption {
             block_customer_keys: false,
             ..default
         };
-        assert!(for_write(customer(), Some(&allowed), false).is_err());
         assert!(matches!(
-            for_write(customer(), Some(&allowed), true).unwrap(),
+            for_write(customer(), Some(&allowed)).unwrap(),
             Encryption::Customer(_)
         ));
         let aes = dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AES256);
@@ -276,6 +282,6 @@ mod tests {
             sse: Some(&aes),
             ..customer()
         };
-        assert!(for_write(both, Some(&allowed), true).is_err());
+        assert!(for_write(both, Some(&allowed)).is_err());
     }
 }

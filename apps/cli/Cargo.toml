@@ -41,6 +41,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # Faster than the system allocators for the server's many threads (and than musl's by far).
 mimalloc.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 teifs-iam.workspace = true
@@ -48,6 +50,8 @@ aws-lc-rs.workspace = true
 base64.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
+rcgen.workspace = true
+aws-smithy-http-client.workspace = true
 
 [lints]
 workspace = true

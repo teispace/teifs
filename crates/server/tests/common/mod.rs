@@ -2,6 +2,7 @@
 
 #![allow(dead_code, reason = "each test binary uses a different part")]
 
+pub mod certs;
 pub mod idp;
 
 use aws_sdk_s3::{
@@ -21,6 +22,8 @@ pub struct Server {
     pub iam: std::sync::Arc<teifs_iam::Iam>,
     _keys: TempDir,
     pub endpoint: String,
+    /// The listener's TLS, when it serves HTTPS.
+    pub tls: Option<std::sync::Arc<teifs_server::Tls>>,
     _stop: oneshot::Sender<()>,
 }
 
@@ -45,6 +48,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         kms_transit: None,
         allow_sse_c: true,
         plain_http_is_secure: None,
+        tls: None,
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,
@@ -54,8 +58,9 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     };
     adjust(&mut config);
     let server = TeiFS::bind(config).await.unwrap();
-    let endpoint = format!("http://{}", server.local_addr().unwrap());
+    let endpoint = format!("{}://{}", server.scheme(), server.local_addr().unwrap());
     let iam = server.iam().clone();
+    let tls = server.tls().cloned();
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(server.run(async {
         let _ = stopped.await;
@@ -65,6 +70,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         iam,
         _keys: keys,
         endpoint,
+        tls,
         _stop: stop,
     }
 }

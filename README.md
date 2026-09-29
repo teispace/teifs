@@ -137,12 +137,33 @@ durability = "relaxed"
 `teifs config show --config teifs.toml` prints the settings `serve` would use and where
 each comes from. The secret key never goes in the file, and is never printed.
 
+### HTTPS
+
+```sh
+teifs serve /srv/drive --listen 0.0.0.0:9000 --certs-dir /etc/teifs/certs
+# or one certificate: --tls-cert fullchain.pem --tls-key privkey.pem
+```
+
+A certificates folder has MinIO's layout, so existing ones work as they are:
+`public.crt` and `private.key` (or Kubernetes' `tls.crt` and `tls.key`, so a mounted
+TLS secret works), plus a subfolder with the same two files for each further
+certificate. Each connection gets the certificate for the name it asks for (wildcards
+too), else the default one. Certificates reload when their files change (checked every
+10 seconds) and at once on `SIGHUP`; one that doesn't load is reported and the ones in
+use stay. TLS 1.3 and 1.2 only, HTTP/2 when the client offers it; plain HTTP on the
+port gets `400 Client sent an HTTP request to an HTTPS server.` `teifs health` finds
+out on its own that a server speaks HTTPS.
+
+Over HTTPS, `aws:SecureTransport` is true, and SSE-C keys are accepted. On plain HTTP
+they're refused for every request (as on AWS), except on a server listening only on
+this machine, or with `--sse-c-over-http`.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -166,7 +187,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs sts whoami ALIAS` | Whom an alias signs as |
 | `teifs sts assume ALIAS [ROLE] [--session-name N] [--duration 1h] [--policy FILE] [--external-id ID] [--tag K=V]… --save-alias NEW\|-o FILE` | Temporary credentials: a role's session, or without a role (MinIO's way) the user's own permissions narrowed; saved as an alias that knows when it expires, or as the AWS CLI's `credential_process` output |
 | `teifs sts assume-web SERVER [--role ARN] [--token-file F] … --save-alias NEW\|-o FILE` | A CI job's OpenID Connect token for temporary credentials (reads `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`) |
-| `teifs health [ADDRESS] [--timeout 5s]` | Check that a server answers its health check |
+| `teifs health [ADDRESS\|URL] [--timeout 5s]` | Check that a server answers its health check, over HTTP or HTTPS |
 | `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
 

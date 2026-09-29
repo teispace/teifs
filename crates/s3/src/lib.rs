@@ -77,7 +77,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let drive = Drive::new(
         store.clone(),
         options.default_layout,
-        options.plain_http_is_secure,
         options.legacy_bucket_defaults,
     );
     let rules = drive.rules();
@@ -120,5 +119,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         store,
         host,
         options.body_timeout,
+        options.plain_http_is_secure,
     ))
 }

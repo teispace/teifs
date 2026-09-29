@@ -21,8 +21,8 @@ mod units;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, Server, Transit,
-    credentials,
+    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, Server, TlsSource,
+    Transit, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -118,6 +118,19 @@ pub(crate) struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
     listen: SocketAddr,
+    /// Serve HTTPS with the certificates in this folder: `public.crt` and `private.key`
+    /// (or `tls.crt` and `tls.key`), and a subfolder with the same files for each
+    /// further certificate, chosen by the name clients ask for. They're reloaded when
+    /// they change, and on SIGHUP.
+    #[arg(long, env = "TEIFS_CERTS_DIR", conflicts_with = "tls_cert")]
+    certs_dir: Option<PathBuf>,
+    /// Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it
+    /// changes; needs `--tls-key`.
+    #[arg(long, env = "TEIFS_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// The private key (PEM) of `--tls-cert`.
+    #[arg(long, env = "TEIFS_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
     /// A domain for virtual-hosted-style requests (bucket.domain); repeatable.
     #[arg(long = "domain", env = "TEIFS_DOMAINS", value_delimiter = ',')]
     domains: Vec<String>,
@@ -466,8 +479,22 @@ fn parse_expiry(text: &str) -> Result<Expiry, String> {
         .map_err(|e| format!("{e} (or say never)"))
 }
 
+/// Where `serve`'s certificates come from, if it serves HTTPS.
+fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
+    match (&args.tls_cert, &args.tls_key, &args.certs_dir) {
+        (Some(cert), Some(key), _) => Ok(Some(TlsSource::Files {
+            cert: cert.clone(),
+            key: key.clone(),
+        })),
+        (Some(_), None, _) => Err("tls-cert needs tls-key, the certificate's private key".into()),
+        (None, Some(_), _) => Err("tls-key needs tls-cert, the key's certificate".into()),
+        (None, None, dir) => Ok(dir.clone().map(TlsSource::Dir)),
+    }
+}
+
 async fn serve(args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
+    let tls = tls_source(&args)?;
     let credentials = match &keys {
         Some(keys) => Some(Credentials {
             access_key: keys.access.clone(),
@@ -491,6 +518,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
+        tls,
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,
             ..JobOptions::default()
@@ -527,7 +555,7 @@ fn announce(
     keys: Option<&config::Keys>,
     durability: Durability,
 ) {
-    let endpoint = format!("http://{}", announce_address(address));
+    let endpoint = format!("{}://{}", server.scheme(), announce_address(address));
     let drive = server.root().display().to_string();
     let secret = match keys {
         Some(keys) => keys.secret.describe(),

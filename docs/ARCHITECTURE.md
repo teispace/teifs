@@ -48,9 +48,11 @@ crates/store    teifs-store    The storage engine: opening a drive (and upgradin
 crates/s3       teifs-s3       The S3 operations: implements s3s's `S3` trait over a
                                store; checksums, S3 errors, continuation tokens; CORS
                                and the health check in front of it.
-crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP/2),
-                               graceful shutdown, and `Server::bind` / `run`, which the
-                               command and embedders use.
+crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP/2,
+                               plain or TLS: `src/tls.rs` loads certificates, picks one
+                               per SNI name, reloads them), graceful shutdown, and
+                               `Server::bind` / `run`, which the command and embedders
+                               use.
 crates/client   teifs-client   A typed client for the admin API (reqwest, Signature V4),
                                for `teifs admin` and apps that manage a server.
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,

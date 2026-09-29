@@ -224,7 +224,8 @@ connections close; an upload body that stops arriving for 60 s fails with
 `RequestTimeout` (`--body-timeout`), counting only time the server waits on the client;
 at most 4096 connections are served at once, the rest wait in the system's queue
 (`--max-connections`); header sections over 16 KiB and user metadata over 2 KiB are
-refused before anything else looks at them. *Planned:* fuzzing of every parser.
+refused before anything else looks at them. Over HTTPS the TLS handshake must finish
+within the header timeout too. *Planned:* fuzzing of every parser.
 
 ### 12. Retention fails closed (*planned*)
 When Object Lock arrives, any error reading an object's retention denies the delete or
@@ -244,8 +245,10 @@ packages that can't be reordered, cut short or moved. The KMS keyring lives outs
 drive (`<config dir>/teifs/keys/<drive id>.json`, mode `0600`), so a copy of the drive
 alone reveals nothing; or the keys stay in a Vault or OpenBao transit engine, whose token
 comes only from the environment. SSE-C keys are never stored (only a salted HMAC to recognize
-them), are refused over plain HTTP except on loopback, and are blocked on buckets by
-default. Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
+them), are blocked on buckets by default, and are refused on plain HTTP (except on a
+server listening only on loopback, or with `--sse-c-over-http`) for every request that
+carries one, reads and copy sources included: one check in front of every operation
+(`crates/s3/src/cors.rs`, tested in `crates/server/tests/tls.rs`). Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
 disk and tampered data fails to decrypt (`crates/store/src/sse_tests.rs`).
 
 ### 15. Browsers get only what a bucket's CORS rules grant
@@ -269,6 +272,16 @@ long-term keys, and an alias whose credentials expired is refused before it's us
 new user's key saved as an alias never inherits the session of the alias that made it.
 Tests: `apps/cli/tests/client.rs`, `apps/cli/tests/init.rs`, `apps/cli/tests/sts.rs`,
 `apps/cli/src/client/target.rs`.
+
+### 17. TLS is modern and certificates can't be half-loaded
+HTTPS uses rustls with aws-lc-rs: TLS 1.3 and 1.2 only, rustls's default cipher suites,
+no client certificates (`crates/server/src/tls.rs`). Every certificate must parse and
+match its key before the server starts or a reload uses it; a reload that fails keeps
+the certificates in use, and is reported once per change. Each connection's `secure`
+flag (`aws:SecureTransport`, SSE-C) comes from the listener, never from a header.
+`teifs health` checks a server's handshake signature but not whom its certificate names
+(it sends nothing secret and reads only a status), so it works with private CAs and
+certificates for public names while it asks `127.0.0.1`.
 
 ## Data safety
 

@@ -24,7 +24,14 @@ use clap::{
 use crate::{Cli, ServeArgs};
 
 /// Settings that are paths: relative ones in the settings file are relative to its folder.
-const PATHS: [&str; 3] = ["dir", "kms_keyring", "secret_key_file"];
+const PATHS: [&str; 6] = [
+    "dir",
+    "kms_keyring",
+    "secret_key_file",
+    "certs_dir",
+    "tls_cert",
+    "tls_key",
+];
 
 /// The subcommands that take `serve`'s settings, by their path from the top.
 const SERVE_COMMANDS: [&[&str]; 2] = [&["serve"], &["config", "show"]];

@@ -1,13 +1,30 @@
-//! Serving the S3 service over HTTP/1.1 and HTTP/2, with bounds on what one client can
-//! hold: connections, time to send headers, and (in the S3 service) stalled bodies.
+//! Serving the S3 service over HTTP/1.1 and HTTP/2, plain or over TLS, with bounds on
+//! what one client can hold: connections, time to send headers (and finish a TLS
+//! handshake), and (in the S3 service) stalled bodies.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
-    server::{conn::auto::Builder, graceful::GracefulShutdown},
+    server::{
+        conn::auto::Builder,
+        graceful::{GracefulShutdown, Watcher},
+    },
 };
-use tokio::{net::TcpListener, sync::Semaphore};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Semaphore,
+};
+use tokio_rustls::TlsAcceptor;
+
+use crate::Tls;
+
+/// The first byte of a TLS connection (a handshake record).
+const TLS_HANDSHAKE: u8 = 0x16;
+
+/// The answer to plain HTTP on a TLS listener, as Go's servers give it.
+const PLAIN_HTTP_ON_TLS: &[u8] = b"HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nClient sent an HTTP request to an HTTPS server.\n";
 
 /// How long open requests may take to finish once shutdown starts.
 pub const DRAIN: Duration = Duration::from_secs(10);
@@ -36,14 +53,16 @@ impl Default for Limits {
     }
 }
 
-/// Serves `service` on `listener` until `shutdown` resolves, then lets open requests
-/// finish for up to [`DRAIN`].
+/// Serves `service` on `listener` (over TLS with `tls`) until `shutdown` resolves, then
+/// lets open requests finish for up to [`DRAIN`].
 pub async fn serve(
     listener: TcpListener,
     service: teifs_s3::Service,
     limits: Limits,
+    tls: Option<Arc<Tls>>,
     shutdown: impl Future<Output = ()>,
 ) {
+    let acceptor = tls.map(|tls| TlsAcceptor::from(tls.config()));
     let mut http = Builder::new(TokioExecutor::new());
     http.http1()
         .timer(TokioTimer::new())
@@ -77,29 +96,89 @@ pub async fn serve(
             () = shutdown.as_mut() => break,
         };
         let _ = socket.set_nodelay(true);
-        let http = Arc::clone(&http);
-        // TLS comes later; until then every connection is plain HTTP.
-        let service = service.for_client(teifs_s3::Client {
-            ip: Some(peer.ip()),
-            secure: false,
-        });
-        let watcher = graceful.watcher();
+        let connection = Connection {
+            http: Arc::clone(&http),
+            service: service.clone(),
+            watcher: graceful.watcher(),
+            peer,
+        };
+        let acceptor = acceptor.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            // Telling HTTP/1 from HTTP/2 waits for the first bytes: bound that wait too.
-            let mut first = [0; 1];
-            match tokio::time::timeout(limits.header_timeout, socket.peek(&mut first)).await {
-                Ok(Ok(n)) if n > 0 => {}
-                _ => return,
-            }
-            let connection = http.serve_connection(TokioIo::new(socket), service);
-            if let Err(err) = watcher.watch(connection.into_owned()).await {
-                tracing::debug!(error = %err, "connection ended with an error");
-            }
+            connection
+                .run(socket, acceptor, limits.header_timeout)
+                .await;
         });
     }
     tokio::select! {
         () = graceful.shutdown() => {}
         () = tokio::time::sleep(DRAIN) => tracing::warn!("requests still open after {DRAIN:?}; stopping anyway"),
     }
+}
+
+/// One accepted connection, before it's served.
+struct Connection {
+    http: Arc<Builder<TokioExecutor>>,
+    service: teifs_s3::Service,
+    watcher: Watcher,
+    peer: SocketAddr,
+}
+
+impl Connection {
+    async fn run(self, socket: TcpStream, tls: Option<TlsAcceptor>, timeout: Duration) {
+        // Telling HTTP/1 from HTTP/2, and TLS from plain HTTP, waits for the first
+        // bytes: bound that wait too.
+        let mut first = [0; 1];
+        match tokio::time::timeout(timeout, socket.peek(&mut first)).await {
+            Ok(Ok(n)) if n > 0 => {}
+            _ => return,
+        }
+        let Some(tls) = tls else {
+            return self.serve(socket, false).await;
+        };
+        if first[0] != TLS_HANDSHAKE {
+            return refuse_plain_http(socket).await;
+        }
+        match tokio::time::timeout(timeout, tls.accept(socket)).await {
+            Ok(Ok(stream)) => self.serve(stream, true).await,
+            Ok(Err(err)) => {
+                tracing::debug!(peer = %self.peer, error = %err, "TLS handshake failed");
+            }
+            Err(_) => tracing::debug!(peer = %self.peer, "TLS handshake timed out"),
+        }
+    }
+
+    async fn serve<I>(self, io: I, secure: bool)
+    where
+        I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let service = self.service.for_client(teifs_s3::Client {
+            ip: Some(self.peer.ip()),
+            secure,
+        });
+        let connection = self.http.serve_connection(TokioIo::new(io), service);
+        if let Err(err) = self.watcher.watch(connection.into_owned()).await {
+            tracing::debug!(error = %err, "connection ended with an error");
+        }
+    }
+}
+
+/// Answers plain HTTP on a TLS listener with a hint, then closes. What the client sent
+/// is read (briefly) first, so closing doesn't reset the connection before the answer
+/// arrives.
+async fn refuse_plain_http(mut socket: TcpStream) {
+    if socket.write_all(PLAIN_HTTP_ON_TLS).await.is_err() || socket.shutdown().await.is_err() {
+        return;
+    }
+    let mut sink = [0; 4096];
+    let drain = async {
+        let mut left: usize = 64 * 1024;
+        while left > 0 {
+            match socket.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => left = left.saturating_sub(n),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
 }

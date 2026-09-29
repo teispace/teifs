@@ -329,6 +329,10 @@ pub struct ServerConfig {
     pub body_timeout_seconds: u64,
     /// The most connections served at once.
     pub max_connections: usize,
+    /// Where its TLS certificates come from (a folder or a certificate file); none when
+    /// it serves plain HTTP.
+    #[serde(default)]
+    pub tls: Option<String>,
 }
 
 /// Where a server's KMS keys are.

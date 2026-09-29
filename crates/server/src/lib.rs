@@ -4,6 +4,7 @@
 
 pub mod credentials;
 mod serve;
+pub mod tls;
 
 use std::{
     future::Future,
@@ -27,6 +28,7 @@ pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
+pub use tls::{Tls, TlsError, TlsSource};
 
 /// How to serve a drive.
 #[derive(Debug, Clone)]
@@ -67,6 +69,8 @@ pub struct Config {
     /// New buckets start with ACLs enabled and no Block Public Access, as S3's did before
     /// April 2023 (off by default: AWS's defaults now).
     pub legacy_bucket_defaults: bool,
+    /// Serve HTTPS with these certificates; `None` serves plain HTTP.
+    pub tls: Option<TlsSource>,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -122,6 +126,9 @@ pub enum ServerError {
     /// A domain for virtual-hosted-style requests is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
+    /// The TLS certificates couldn't be loaded.
+    #[error("can't load the TLS certificates: {0}")]
+    Tls(TlsError),
     /// The KMS keyring couldn't be opened or created.
     #[error("can't open the KMS keyring at {}: {source}", path.display())]
     Keyring {
@@ -165,6 +172,7 @@ pub struct Server {
     access_key: String,
     created_credentials: bool,
     kms: KmsLocation,
+    tls: Option<Arc<Tls>>,
 }
 
 impl std::fmt::Debug for Server {
@@ -258,12 +266,29 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         header_timeout_seconds: config.limits.header_timeout.as_secs(),
         body_timeout_seconds: config.limits.body_timeout.as_secs(),
         max_connections: config.limits.max_connections,
+        tls: config.tls.as_ref().map(ToString::to_string),
     }
+}
+
+/// Listens on `address`: the listener, and the address it got (its port, for port 0).
+async fn listen(address: SocketAddr) -> Result<(TcpListener, SocketAddr), ServerError> {
+    let failed = |source| ServerError::Listen { address, source };
+    let listener = TcpListener::bind(address).await.map_err(failed)?;
+    let bound = listener.local_addr().map_err(failed)?;
+    Ok((listener, bound))
 }
 
 impl Server {
     /// Opens the drive and starts listening.
     pub async fn bind(config: Config) -> Result<Self, ServerError> {
+        // Certificates first: a mistake in them shouldn't wait for the drive to open.
+        let tls = config
+            .tls
+            .clone()
+            .map(Tls::load)
+            .transpose()
+            .map_err(ServerError::Tls)?
+            .map(Arc::new);
         std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
             path: config.dir.clone(),
             source,
@@ -296,19 +321,7 @@ impl Server {
                 path: config.dir.clone(),
                 source,
             })?;
-        let listener =
-            TcpListener::bind(config.listen)
-                .await
-                .map_err(|source| ServerError::Listen {
-                    address: config.listen,
-                    source,
-                })?;
-        let listen = listener
-            .local_addr()
-            .map_err(|source| ServerError::Listen {
-                address: config.listen,
-                source,
-            })?;
+        let (listener, listen) = listen(config.listen).await?;
         let admin_config = admin_config(&config, &location, listen);
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
             config.credentials.is_none().then(|| {
@@ -360,6 +373,7 @@ impl Server {
             access_key,
             created_credentials,
             kms: location,
+            tls,
         })
     }
 
@@ -393,6 +407,18 @@ impl Server {
         &self.kms
     }
 
+    /// The listener's TLS, if it serves HTTPS.
+    #[must_use]
+    pub const fn tls(&self) -> Option<&Arc<Tls>> {
+        self.tls.as_ref()
+    }
+
+    /// `https` or `http`: how clients reach it.
+    #[must_use]
+    pub const fn scheme(&self) -> &'static str {
+        if self.tls.is_some() { "https" } else { "http" }
+    }
+
     /// Whether this start generated the drive's credentials.
     #[must_use]
     pub fn created_credentials(&self) -> bool {
@@ -403,7 +429,11 @@ impl Server {
     /// lets open requests finish for up to [`DRAIN`] and stops the jobs.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let jobs = self.store.start_jobs(&self.jobs);
-        serve(self.listener, self.service, self.limits, shutdown).await;
+        let reloads = self.tls.clone().map(|tls| tokio::spawn(tls::watch(tls)));
+        serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
+        if let Some(reloads) = reloads {
+            reloads.abort();
+        }
         jobs.stop().await;
     }
 }

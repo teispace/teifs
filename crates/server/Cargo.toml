@@ -24,6 +24,9 @@ thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 dirs.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3.workspace = true
@@ -39,6 +42,8 @@ md-5.workspace = true
 reqwest.workspace = true
 s3s.workspace = true
 tempfile.workspace = true
+rcgen.workspace = true
+aws-smithy-http-client.workspace = true
 
 [lints]
 workspace = true

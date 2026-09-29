@@ -193,6 +193,8 @@ pub struct Service {
     store: Store,
     host: Option<Arc<MultiDomain>>,
     body_timeout: Option<Duration>,
+    /// Whether plain HTTP counts as secure for SSE-C keys.
+    plain_http_is_secure: bool,
     client: crate::Client,
 }
 
@@ -208,12 +210,14 @@ impl Service {
         store: Store,
         host: Option<MultiDomain>,
         body_timeout: Option<Duration>,
+        plain_http_is_secure: bool,
     ) -> Self {
         Self {
             s3,
             store,
             host: host.map(Arc::new),
             body_timeout,
+            plain_http_is_secure,
             client: crate::Client::default(),
         }
     }
@@ -248,6 +252,18 @@ impl Service {
         crate::sig_v2::canonical_bucket_path(&mut req, virtual_hosted);
         let bucket = self.bucket_of(&req);
         match crate::post_form::with_form(req, bucket.as_deref()).await {
+            // SSE-C keys never travel in the clear, whatever the request does with them
+            // (a form's fields are headers by now).
+            Ok(req)
+                if !(self.client.secure || self.plain_http_is_secure)
+                    && crate::sse::names_customer_key(req.headers()) =>
+            {
+                Ok(error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    crate::sse::CUSTOMER_KEY_NEEDS_TLS,
+                ))
+            }
             Ok(req) => self.s3.call(req).await,
             Err(refused) => Ok(*refused),
         }

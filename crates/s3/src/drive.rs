@@ -53,9 +53,6 @@ const NULL_VERSION: &str = "null";
 pub struct Drive {
     store: Store,
     default_layout: Layout,
-    /// Whether requests over plain HTTP count as secure for SSE-C (a server that only
-    /// listens on this machine, or behind a proxy that terminates TLS).
-    plain_http_is_secure: bool,
     /// The buckets' policies and Block Public Access settings, as requests read them.
     rules: Arc<Rules>,
     /// New buckets start as S3's did before April 2023: ACLs enabled, no Block Public
@@ -66,17 +63,11 @@ pub struct Drive {
 impl Drive {
     /// Serves `store`; buckets created without choosing get `default_layout`.
     #[must_use]
-    pub fn new(
-        store: Store,
-        default_layout: Layout,
-        plain_http_is_secure: bool,
-        legacy_bucket_defaults: bool,
-    ) -> Self {
+    pub fn new(store: Store, default_layout: Layout, legacy_bucket_defaults: bool) -> Self {
         Self {
             rules: Arc::new(Rules::new(store.clone())),
             store,
             default_layout,
-            plain_http_is_secure,
             legacy_bucket_defaults,
         }
     }
@@ -248,7 +239,7 @@ impl Drive {
         request: sse::WriteRequest<'_>,
     ) -> S3Result<Encryption> {
         let default = self.store.bucket_encryption(bucket).await.s3()?;
-        sse::for_write(request, default.as_ref(), self.plain_http_is_secure)
+        sse::for_write(request, default.as_ref())
     }
 
     /// Streams a request body into `staged`, hashing it for the checksums asked for. A

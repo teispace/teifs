@@ -165,9 +165,13 @@ fn serve_announces_where_it_listens_for_programs() {
     let endpoint = serving["endpoint"].as_str().unwrap();
     // What a container's health check runs.
     let healthy = teifs(home.path(), &["-q", "health", endpoint]);
+    // Asked for HTTPS, it never settles for plain HTTP.
+    let https = endpoint.replace("http://", "https://");
+    let refused = teifs(home.path(), &["health", &https, "--timeout", "2s"]);
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(healthy.status.success(), "{}", text(&healthy.stderr));
+    assert_eq!(refused.status.code(), Some(3), "{}", text(&refused.stderr));
     let down = teifs(home.path(), &["health", endpoint, "--timeout", "2s"]);
     assert_eq!(down.status.code(), Some(3), "{}", text(&down.stderr));
     assert!(endpoint.starts_with("http://127.0.0.1:"), "{endpoint}");

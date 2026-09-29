@@ -7,6 +7,15 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- HTTPS: `teifs serve --certs-dir DIR` (MinIO's certificates folder layout, or a
+  Kubernetes TLS secret's `tls.crt` and `tls.key`) or `--tls-cert` and `--tls-key`.
+  Several certificates chosen by the name each client asks for, wildcards included;
+  reloaded when their files change and on `SIGHUP`, keeping the ones in use when new
+  ones don't load; TLS 1.3 and 1.2, HTTP/2; a handshake must finish within the header
+  timeout; plain HTTP on the port is told to use HTTPS. `aws:SecureTransport` is true
+  over it. `teifs health` asks over HTTPS when the server speaks it.
+- SSE-C keys are refused on plain HTTP for every request, as on AWS: reads, `HEAD` and
+  copy sources too, not only writes.
 - IAM, as AWS has it: users, access keys, groups, customer-managed policies with
   versions, inline policies, permissions boundaries and tags, with AWS's rules, quotas
   and error codes. Requests signed with a user's key do only what the user's policies
