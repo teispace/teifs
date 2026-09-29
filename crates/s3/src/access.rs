@@ -31,6 +31,7 @@ use teifs_store::{Store, StoreError};
 use crate::{
     acl::{self, AclOf},
     bucket_access::{BucketRules, Rules},
+    caps::Caps,
     drive::REGION,
     errors::from_store,
     post_form::{self, Form},
@@ -302,6 +303,7 @@ impl S3Access for Access {
                     .identity
             }
         };
+        with_caps(cx, signed)?;
         let (form, posted) = posted(cx)?;
         let operation = cx.s3_op().name();
         let path = posted.as_ref().unwrap_or_else(|| cx.s3_path());
@@ -388,6 +390,16 @@ impl S3Access for Access {
         });
         Ok(())
     }
+}
+
+/// Checks the upload size caps a request carries ([`Caps`]) and hands them to the
+/// operation in the request's extensions.
+fn with_caps(cx: &mut S3AccessContext<'_>, signed: bool) -> S3Result<()> {
+    let caps = Caps::of(cx.uri().query(), cx.s3_op().name(), signed && is_sig_v4(cx))?;
+    if caps != Caps::default() {
+        cx.extensions_mut().insert(caps);
+    }
+    Ok(())
 }
 
 /// A browser upload's form and the object it names (its path names only the bucket);
@@ -657,12 +669,7 @@ fn context(
 /// request has neither.
 fn with_signature(context: Context, cx: &S3AccessContext<'_>) -> Context {
     let presigned = query(cx, "X-Amz-Signature").is_some() || query(cx, "Signature").is_some();
-    let sig_v4 = query(cx, "X-Amz-Algorithm").is_some()
-        || cx
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|a| a.starts_with("AWS4-"));
+    let sig_v4 = is_sig_v4(cx);
     context
         .with(
             S3Key::AuthType,
@@ -677,6 +684,16 @@ fn with_signature(context: Context, cx: &S3AccessContext<'_>) -> Context {
             S3Key::SignatureVersion,
             signature_version(sig_v4).to_owned(),
         )
+}
+
+/// Whether a signed request is signed with Signature V4, in its header or its query.
+fn is_sig_v4(cx: &S3AccessContext<'_>) -> bool {
+    query(cx, "X-Amz-Algorithm").is_some()
+        || cx
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.starts_with("AWS4-"))
 }
 
 /// `s3:signatureversion` for Signature V4 or V2.

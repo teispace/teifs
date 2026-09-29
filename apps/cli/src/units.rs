@@ -75,6 +75,28 @@ pub fn rfc3339(time: SystemTime) -> String {
     date(time).replacen(' ', "T", 1) + "Z"
 }
 
+/// Parses a size: bytes, or a number with `KiB`, `MiB` or `GiB` (`K`, `M`, `G` too).
+pub fn parse_size(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| format!("`{text}` isn't a size like 8MiB"))?;
+    let unit: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kib" => 1 << 10,
+        "m" | "mib" => 1 << 20,
+        "g" | "gib" => 1 << 30,
+        _ => return Err(format!("`{text}` needs a unit: KiB, MiB or GiB")),
+    };
+    number
+        .checked_mul(unit)
+        .ok_or_else(|| format!("`{text}` is too large"))
+}
+
 /// A size in bytes for people: `512 B`, `1.5 KiB`, `12.3 MiB`, `4.0 GiB`.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -102,6 +124,20 @@ pub fn rate(bytes: u64, elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_parse_with_units() {
+        assert_eq!(parse_size("0"), Ok(0));
+        assert_eq!(parse_size("10"), Ok(10));
+        assert_eq!(parse_size("10B"), Ok(10));
+        assert_eq!(parse_size("2K"), Ok(2048));
+        assert_eq!(parse_size(" 3 MiB "), Ok(3 << 20));
+        assert_eq!(parse_size("1g"), Ok(1 << 30));
+        assert_eq!(parse_size("17179869183G"), Ok(17_179_869_183 << 30));
+        for bad in ["", "MiB", "-1", "1.5M", "8MB", "1T", "17179869184G"] {
+            assert!(parse_size(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn durations_and_counts() {

@@ -10,6 +10,7 @@ use aws_sdk_s3::{
 };
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::json;
+use teifs_types::caps::MAX_CONTENT_LENGTH;
 
 use super::{
     AliasAction, Command, Error, Kind, SetAlias,
@@ -63,7 +64,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
             target,
             expires,
             put,
-        } => presign(remote(&target, "presign")?, expires, put).await,
+            max_size,
+        } => presign(remote(&target, "presign")?, expires, put, max_size).await,
         Command::Mirror {
             source,
             destination,
@@ -736,7 +738,12 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
     });
 }
 
-async fn presign(remote: Remote, expires: Duration, put: bool) -> Result<(), Error> {
+async fn presign(
+    remote: Remote,
+    expires: Duration,
+    put: bool,
+    max_size: Option<u64>,
+) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     if remote.key.is_empty() || remote.key.ends_with('/') {
         return Err(Error::usage(format!(
@@ -752,10 +759,21 @@ async fn presign(remote: Remote, expires: Duration, put: bool) -> Result<(), Err
     let name = remote.display(&remote.key);
     let what = || format!("can't make a link for {name}");
     let request = if put {
+        // The cap goes into the query before it's signed, so the signature covers it.
         client
             .put_object()
             .bucket(bucket)
             .key(&remote.key)
+            .customize()
+            .mutate_request(move |req| {
+                if let Some(max) = max_size {
+                    let uri = req.uri();
+                    let sep = if uri.contains('?') { '&' } else { '?' };
+                    let capped = format!("{uri}{sep}{MAX_CONTENT_LENGTH}={max}");
+                    // A failure here leaves the link without its cap, which is caught below.
+                    let _ = req.set_uri(capped);
+                }
+            })
             .presigned(config)
             .await
             .map_err(|e| Error::s3(what(), &e))?
@@ -769,9 +787,17 @@ async fn presign(remote: Remote, expires: Duration, put: bool) -> Result<(), Err
             .map_err(|e| Error::s3(what(), &e))?
     };
     let url = request.uri().to_owned();
+    // A link that should be capped and isn't would take any size: never hand one out.
+    if let Some(max) = max_size
+        && !url.contains(&format!("{MAX_CONTENT_LENGTH}={max}"))
+    {
+        return Err(Error::general(format!(
+            "can't limit the size of a link for {name}"
+        )));
+    }
     ui::item(
         || url.clone(),
-        || json!({"type": "link", "url": url, "method": if put { "PUT" } else { "GET" }, "expiresIn": expires.as_secs()}),
+        || json!({"type": "link", "url": url, "method": if put { "PUT" } else { "GET" }, "expiresIn": expires.as_secs(), "maxSize": max_size}),
     );
     Ok(())
 }

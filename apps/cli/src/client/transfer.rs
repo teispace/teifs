@@ -58,28 +58,11 @@ const COPY_PART: u64 = 512 * MIB;
 /// A stream's parts double in size after every this many.
 const STREAM_PARTS_PER_SIZE: u64 = 1000;
 
-/// Parses a part size: bytes, or a number with `KiB`, `MiB` or `GiB` (`K`, `M`, `G` too).
+/// Parses a part size ([`crate::units::parse_size`]): from 5 MiB to 5 GiB.
 pub fn parse_part_size(text: &str) -> Result<u64, String> {
-    let text = text.trim();
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let number: u64 = number
-        .parse()
-        .map_err(|_| format!("`{text}` isn't a size like 8MiB"))?;
-    let unit = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1,
-        "k" | "kib" => KIB,
-        "m" | "mib" => MIB,
-        "g" | "gib" => GIB,
-        _ => return Err(format!("`{text}` needs a unit: KiB, MiB or GiB")),
-    };
-    let bytes = number
-        .checked_mul(unit)
-        .ok_or_else(|| format!("`{text}` is too large"))?;
+    let bytes = crate::units::parse_size(text)?;
     if !(MIN_PART..=MAX_PART).contains(&bytes) {
-        return Err(format!("`{text}` must be from 5MiB to 5GiB"));
+        return Err(format!("`{}` must be from 5MiB to 5GiB", text.trim()));
     }
     Ok(bytes)
 }

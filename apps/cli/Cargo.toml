@@ -17,6 +17,7 @@ path = "src/main.rs"
 teifs-store.workspace = true
 teifs-server.workspace = true
 teifs-client.workspace = true
+teifs-types.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 clap.workspace = true
 clap_complete.workspace = true

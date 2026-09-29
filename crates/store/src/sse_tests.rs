@@ -238,6 +238,7 @@ async fn multipart_uploads_encrypt_each_part() {
                 None,
                 &encryption,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -289,6 +290,7 @@ async fn multipart_uploads_encrypt_each_part() {
             ObjectAttrs::default(),
             None,
             &Encryption::Customer(customer(4)),
+            None,
             None,
         )
         .await
@@ -485,6 +487,7 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
                 ObjectAttrs::default(),
                 None,
                 &encryption,
+                None,
                 None,
             )
             .await

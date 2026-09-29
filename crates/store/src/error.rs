@@ -38,6 +38,9 @@ pub enum StoreError {
     /// A part other than the last is smaller than the minimum part size.
     #[error("a part other than the last is smaller than 5 MiB")]
     EntityTooSmall,
+    /// An upload's parts are larger, all together, than its creation allowed.
+    #[error("the upload is larger than its size limit")]
+    EntityTooLarge,
     /// The request can't be done as asked.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),

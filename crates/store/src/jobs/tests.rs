@@ -33,6 +33,7 @@ async fn upload(store: &Store) -> String {
             None,
             &Encryption::None,
             None,
+            None,
         )
         .await
         .unwrap()

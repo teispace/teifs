@@ -97,6 +97,7 @@ async fn restored_multipart_files_keep_their_etag() {
             None,
             &crate::Encryption::None,
             None,
+            None,
         )
         .await
         .unwrap();

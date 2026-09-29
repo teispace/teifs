@@ -30,6 +30,12 @@ Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
 `serve --allow-sigv2` for clients too old for V4.
 Every `x-amz-*` header of a signed request must be signed, presigned links included:
 whoever holds a link can't add an ACL, tags, metadata or encryption to it.
+An upload link can carry a size cap in its query, which its Signature V4 signature
+covers (`x-teifs-max-content-length`, and `x-teifs-max-total-object-size` for multipart
+uploads): the declared length is checked before the body is read, the body is cut off if
+it runs past the cap, and a multipart upload's parts are summed under the store's lock,
+so parts sent at once can't add up past it. A cap that the signature wouldn't cover (an
+unsigned or Signature V2 request) is refused, never quietly ignored.
 A browser upload (`POST` with a form) is signed by its policy, which must name every
 field the form sends. Its fields are read before any decision, at most 64 KiB of them,
 and the upload is authorized on the key the form names, as a PutObject would be; a form

@@ -53,7 +53,11 @@ struct CompletedResult {
 
 impl Store {
     /// Starts a multipart upload to `bucket`/`key`, encrypted as `encryption` asks, whose
-    /// object gets `checksum`.
+    /// object gets `checksum` and may be at most `max_size` bytes, all parts together.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one of S3's upload settings"
+    )]
     pub async fn create_upload(
         &self,
         bucket: &str,
@@ -62,6 +66,7 @@ impl Store {
         owner: Option<String>,
         encryption: &Encryption,
         checksum: Option<&UploadChecksum>,
+        max_size: Option<u64>,
     ) -> Result<Upload> {
         let crypt = match encryption {
             Encryption::None => None,
@@ -89,6 +94,7 @@ impl Store {
             created_ms: now_ms(),
             crypt,
             checksum: checksum.map(|c| serde_json::to_string(c).expect("checksum serializes")),
+            max_size,
         };
         self.blocking(move |inner| {
             match inner.bucket(&upload.bucket)? {
@@ -148,6 +154,20 @@ impl Store {
         .await?;
         let keyed = Keyed { data_key, crypt };
         Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, number).await
+    }
+
+    /// How many bytes part `number` of an upload may have: what its size cap leaves
+    /// beside its other parts (a part being replaced doesn't count), or `None` without a
+    /// cap. Parts are checked again when stored.
+    pub async fn part_room(&self, upload: &Upload, number: u32) -> Result<Option<u64>> {
+        let Some(max) = upload.max_size else {
+            return Ok(None);
+        };
+        let id = upload.id.clone();
+        let others = self
+            .blocking(move |inner| Ok(inner.lock().parts_size(&id, number)?))
+            .await?;
+        Ok(Some(max.saturating_sub(others)))
     }
 
     /// The checksum an upload's object will get, if any.
@@ -221,6 +241,12 @@ impl Store {
             };
             let dir = inner.uploads.join(&id);
             let size = staged.size();
+            // Checked under the lock, so parts sent at once can't add up past the cap.
+            if let Some(max) = upload.max_size
+                && conn.parts_size(&id, number)?.saturating_add(size) > max
+            {
+                return Err(StoreError::EntityTooLarge);
+            }
             // An acknowledged part must survive a power cut.
             inner.sync_file(staged.path())?;
             fs::rename(staged.path(), dir.join(number.to_string()))?;
@@ -377,7 +403,10 @@ impl Store {
             }
             let bucket = inner.bucket(&upload.bucket)?;
             let stored_len = fs::metadata(&tmp.path)?.len();
-            let size = parts.iter().map(|p| p.size).sum();
+            let size: u64 = parts.iter().map(|p| p.size).sum();
+            if upload.max_size.is_some_and(|max| size > max) {
+                return Err(StoreError::EntityTooLarge);
+            }
             // Parts' checksums are already sealed under SSE-KMS and SSE-C (see put_part).
             let sealed = crypt.map(|crypt| (crypt.object.clone(), crypt));
             let attrs = crate::ObjectAttrs {

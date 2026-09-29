@@ -2858,6 +2858,7 @@ dependencies = [
  "teifs-iam",
  "teifs-server",
  "teifs-store",
+ "teifs-types",
  "tempfile",
  "tokio",
  "toml",

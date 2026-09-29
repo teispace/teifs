@@ -22,6 +22,7 @@ use crate::{
     access,
     acl::{self, AclHeaders, acl_headers},
     bucket_access::{self, Rules},
+    caps::{self, Caps},
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
@@ -250,16 +251,22 @@ impl Drive {
         sse::for_write(request, default.as_ref(), self.plain_http_is_secure)
     }
 
-    /// Streams a request body into `staged`, hashing it for the checksums asked for.
+    /// Streams a request body into `staged`, hashing it for the checksums asked for. A
+    /// body longer than `limit` is cut off with `EntityTooLarge`, whatever it declared.
     async fn stage(
         &self,
         mut staged: Staged,
         body: StreamingBlob,
         sums: &mut s3s::checksum::ChecksumHasher,
+        limit: Option<u64>,
     ) -> S3Result<Staged> {
         let mut body = body;
+        let mut left = limit.unwrap_or(u64::MAX);
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(from_body)?;
+            left = left
+                .checked_sub(chunk.len() as u64)
+                .ok_or_else(caps::too_large)?;
             sums.update(&chunk);
             staged.write(&chunk).await.s3()?;
         }
@@ -1060,6 +1067,13 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutObjectOutput>> {
         let mut input = req.input;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
+        let limit = req
+            .extensions
+            .get::<Caps>()
+            .and_then(|caps| caps.content_length);
+        if let Some(cap) = limit {
+            caps::admit(input.content_length, cap)?;
+        }
         let tags = header_tags(input.tagging.as_deref())?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
         // Like S3, an object sent without a checksum gets CRC64NVME.
@@ -1099,7 +1113,7 @@ impl S3 for Drive {
             .stage_for(&input.bucket, &encryption)
             .await
             .s3()?;
-        let staged = self.stage(staged, body, &mut hasher).await?;
+        let staged = self.stage(staged, body, &mut hasher, limit).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         let computed = checksums::from_dto(&hasher.finalize());
         checksums::verify(&sent, &computed)?;
@@ -2210,6 +2224,10 @@ impl S3 for Drive {
         req: S3Request<dto::CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<dto::CreateMultipartUploadOutput>> {
         let owner = uploader(&req).id;
+        let max_size = req
+            .extensions
+            .get::<Caps>()
+            .and_then(|caps| caps.total_object_size);
         let mut input = req.input;
         let mut attrs = new_attrs!(input).into_attrs(BTreeMap::new());
         attrs.tags = header_tags(input.tagging.as_deref())?;
@@ -2249,6 +2267,7 @@ impl S3 for Drive {
                 owner,
                 &encryption,
                 Some(&checksum),
+                max_size,
             )
             .await
             .s3()?;
@@ -2300,6 +2319,11 @@ impl S3 for Drive {
             input.sse_customer_key.as_deref(),
             input.sse_customer_key_md5.as_deref(),
         )?;
+        // A capped upload's part must declare a length that fits beside the other parts.
+        let room = self.store.part_room(&upload, number).await.s3()?;
+        if let Some(room) = room {
+            caps::admit(input.content_length, room)?;
+        }
         self.check_write(&upload.bucket, None, input.content_length)
             .await?;
         let staged = self
@@ -2307,7 +2331,7 @@ impl S3 for Drive {
             .stage_part(&upload.id, number, customer.as_ref())
             .await
             .s3()?;
-        let staged = self.stage(staged, body, &mut hasher).await?;
+        let staged = self.stage(staged, body, &mut hasher, room).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         if let Some(checksum) = &upload_checksum {
             checksums::check_part(checksum, &sent)?;
@@ -2379,6 +2403,11 @@ impl S3 for Drive {
             Some(range) => copy_range(range, source.size)?,
             None => (0, source.size),
         };
+        if let Some(room) = self.store.part_room(&upload, number).await.s3()?
+            && length > room
+        {
+            return Err(caps::too_large());
+        }
         self.check_write(&upload.bucket, None, i64::try_from(length).ok())
             .await?;
         let mut staged = self

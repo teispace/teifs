@@ -30,6 +30,11 @@ behaviour; the on-disk format is always upgraded automatically.
   and every other field, as on AWS. The form's `acl`, `tagging`, metadata and redirect
   fields work; the upload is authorized like a PutObject on the key the form names, and
   anonymous forms get only what a bucket policy grants.
+- Upload size limits signed into a link: `teifs presign --put --max-size 10MiB` (or
+  `x-teifs-max-content-length` in any Signature V4 signed PutObject's query) makes a link
+  that refuses a larger body before storing it, and `x-teifs-max-total-object-size` on
+  CreateMultipartUpload caps every part of the upload together. The limit is part of the
+  signature, so whoever holds the link can't raise or remove it.
 - Presigned links refuse `x-amz-*` headers that weren't signed, so whoever holds a link
   can't add an ACL, tags, metadata or encryption to what it uploads (tested).
 - With `--allow-sigv2`, requests for a whole bucket (creating, listing, its settings)

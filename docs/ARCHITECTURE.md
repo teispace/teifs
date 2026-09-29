@@ -191,6 +191,14 @@ without a `Form` is refused, so no form is ever decided without being read. s3s 
 the signature, the policy and every field against it; `post_form.rs` checks the policy's
 conditions again only to answer `403 AccessDenied` as AWS does.
 
+Upload size caps (`caps.rs`) are query parameters a Signature V4 signature covers.
+`Access` reads and checks them for every request (where they apply, and only when
+signed with V4) and passes them on as a request extension; `put_object` checks the
+declared length and `stage` cuts off a body past it. A multipart upload's cap is stored
+with the upload (`uploads.max_size`): each part is admitted against the room its other
+parts leave (`Store::part_room`), and `put_part` checks the total again under the
+store's lock, which also covers copied parts, before the part replaces any other.
+
 ## Two layouts, one API
 
 `Store` resolves a bucket name to `Bucket::Folder` (a folder at the root) or

@@ -536,6 +536,24 @@ async fn presigned_links_work_without_keys() {
     assert_eq!(cli.ok(&["cat", "t/share/up.txt"]).await, "uploaded");
     cli.fails(&["presign", "t/share/note.txt", "--expires", "8d"], 2)
         .await;
+    // A link can limit what it uploads; the limit only makes sense for uploads.
+    let capped = cli
+        .ok(&["presign", "t/share/small.txt", "--put", "--max-size", "1K"])
+        .await;
+    assert!(
+        capped.contains("x-teifs-max-content-length=1024"),
+        "{capped}"
+    );
+    let send = |body: Vec<u8>| reqwest::Client::new().put(capped.trim()).body(body).send();
+    assert_eq!(send(vec![b'x'; 1025]).await.unwrap().status(), 400);
+    assert!(send(vec![b'x'; 1024]).await.unwrap().status().is_success());
+    cli.fails(&["presign", "t/share/note.txt", "--max-size", "1K"], 2)
+        .await;
+    cli.fails(
+        &["presign", "t/share/up.txt", "--put", "--max-size", "1T"],
+        2,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

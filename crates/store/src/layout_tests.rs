@@ -383,6 +383,7 @@ async fn multipart_uploads_complete_into_object_buckets() {
             None,
             &Encryption::None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -421,7 +422,15 @@ async fn completed_uploads_remember_their_parts() {
     for layout in LAYOUTS {
         let (dir, store) = bucket(layout).await;
         let upload = store
-            .create_upload("bkt", "f.bin", attrs("x/y"), None, &Encryption::None, None)
+            .create_upload(
+                "bkt",
+                "f.bin",
+                attrs("x/y"),
+                None,
+                &Encryption::None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let first = vec![1u8; usize::try_from(MIN_PART_SIZE).unwrap()];

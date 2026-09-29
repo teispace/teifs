@@ -101,6 +101,7 @@ teifs ls home/photos/2026
 teifs mirror ~/Documents home/docs --remove  # copy what changed, delete what's gone
 teifs cp home/photos/2026/cat.jpg .
 teifs presign home/photos/2026/cat.jpg --expires 1d
+teifs presign home/inbox/upload.jpg --put --max-size 10MiB   # an upload link that takes 10 MiB at most
 tar c ~/Projects | teifs cp - home/backups/projects.tar   # a stream in, of any size
 teifs cp home/backups/projects.tar - | tar x               # and out
 ```
@@ -152,7 +153,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way |
 | `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`) |
 | `teifs cat\|stat ALIAS/BUCKET/KEY` | Print an object, or show its details |
-| `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put]` | A link that works without keys |
+| `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |

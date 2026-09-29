@@ -36,6 +36,7 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::InvalidPart => s3_error!(InvalidPart),
         StoreError::InvalidPartOrder => s3_error!(InvalidPartOrder),
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
+        StoreError::EntityTooLarge => crate::caps::too_large(),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
         StoreError::AclsDisabled => crate::acl::not_supported(),

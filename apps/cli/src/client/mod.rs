@@ -94,6 +94,10 @@ pub enum Command {
         /// A link for uploading the object instead.
         #[arg(long)]
         put: bool,
+        /// The most the upload may be (with `--put`): bytes, or with KiB, MiB or GiB.
+        /// The limit is part of the link's signature, so it can't be raised or removed.
+        #[arg(long, requires = "put", value_parser = crate::units::parse_size)]
+        max_size: Option<u64>,
     },
     /// Make a folder or a key prefix the same as another: copy what's new or changed,
     /// and (with `--remove`) delete what's gone.

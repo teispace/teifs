@@ -5,6 +5,7 @@ mod access;
 mod acl;
 mod admin;
 mod bucket_access;
+mod caps;
 mod checksums;
 mod control;
 mod cors;

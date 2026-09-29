@@ -87,6 +87,8 @@ const MIGRATIONS: &[&str] = &[
         result       TEXT    NOT NULL,
         completed_ms INTEGER NOT NULL
      ) WITHOUT ROWID;",
+    // 7: the most a multipart upload's object may be, when its creation was capped.
+    "ALTER TABLE uploads ADD COLUMN max_size INTEGER;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -147,6 +149,8 @@ pub struct Upload {
     pub crypt: Option<String>,
     /// The checksum the object will get (JSON the store owns), if any.
     pub checksum: Option<String>,
+    /// The most the object may be, all parts together, if its creation capped it.
+    pub max_size: Option<u64>,
 }
 
 /// A completed multipart upload, remembered for a while so a retried Complete gets the
@@ -200,6 +204,7 @@ fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
         created_ms: r.get(5)?,
         crypt: r.get(6)?,
         checksum: r.get(7)?,
+        max_size: r.get::<_, Option<i64>>(8)?.map(from_db),
     })
 }
 
@@ -376,8 +381,8 @@ impl Index {
     /// Records a new multipart upload.
     pub fn insert_upload(&self, upload: &Upload) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt, checksum)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 upload.id,
                 upload.bucket,
@@ -386,7 +391,8 @@ impl Index {
                 attrs_to_json(&upload.attrs),
                 upload.created_ms,
                 upload.crypt,
-                upload.checksum
+                upload.checksum,
+                upload.max_size.map(to_db)
             ],
         )?;
         Ok(())
@@ -397,7 +403,7 @@ impl Index {
         Ok(self
             .conn
             .prepare_cached(
-                "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum FROM uploads WHERE id = ?1",
+                "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads WHERE id = ?1",
             )?
             .query_row([id], upload_from_row)
             .optional()?)
@@ -413,7 +419,7 @@ impl Index {
     ) -> Result<Vec<Upload>> {
         let (key_marker, id_marker) = after.unwrap_or(("", ""));
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum FROM uploads
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads
              WHERE bucket = ?1 AND substr(key, 1, length(?2)) = ?2 AND (key > ?3 OR (key = ?3 AND id > ?4))
              ORDER BY key, id LIMIT ?5",
         )?;
@@ -518,6 +524,17 @@ impl Index {
         Ok(())
     }
 
+    /// The size of an upload's parts, all but part `except` (0 for all of them).
+    pub fn parts_size(&self, upload_id: &str, except: u32) -> Result<u64> {
+        let size: i64 = self
+            .conn
+            .prepare_cached(
+                "SELECT COALESCE(SUM(size), 0) FROM parts WHERE upload_id = ?1 AND part != ?2",
+            )?
+            .query_row(params![upload_id, except], |r| r.get(0))?;
+        Ok(from_db(size))
+    }
+
     /// Parts of an upload with numbers above `after`, in order.
     pub fn list_parts(&self, upload_id: &str, after: u32, limit: usize) -> Result<Vec<Part>> {
         let mut stmt = self.conn.prepare_cached(
@@ -581,5 +598,43 @@ mod tests {
             .unwrap();
         assert_eq!(index.completed_upload("old").unwrap(), None);
         assert_eq!(index.completed_upload("new").unwrap(), Some(done("k2")));
+    }
+
+    #[test]
+    fn an_uploads_cap_and_its_parts_sizes_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let upload = |id: &str, max_size| Upload {
+            id: id.into(),
+            bucket: "b".into(),
+            key: "k".into(),
+            owner: None,
+            attrs: ObjectAttrs::default(),
+            created_ms: 1,
+            crypt: None,
+            checksum: None,
+            max_size,
+        };
+        index
+            .insert_upload(&upload("capped", Some(u64::MAX)))
+            .unwrap();
+        index.insert_upload(&upload("open", None)).unwrap();
+        let max = |id| index.get_upload(id).unwrap().unwrap().max_size;
+        assert_eq!(max("capped"), Some(u64::MAX));
+        assert_eq!(max("open"), None);
+        assert_eq!(index.parts_size("capped", 0).unwrap(), 0);
+        for (number, size) in [(1, 5), (2, 7), (3, 11)] {
+            let part = Part {
+                number,
+                size,
+                etag: String::new(),
+                checksums: std::collections::BTreeMap::new(),
+                modified_ms: 1,
+            };
+            index.put_part("capped", &part).unwrap();
+        }
+        assert_eq!(index.parts_size("capped", 0).unwrap(), 23);
+        assert_eq!(index.parts_size("capped", 2).unwrap(), 16);
+        assert_eq!(index.parts_size("open", 0).unwrap(), 0);
     }
 }

@@ -500,6 +500,7 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
             Some("key1".into()),
             &Encryption::None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -561,6 +562,63 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
 }
 
 #[tokio::test]
+async fn a_capped_upload_stores_parts_only_up_to_its_total() {
+    let (_dir, store) = with_bucket().await;
+    let upload = store
+        .create_upload(
+            "photos",
+            "capped",
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+            None,
+            Some(10),
+        )
+        .await
+        .unwrap();
+    let put = |number: u32, bytes: &'static [u8]| {
+        let store = &store;
+        let id = upload.id.clone();
+        async move {
+            let mut staged = store.stage().await.unwrap();
+            staged.write(bytes).await.unwrap();
+            store.put_part(&id, number, staged, BTreeMap::new()).await
+        }
+    };
+    put(1, b"123456").await.unwrap();
+    assert_eq!(store.part_room(&upload, 2).await.unwrap(), Some(4));
+    assert!(matches!(
+        put(2, b"12345").await,
+        Err(StoreError::EntityTooLarge)
+    ));
+    // A replaced part leaves room for what it was.
+    assert_eq!(store.part_room(&upload, 1).await.unwrap(), Some(10));
+    put(1, b"1234").await.unwrap();
+    put(2, b"123456").await.unwrap();
+    assert_eq!(store.part_room(&upload, 3).await.unwrap(), Some(0));
+    assert!(matches!(
+        put(3, b"1").await,
+        Err(StoreError::EntityTooLarge)
+    ));
+    let parts = store.parts(&upload.id, 0, 100, None).await.unwrap();
+    let sizes: Vec<u64> = parts.iter().map(|p| p.size).collect();
+    assert_eq!(sizes, [4, 6], "refused parts leave the upload as it was");
+    let uncapped = store
+        .create_upload(
+            "photos",
+            "open",
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.part_room(&uncapped, 1).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn multipart_rules_are_enforced() {
     let (_dir, store) = with_bucket().await;
     let upload = store
@@ -570,6 +628,7 @@ async fn multipart_rules_are_enforced() {
             ObjectAttrs::default(),
             None,
             &Encryption::None,
+            None,
             None,
         )
         .await
@@ -639,6 +698,7 @@ async fn multipart_rules_are_enforced() {
             ObjectAttrs::default(),
             None,
             &Encryption::None,
+            None,
             None,
         )
         .await
@@ -1182,6 +1242,7 @@ async fn folder_buckets_only_create_portable_names() {
                 ObjectAttrs::default(),
                 None,
                 &Encryption::None,
+                None,
                 None,
             )
             .await;
