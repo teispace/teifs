@@ -108,7 +108,7 @@ garbage is removed at the next start.
 
 | Table | Holds |
 |---|---|
-| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums and `checksumType`, absent for a whole-object checksum, and `tags`), and for multipart objects `parts` (JSON: each part's size and checksums). Rebuildable from the files, except the parts |
+| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums and `checksumType`, absent for a whole-object checksum, `tags`, and `acl` when the object has one), and for multipart objects `parts` (JSON: each part's size and checksums). Rebuildable from the files, except the parts |
 | `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq`, `version_id` (`null` without versioning), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
 | `garbage` | Data files waiting to be removed |
 | `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt`, and every upload the checksum its object gets in `uploads.checksum` (JSON: `algorithm`, `type` `FULL_OBJECT` or `COMPOSITE`, `requested`) |
@@ -140,7 +140,7 @@ What can't be rebuilt from the files.
 
 | Table | Holds |
 |---|---|
-| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules) |
+| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL) |
 
 A bucket folder without a row is a folder bucket with default settings.
 

@@ -1,6 +1,6 @@
 //! Bucket policies and Block Public Access. [`Rules`] is what every request's decision
-//! reads of a bucket: its policy, parsed, whether the policy is public, and the bucket's
-//! Block Public Access settings. It's read from the store once and kept until the drive
+//! reads of a bucket: its policy, parsed, whether the policy is public, the bucket's
+//! Block Public Access settings, its Object Ownership and its ACL. It's read from the store once and kept until the drive
 //! changes one of them.
 
 use std::{
@@ -13,7 +13,7 @@ use std::{
 
 use s3s::{S3Error, S3ErrorCode, S3Result, dto, s3_error};
 use teifs_policy::{Kind, Policy};
-use teifs_store::{BucketAccess, PublicAccessBlock, Store, StoreError};
+use teifs_store::{Acl, BucketAccess, ObjectOwnership, PublicAccessBlock, Store, StoreError};
 
 use crate::errors::from_store;
 
@@ -29,6 +29,11 @@ pub(crate) struct BucketRules {
     pub(crate) public: bool,
     /// The bucket's Block Public Access settings (none when it has none).
     pub(crate) block: PublicAccessBlock,
+    /// Its Object Ownership: a bucket made before the setting existed has ACLs, as
+    /// `ObjectWriter`.
+    pub(crate) ownership: ObjectOwnership,
+    /// Its ACL, kept while ACLs are disabled so enabling them brings it back.
+    pub(crate) acl: Option<Acl>,
 }
 
 impl BucketRules {
@@ -45,7 +50,15 @@ impl BucketRules {
             public: policy.as_deref().is_some_and(Policy::is_public),
             policy,
             block: access.public_access_block.unwrap_or_default(),
+            ownership: access.ownership.unwrap_or(ObjectOwnership::ObjectWriter),
+            acl: access.acl,
         }
+    }
+
+    /// Whether ACLs grant anything: Object Ownership enables them and `IgnorePublicAcls`
+    /// is off (every grant that changes access is public).
+    pub(crate) fn acls_apply(&self) -> bool {
+        self.ownership.acls_enabled() && !self.block.ignore_public_acls
     }
 
     /// Whether `RestrictPublicBuckets` is in force: the setting is on and the policy is
@@ -165,6 +178,7 @@ mod tests {
         BucketAccess {
             policy: Some(policy.to_owned()),
             public_access_block: block,
+            ..BucketAccess::default()
         }
     }
 

@@ -2,6 +2,7 @@
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
 mod access;
+mod acl;
 mod bucket_access;
 mod checksums;
 mod cors;
@@ -51,6 +52,10 @@ pub struct Options {
     /// Accept Signature Version 2 (HMAC-SHA1, deprecated by AWS and refused for its
     /// newer buckets), for old clients and boto3's default presigned links.
     pub allow_sig_v2: bool,
+    /// New buckets start as S3's did before April 2023: ACLs enabled and no Block Public
+    /// Access, for applications that upload with public ACLs. Off, they start as AWS's do
+    /// now.
+    pub legacy_bucket_defaults: bool,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -59,6 +64,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         store.clone(),
         options.default_layout,
         options.plain_http_is_secure,
+        options.legacy_bucket_defaults,
     );
     let rules = drive.rules();
     let mut builder = S3ServiceBuilder::new(drive);
@@ -69,7 +75,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));
-        builder.set_access(access::Access::new(iam.clone(), rules));
+        builder.set_access(access::Access::new(iam.clone(), rules, store.clone()));
         builder.set_route(iam_api::Route { iam });
     }
     let host = if options.domains.is_empty() {

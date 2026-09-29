@@ -770,8 +770,9 @@ async fn bucket_tags_are_kept_in_its_settings() {
 async fn new_buckets_block_public_access() {
     let (dir, store) = drive();
     let blocked = BucketAccess {
-        policy: None,
         public_access_block: Some(PublicAccessBlock::ALL),
+        ownership: Some(ObjectOwnership::BucketOwnerEnforced),
+        ..BucketAccess::default()
     };
     for (name, layout) in [("objects", Layout::Object), ("folder", Layout::Folder)] {
         store.create_bucket(name, layout).await.unwrap();
@@ -801,14 +802,16 @@ async fn new_buckets_block_public_access() {
     assert_eq!(
         store.bucket_access("by-hand").await.unwrap(),
         BucketAccess {
-            policy: None,
             public_access_block: Some(open),
+            ownership: Some(ObjectOwnership::BucketOwnerEnforced),
+            ..BucketAccess::default()
         }
     );
     store
         .set_bucket_public_access_block("by-hand", None)
         .await
         .unwrap();
+    store.set_bucket_ownership("by-hand", None).await.unwrap();
     assert_eq!(
         store.bucket_access("by-hand").await.unwrap(),
         BucketAccess::default()
@@ -819,6 +822,160 @@ async fn new_buckets_block_public_access() {
         store.set_bucket_public_access_block("nope", None).await,
     ] {
         assert!(matches!(result, Err(StoreError::NoSuchBucket)));
+    }
+}
+
+#[tokio::test]
+async fn ownership_and_acls_are_kept() {
+    let (dir, store) = drive();
+    let public = Acl {
+        grants: vec![AclGrant {
+            grantee: Grantee::AllUsers,
+            permission: Permission::Read,
+        }],
+    };
+    let options = NewBucket {
+        ownership: Some(ObjectOwnership::ObjectWriter),
+        acl: Some(public.clone()),
+        ..NewBucket::default()
+    };
+    for (name, layout) in [("objects", Layout::Object), ("folder", Layout::Folder)] {
+        store
+            .create_bucket_with(name, layout, options.clone())
+            .await
+            .unwrap();
+        let access = store.bucket_access(name).await.unwrap();
+        assert_eq!(access.ownership, Some(ObjectOwnership::ObjectWriter));
+        assert_eq!(access.acl.as_ref(), Some(&public));
+        store.set_bucket_acl(name, None).await.unwrap();
+        store
+            .set_bucket_ownership(name, Some(ObjectOwnership::BucketOwnerPreferred))
+            .await
+            .unwrap();
+        let access = store.bucket_access(name).await.unwrap();
+        assert_eq!(
+            (access.ownership, access.acl),
+            (Some(ObjectOwnership::BucketOwnerPreferred), None)
+        );
+
+        // An object's ACL changes nothing else about it.
+        store
+            .put_bytes(name, "a.txt", b"hello", ObjectAttrs::default())
+            .await
+            .unwrap();
+        let before = store.head(name, "a.txt").await.unwrap();
+        let after = store
+            .set_acl(name, "a.txt", Some(public.clone()))
+            .await
+            .unwrap();
+        assert_eq!(after.attrs.acl.as_ref(), Some(&public));
+        assert_eq!((after.etag, after.modified), (before.etag, before.modified));
+        assert_eq!(
+            store.head(name, "a.txt").await.unwrap().attrs.acl,
+            Some(public.clone())
+        );
+        assert!(matches!(
+            store.set_acl(name, "missing", None).await,
+            Err(StoreError::NoSuchKey)
+        ));
+    }
+    // A file replaced outside TeiFS loses the old file's ACL: it's private again.
+    fs::write(dir.path().join("folder/a.txt"), b"changed outside").unwrap();
+    assert_eq!(store.head("folder", "a.txt").await.unwrap().attrs.acl, None);
+    assert_eq!(
+        ObjectOwnership::parse("ObjectWriter"),
+        Some(ObjectOwnership::ObjectWriter)
+    );
+    assert_eq!(ObjectOwnership::parse("objectwriter"), None);
+    assert!(!ObjectOwnership::default().acls_enabled());
+}
+
+#[tokio::test]
+async fn ownership_and_bucket_acls_guard_each_other() {
+    let (_dir, store) = drive();
+    let public = Acl {
+        grants: vec![AclGrant {
+            grantee: Grantee::AllUsers,
+            permission: Permission::Read,
+        }],
+    };
+    store
+        .create_bucket("enforced", Layout::Object)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.set_bucket_acl("enforced", Some(Acl::private())).await,
+        Err(StoreError::AclsDisabled)
+    ));
+    // S3's defaults before April 2023: no ownership setting (ACLs on), no Block Public
+    // Access.
+    let options = NewBucket {
+        ownership: None,
+        block_public_access: false,
+        acl: Some(public),
+    };
+    store
+        .create_bucket_with("writer", Layout::Folder, options)
+        .await
+        .unwrap();
+    let enforce = Some(ObjectOwnership::BucketOwnerEnforced);
+    assert!(matches!(
+        store.set_bucket_ownership("writer", enforce).await,
+        Err(StoreError::AclGrantsOthers)
+    ));
+    // Refused changes change nothing; another setting that keeps ACLs is fine.
+    let access = store.bucket_access("writer").await.unwrap();
+    assert_eq!((access.ownership, access.public_access_block), (None, None));
+    let writer = Some(ObjectOwnership::ObjectWriter);
+    store.set_bucket_ownership("writer", writer).await.unwrap();
+    store
+        .set_bucket_acl("writer", Some(Acl::private()))
+        .await
+        .unwrap();
+    store.set_bucket_ownership("writer", enforce).await.unwrap();
+    assert!(matches!(
+        store.set_bucket_acl("missing", None).await,
+        Err(StoreError::NoSuchBucket)
+    ));
+}
+
+#[tokio::test]
+async fn copies_never_take_the_source_acl() {
+    let (_dir, store) = drive();
+    let acl = Some(Acl::private());
+    for (name, layout) in [("objects", Layout::Object), ("folder", Layout::Folder)] {
+        store.create_bucket(name, layout).await.unwrap();
+        store
+            .put_bytes(name, "src", b"hello", ObjectAttrs::default())
+            .await
+            .unwrap();
+        store.set_acl(name, "src", acl.clone()).await.unwrap();
+    }
+    for (from, to) in [
+        ("objects", "objects"),
+        ("folder", "folder"),
+        ("objects", "folder"),
+        ("folder", "objects"),
+    ] {
+        let copy = store
+            .copy((from, "src"), (to, "copy"), None, Precondition::default())
+            .await
+            .unwrap();
+        assert_eq!(copy.attrs.acl, None, "{from} to {to}");
+        let named = ObjectAttrs {
+            acl: acl.clone(),
+            ..ObjectAttrs::default()
+        };
+        let copy = store
+            .copy(
+                (from, "src"),
+                (to, "named"),
+                Some(named),
+                Precondition::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(copy.attrs.acl, acl, "{from} to {to}");
     }
 }
 

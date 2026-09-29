@@ -12,13 +12,15 @@ use s3s::{
     s3_error,
 };
 use teifs_store::{
-    After, BucketEncryption, CustomerKey, DefaultEncryption, Encryption, Layout, ListQuery, Match,
-    ObjectAttrs, ObjectInfo, Precondition, SseInfo, SseMode, Staged, Store, Upload,
+    Acl, After, BucketEncryption, CustomerKey, DefaultEncryption, Encryption, Layout, ListQuery,
+    Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
+    SseMode, Staged, Store, Upload,
 };
 use tokio_util::io::ReaderStream;
 
 use crate::{
     access,
+    acl::{self, AclHeaders, acl_headers},
     bucket_access::{self, Rules},
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
@@ -38,7 +40,6 @@ const MAX_DELETE: usize = 1000;
 /// Read buffer for object bodies.
 const READ_CHUNK: usize = 256 * 1024;
 /// Who owns every bucket (a drive has one owner).
-const OWNER: &str = "teifs";
 /// Chooses the layout of a bucket being created (`object` or `folder`); without it, the
 /// server's default applies.
 pub const LAYOUT_HEADER: &str = "x-teifs-bucket-layout";
@@ -55,23 +56,48 @@ pub struct Drive {
     plain_http_is_secure: bool,
     /// The buckets' policies and Block Public Access settings, as requests read them.
     rules: Arc<Rules>,
+    /// New buckets start as S3's did before April 2023: ACLs enabled, no Block Public
+    /// Access.
+    legacy_bucket_defaults: bool,
 }
 
 impl Drive {
     /// Serves `store`; buckets created without choosing get `default_layout`.
     #[must_use]
-    pub fn new(store: Store, default_layout: Layout, plain_http_is_secure: bool) -> Self {
+    pub fn new(
+        store: Store,
+        default_layout: Layout,
+        plain_http_is_secure: bool,
+        legacy_bucket_defaults: bool,
+    ) -> Self {
         Self {
             rules: Arc::new(Rules::new(store.clone())),
             store,
             default_layout,
             plain_http_is_secure,
+            legacy_bucket_defaults,
         }
     }
 
     /// The rules requests are decided with, shared with [`crate::access::Access`].
     pub(crate) fn rules(&self) -> Arc<Rules> {
         Arc::clone(&self.rules)
+    }
+
+    /// The ACL an object write asks for, checked against the bucket's Object Ownership
+    /// and Block Public Access; none when it asks for none.
+    async fn object_write_acl(
+        &self,
+        bucket: &str,
+        headers: AclHeaders<'_>,
+    ) -> S3Result<Option<Acl>> {
+        let requested = acl::requested(&headers, false)?;
+        if requested == acl::Requested::Nothing {
+            return Ok(None);
+        }
+        self.store.head_bucket(bucket).await.s3()?;
+        let rules = self.rules.of(bucket).await?;
+        acl::for_object_write(requested, rules.ownership, rules.block)
     }
 
     /// Reads an object. As in S3, a part number the object doesn't have is reported
@@ -240,13 +266,6 @@ impl Drive {
     }
 }
 
-fn owner() -> dto::Owner {
-    dto::Owner {
-        display_name: Some(OWNER.to_owned()),
-        id: Some(OWNER.to_owned()),
-    }
-}
-
 /// An object's encryption as S3 reports it, with the SSE-C key's MD5 the request sent.
 fn with_customer_md5(info: Option<SseInfo>, md5: Option<String>) -> Option<SseInfo> {
     info.map(|mut info| {
@@ -259,6 +278,13 @@ fn with_customer_md5(info: Option<SseInfo>, md5: Option<String>) -> Option<SseIn
 
 /// Checks a request's `versionId`. Without versioning, an object's only version is
 /// `null` (the current one); any other id is invalid, as S3 answers.
+fn initiator() -> dto::Initiator {
+    dto::Initiator {
+        display_name: Some(OWNER_ID.to_owned()),
+        id: Some(OWNER_ID.to_owned()),
+    }
+}
+
 fn check_version(version_id: Option<&str>) -> S3Result<()> {
     match version_id {
         None | Some(NULL_VERSION) => Ok(()),
@@ -427,6 +453,7 @@ impl NewAttrs {
             checksums,
             checksum_type: None,
             tags: BTreeMap::new(),
+            acl: None,
         }
     }
 }
@@ -624,17 +651,18 @@ fn object_parts(
 }
 
 /// The attributes a copy gets when the request replaces its metadata or its tags (each
-/// has its own directive); `None` keeps the source's.
+/// has its own directive) or gives it an ACL; `None` keeps the source's, without its ACL.
 fn copy_attrs(
     input: &mut dto::CopyObjectInput,
     source: &ObjectAttrs,
     replace_metadata: bool,
+    acl: Option<Acl>,
 ) -> S3Result<Option<ObjectAttrs>> {
     let replace_tags = input
         .tagging_directive
         .as_ref()
         .is_some_and(|d| d.as_str() == dto::TaggingDirective::REPLACE);
-    if !replace_metadata && !replace_tags {
+    if !replace_metadata && !replace_tags && acl.is_none() {
         return Ok(None);
     }
     let mut attrs = if replace_metadata {
@@ -647,6 +675,7 @@ fn copy_attrs(
     } else {
         source.tags.clone()
     };
+    attrs.acl = acl;
     Ok(Some(attrs))
 }
 
@@ -805,7 +834,7 @@ impl S3 for Drive {
             .collect();
         Ok(S3Response::new(dto::ListBucketsOutput {
             buckets: Some(buckets),
-            owner: Some(owner()),
+            owner: Some(acl::owner()),
             continuation_token,
             prefix: input.prefix,
         }))
@@ -826,11 +855,30 @@ impl S3 for Drive {
                 ));
             }
         };
+        let input = &req.input;
+        let ownership = match &input.object_ownership {
+            None if self.legacy_bucket_defaults => None,
+            None => Some(ObjectOwnership::default()),
+            Some(value) => Some(ObjectOwnership::parse(value.as_str()).ok_or_else(|| {
+                s3_error!(
+                    InvalidArgument,
+                    "`{}` isn't an Object Ownership setting",
+                    value.as_str()
+                )
+            })?),
+        };
+        let new = NewBucket {
+            ownership,
+            block_public_access: !self.legacy_bucket_defaults,
+            acl: None,
+        };
+        let requested = acl::requested(&acl_headers!(input, bucket), true)?;
+        let acl = acl::for_new_bucket(requested, &new)?;
         self.store
-            .create_bucket(&req.input.bucket, layout)
+            .create_bucket_with(&input.bucket, layout, NewBucket { acl, ..new })
             .await
             .s3()?;
-        self.rules.forget(&req.input.bucket);
+        self.rules.forget(&input.bucket);
         Ok(S3Response::new(dto::CreateBucketOutput {
             location: Some(format!("/{}", req.input.bucket)),
             ..Default::default()
@@ -1042,6 +1090,9 @@ impl S3 for Drive {
             .await?;
         self.check_write(&input.bucket, Some(&input.key), input.content_length)
             .await?;
+        let acl = self
+            .object_write_acl(&input.bucket, acl_headers!(input))
+            .await?;
         let staged = self
             .store
             .stage_for(&input.bucket, &encryption)
@@ -1062,6 +1113,7 @@ impl S3 for Drive {
         }
         let mut attrs = new_attrs!(input).into_attrs(computed.clone());
         attrs.tags = tags;
+        attrs.acl = acl;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
@@ -1512,6 +1564,129 @@ impl S3 for Drive {
         ))
     }
 
+    async fn get_bucket_ownership_controls(
+        &self,
+        req: S3Request<dto::GetBucketOwnershipControlsInput>,
+    ) -> S3Result<S3Response<dto::GetBucketOwnershipControlsOutput>> {
+        let access = self.store.bucket_access(&req.input.bucket).await.s3()?;
+        let ownership = access.ownership.ok_or_else(acl::no_ownership_controls)?;
+        Ok(S3Response::new(dto::GetBucketOwnershipControlsOutput {
+            ownership_controls: Some(dto::OwnershipControls {
+                rules: vec![dto::OwnershipControlsRule {
+                    object_ownership: dto::ObjectOwnership::from(ownership.name().to_owned()),
+                }],
+            }),
+        }))
+    }
+
+    async fn put_bucket_ownership_controls(
+        &self,
+        req: S3Request<dto::PutBucketOwnershipControlsInput>,
+    ) -> S3Result<S3Response<dto::PutBucketOwnershipControlsOutput>> {
+        let input = req.input;
+        let ownership = match input.ownership_controls.rules.as_slice() {
+            [rule] => ObjectOwnership::parse(rule.object_ownership.as_str()),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            s3_error!(
+                MalformedXML,
+                "OwnershipControls needs exactly one rule, with BucketOwnerEnforced, \
+                 BucketOwnerPreferred or ObjectWriter"
+            )
+        })?;
+        self.store
+            .set_bucket_ownership(&input.bucket, Some(ownership))
+            .await
+            .s3()?;
+        self.rules.forget(&input.bucket);
+        Ok(S3Response::new(
+            dto::PutBucketOwnershipControlsOutput::default(),
+        ))
+    }
+
+    async fn delete_bucket_ownership_controls(
+        &self,
+        req: S3Request<dto::DeleteBucketOwnershipControlsInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketOwnershipControlsOutput>> {
+        self.store
+            .set_bucket_ownership(&req.input.bucket, None)
+            .await
+            .s3()?;
+        self.rules.forget(&req.input.bucket);
+        Ok(S3Response::new(
+            dto::DeleteBucketOwnershipControlsOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_acl(
+        &self,
+        req: S3Request<dto::GetBucketAclInput>,
+    ) -> S3Result<S3Response<dto::GetBucketAclOutput>> {
+        self.store.head_bucket(&req.input.bucket).await.s3()?;
+        let rules = self.rules.of(&req.input.bucket).await?;
+        let acl = acl::effective(rules.ownership, rules.acl.clone());
+        Ok(S3Response::new(dto::GetBucketAclOutput {
+            grants: Some(acl::to_grants(&acl)),
+            owner: Some(acl::owner()),
+        }))
+    }
+
+    async fn put_bucket_acl(
+        &self,
+        req: S3Request<dto::PutBucketAclInput>,
+    ) -> S3Result<S3Response<dto::PutBucketAclOutput>> {
+        let mut input = req.input;
+        let headers = acl_headers!(input, bucket);
+        let requested = acl::put_request(&headers, input.access_control_policy.take(), true)?;
+        self.store.head_bucket(&input.bucket).await.s3()?;
+        let rules = self.rules.of(&input.bucket).await?;
+        let acl = acl::for_acl_write(requested, rules.ownership, rules.block)?;
+        self.store
+            .set_bucket_acl(&input.bucket, Some(acl))
+            .await
+            .s3()?;
+        self.rules.forget(&input.bucket);
+        Ok(S3Response::new(dto::PutBucketAclOutput::default()))
+    }
+
+    async fn get_object_acl(
+        &self,
+        req: S3Request<dto::GetObjectAclInput>,
+    ) -> S3Result<S3Response<dto::GetObjectAclOutput>> {
+        let input = req.input;
+        check_version(input.version_id.as_deref())?;
+        let info = self.store.head(&input.bucket, &input.key).await.s3()?;
+        let rules = self.rules.of(&input.bucket).await?;
+        let acl = acl::effective(rules.ownership, info.attrs.acl);
+        Ok(S3Response::new(dto::GetObjectAclOutput {
+            grants: Some(acl::to_grants(&acl)),
+            owner: Some(acl::owner()),
+            ..Default::default()
+        }))
+    }
+
+    async fn put_object_acl(
+        &self,
+        req: S3Request<dto::PutObjectAclInput>,
+    ) -> S3Result<S3Response<dto::PutObjectAclOutput>> {
+        let mut input = req.input;
+        check_version(input.version_id.as_deref())?;
+        let headers = AclHeaders {
+            write: input.grant_write.as_deref(),
+            ..acl_headers!(input)
+        };
+        let requested = acl::put_request(&headers, input.access_control_policy.take(), false)?;
+        self.store.head(&input.bucket, &input.key).await.s3()?;
+        let rules = self.rules.of(&input.bucket).await?;
+        let acl = acl::for_acl_write(requested, rules.ownership, rules.block)?;
+        self.store
+            .set_acl(&input.bucket, &input.key, Some(acl))
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutObjectAclOutput::default()))
+    }
+
     async fn get_bucket_tagging(
         &self,
         req: S3Request<dto::GetBucketTaggingInput>,
@@ -1717,7 +1892,10 @@ impl S3 for Drive {
                 "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes."
             ));
         }
-        let attrs = copy_attrs(&mut input, &source.attrs, replace)?;
+        let acl = self
+            .object_write_acl(&input.bucket, acl_headers!(input))
+            .await?;
+        let attrs = copy_attrs(&mut input, &source.attrs, replace, acl)?;
         self.check_write(
             &input.bucket,
             Some(&input.key),
@@ -1802,7 +1980,7 @@ impl S3 for Drive {
                 storage_class: Some(ObjectStorageClass::from_static(
                     ObjectStorageClass::STANDARD,
                 )),
-                owner: fetch_owner.then(owner),
+                owner: fetch_owner.then(acl::owner),
                 ..Default::default()
             })
             .collect();
@@ -1879,7 +2057,7 @@ impl S3 for Drive {
                 storage_class: Some(ObjectStorageClass::from_static(
                     ObjectStorageClass::STANDARD,
                 )),
-                owner: show_owner.then(owner),
+                owner: show_owner.then(acl::owner),
                 ..Default::default()
             })
             .collect();
@@ -1970,7 +2148,7 @@ impl S3 for Drive {
                 storage_class: Some(dto::ObjectVersionStorageClass::from_static(
                     dto::ObjectVersionStorageClass::STANDARD,
                 )),
-                owner: Some(owner()),
+                owner: Some(acl::owner()),
                 ..Default::default()
             })
             .collect();
@@ -2006,6 +2184,9 @@ impl S3 for Drive {
         let mut input = req.input;
         let mut attrs = new_attrs!(input).into_attrs(BTreeMap::new());
         attrs.tags = header_tags(input.tagging.as_deref())?;
+        attrs.acl = self
+            .object_write_acl(&input.bucket, acl_headers!(input))
+            .await?;
         let checksum = checksums::for_upload(
             input
                 .checksum_algorithm
@@ -2258,11 +2439,8 @@ impl S3 for Drive {
             part_number_marker: input.part_number_marker,
             next_part_number_marker: truncated.then_some(next).flatten(),
             is_truncated: Some(truncated),
-            owner: Some(owner()),
-            initiator: Some(dto::Initiator {
-                display_name: Some(OWNER.to_owned()),
-                id: Some(OWNER.to_owned()),
-            }),
+            owner: Some(acl::owner()),
+            initiator: Some(initiator()),
             storage_class: Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD)),
             checksum_algorithm,
             checksum_type,
@@ -2300,11 +2478,8 @@ impl S3 for Drive {
                     checksum_algorithm,
                     checksum_type,
                     initiated: Some(millis(u.created_ms)),
-                    owner: Some(owner()),
-                    initiator: Some(dto::Initiator {
-                        display_name: Some(OWNER.to_owned()),
-                        id: Some(OWNER.to_owned()),
-                    }),
+                    owner: Some(acl::owner()),
+                    initiator: Some(initiator()),
                     storage_class: Some(dto::StorageClass::from_static(
                         dto::StorageClass::STANDARD,
                     )),

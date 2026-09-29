@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use teifs_policy::{Context, Policies, Policy, Principal, Request, evaluate};
+use teifs_policy::{Context, Decision, Policies, Policy, Principal, Request, evaluate};
 use zeroize::Zeroizing;
 
 use crate::state::State;
@@ -80,8 +80,22 @@ impl Identity {
         resource: &str,
         resource_policy: Option<&Policy>,
     ) -> bool {
+        self.decide(context, action, resource, resource_policy)
+            .is_allowed()
+    }
+
+    /// The decision [`Self::allows_with`] makes, which tells an explicit `Deny` from
+    /// nothing allowing the request (which an ACL may still allow).
+    #[must_use]
+    pub fn decide(
+        &self,
+        context: &Context,
+        action: &str,
+        resource: &str,
+        resource_policy: Option<&Policy>,
+    ) -> Decision {
         if self.root && resource_policy.is_none() {
-            return true;
+            return Decision::Allow;
         }
         let policies: Vec<&Policy> = self.policies.iter().map(Arc::as_ref).collect();
         evaluate(
@@ -97,7 +111,26 @@ impl Identity {
                 context,
             },
         )
-        .is_allowed()
+    }
+
+    /// Whether the permissions boundary, if there is one, allows the request: what a
+    /// grant to everyone (a public ACL) still needs, as a `"Principal": "*"` grant does.
+    #[must_use]
+    pub fn within_boundary(&self, context: &Context, action: &str, resource: &str) -> bool {
+        self.boundary().is_none_or(|boundary| {
+            evaluate(
+                &Policies {
+                    identity: &[boundary],
+                    ..Policies::default()
+                },
+                &Request {
+                    action,
+                    resource,
+                    context,
+                },
+            )
+            .is_allowed()
+        })
     }
 }
 

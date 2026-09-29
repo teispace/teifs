@@ -498,14 +498,15 @@ impl Inner {
 }
 
 impl Inner {
-    /// Replaces the tags of the folder-bucket object `key`. The file isn't touched, so
-    /// its modification time and ETag stay (a file changed outside TeiFS gets its MD5).
-    pub(crate) fn set_folder_tags(
+    /// Changes the attributes of the folder-bucket object `key`. The file isn't touched,
+    /// so its modification time and ETag stay; a file changed outside TeiFS starts from
+    /// empty attributes (its tags and ACL were the old file's) and gets its MD5.
+    pub(crate) fn change_folder_attrs(
         &self,
         bucket: &str,
         dir: &Path,
         key: &ObjectKey,
-        tags: std::collections::BTreeMap<String, String>,
+        change: impl FnOnce(&mut ObjectAttrs),
     ) -> Result<ObjectInfo> {
         let (path, meta) = match Inner::find(dir, key)? {
             Found::File(path, meta) | Found::Folder(path, meta) => (path, meta),
@@ -515,7 +516,7 @@ impl Inner {
         let stamp = Stamp::of(&meta);
         let row = match conn.get(bucket, key.as_str())? {
             Some(mut row) if row.stamp.matches(&stamp) => {
-                row.attrs.tags = tags;
+                change(&mut row.attrs);
                 row
             }
             _ => Row {
@@ -525,9 +526,10 @@ impl Inner {
                 } else {
                     teifs_types::hex(&md5_file(&path)?)
                 },
-                attrs: ObjectAttrs {
-                    tags,
-                    ..ObjectAttrs::default()
+                attrs: {
+                    let mut attrs = ObjectAttrs::default();
+                    change(&mut attrs);
+                    attrs
                 },
                 parts: None,
             },

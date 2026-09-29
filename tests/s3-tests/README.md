@@ -35,6 +35,13 @@ to `implemented.txt`. Commit the lists with the feature, and update
 `docs/COMPATIBILITY.md`. A test never moves back out of `implemented.txt` without a
 reason in the pull request.
 
+## The suite's bucket defaults
+
+The suite was written for S3 before AWS's 2023 and 2026 defaults: it makes buckets with
+public ACLs and uploads with SSE-C keys. The server it runs therefore starts with
+`--legacy-bucket-defaults` (new buckets have ACLs enabled and no Block Public Access)
+and `--allow-sse-c`. TeiFS's own tests prove the current AWS defaults.
+
 ## One set of credentials
 
 Until TeiFS has users, every user the suite knows (main, alt, tenant, IAM) uses the same

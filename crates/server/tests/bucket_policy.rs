@@ -6,24 +6,12 @@
     reason = "test helpers fail the test on any error"
 )]
 
-use aws_sdk_s3::{
-    Client, error::ProvideErrorMetadata, primitives::ByteStream,
-    types::PublicAccessBlockConfiguration,
-};
+use aws_sdk_s3::{Client, primitives::ByteStream, types::PublicAccessBlockConfiguration};
 use reqwest::Method;
-use teifs_iam::Owner;
 
 mod common;
 
-use common::{SECRET_KEY, Server, client, client_as, start};
-
-/// The error code of a failed SDK call, or `ok`.
-fn code<T, E: ProvideErrorMetadata>(result: Result<T, E>) -> String {
-    match result {
-        Ok(_) => "ok".into(),
-        Err(err) => err.code().unwrap_or("?").to_owned(),
-    }
-}
+use common::{SECRET_KEY, Server, anonymous, client, code, start, user};
 
 fn statement(effect: &str, principal: &str, actions: &str, resources: &str) -> String {
     format!(
@@ -46,19 +34,6 @@ fn public_read() -> String {
         r#"["s3:GetObject","s3:ListBucket"]"#,
         r#"["arn:aws:s3:::photos","arn:aws:s3:::photos/*"]"#,
     )])
-}
-
-/// A user with an optional inline policy, and a client signing as them.
-fn user(server: &Server, name: &str, identity_policy: Option<&str>) -> Client {
-    server.iam.create_user(name, None, &[], None).unwrap();
-    if let Some(identity_policy) = identity_policy {
-        server
-            .iam
-            .put_inline(Owner::User(name), "policy", identity_policy)
-            .unwrap();
-    }
-    let key = server.iam.create_access_key(name).unwrap();
-    client_as(server, &key.info.id, &key.secret)
 }
 
 async fn put(s3: &Client, bucket: &str, key: &str) -> String {
@@ -107,18 +82,6 @@ async fn put_block(root: &Client, restrict: bool) {
         .send()
         .await
         .unwrap();
-}
-
-/// The status of an unsigned request.
-async fn anonymous(server: &Server, method: Method, path: &str) -> u16 {
-    reqwest::Client::new()
-        .request(method, format!("{}{path}", server.endpoint))
-        .header("x-amz-object-attributes", "ETag")
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
 }
 
 #[tokio::test]
@@ -526,32 +489,4 @@ async fn a_policy_grants_users_it_names() {
         .await
         .unwrap();
     assert_eq!(deleted.errors()[0].code(), Some("AccessDenied"));
-}
-
-#[tokio::test]
-async fn a_public_acl_makes_nothing_public() {
-    let server = start().await;
-    let root = setup(&server).await;
-    // TeiFS keeps no ACLs, so it accepts and ignores them, as MinIO does: a public one
-    // opens nothing, whatever Block Public Access says.
-    for block in [true, false] {
-        if !block {
-            root.delete_public_access_block()
-                .bucket("photos")
-                .send()
-                .await
-                .unwrap();
-        }
-        let public = root
-            .put_object()
-            .bucket("photos")
-            .key("c.jpg")
-            .acl(aws_sdk_s3::types::ObjectCannedAcl::PublicReadWrite)
-            .body(ByteStream::from_static(b"data"))
-            .send()
-            .await;
-        assert_eq!(code(public), "ok");
-        assert_eq!(anonymous(&server, Method::GET, "/photos/c.jpg").await, 403);
-        assert_eq!(anonymous(&server, Method::PUT, "/photos/d.jpg").await, 403);
-    }
 }

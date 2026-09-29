@@ -18,6 +18,13 @@ behaviour; the on-disk format is always upgraded automatically.
   user's included (who can always fix the policy). Unsigned requests get what a policy
   grants everyone, and nothing else. Block Public Access per bucket
   (Put/Get/DeletePublicAccessBlock), with all four settings on for every new bucket.
+- Object Ownership and ACLs, as AWS has them: Put/Get/DeleteBucketOwnershipControls,
+  bucket and object ACLs (Get/PutBucketAcl, Get/PutObjectAcl) and ACL headers on
+  CreateBucket, PutObject, CopyObject and CreateMultipartUpload. New buckets disable
+  ACLs, as on AWS, so a write with a public ACL such as `public-read` now fails with
+  `AccessControlListNotSupported` instead of being accepted and ignored; enable ACLs on a
+  bucket with PutBucketOwnershipControls, or start the server with
+  `--legacy-bucket-defaults` to make new buckets as S3 did before April 2023.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.

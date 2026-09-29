@@ -90,6 +90,10 @@ enum Command {
 /// `teifs serve`'s settings. Each can also be set in a settings file (`--config`),
 /// under the flag's name; flags and environment variables win over it.
 #[derive(clap::Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent command-line flag"
+)]
 pub(crate) struct ServeArgs {
     /// A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`).
     #[arg(long, env = "TEIFS_CONFIG")]
@@ -139,6 +143,12 @@ pub(crate) struct ServeArgs {
     /// buckets; prefer configuring clients for Signature Version 4.
     #[arg(long, env = "TEIFS_ALLOW_SIGV2")]
     allow_sigv2: bool,
+    /// Make new buckets as S3 did before April 2023: ACLs enabled and no Block Public
+    /// Access, for applications that upload with public ACLs such as `public-read`.
+    /// Without it, new buckets start as AWS's do now: ACLs disabled, public access
+    /// blocked. Either way each bucket's settings can be changed.
+    #[arg(long, env = "TEIFS_LEGACY_BUCKET_DEFAULTS")]
+    legacy_bucket_defaults: bool,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -463,6 +473,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         }),
         allow_sse_c: args.allow_sse_c,
         allow_sig_v2: args.allow_sigv2,
+        legacy_bucket_defaults: args.legacy_bucket_defaults,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,

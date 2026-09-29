@@ -38,6 +38,8 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
+        StoreError::AclsDisabled => crate::acl::not_supported(),
+        StoreError::AclGrantsOthers => crate::acl::invalid_with_ownership(),
         StoreError::CustomerKeyRequired => s3_error!(
             InvalidRequest,
             "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."

@@ -107,12 +107,23 @@ a `Caller` in the request's extensions for what operations decide themselves: ea
 a `DeleteObjects`, optional details (tag counts, owners), who owns a multipart upload, and
 whether a missing key may be reported as missing. Unsigned requests are decided the same
 way as `Identity::anonymous()`. Each permission is decided with the bucket's rules
-(`bucket_access.rs`): the bucket policy, parsed, whether it's public, and its Block
-Public Access settings, read from the bucket's settings in `system.db` once and cached
-until the drive changes them (a generation counter keeps a read that raced a change
-from being cached; buckets that don't exist aren't cached). `decide` applies
-`RestrictPublicBuckets` and the root user's policy rescue, then
-`Identity::allows_with`. Root requests on buckets without a policy skip all of it.
+(`bucket_access.rs`): the bucket policy, parsed, whether it's public, its Block Public
+Access settings, its Object Ownership and its ACL, read from the bucket's settings in
+`system.db` once and cached until the drive changes them (a generation counter keeps a
+read that raced a change from being cached; buckets that don't exist aren't cached).
+`decide` applies `RestrictPublicBuckets` and the root user's policy rescue, then
+`Identity::decide`. What no policy decides (an implicit deny, never an explicit one) an
+ACL may still allow, where the bucket's ACLs apply (Object Ownership enables them and
+`IgnorePublicAcls` is off): the bucket's ACL for bucket permissions, the object's (read
+from its attributes only then) for object permissions, as AWS maps ACL permissions to
+actions, and never past the caller's permissions boundary. Root requests on buckets
+without a policy skip all of it.
+
+ACLs (`acl.rs`) are read from canned ACLs, `x-amz-grant-*` headers or an
+`AccessControlPolicy` body into `teifs_types::Acl`, whose grantees are the owner and
+S3's groups (a drive is one account). A bucket's ACL and Object Ownership live in its
+settings, which the store changes atomically so ACLs can't be disabled while the
+bucket's ACL grants others; an object's ACL is one of its attributes, never copied.
 
 IAM is managed with AWS's own API: `teifs-iam`'s `api` module speaks the Query protocol
 (a form body, answers in XML) for 50 actions and STS's `GetCallerIdentity`. Actions are

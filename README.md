@@ -141,7 +141,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -170,6 +170,7 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Auth | Signature V4 (headers and presigned URLs); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS `GetCallerIdentity` on the S3 endpoint (`aws iam --endpoint-url …`) |
 | Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list |
+| Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
@@ -177,7 +178,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** ACLs, account-level Block Public Access, roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
+**Not yet:** account-level Block Public Access, roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

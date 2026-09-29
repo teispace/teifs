@@ -63,6 +63,9 @@ pub struct Config {
     pub limits: Limits,
     /// Accept Signature Version 2 (deprecated; off by default, as on AWS).
     pub allow_sig_v2: bool,
+    /// New buckets start with ACLs enabled and no Block Public Access, as S3's did before
+    /// April 2023 (off by default: AWS's defaults now).
+    pub legacy_bucket_defaults: bool,
 }
 
 /// A Vault or OpenBao transit engine.
@@ -273,6 +276,7 @@ impl Server {
                     .unwrap_or_else(|| config.listen.ip().is_loopback()),
                 body_timeout: Some(config.limits.body_timeout),
                 allow_sig_v2: config.allow_sig_v2,
+                legacy_bucket_defaults: config.legacy_bucket_defaults,
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;

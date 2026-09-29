@@ -42,6 +42,9 @@ pub struct ObjectAttrs {
     /// Tags, by key.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
+    /// The object's ACL; none is private (only the owner).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl: Option<crate::Acl>,
 }
 
 /// What an object's checksum covers.

@@ -2,7 +2,8 @@
 //! signed at all (anonymous), and before the operation runs, [`Access`] decides every
 //! permission the operation needs (`teifs_policy::authorizations`) against the caller's
 //! policies and the bucket's policy, under the bucket's Block Public Access settings
-//! ([`BucketRules`]). The decision reads only what TeiFS knows about the request: its
+//! ([`BucketRules`]). What no policy allows or denies, a bucket's or an object's ACL may
+//! still allow, where the bucket's Object Ownership enables ACLs. The decision reads only what TeiFS knows about the request: its
 //! operation, the bucket and key s3s parsed, the headers and query the condition keys
 //! name, and the connection ([`Client`]).
 //!
@@ -22,13 +23,16 @@ use s3s::{
 };
 use teifs_iam::{Iam, Identity};
 use teifs_policy::{
-    Authorization, Context, Date, Facts, Number, PrincipalKind, S3_ACCOUNT_RESOURCE, S3Key,
-    TagKind, Target, bucket_arn, object_arn,
+    Authorization, Context, Date, Decision, Facts, Number, PrincipalKind, S3_ACCOUNT_RESOURCE,
+    S3Key, TagKind, Target, bucket_arn, object_arn,
 };
+use teifs_store::{Store, StoreError};
 
 use crate::{
+    acl::{self, AclOf},
     bucket_access::{BucketRules, Rules},
     drive::REGION,
+    errors::from_store,
     tagging,
 };
 
@@ -59,19 +63,56 @@ impl S3Auth for Auth {
 pub(crate) struct Access {
     iam: Arc<Iam>,
     rules: Arc<Rules>,
+    /// Where objects' ACLs are read from.
+    store: Store,
     account: Arc<str>,
     anonymous: Arc<Identity>,
 }
 
 impl Access {
-    pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>) -> Self {
+    pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>, store: Store) -> Self {
         let account = iam.account().into();
         Self {
             iam,
             rules,
+            store,
             account,
             anonymous: Arc::new(Identity::anonymous()),
         }
+    }
+
+    /// Whether `identity` may do `action` on `arn`: [`allows`], then the ACL of the
+    /// object `(bucket, key)` the request is on, if any.
+    async fn permits(
+        &self,
+        identity: &Identity,
+        context: &Context,
+        (action, arn): (&str, &str),
+        rules: Option<&BucketRules>,
+        object: Option<(&str, &str)>,
+    ) -> S3Result<bool> {
+        let decision = decide(identity, context, action, arn, rules);
+        let (Decision::ImplicitDeny, Some(rules)) = (decision, rules) else {
+            return Ok(decision.is_allowed());
+        };
+        if bucket_acl_allows(identity, context, (action, arn), rules) {
+            return Ok(true);
+        }
+        // The object's ACL, read only when the bucket's ACLs apply.
+        let (Some((AclOf::Object, permission)), Some((bucket, key))) =
+            (acl_for(action, rules), object)
+        else {
+            return Ok(false);
+        };
+        let acl = match self.store.head(bucket, key).await {
+            Ok(info) => info.attrs.acl,
+            Err(StoreError::NoSuchKey | StoreError::NoSuchBucket) => None,
+            Err(err) => return Err(from_store(err)),
+        };
+        Ok(
+            acl.is_some_and(|acl| acl.grants(permission, is_signed(identity)))
+                && identity.within_boundary(context, action, arn),
+        )
     }
 }
 
@@ -83,27 +124,70 @@ const OWNER_ONLY: [&str; 3] = [
     "s3:DeleteBucketPolicy",
 ];
 
-/// Whether `identity` may do `action` on `resource`, which is in the bucket `rules`
-/// describe (`None`: not in a bucket, or one that doesn't exist).
+/// What the policies say about `identity` doing `action` on `resource`, which is in the
+/// bucket `rules` describe (`None`: not in a bucket, or one that doesn't exist).
 fn decide(
     identity: &Identity,
     context: &Context,
     action: &str,
     resource: &str,
     rules: Option<&BucketRules>,
-) -> bool {
+) -> Decision {
     let Some(rules) = rules else {
-        return identity.allows(context, action, resource);
+        return identity.decide(context, action, resource, None);
     };
-    if identity.principal().kind() == PrincipalKind::Anonymous
-        && (rules.restricted() || OWNER_ONLY.contains(&action))
-    {
-        return false;
+    let anonymous = !is_signed(identity);
+    if OWNER_ONLY.contains(&action) {
+        if identity.is_root() {
+            return Decision::Allow;
+        }
+        if anonymous {
+            return Decision::ImplicitDeny;
+        }
     }
-    if identity.is_root() && OWNER_ONLY.contains(&action) {
-        return true;
+    match identity.decide(context, action, resource, rules.policy.as_deref()) {
+        // Only a policy allows an anonymous request, and `RestrictPublicBuckets` takes
+        // that away from a public one; an ACL may still allow it.
+        Decision::Allow if anonymous && rules.restricted() => Decision::ImplicitDeny,
+        decision => decision,
     }
-    identity.allows_with(context, action, resource, rules.policy.as_deref())
+}
+
+fn is_signed(identity: &Identity) -> bool {
+    identity.principal().kind() != PrincipalKind::Anonymous
+}
+
+/// The ACL that could allow `action` in a bucket whose ACLs apply.
+fn acl_for(action: &str, rules: &BucketRules) -> Option<(AclOf, teifs_store::Permission)> {
+    acl::permission_for(action).filter(|_| rules.acls_apply())
+}
+
+/// Whether the bucket's ACL allows an action the policies left undecided.
+fn bucket_acl_allows(
+    identity: &Identity,
+    context: &Context,
+    (action, arn): (&str, &str),
+    rules: &BucketRules,
+) -> bool {
+    matches!(acl_for(action, rules), Some((AclOf::Bucket, permission))
+        if rules.acl.as_ref().is_some_and(|acl| acl.grants(permission, is_signed(identity))))
+        && identity.within_boundary(context, action, arn)
+}
+
+/// [`decide`], then the bucket's ACL: for what needs no object read.
+fn allows(
+    identity: &Identity,
+    context: &Context,
+    action: &str,
+    resource: &str,
+    rules: Option<&BucketRules>,
+) -> bool {
+    match decide(identity, context, action, resource, rules) {
+        Decision::Allow => true,
+        Decision::ExplicitDeny => false,
+        Decision::ImplicitDeny => rules
+            .is_some_and(|rules| bucket_acl_allows(identity, context, (action, resource), rules)),
+    }
 }
 
 /// Who a request is from, for the operations: in the request's extensions whenever IAM
@@ -133,7 +217,7 @@ impl Caller {
     /// Whether the caller may do `action` on `resource` (for operations that name
     /// several objects, such as `DeleteObjects`).
     pub(crate) fn allows(&self, action: &str, resource: &str) -> bool {
-        decide(
+        allows(
             &self.identity,
             &self.context,
             action,
@@ -235,7 +319,19 @@ impl S3Access for Access {
                 };
                 match resource(need, cx.s3_path(), operation, source.as_ref()) {
                     Resource::Arn(arn) => {
-                        if !decide(&identity, &context, need.action, &arn, bucket) {
+                        let object = match (need.target, cx.s3_path()) {
+                            (Target::Source, _) => {
+                                source.as_ref().map(|(b, k, _)| (b.as_str(), k.as_str()))
+                            }
+                            (Target::Object, S3Path::Object { bucket, key }) => {
+                                Some((bucket.as_ref(), key.as_ref()))
+                            }
+                            _ => None,
+                        };
+                        let allowed = self
+                            .permits(&identity, &context, (need.action, &arn), bucket, object)
+                            .await?;
+                        if !allowed {
                             if need.required {
                                 return Err(denied());
                             }

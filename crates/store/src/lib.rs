@@ -42,7 +42,8 @@ pub use jobs::{JobOptions, JobStatus, Jobs};
 pub use list::{After, ListQuery, Listing};
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{
-    BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, PublicAccessBlock,
+    BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
+    PublicAccessBlock,
 };
 pub use sse::Encryption;
 pub use staged::Staged;
@@ -51,7 +52,10 @@ pub use teifs_crypto::{
 };
 pub use teifs_meta::{Layout, Part, Upload};
 use teifs_types::check_folder_bucket;
-pub use teifs_types::{ChecksumType, PartInfo, SseInfo, SseMode, UploadChecksum};
+pub use teifs_types::{
+    Acl, AclGrant, ChecksumType, Grantee, OWNER_ID, PartInfo, Permission, SseInfo, SseMode,
+    UploadChecksum,
+};
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
 use error::not_found_as;
@@ -392,6 +396,17 @@ impl Store {
 
     /// Creates a bucket with the given layout.
     pub async fn create_bucket(&self, name: &str, layout: Layout) -> Result<()> {
+        self.create_bucket_with(name, layout, NewBucket::default())
+            .await
+    }
+
+    /// Creates a bucket with its first settings, recorded with it.
+    pub async fn create_bucket_with(
+        &self,
+        name: &str,
+        layout: Layout,
+        options: NewBucket,
+    ) -> Result<()> {
         match layout {
             Layout::Object => check_bucket(name)?,
             Layout::Folder => {
@@ -430,7 +445,7 @@ impl Store {
                     layout,
                     created_ms: now_ms(),
                 },
-                &settings::new_bucket_config(),
+                &settings::new_bucket_config(options),
             )?;
             Ok(())
         })
@@ -679,17 +694,35 @@ impl Store {
         key: &str,
         tags: std::collections::BTreeMap<String, String>,
     ) -> Result<ObjectInfo> {
+        self.change_attrs(bucket, key, move |attrs| attrs.tags = tags)
+            .await
+    }
+
+    /// Replaces an object's ACL (`None`: private). Its bytes, ETag and modification time
+    /// don't change.
+    pub async fn set_acl(&self, bucket: &str, key: &str, acl: Option<Acl>) -> Result<ObjectInfo> {
+        self.change_attrs(bucket, key, move |attrs| attrs.acl = acl)
+            .await
+    }
+
+    /// Changes an object's attributes in place.
+    async fn change_attrs(
+        &self,
+        bucket: &str,
+        key: &str,
+        change: impl FnOnce(&mut ObjectAttrs) + Send + 'static,
+    ) -> Result<ObjectInfo> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         self.blocking(move |inner| match inner.bucket(&bucket)? {
             Bucket::Folder(name, dir) => {
                 let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
-                inner.set_folder_tags(&name, &dir, &key, tags)
+                inner.change_folder_attrs(&name, &dir, &key, change)
             }
             Bucket::Object(bucket) => {
                 let conn = inner.lock();
                 let mut row =
                     Inner::object_row(&conn, &bucket, &key)?.ok_or(StoreError::NoSuchKey)?;
-                row.attrs.tags = tags;
+                change(&mut row.attrs);
                 conn.set_version_attrs(&bucket.id, &key, &row.attrs, None)?;
                 Ok(objects::to_info(&row))
             }
@@ -905,16 +938,21 @@ impl Store {
 
 /// The attributes a copy gets: `replacement`, or the source's. The source's checksums
 /// carry over when they describe its bytes, which the copy shares; a composite checksum
-/// describes its parts, which a copy doesn't have.
+/// describes its parts, which a copy doesn't have. As on S3, an ACL is never copied: the
+/// copy has the replacement's, or none.
 pub(crate) fn copied_attrs(source: ObjectAttrs, replacement: Option<ObjectAttrs>) -> ObjectAttrs {
     let (checksums, checksum_type) = match source.checksum_type {
         Some(teifs_types::ChecksumType::Composite) => (std::collections::BTreeMap::new(), None),
         _ => (source.checksums.clone(), None),
     };
+    let attrs = replacement.unwrap_or(ObjectAttrs {
+        acl: None,
+        ..source
+    });
     ObjectAttrs {
         checksums,
         checksum_type,
-        ..replacement.unwrap_or(source)
+        ..attrs
     }
 }
 

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout};
-use teifs_types::SseMode;
+use teifs_types::{Acl, SseMode};
 
 use crate::{Bucket, Inner, Store, StoreError, error::Result, now_ms};
 
@@ -22,6 +22,10 @@ struct BucketConfig {
     policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     public_access_block: Option<PublicAccessBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ownership: Option<ObjectOwnership>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acl: Option<Acl>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -104,6 +108,51 @@ impl PublicAccessBlock {
     };
 }
 
+/// S3 Object Ownership: whether a bucket's ACLs are enabled, and who owns objects others
+/// write (in a one-account drive, always the account).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectOwnership {
+    /// ACLs are disabled: they neither grant nor can be set. Every new bucket's.
+    #[default]
+    BucketOwnerEnforced,
+    /// ACLs are enabled; the bucket owner owns objects written with
+    /// `bucket-owner-full-control`.
+    BucketOwnerPreferred,
+    /// ACLs are enabled; the writer owns what it writes. Buckets without the setting.
+    ObjectWriter,
+}
+
+impl ObjectOwnership {
+    /// Every setting, as S3 names them.
+    pub const ALL: [Self; 3] = [
+        Self::BucketOwnerEnforced,
+        Self::BucketOwnerPreferred,
+        Self::ObjectWriter,
+    ];
+
+    /// S3's name for it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BucketOwnerEnforced => "BucketOwnerEnforced",
+            Self::BucketOwnerPreferred => "BucketOwnerPreferred",
+            Self::ObjectWriter => "ObjectWriter",
+        }
+    }
+
+    /// The setting S3 names so.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|o| o.name() == name)
+    }
+
+    /// Whether ACLs are in force.
+    #[must_use]
+    pub const fn acls_enabled(self) -> bool {
+        !matches!(self, Self::BucketOwnerEnforced)
+    }
+}
+
 /// What decides who may reach a bucket, read together.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BucketAccess {
@@ -111,19 +160,50 @@ pub struct BucketAccess {
     pub policy: Option<String>,
     /// The bucket's Block Public Access settings.
     pub public_access_block: Option<PublicAccessBlock>,
+    /// The bucket's Object Ownership setting; none for a bucket made before TeiFS had
+    /// them, which behaves as [`ObjectOwnership::ObjectWriter`], as on AWS.
+    pub ownership: Option<ObjectOwnership>,
+    /// The bucket's ACL; none is private.
+    pub acl: Option<Acl>,
 }
 
-/// A new bucket's settings, which a folder bucket made outside TeiFS has too.
-fn new_bucket() -> BucketConfig {
+/// How a new bucket starts, beyond its layout. The default is AWS's: ACLs disabled and
+/// Block Public Access on, which a folder bucket made outside TeiFS gets too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewBucket {
+    /// Its Object Ownership setting; none leaves ACLs enabled with no setting, as on
+    /// buckets S3 made before April 2023.
+    pub ownership: Option<ObjectOwnership>,
+    /// Whether all four Block Public Access settings start on; off, it has none.
+    pub block_public_access: bool,
+    /// Its ACL (the caller checks it against the ownership); none is private.
+    pub acl: Option<Acl>,
+}
+
+impl Default for NewBucket {
+    fn default() -> Self {
+        Self {
+            ownership: Some(ObjectOwnership::default()),
+            block_public_access: true,
+            acl: None,
+        }
+    }
+}
+
+fn new_bucket(options: NewBucket) -> BucketConfig {
     BucketConfig {
-        public_access_block: Some(PublicAccessBlock::ALL),
+        public_access_block: options
+            .block_public_access
+            .then_some(PublicAccessBlock::ALL),
+        ownership: options.ownership,
+        acl: options.acl,
         ..BucketConfig::default()
     }
 }
 
 /// A new bucket's settings, to record with it.
-pub(crate) fn new_bucket_config() -> String {
-    serde_json::to_string(&new_bucket()).expect("the config serializes")
+pub(crate) fn new_bucket_config(options: NewBucket) -> String {
+    serde_json::to_string(&new_bucket(options)).expect("the config serializes")
 }
 
 impl BucketEncryption {
@@ -172,9 +252,10 @@ impl Store {
             Bucket::Folder(..) => Err(StoreError::InvalidRequest(
                 "encryption at rest needs an object bucket",
             )),
-            Bucket::Object(_) => {
-                inner.update_config(&name, |config| config.encryption = encryption)
-            }
+            Bucket::Object(_) => inner.update_config(&name, |config| {
+                config.encryption = encryption;
+                Ok(())
+            }),
         })
         .await
     }
@@ -201,6 +282,8 @@ impl Store {
         Ok(BucketAccess {
             policy: config.policy,
             public_access_block: config.public_access_block,
+            ownership: config.ownership,
+            acl: config.acl,
         })
     }
 
@@ -208,6 +291,38 @@ impl Store {
     pub async fn set_bucket_policy(&self, bucket: &str, policy: Option<String>) -> Result<()> {
         self.change_config(bucket, move |config| config.policy = policy)
             .await
+    }
+
+    /// Replaces a bucket's Object Ownership setting; `None` removes it (the bucket then
+    /// has ACLs, as `ObjectWriter`). ACLs can only be disabled while the bucket's ACL
+    /// grants only the owner ([`StoreError::AclGrantsOthers`]).
+    pub async fn set_bucket_ownership(
+        &self,
+        bucket: &str,
+        ownership: Option<ObjectOwnership>,
+    ) -> Result<()> {
+        self.try_change_config(bucket, move |config| {
+            let disables = ownership.is_some_and(|o| !o.acls_enabled());
+            if disables && !config.acl.as_ref().is_none_or(Acl::owner_only) {
+                return Err(StoreError::AclGrantsOthers);
+            }
+            config.ownership = ownership;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces a bucket's ACL; `None` makes it private. Refused while the bucket's
+    /// Object Ownership disables ACLs ([`StoreError::AclsDisabled`]).
+    pub async fn set_bucket_acl(&self, bucket: &str, acl: Option<Acl>) -> Result<()> {
+        self.try_change_config(bucket, move |config| {
+            if !config.ownership.is_none_or(ObjectOwnership::acls_enabled) {
+                return Err(StoreError::AclsDisabled);
+            }
+            config.acl = acl;
+            Ok(())
+        })
+        .await
     }
 
     /// Replaces a bucket's Block Public Access settings; `None` removes them.
@@ -245,6 +360,20 @@ impl Store {
         bucket: &str,
         change: impl FnOnce(&mut BucketConfig) + Send + 'static,
     ) -> Result<()> {
+        self.try_change_config(bucket, |config| {
+            change(config);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Changes a bucket's settings if `change` succeeds, as one step: nothing else
+    /// changes them in between.
+    async fn try_change_config(
+        &self,
+        bucket: &str,
+        change: impl FnOnce(&mut BucketConfig) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let name = bucket.to_owned();
         self.blocking(move |inner| {
             inner.bucket(&name)?;
@@ -256,7 +385,11 @@ impl Store {
 
 impl Inner {
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.
-    fn update_config(&self, name: &str, change: impl FnOnce(&mut BucketConfig)) -> Result<()> {
+    fn update_config(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut BucketConfig) -> Result<()>,
+    ) -> Result<()> {
         let system = self.system();
         if system.bucket(name)?.is_none() {
             system.record_bucket(
@@ -266,11 +399,11 @@ impl Inner {
                     layout: Layout::Folder,
                     created_ms: now_ms(),
                 },
-                &new_bucket_config(),
+                &new_bucket_config(NewBucket::default()),
             )?;
         }
         let mut config = read_config(system.bucket_config(name)?.as_deref())?;
-        change(&mut config);
+        change(&mut config)?;
         let json = serde_json::to_string(&config).expect("the config serializes");
         if !system.set_bucket_config(name, &json)? {
             return Err(StoreError::NoSuchBucket);
@@ -281,7 +414,7 @@ impl Inner {
 
 fn read_config(json: Option<&str>) -> Result<BucketConfig> {
     match json {
-        None => Ok(new_bucket()),
+        None => Ok(new_bucket(NewBucket::default())),
         Some(json) => serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata),
     }
 }

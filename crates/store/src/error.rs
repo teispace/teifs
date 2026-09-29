@@ -41,6 +41,13 @@ pub enum StoreError {
     /// The request can't be done as asked.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    /// The bucket's Object Ownership (`BucketOwnerEnforced`) disables ACLs.
+    #[error("the bucket's Object Ownership disables ACLs")]
+    AclsDisabled,
+    /// `BucketOwnerEnforced` was asked for while the bucket's ACL grants someone besides
+    /// the owner.
+    #[error("the bucket's ACL grants others, so ACLs can't be disabled")]
+    AclGrantsOthers,
     /// An `If-Match` / `If-None-Match` condition wasn't met.
     #[error("the precondition wasn't met")]
     PreconditionFailed,

@@ -41,6 +41,15 @@ so no read or list path escapes it (the known bypass, anonymous `ListObjectVersi
 has its own test with 15 other paths). Anonymous requests can never read or change a
 bucket's policy.
 
+ACLs are disabled on every new bucket (Object Ownership `BucketOwnerEnforced`, as on
+AWS): a request with an ACL other than the bucket owner's full control is refused, and
+stored ACLs grant nothing. Where the owner enables them, an ACL can only add what no
+policy decided: an explicit Deny still wins, a permissions boundary still limits, and
+`BlockPublicAcls` refuses public ACLs while `IgnorePublicAcls` makes stored ones grant
+nothing. A copy never takes its source's ACL. `serve --legacy-bucket-defaults` makes new
+buckets as S3 did before April 2023 (ACLs enabled, no Block Public Access) for
+applications that upload with public ACLs; it is off by default.
+
 ### 2. Every endpoint declares what it authorizes (*planned*)
 Admin, health and metrics endpoints will be registered in one route table where each
 route declares its action, and the server refuses to start a route without one. A test

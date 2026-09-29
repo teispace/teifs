@@ -83,3 +83,4 @@ test_bucket_policy_put_obj_s3_incorrect_algo_sse_s3  # encryption at rest: folde
 test_bucket_policy_put_obj_s3_noenc  # encryption at rest: folder buckets store plain files
 test_encryption_sse_c_deny_algo_with_bucket_policy  # encryption at rest: folder buckets store plain files
 test_encryption_sse_c_enforced_with_bucket_policy  # encryption at rest: folder buckets store plain files
+test_bucket_create_special_key_names  # stores ' ' and '_ ': portable folder names can't end in a space
