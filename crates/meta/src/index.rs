@@ -9,6 +9,37 @@ use teifs_types::{ObjectAttrs, Stamp};
 
 use crate::{Result, db};
 
+/// An open transaction or savepoint ([`Index::begin`]).
+pub(crate) struct Tx<'a> {
+    conn: &'a Connection,
+    done: bool,
+}
+
+impl Tx<'_> {
+    /// Keeps its writes (commits them, when it's the outermost).
+    pub(crate) fn commit(mut self) -> Result<()> {
+        self.done = true;
+        self.conn.execute_batch("RELEASE tx")?;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Tx<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn
+    }
+}
+
+impl Drop for Tx<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = self.conn.execute_batch("ROLLBACK TO tx; RELEASE tx");
+        }
+    }
+}
+
 /// The index's schema, one entry per version.
 const MIGRATIONS: &[&str] = &[
     // 1: objects, uploads and their parts.
@@ -89,6 +120,8 @@ const MIGRATIONS: &[&str] = &[
      ) WITHOUT ROWID;",
     // 7: the most a multipart upload's object may be, when its creation was capped.
     "ALTER TABLE uploads ADD COLUMN max_size INTEGER;",
+    // 8: the version id of a folder bucket's current file (NULL: `null`).
+    "ALTER TABLE objects ADD COLUMN version_id TEXT;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -108,6 +141,8 @@ pub struct Row {
     pub attrs: ObjectAttrs,
     /// Its parts, when it was uploaded in parts (JSON the store owns).
     pub parts: Option<String>,
+    /// Its version id, in a bucket with versioning; `None` is `null`.
+    pub version_id: Option<String>,
 }
 
 #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
@@ -180,7 +215,8 @@ pub struct Part {
     pub modified_ms: i64,
 }
 
-/// A row from `size, mtime_ns, ino, etag, attrs, parts` (the first six columns).
+/// A row from `size, mtime_ns, ino, etag, attrs, parts, version_id` (the first seven
+/// columns).
 fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
         stamp: Stamp {
@@ -191,6 +227,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         etag: r.get(3)?,
         attrs: attrs_from_json(&r.get::<_, String>(4)?),
         parts: r.get(5)?,
+        version_id: r.get(6)?,
     })
 }
 
@@ -227,17 +264,30 @@ impl Index {
 
     /// Runs `change` in one transaction: its writes are committed and synced together,
     /// or not at all. Many small writes cost one sync instead of one each.
+    /// Batches nest: one inside another is part of the outer one.
     pub fn batch<T>(&self, change: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin()?;
         let out = change(self)?;
         tx.commit()?;
         Ok(out)
     }
 
+    /// Starts a transaction, or a savepoint inside the one already open, so a change
+    /// made of several writes can be part of a larger one ([`Index::batch`]). Dropped
+    /// without [`Tx::commit`], its writes are undone.
+    pub(crate) fn begin(&self) -> Result<Tx<'_>> {
+        self.conn.execute_batch("SAVEPOINT tx")?;
+        Ok(Tx {
+            conn: &self.conn,
+            done: false,
+        })
+    }
+
     /// The row for an object, if any.
     pub fn get(&self, bucket: &str, key: &str) -> Result<Option<Row>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT size, mtime_ns, ino, etag, attrs, parts FROM objects WHERE bucket = ?1 AND key = ?2",
+            "SELECT size, mtime_ns, ino, etag, attrs, parts, version_id FROM objects
+             WHERE bucket = ?1 AND key = ?2",
         )?;
         Ok(stmt.query_row(params![bucket, key], row_from).optional()?)
     }
@@ -251,11 +301,11 @@ impl Index {
         upto: &str,
     ) -> Result<Vec<(String, Row)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT size, mtime_ns, ino, etag, attrs, parts, key FROM objects
+            "SELECT size, mtime_ns, ino, etag, attrs, parts, version_id, key FROM objects
              WHERE bucket = ?1 AND (?2 IS NULL OR key > ?2) AND key <= ?3 ORDER BY key",
         )?;
         let rows = stmt.query_map(params![bucket, after, upto], |r| {
-            Ok((r.get(6)?, row_from(r)?))
+            Ok((r.get(7)?, row_from(r)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -264,11 +314,12 @@ impl Index {
     pub fn put(&self, bucket: &str, key: &str, row: &Row) -> Result<()> {
         self.conn
             .prepare_cached(
-                "INSERT INTO objects (bucket, key, size, mtime_ns, ino, etag, attrs, parts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO objects (bucket, key, size, mtime_ns, ino, etag, attrs, parts, version_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (bucket, key) DO UPDATE SET
                size = excluded.size, mtime_ns = excluded.mtime_ns, ino = excluded.ino,
-               etag = excluded.etag, attrs = excluded.attrs, parts = excluded.parts",
+               etag = excluded.etag, attrs = excluded.attrs, parts = excluded.parts,
+               version_id = excluded.version_id",
             )?
             .execute(params![
                 bucket,
@@ -279,6 +330,7 @@ impl Index {
                 row.etag,
                 attrs_to_json(&row.attrs),
                 row.parts,
+                row.version_id,
             ])?;
         Ok(())
     }
@@ -352,7 +404,7 @@ impl Index {
 
     /// Moves a folder bucket's row from one key to another (a rename keeps the file).
     pub fn rename(&self, bucket: &str, from: &str, to: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin()?;
         tx.execute(
             "DELETE FROM objects WHERE bucket = ?1 AND key = ?2",
             params![bucket, to],
@@ -576,6 +628,41 @@ mod tests {
         assert_eq!(level(&index), 1);
         index.set_synchronous("OFF").unwrap();
         assert_eq!(level(&index), 0);
+    }
+
+    #[test]
+    fn batches_nest_and_a_failed_one_undoes_only_its_own_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let done = |key: &str| CompletedUpload {
+            bucket: "b".into(),
+            key: key.into(),
+            result: "{}".into(),
+        };
+        let failed = || -> crate::MetaError { rusqlite::Error::InvalidQuery.into() };
+        index
+            .batch(|index| {
+                index.record_completed("outer", &done("k1"), 1_000, 0)?;
+                let inner = index.batch(|index| {
+                    index.record_completed("inner", &done("k2"), 1_000, 0)?;
+                    Err::<(), _>(failed())
+                });
+                assert!(inner.is_err());
+                index.batch(|index| index.record_completed("kept", &done("k3"), 1_000, 0))
+            })
+            .unwrap();
+        assert!(index.completed_upload("outer").unwrap().is_some());
+        assert_eq!(index.completed_upload("inner").unwrap(), None);
+        assert!(index.completed_upload("kept").unwrap().is_some());
+        // A failed outer batch undoes everything in it, nested batches included.
+        let outer = index.batch(|index| {
+            index.batch(|index| index.record_completed("nested", &done("k4"), 1_000, 0))?;
+            Err::<(), _>(failed())
+        });
+        assert!(outer.is_err());
+        assert_eq!(index.completed_upload("nested").unwrap(), None);
+        // And the connection is back outside any transaction.
+        assert!(index.conn.is_autocommit());
     }
 
     #[test]

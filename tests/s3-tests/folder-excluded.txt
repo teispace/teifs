@@ -1,6 +1,6 @@
-# Tests folder buckets can't pass: by design (they store keys a folder can't hold), or
-# not yet (they turn versioning on, which folder buckets refuse until they have it). They
-# must still pass on object buckets (they're in implemented.txt).
+# Tests folder buckets can't pass, by design: they store keys a folder can't hold, or
+# need encryption at rest, which plain files don't have. They must still pass on object
+# buckets (they're in implemented.txt).
 test_bucket_list_delimiter_basic  # stores foo/bar and foo/bar/xyzzy: a file and a folder with one name
 test_bucket_listv2_delimiter_basic  # stores foo/bar and foo/bar/xyzzy: a file and a folder with one name
 test_bucket_list_delimiter_not_skip_special  # stores keys that are both a file and a folder's name
@@ -86,41 +86,9 @@ test_encryption_sse_c_deny_algo_with_bucket_policy  # encryption at rest: folder
 test_encryption_sse_c_enforced_with_bucket_policy  # encryption at rest: folder buckets store plain files
 test_bucket_create_special_key_names  # stores ' ' and '_ ': portable folder names can't end in a space
 test_post_object_escaped_field_values  # stores '\$foo.txt': a backslash separates folders on Windows (portable key names)
+test_object_copy_versioned_url_encoding  # stores 'foo?bar': names Windows can't hold (portable key names)
+test_versioning_obj_create_versions_remove_special_names  # stores ':': names Windows can't hold (portable key names)
 test_encryption_sse_c_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
 test_sse_kms_default_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
 test_sse_kms_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
 test_sse_s3_default_post_object_authenticated_request  # encryption at rest: folder buckets store plain files
-test_delete_marker_suspended  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_delete_marker_versioned  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_get_versioned_object_attributes  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_multipart_copy_versioned  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_multipart_put_current_object_if_match  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_multipart_put_current_object_if_none_match  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_object_copy_versioned_bucket  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_object_copy_versioned_url_encoding  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_object_copy_versioning_multipart_upload  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_object_put_acl_mtime  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_put_current_object_if_match  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_put_current_object_if_none_match  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_put_object_current_if_match  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioned_concurrent_object_create_and_remove  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioned_concurrent_object_create_concurrent_remove  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_bucket_atomic_upload_return_version_id  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_bucket_create_suspend  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_bucket_multipart_upload_return_version_id  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_copy_obj_version  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_multi_object_delete  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_multi_object_delete_with_marker  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_multi_object_delete_with_marker_create  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_create_overwrite_multipart  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_create_read_remove  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_create_read_remove_head  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_create_versions_remove_all  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_create_versions_remove_special_names  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_list_marker  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_plain_null_version_overwrite  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_plain_null_version_overwrite_suspended  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_plain_null_version_removal  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_suspend_versions  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_obj_suspended_copy  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)
-test_versioning_stack_delete_merkers  # turns versioning on, which folder buckets don't have yet (501 NotImplemented)

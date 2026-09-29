@@ -1,6 +1,6 @@
 //! Versioning as the official AWS SDK sees it: versions stack, delete markers hide
 //! objects and answer as S3's do, versions are listed in pages, and a suspended bucket
-//! writes `null`.
+//! writes `null`. Each test runs on an object bucket and on a folder bucket.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,9 +17,35 @@ use aws_sdk_s3::{
 mod common;
 
 use common::{SECRET_KEY, client, code, start_with};
+use teifs_store::Layout;
 
-async fn object_drive() -> (common::Server, Client) {
-    let server = start_with(|c| c.default_layout = teifs_store::Layout::Object).await;
+/// Runs each test (an `async fn(Layout)`) on a drive whose new buckets are object
+/// buckets, and on one whose new buckets are folder buckets.
+macro_rules! in_both_layouts {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[tokio::test]
+            async fn object_bucket() {
+                super::$name(teifs_store::Layout::Object).await;
+            }
+
+            #[tokio::test]
+            async fn folder_bucket() {
+                super::$name(teifs_store::Layout::Folder).await;
+            }
+        }
+    )*};
+}
+
+in_both_layouts!(
+    versions_stack_and_each_stays_readable,
+    delete_markers_hide_objects_as_on_s3,
+    versions_list_in_pages_newest_first,
+    suspended_buckets_write_null_versions,
+);
+
+async fn drive(layout: Layout) -> (common::Server, Client) {
+    let server = start_with(|c| c.default_layout = layout).await;
     let s3 = client(&server, SECRET_KEY);
     (server, s3)
 }
@@ -69,9 +95,8 @@ fn marker_headers<E>(
     )
 }
 
-#[tokio::test]
-async fn versions_stack_and_each_stays_readable() {
-    let (_server, s3) = object_drive().await;
+async fn versions_stack_and_each_stays_readable(layout: Layout) {
+    let (_server, s3) = drive(layout).await;
     s3.create_bucket().bucket("docs").send().await.unwrap();
     let status = s3.get_bucket_versioning().bucket("docs").send().await;
     assert_eq!(status.unwrap().status(), None);
@@ -166,9 +191,8 @@ async fn versions_stack_and_each_stays_readable() {
     assert_eq!(get(&s3, "a.txt", None).await, b"one");
 }
 
-#[tokio::test]
-async fn delete_markers_hide_objects_as_on_s3() {
-    let (_server, s3) = object_drive().await;
+async fn delete_markers_hide_objects_as_on_s3(layout: Layout) {
+    let (_server, s3) = drive(layout).await;
     s3.create_bucket().bucket("docs").send().await.unwrap();
     set_versioning(&s3, "docs", BucketVersioningStatus::Enabled).await;
     let v1 = put(&s3, "a.txt", b"one").await.unwrap();
@@ -261,9 +285,8 @@ async fn delete_markers_hide_objects_as_on_s3() {
     assert_eq!(code(b), "NotFound");
 }
 
-#[tokio::test]
-async fn versions_list_in_pages_newest_first() {
-    let (_server, s3) = object_drive().await;
+async fn versions_list_in_pages_newest_first(layout: Layout) {
+    let (_server, s3) = drive(layout).await;
     s3.create_bucket().bucket("docs").send().await.unwrap();
     set_versioning(&s3, "docs", BucketVersioningStatus::Enabled).await;
     let a1 = put(&s3, "a", b"1").await.unwrap();
@@ -303,9 +326,8 @@ async fn versions_list_in_pages_newest_first() {
     assert_eq!(code(without_key), "InvalidArgument");
 }
 
-#[tokio::test]
-async fn suspended_buckets_write_null_versions() {
-    let (_server, s3) = object_drive().await;
+async fn suspended_buckets_write_null_versions(layout: Layout) {
+    let (_server, s3) = drive(layout).await;
     s3.create_bucket().bucket("docs").send().await.unwrap();
     set_versioning(&s3, "docs", BucketVersioningStatus::Enabled).await;
     let v1 = put(&s3, "a.txt", b"one").await.unwrap();
@@ -353,15 +375,10 @@ async fn suspended_buckets_write_null_versions() {
 }
 
 #[tokio::test]
-async fn what_teifs_cant_version_is_refused() {
+async fn versioning_needs_a_bucket() {
     let server = start_with(|_| {}).await;
     let s3 = client(&server, SECRET_KEY);
     s3.create_bucket().bucket("files").send().await.unwrap();
-    // Folder buckets keep plain files: not yet.
-    assert_eq!(
-        set_versioning(&s3, "files", BucketVersioningStatus::Enabled).await,
-        "NotImplemented"
-    );
     let status = s3.get_bucket_versioning().bucket("files").send().await;
     assert_eq!(status.unwrap().status(), None);
     assert_eq!(

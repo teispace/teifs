@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
 use teifs_types::{Acl, SseMode};
 
-use crate::{Bucket, Inner, Store, StoreError, error::Result, now_ms};
+use crate::{Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, now_ms};
 
 /// Why a bucket's tags can't be replaced or deleted as a whole.
 const ABAC_TAGS: &str = "The bucket's tags decide access (ABAC is enabled): change them with \
@@ -464,18 +464,19 @@ impl Store {
             .await
     }
 
-    /// A bucket's versioning. Folder buckets don't have it.
+    /// A bucket's versioning.
     pub async fn bucket_versioning(&self, bucket: &str) -> Result<Versioning> {
         let name = bucket.to_owned();
         self.blocking(move |inner| match inner.bucket(&name)? {
             Bucket::Object(bucket) => Ok(bucket.versioning),
-            Bucket::Folder(..) => Ok(Versioning::Unversioned),
+            Bucket::Folder(bucket) => Ok(bucket.versioning()),
         })
         .await
     }
 
     /// Turns a bucket's versioning on, or suspends it. As on S3, a bucket that has had
-    /// versioning never goes back to having none. Only object buckets have versioning.
+    /// versioning never goes back to having none. In a folder bucket the current versions
+    /// stay the plain files; older ones are kept in the drive's system folder.
     pub async fn set_bucket_versioning(&self, bucket: &str, versioning: Versioning) -> Result<()> {
         if versioning == Versioning::Unversioned {
             return Err(StoreError::InvalidRequest(
@@ -486,15 +487,12 @@ impl Store {
         self.blocking(move |inner| {
             // Under the commit lock, so no write sees the bucket half-changed.
             let _lock = inner.lock();
-            match inner.bucket(&name)? {
-                Bucket::Object(_) => {
-                    inner.system().set_bucket_versioning(&name, versioning)?;
-                    Ok(())
-                }
-                Bucket::Folder(..) => Err(StoreError::NotImplemented(
-                    "versioning in folder buckets isn't supported yet; use an object bucket",
-                )),
+            if let Bucket::Folder(FolderBucket { versions: None, .. }) = inner.bucket(&name)? {
+                // A folder made outside TeiFS gets its record, which names its versions.
+                inner.update_config(&name, |_| Ok(()))?;
             }
+            inner.system().set_bucket_versioning(&name, versioning)?;
+            Ok(())
         })
         .await
     }

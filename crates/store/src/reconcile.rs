@@ -30,6 +30,7 @@ use teifs_types::{Stamp, hex, multipart_etag};
 use crate::{
     Bucket, Inner, ObjectAttrs, ObjectKey,
     error::Result,
+    folder::FolderBucket,
     folder::Found,
     jobs::{Job, Step},
     list::{After, Entry, FolderWalk, ListQuery, Next},
@@ -132,7 +133,7 @@ impl IndexFolders {
     /// forgot), and whether the bucket is done.
     fn scan(&mut self, inner: &Inner, bucket: &str, step: &Step) -> Result<(usize, bool)> {
         let dir = match inner.bucket(bucket)? {
-            Bucket::Folder(_, dir) => dir,
+            Bucket::Folder(FolderBucket { dir, .. }) => dir,
             Bucket::Object(_) => return Ok((0, true)),
         };
         if self.walk.is_none() && self.backlog.is_empty() {
@@ -241,6 +242,9 @@ fn check_file(
         etag: readopted.map_or_else(|| hex(&hashes.whole), |r| r.etag.clone()),
         attrs: readopted.map_or_else(ObjectAttrs::default, |r| r.attrs.clone()),
         parts: readopted.and_then(|r| r.parts.clone()),
+        // The same content keeps its version; other content written outside TeiFS is the
+        // `null` version, as any file added by hand.
+        version_id: readopted.and_then(|r| r.version_id.clone()),
     };
     let update = Update {
         key: key.to_owned(),

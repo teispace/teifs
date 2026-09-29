@@ -9,16 +9,37 @@ use std::{
     time::SystemTime,
 };
 
-use teifs_meta::{Index, Row};
+use teifs_meta::{Index, Row, Versioning};
 use teifs_types::{Stamp, empty_etag, provisional_etag};
 
 use crate::{
     Inner, KeyRules, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, StoreError,
     error::{Result, not_found_as},
     md5_file,
-    objects::PartsRecord,
+    objects::{ObjectBucket, PartsRecord},
     staged::{Publish, TmpFile, publish},
 };
+
+/// A folder bucket, resolved.
+#[derive(Debug, Clone)]
+pub(crate) struct FolderBucket {
+    /// Its name.
+    pub name: String,
+    /// Its folder (canonical: a bucket that's a link is resolved).
+    pub dir: PathBuf,
+    /// Where its older versions and delete markers go, once it has a record (made by
+    /// TeiFS, or given a setting): stored as an object bucket's versions are.
+    pub versions: Option<ObjectBucket>,
+}
+
+impl FolderBucket {
+    /// Its versioning.
+    pub(crate) fn versioning(&self) -> Versioning {
+        self.versions
+            .as_ref()
+            .map_or(Versioning::Unversioned, |v| v.versioning)
+    }
+}
 
 /// What's at an object's path.
 pub(crate) enum Found {
@@ -42,27 +63,34 @@ impl Inner {
         Ok(key)
     }
 
-    /// Opens the object at `key`: its description and file (`None` for a folder).
+    /// Opens a version of the object at `key` (`None`: the current one): its description
+    /// and file (`None` for a folder or a delete marker). The current version is the file
+    /// at the key's path; older ones are in the bucket's version store. Holding the commit
+    /// lock while opening means neither can be replaced and removed in between.
     pub(crate) fn open_folder_object(
         &self,
-        bucket: &str,
-        dir: &Path,
+        bucket: &FolderBucket,
         key: &ObjectKey,
+        version_id: Option<&str>,
     ) -> Result<(ObjectInfo, Option<fs::File>)> {
-        match Inner::find(dir, key)? {
+        let conn = self.lock();
+        let (file, meta) = match Inner::find(&bucket.dir, key)? {
             Found::File(path, _) => {
                 let file =
                     fs::File::open(&path).map_err(|e| not_found_as(e, StoreError::NoSuchKey))?;
                 let meta = file.metadata()?;
-                let info = Inner::info(&self.lock(), bucket, key.as_str(), &meta)?;
-                Ok((info, Some(file)))
+                (Some(file), meta)
             }
-            Found::Folder(_, meta) => Ok((
-                Inner::info(&self.lock(), bucket, key.as_str(), &meta)?,
-                None,
-            )),
-            Found::Missing | Found::Other => Err(StoreError::NoSuchKey),
+            Found::Folder(_, meta) => (None, meta),
+            Found::Missing | Found::Other => {
+                return Inner::open_older_version(&conn, bucket, key.as_str(), version_id);
+            }
+        };
+        let info = Inner::info(&conn, &bucket.name, key.as_str(), &meta)?;
+        if version_id.is_some_and(|id| id != crate::folder_versions::current_id(&info)) {
+            return Inner::open_older_version(&conn, bucket, key.as_str(), version_id);
         }
+        Ok((bucket.describe(info), file))
     }
 
     /// Renames the file at `src` to `dst` (atomic; the bytes don't move) and its row with
@@ -173,7 +201,9 @@ impl Inner {
         })
     }
 
-    /// Describes the object at `key`, whose file (or folder) has `meta`.
+    /// Describes the object at `key`, whose file (or folder) has `meta`. Its version id
+    /// is the recorded one (`None`: `null`), not yet named as answers name it
+    /// ([`FolderBucket::describe`]).
     pub(crate) fn info(
         conn: &Index,
         bucket: &str,
@@ -196,9 +226,11 @@ impl Inner {
             });
         }
         let stamp = Stamp::of(meta);
-        let (etag, attrs, parts) = match row {
-            Some(row) if row.stamp.matches(&stamp) => (row.etag, row.attrs, row.parts),
-            _ => (provisional_etag(stamp), ObjectAttrs::default(), None),
+        let (etag, attrs, parts, version_id) = match row {
+            Some(row) if row.stamp.matches(&stamp) => {
+                (row.etag, row.attrs, row.parts, row.version_id)
+            }
+            _ => (provisional_etag(stamp), ObjectAttrs::default(), None, None),
         };
         let parts = parts
             .as_deref()
@@ -213,7 +245,7 @@ impl Inner {
             attrs,
             sse: None,
             parts,
-            version_id: None,
+            version_id,
         })
     }
 
@@ -290,12 +322,13 @@ impl Inner {
         Ok(current)
     }
 
-    /// Renames the finished file `tmp` into place as `key` and records it. Holds the lock.
+    /// Renames the finished file `tmp` into place as `key` and records it. With
+    /// versioning, the file it replaces is kept as an older version first. Holds the lock.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_file(
         &self,
         conn: &Index,
-        bucket: &str,
+        bucket: &FolderBucket,
         key: &ObjectKey,
         tmp: &Path,
         etag: String,
@@ -303,26 +336,41 @@ impl Inner {
         parts: Option<String>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
-        let dir = self.bucket_dir(bucket)?;
-        let current = Inner::current_for_write(conn, bucket, &dir, key)?;
+        let dir = &bucket.dir;
+        let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
         // Flushing needs write access on Windows.
         self.sync_file(tmp)?;
-        let parent = self.make_parents(&dir, key)?;
+        let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
+        let version_id = bucket.new_version_id();
+        let archived = match (&current, bucket.versioned()) {
+            (Some(_), Some(_)) => {
+                let meta = fs::metadata(&path)?;
+                self.archive_for_write(
+                    conn,
+                    bucket,
+                    key,
+                    Some((&path, &meta)),
+                    version_id.as_deref(),
+                )?
+            }
+            _ => None,
+        };
         let how = if precondition.creates_only() {
             Publish::CreateNew
         } else {
             Publish::Replace
         };
-        publish(tmp, &path, &dir, how).map_err(|err| {
+        if let Err(err) = publish(tmp, &path, dir, how) {
+            Inner::unarchive(conn, bucket, key, archived);
             // Something appeared at the key since the check: another program's file.
-            if err.kind() == io::ErrorKind::AlreadyExists {
+            return Err(if err.kind() == io::ErrorKind::AlreadyExists {
                 StoreError::PreconditionFailed
             } else {
                 err.into()
-            }
-        })?;
+            });
+        }
         self.sync_folder(&parent)?;
         let meta = fs::metadata(&path)?;
         let stamp = Stamp::of(&meta);
@@ -331,17 +379,24 @@ impl Inner {
             .and_then(|json| PartsRecord::parse(json).ok())
             .map(|p| p.infos())
             .unwrap_or_default();
-        conn.put(
-            bucket,
-            key.as_str(),
-            &Row {
-                stamp,
-                etag: etag.clone(),
-                attrs: attrs.clone(),
-                parts,
-            },
-        )?;
-        Ok(ObjectInfo {
+        let replaced = conn.batch(|conn| {
+            conn.put(
+                &bucket.name,
+                key.as_str(),
+                &Row {
+                    stamp,
+                    etag: etag.clone(),
+                    attrs: attrs.clone(),
+                    parts,
+                    version_id: version_id.clone(),
+                },
+            )?;
+            Inner::settle_versions(conn, bucket, key, version_id.as_deref())
+        })?;
+        if let Some(versions) = bucket.versioned() {
+            Inner::remove_data_files(conn, versions, &replaced);
+        }
+        Ok(bucket.describe(ObjectInfo {
             key: key.as_str().to_owned(),
             size: stamp.size,
             modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -349,23 +404,24 @@ impl Inner {
             attrs,
             sse: None,
             parts: part_infos,
-            version_id: None,
-        })
+            version_id,
+        }))
     }
 
     /// Creates a folder on purpose (a `key/` object): it stays when its last file goes.
+    /// Folders have no versions: one is the `null` version whatever the versioning.
     pub(crate) fn make_folder(
         &self,
         conn: &Index,
-        bucket: &str,
+        bucket: &FolderBucket,
         key: &ObjectKey,
         attrs: ObjectAttrs,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
-        let dir = self.bucket_dir(bucket)?;
-        let current = Inner::current_for_write(conn, bucket, &dir, key)?;
+        let dir = &bucket.dir;
+        let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
-        let parent = self.make_parents(&dir, key)?;
+        let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
         match fs::create_dir(&path) {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
@@ -378,9 +434,10 @@ impl Inner {
             etag: empty_etag(),
             attrs,
             parts: None,
+            version_id: None,
         };
-        conn.put(bucket, key.as_str(), &row)?;
-        Inner::info(conn, bucket, key.as_str(), &meta)
+        conn.put(&bucket.name, key.as_str(), &row)?;
+        Ok(bucket.describe(Inner::info(conn, &bucket.name, key.as_str(), &meta)?))
     }
 
     /// Removes the folders above `key` that its deletion left empty, stopping at one that
@@ -399,29 +456,24 @@ impl Inner {
         Ok(())
     }
 
+    /// Copies the current version of `src_key` (its file) to `dst_key`. Onto itself
+    /// without versioning, only its attributes change; with versioning, the copy is a
+    /// new version like any other.
     pub(crate) fn copy_folder(
         &self,
-        src_bucket: &str,
-        src_key: &ObjectKey,
-        dst_bucket: &str,
-        dst_key: &ObjectKey,
+        (src, src_key): (&FolderBucket, &ObjectKey),
+        (dst, dst_key): (&FolderBucket, &ObjectKey),
         attrs: Option<ObjectAttrs>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
-        let src_dir = self.bucket_dir(src_bucket)?;
-        let (src_path, src_meta) = match Inner::find(&src_dir, src_key)? {
+        let (src_path, src_meta) = match Inner::find(&src.dir, src_key)? {
             Found::File(path, meta) => (path, meta),
-            Found::Folder(..) => {
+            Found::Folder(_, meta) => {
                 let conn = self.lock();
-                let source = Inner::info(
-                    &conn,
-                    src_bucket,
-                    src_key.as_str(),
-                    &fs::metadata(src_dir.join(src_key.rel()))?,
-                )?;
+                let source = Inner::info(&conn, &src.name, src_key.as_str(), &meta)?;
                 let attrs = crate::copied_attrs(source.attrs, attrs);
                 return if dst_key.is_folder() {
-                    self.make_folder(&conn, dst_bucket, dst_key, attrs, precondition)
+                    self.make_folder(&conn, dst, dst_key, attrs, precondition)
                 } else {
                     Err(StoreError::InvalidRequest(
                         "a folder can only be copied to a folder",
@@ -435,36 +487,26 @@ impl Inner {
                 "a file can't be copied to a folder key",
             ));
         }
-        let same = src_bucket == dst_bucket && src_key == dst_key;
-        if same {
+        if src.name == dst.name && src_key == dst_key && dst.versioned().is_none() {
             let Some(attrs) = attrs else {
                 return Err(StoreError::InvalidRequest(
                     "copying an object onto itself needs new metadata",
                 ));
             };
             let conn = self.lock();
-            let source = Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta)?;
+            let source = Inner::info(&conn, &src.name, src_key.as_str(), &src_meta)?;
             precondition.check(Some(&source))?;
             let attrs = crate::replaced_attrs(&source.attrs, attrs);
             // A recorded ETag (plain or multipart) stays; a file changed outside gets its MD5.
-            let recorded = conn
-                .get(src_bucket, src_key.as_str())?
-                .filter(|r| r.stamp.matches(&Stamp::of(&src_meta)));
-            let (etag, parts) = match recorded {
-                Some(row) => (row.etag, row.parts),
-                None => (teifs_types::hex(&md5_file(&src_path)?), None),
-            };
             let row = Row {
-                stamp: Stamp::of(&src_meta),
-                etag,
                 attrs,
-                parts,
+                ..Inner::file_row(&conn, &src.name, src_key.as_str(), &src_path, &src_meta)?
             };
-            conn.put(src_bucket, src_key.as_str(), &row)?;
-            return Inner::info(&conn, src_bucket, src_key.as_str(), &src_meta);
+            conn.put(&src.name, src_key.as_str(), &row)?;
+            return Ok(src.describe(Inner::info(&conn, &src.name, src_key.as_str(), &src_meta)?));
         }
 
-        let source = Inner::info(&self.lock(), src_bucket, src_key.as_str(), &src_meta)?;
+        let source = Inner::info(&self.lock(), &src.name, src_key.as_str(), &src_meta)?;
         let tmp = TmpFile::new(&self.tmp);
         // Clones the file where the disk can (APFS, Btrfs, XFS), else copies it.
         fs::copy(&src_path, &tmp.path)?;
@@ -487,7 +529,7 @@ impl Inner {
         let conn = self.lock();
         let info = self.commit_file(
             &conn,
-            dst_bucket,
+            dst,
             dst_key,
             &tmp.path,
             etag,
@@ -501,43 +543,49 @@ impl Inner {
 }
 
 impl Inner {
-    /// Changes the attributes of the folder-bucket object `key`. The file isn't touched,
-    /// so its modification time and ETag stay; a file changed outside TeiFS starts from
-    /// empty attributes (its tags and ACL were the old file's) and gets its MD5.
+    /// Changes the attributes of a version of the folder-bucket object `key` (`None`:
+    /// the current one). The current version's file isn't touched, so its modification
+    /// time and ETag stay; a file changed outside TeiFS starts from empty attributes
+    /// (its tags and ACL were the old file's) and gets its MD5. An older version's row
+    /// changes as an object bucket's does.
     pub(crate) fn change_folder_attrs(
         &self,
-        bucket: &str,
-        dir: &Path,
+        bucket: &FolderBucket,
         key: &ObjectKey,
+        version_id: Option<&str>,
         change: impl FnOnce(&mut ObjectAttrs),
     ) -> Result<ObjectInfo> {
-        let (path, meta) = match Inner::find(dir, key)? {
-            Found::File(path, meta) | Found::Folder(path, meta) => (path, meta),
-            Found::Missing | Found::Other => return Err(StoreError::NoSuchKey),
-        };
         let conn = self.lock();
-        let stamp = Stamp::of(&meta);
-        let row = match conn.get(bucket, key.as_str())? {
-            Some(mut row) if row.stamp.matches(&stamp) => {
+        if let Found::File(path, meta) | Found::Folder(path, meta) = Inner::find(&bucket.dir, key)?
+        {
+            let row = Inner::file_row(&conn, &bucket.name, key.as_str(), &path, &meta)?;
+            let current = row
+                .version_id
+                .as_deref()
+                .unwrap_or(teifs_meta::NULL_VERSION);
+            if version_id.is_none_or(|id| id == current) {
+                let mut row = row;
                 change(&mut row.attrs);
-                row
+                conn.put(&bucket.name, key.as_str(), &row)?;
+                return Ok(bucket.describe(Inner::info(&conn, &bucket.name, key.as_str(), &meta)?));
             }
-            _ => Row {
-                stamp,
-                etag: if meta.is_dir() {
-                    empty_etag()
-                } else {
-                    teifs_types::hex(&md5_file(&path)?)
-                },
-                attrs: {
-                    let mut attrs = ObjectAttrs::default();
-                    change(&mut attrs);
-                    attrs
-                },
-                parts: None,
-            },
+        }
+        let Some(versions) = &bucket.versions else {
+            return Err(if version_id.is_some() {
+                StoreError::NoSuchVersion
+            } else {
+                StoreError::NoSuchKey
+            });
         };
-        conn.put(bucket, key.as_str(), &row)?;
-        Inner::info(&conn, bucket, key.as_str(), &meta)
+        let mut row = Inner::version_row(&conn, versions, key.as_str(), version_id)?;
+        change(&mut row.attrs);
+        conn.set_version_attrs(
+            &versions.id,
+            key.as_str(),
+            &row.version_id,
+            &row.attrs,
+            None,
+        )?;
+        Ok(versions.info(&row))
     }
 }

@@ -7,13 +7,15 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
-- Versioning in object buckets, with AWS's semantics: `PutBucketVersioning`
+- Versioning, with AWS's semantics, in both layouts: `PutBucketVersioning`
   (enabled or suspended), versions stacking under each key, delete markers,
   permanent deletes by version id, `versionId` on reads, tags, ACLs, deletes and a
   copy's source, and `ListObjectVersions` with delete markers and version markers.
   Reads of a delete marker answer as AWS's do (`404` or `405` with
-  `x-amz-delete-marker`), and version ids AWS would refuse are refused. Folder buckets
-  refuse versioning for now (`NotImplemented`).
+  `x-amz-delete-marker`), and version ids AWS would refuse are refused. In a folder
+  bucket the current version stays the plain file, so the folder always shows the
+  latest; older versions and delete markers are kept in the drive's system folder, and
+  a file changed by another program is kept as the `null` version when it's replaced.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

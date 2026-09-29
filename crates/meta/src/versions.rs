@@ -136,7 +136,18 @@ impl Index {
     /// versions are queued as garbage; their ids are returned so the caller can remove
     /// them right away.
     pub fn put_version(&self, row: &VersionRow, now_ms: i64) -> Result<Vec<String>> {
-        let tx = self.conn.unchecked_transaction()?;
+        self.insert_version(row, now_ms, true)
+    }
+
+    /// Adds `row` as the newest of its key's versions without making it current (a
+    /// folder bucket's current version is its file), replacing a version with the same
+    /// id as [`Index::put_version`] does. No version of the key stays current.
+    pub fn put_noncurrent(&self, row: &VersionRow, now_ms: i64) -> Result<Vec<String>> {
+        self.insert_version(row, now_ms, false)
+    }
+
+    fn insert_version(&self, row: &VersionRow, now_ms: i64, latest: bool) -> Result<Vec<String>> {
+        let tx = self.begin()?;
         let key = row.key.as_bytes();
         let replaced = files_of(&tx, &row.bucket_id, key, &row.version_id)?;
         tx.execute(
@@ -156,7 +167,7 @@ impl Index {
         tx.execute(
             &format!(
                 "INSERT INTO object_versions ({COLUMNS}, seq, latest)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ),
             params![
                 row.bucket_id,
@@ -172,11 +183,47 @@ impl Index {
                 row.parts,
                 row.inline,
                 seq,
+                latest,
             ],
         )?;
         queue_garbage(&tx, &row.bucket_id, &replaced, now_ms)?;
         tx.commit()?;
         Ok(replaced)
+    }
+
+    /// Makes no version of `key` current (its current version is somewhere else: a
+    /// folder bucket's file).
+    pub fn demote_versions(&self, bucket_id: &str, key: &str) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE object_versions SET latest = 0
+                 WHERE bucket_id = ?1 AND key = ?2 AND latest = 1",
+            )?
+            .execute(params![bucket_id, key.as_bytes()])?;
+        Ok(())
+    }
+
+    /// The newest version of `key`, current or not, delete markers included.
+    pub fn newest_version(&self, bucket_id: &str, key: &str) -> Result<Option<VersionRow>> {
+        Ok(self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT {READ} FROM object_versions
+                 WHERE bucket_id = ?1 AND key = ?2 ORDER BY seq DESC LIMIT 1"
+            ))?
+            .query_row(params![bucket_id, key.as_bytes()], from_row)
+            .optional()?)
+    }
+
+    /// Makes the version `version_id` of `key` its current one, and no other.
+    pub fn set_latest(&self, bucket_id: &str, key: &str, version_id: &str) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE object_versions SET latest = (version_id = ?3)
+                 WHERE bucket_id = ?1 AND key = ?2",
+            )?
+            .execute(params![bucket_id, key.as_bytes(), version_id])?;
+        Ok(())
     }
 
     /// Renames the current `null` version of `from` to `to` (same bucket), replacing
@@ -189,7 +236,7 @@ impl Index {
         to: &str,
         now_ms: i64,
     ) -> Result<Vec<String>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin()?;
         let replaced = files_of(&tx, bucket_id, to.as_bytes(), NULL_VERSION)?;
         tx.execute(
             "DELETE FROM object_versions WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3",
@@ -241,7 +288,7 @@ impl Index {
         version_id: &str,
         now_ms: i64,
     ) -> Result<Option<(VersionRow, Vec<String>)>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin()?;
         let key = key.as_bytes();
         let removed = tx
             .prepare_cached(&format!(
@@ -296,7 +343,7 @@ impl Index {
     /// Forgets every version in a bucket (it's being deleted and has none left that
     /// matter), queuing their data files.
     pub fn forget_bucket_versions(&self, bucket_id: &str, now_ms: i64) -> Result<Vec<String>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin()?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare_cached(
                 "SELECT object_id FROM object_versions
@@ -478,7 +525,7 @@ fn lower_bound(prefix: &[u8], from: VersionsFrom<'_>) -> Option<(Vec<u8>, bool)>
 
 /// The data file of a version of `key`, if it has one.
 fn files_of(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     bucket_id: &str,
     key: &[u8],
     version_id: &str,
@@ -492,7 +539,7 @@ fn files_of(
 }
 
 fn queue_garbage(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     bucket_id: &str,
     object_ids: &[String],
     now_ms: i64,
@@ -703,6 +750,27 @@ mod tests {
         index.delete_version("b1", "k", "v2", 13).unwrap().unwrap();
         assert!(index.latest_version("b1", "k").unwrap().is_none());
         assert!(!index.bucket_has_versions("b1").unwrap());
+    }
+
+    #[test]
+    fn a_folder_buckets_versions_can_all_be_noncurrent() {
+        let (_dir, index) = index();
+        index.put_version(&version("k", "m1", None), 1).unwrap();
+        index
+            .put_noncurrent(&version("k", "v1", Some("o1")), 2)
+            .unwrap();
+        // The newest is noncurrent, and so is every other.
+        assert!(index.latest_version("b1", "k").unwrap().is_none());
+        let newest = index.newest_version("b1", "k").unwrap().unwrap();
+        assert_eq!((newest.version_id.as_str(), newest.latest), ("v1", false));
+        index.set_latest("b1", "k", "m1").unwrap();
+        assert_eq!(
+            index.latest_version("b1", "k").unwrap().unwrap().version_id,
+            "m1"
+        );
+        index.demote_versions("b1", "k").unwrap();
+        assert!(index.latest_version("b1", "k").unwrap().is_none());
+        assert!(index.newest_version("b1", "nothing").unwrap().is_none());
     }
 
     #[test]

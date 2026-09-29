@@ -12,6 +12,7 @@
 mod body;
 mod error;
 mod folder;
+mod folder_versions;
 mod folders;
 mod format;
 mod jobs;
@@ -33,7 +34,7 @@ use std::{
     time::SystemTime,
 };
 
-use teifs_meta::{BucketRecord, Index, NULL_VERSION, System};
+use teifs_meta::{BucketRecord, Index, System};
 
 pub use body::{BodyReader, ObjectBody};
 pub use error::{Result, StoreError};
@@ -59,7 +60,7 @@ pub use teifs_types::{
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
 use error::not_found_as;
-use folder::Found;
+use folder::{FolderBucket, Found};
 pub use objects::Deleted;
 use objects::{BUCKETS_DIR, Finished, ObjectBucket};
 use staged::{TmpFile, sync_dir};
@@ -89,8 +90,8 @@ pub struct BucketInfo {
 /// A bucket, resolved to where its objects are.
 #[derive(Debug, Clone)]
 enum Bucket {
-    /// A folder bucket: its name and its (canonical) folder.
-    Folder(String, PathBuf),
+    /// A folder bucket.
+    Folder(FolderBucket),
     /// An object bucket.
     Object(ObjectBucket),
 }
@@ -480,9 +481,15 @@ impl Store {
         self.blocking(move |inner| {
             let conn = inner.lock();
             match inner.bucket(&name)? {
-                Bucket::Folder(_, dir) => {
+                Bucket::Folder(FolderBucket { dir, versions, .. }) => {
                     if fs::read_dir(&dir)?.next().is_some() {
                         return Err(StoreError::BucketNotEmpty);
+                    }
+                    if let Some(versions) = versions {
+                        if conn.bucket_has_versions(&versions.id)? {
+                            return Err(StoreError::BucketNotEmpty);
+                        }
+                        let _ = fs::remove_dir_all(&versions.dir);
                     }
                     // A bucket that's a symlink goes as a symlink; its target folder stays.
                     if fs::symlink_metadata(inner.root.join(&name))?.is_symlink() {
@@ -641,10 +648,10 @@ impl Store {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| match inner.bucket(&bucket)? {
-            Bucket::Folder(name, dir) => {
-                only_null(version_id.as_deref())?;
+            Bucket::Folder(bucket) => {
                 let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
-                let (info, file) = inner.open_folder_object(&name, &dir, &key)?;
+                let (info, file) =
+                    inner.open_folder_object(&bucket, &key, version_id.as_deref())?;
                 Ok((info, file, None))
             }
             Bucket::Object(bucket) => {
@@ -749,10 +756,9 @@ impl Store {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| match inner.bucket(&bucket)? {
-            Bucket::Folder(name, dir) => {
-                only_null(version_id.as_deref())?;
+            Bucket::Folder(bucket) => {
                 let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
-                inner.change_folder_attrs(&name, &dir, &key, change)
+                inner.change_folder_attrs(&bucket, &key, version_id.as_deref(), change)
             }
             Bucket::Object(bucket) => {
                 let conn = inner.lock();
@@ -788,24 +794,39 @@ impl Store {
         self.blocking(move |inner| {
             let conn = inner.lock();
             match inner.bucket(&bucket)? {
-                Bucket::Folder(name, dir) => {
-                    // A folder bucket has only `null` versions: another id names nothing.
-                    if version_id.as_deref().is_some_and(|v| v != NULL_VERSION) {
-                        return Ok(Deleted::default());
-                    }
+                Bucket::Folder(bucket) => {
                     let Ok(key) = ObjectKey::parse(&key) else {
                         return Ok(Deleted::default());
                     };
-                    let current = match Inner::find(&dir, &key)? {
-                        Found::File(_, meta) | Found::Folder(_, meta) => {
-                            Some(Inner::info(&conn, &name, key.as_str(), &meta)?)
+                    match (version_id, bucket.versioned()) {
+                        (Some(id), _) => {
+                            inner.delete_folder_version(&conn, &bucket, &key, &id, &precondition)
                         }
-                        Found::Missing | Found::Other => None,
-                    };
-                    if precondition.check_delete(current.as_ref())? {
-                        Inner::delete_folder_object(&conn, &name, &dir, &key)?;
+                        (None, Some(versions)) => inner.delete_folder_versioned(
+                            &conn,
+                            &bucket,
+                            versions,
+                            &key,
+                            &precondition,
+                        ),
+                        (None, None) => {
+                            let current = match Inner::find(&bucket.dir, &key)? {
+                                Found::File(_, meta) | Found::Folder(_, meta) => {
+                                    Some(Inner::info(&conn, &bucket.name, key.as_str(), &meta)?)
+                                }
+                                Found::Missing | Found::Other => None,
+                            };
+                            if precondition.check_delete(current.as_ref())? {
+                                Inner::delete_folder_object(
+                                    &conn,
+                                    &bucket.name,
+                                    &bucket.dir,
+                                    &key,
+                                )?;
+                            }
+                            Ok(Deleted::default())
+                        }
                     }
-                    Ok(Deleted::default())
                 }
                 Bucket::Object(bucket) => match version_id {
                     None => Inner::delete_object(&conn, &bucket, &key, &precondition),
@@ -844,7 +865,16 @@ impl Store {
                 }
             }
             match inner.bucket(&bucket)? {
-                Bucket::Folder(name, dir) => {
+                Bucket::Folder(FolderBucket {
+                    name,
+                    dir,
+                    versions,
+                }) => {
+                    if versions.is_some_and(|v| v.versioning != Versioning::Unversioned) {
+                        return Err(StoreError::InvalidRequest(
+                            "objects can't be renamed in a bucket with versioning",
+                        ));
+                    }
                     let src = ObjectKey::parse(&from).map_err(|_| StoreError::NoSuchKey)?;
                     let dst = inner.new_key(&to)?;
                     inner.rename_folder_object(
@@ -927,8 +957,8 @@ impl Store {
                     let row = Inner::version_row(&inner.lock(), &b, &key, version.as_deref())?;
                     Ok((row.crypt.is_some(), b.versioning != Versioning::Unversioned))
                 }
-                Bucket::Folder(..) => {
-                    only_null(version.as_deref())?;
+                Bucket::Folder(b) => {
+                    inner.older_source(&b, &key, version.as_deref())?;
                     Ok((false, false))
                 }
             })
@@ -954,10 +984,14 @@ impl Store {
         self.blocking(move |inner| {
             let (src, dst) = (inner.bucket(&src_bucket)?, inner.bucket(&dst_bucket)?);
             match (&src, &dst) {
-                (Bucket::Folder(src_name, _), Bucket::Folder(dst_name, _)) => {
+                (Bucket::Folder(a), Bucket::Folder(b))
+                    if inner
+                        .older_source(a, &src_key, src_version.as_deref())?
+                        .is_none() =>
+                {
                     let src_key = ObjectKey::parse(&src_key).map_err(|_| StoreError::NoSuchKey)?;
                     let dst_key = inner.new_key(&dst_key)?;
-                    inner.copy_folder(src_name, &src_key, dst_name, &dst_key, attrs, &precondition)
+                    inner.copy_folder((a, &src_key), (b, &dst_key), attrs, &precondition)
                 }
                 (Bucket::Object(a), Bucket::Object(b)) if a.id == b.id && same && !versioned => {
                     let attrs = attrs.ok_or(StoreError::InvalidRequest(
@@ -1122,16 +1156,25 @@ impl Inner {
         if check_bucket(name).is_err() {
             return Err(StoreError::NoSuchBucket);
         }
-        if let Some(record) = self.system().bucket(name)?
-            && record.layout == Layout::Object
-        {
-            return Ok(Bucket::Object(ObjectBucket {
+        let record = self.system().bucket(name)?;
+        // An object bucket's data, or a folder bucket's older versions.
+        let store = record.map(|record| {
+            let layout = record.layout;
+            let store = ObjectBucket {
                 dir: self.system_dir.join(BUCKETS_DIR).join(&record.id),
                 id: record.id,
                 versioning: record.versioning,
-            }));
+            };
+            (layout, store)
+        });
+        match store {
+            Some((Layout::Object, bucket)) => Ok(Bucket::Object(bucket)),
+            store => Ok(Bucket::Folder(FolderBucket {
+                name: name.to_owned(),
+                dir: self.bucket_dir(name)?,
+                versions: store.map(|(_, versions)| versions),
+            })),
         }
-        Ok(Bucket::Folder(name.to_owned(), self.bucket_dir(name)?))
     }
 
     /// The bucket's folder, resolved (a bucket may be a symlink to a folder elsewhere).
@@ -1157,7 +1200,7 @@ impl Inner {
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         match bucket {
-            Bucket::Folder(name, _) => {
+            Bucket::Folder(bucket) => {
                 if finished.sealed.is_some() {
                     return Err(StoreError::InvalidRequest(
                         "encryption at rest needs an object bucket",
@@ -1170,7 +1213,7 @@ impl Inner {
                             "a folder (a key ending in `/`) can't have content",
                         ));
                     }
-                    return self.make_folder(conn, name, &key, finished.attrs, precondition);
+                    return self.make_folder(conn, bucket, &key, finished.attrs, precondition);
                 }
                 // A copied file may have leftovers (an object bucket's footer) to cut off.
                 fs::OpenOptions::new()
@@ -1183,7 +1226,7 @@ impl Inner {
                     .map(|p| objects::PartsRecord::new(p).to_json());
                 self.commit_file(
                     conn,
-                    name,
+                    bucket,
                     &key,
                     finished.tmp,
                     finished.etag,
@@ -1207,9 +1250,14 @@ impl Inner {
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         let tmp = TmpFile::new(&self.tmp);
-        let source = match src {
-            Bucket::Folder(name, dir) => {
-                only_null(src_version)?;
+        // An older version of a folder bucket's object is read from its version store.
+        let older = match src {
+            Bucket::Folder(bucket) => self.older_source(bucket, src_key, src_version)?,
+            Bucket::Object(_) => None,
+        };
+        let older = older.map(Bucket::Object);
+        let source = match older.as_ref().unwrap_or(src) {
+            Bucket::Folder(FolderBucket { name, dir, .. }) => {
                 let key = ObjectKey::parse(src_key).map_err(|_| StoreError::NoSuchKey)?;
                 match Inner::find(dir, &key)? {
                     Found::File(path, meta) => {
@@ -1245,15 +1293,6 @@ impl Inner {
         let info = self.commit_to(&conn, dst, dst_key, finished, precondition)?;
         tmp.keep();
         Ok(info)
-    }
-}
-
-/// Checks a version id named in a folder bucket, whose objects have only the `null`
-/// version.
-fn only_null(version_id: Option<&str>) -> Result<()> {
-    match version_id {
-        Some(id) if id != NULL_VERSION => Err(StoreError::NoSuchVersion),
-        _ => Ok(()),
     }
 }
 

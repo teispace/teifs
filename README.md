@@ -224,7 +224,7 @@ location / {
 
 | Area | Supported |
 |---|---|
-| Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning (object buckets) |
+| Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning |
 | Objects | put, browser uploads (`POST` with a signed form and policy), get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
 | Versions | versioning enabled or suspended, every version readable, taggable and deletable by id, delete markers, ListObjectVersions, restoring a version by copying it |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
@@ -254,7 +254,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** SAML federation (`AssumeRoleWithSAML`), versioning in folder buckets, Object Lock, lifecycle rules, website
+**Not yet:** SAML federation (`AssumeRoleWithSAML`), Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

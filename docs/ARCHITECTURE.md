@@ -291,7 +291,15 @@ write gets (`ObjectBucket::new_version_id`: a new one while enabled, else `null`
 what a delete does (`Inner::delete_object`: remove the `null` version, add a delete
 marker, or replace the `null` version with one); `Inner::version_row` finds the version
 a read names and turns a delete marker into `StoreError::DeleteMarker`, which the S3
-layer answers as AWS does. Folder buckets have only `null` versions. Reads return an `ObjectBody`, which only ever yields the
+layer answers as AWS does. A folder bucket with versioning keeps the same semantics
+with the file as the current version (`crates/store/src/folder_versions.rs`): before a
+write or delete replaces the file, `Inner::archive_for_write` hard-links it into the
+bucket's version store (the object-bucket machinery, under the folder bucket's record
+id) as an older version; removing the current version by id puts the newest older one
+back at the key's path (`Inner::restore_newest`); reads, tags and copies that name an
+older version go to the version store; `Store::list_folder_versions` merges the files
+with the version rows, key by key. `Index::batch` nests (savepoints), so these steps
+join the batch that records the file. Reads return an `ObjectBody`, which only ever yields the
 object's own bytes (whole or a range). Copies between layouts clone the bytes where
 the disk can. The tests in `crates/store/src/layout_tests.rs` run the same S3 behaviour
 against both layouts.

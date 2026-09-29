@@ -13,11 +13,12 @@ use std::{
 
 use teifs_types::MAX_SEGMENT_LEN;
 
-use teifs_meta::{Index, NULL_VERSION, VersionsFrom};
+use teifs_meta::{Index, VersionsFrom};
 
 use crate::{
-    Bucket, Inner, ObjectInfo, Store, StoreError,
+    Bucket, Inner, ObjectInfo, Store,
     error::Result,
+    folder::FolderBucket,
     folders::{Children, FolderCache, start_at},
     objects::ObjectBucket,
 };
@@ -179,7 +180,7 @@ impl Store {
         self.blocking(move |inner| {
             let mut listing = Listing::default();
             let dir = match inner.bucket(&bucket)? {
-                Bucket::Folder(_, dir) => dir,
+                Bucket::Folder(FolderBucket { dir, .. }) => dir,
                 Bucket::Object(object_bucket) => {
                     if query.max_keys > 0 {
                         list_index(&inner.lock(), &object_bucket, &query, &mut listing)?;
@@ -357,8 +358,8 @@ impl FolderWalk {
 }
 
 impl Store {
-    /// Lists a bucket's versions and delete markers. A folder bucket's objects each have
-    /// one version, `null`.
+    /// Lists a bucket's versions and delete markers. In a folder bucket, each key's file
+    /// is its current version ([`Store::list_folder_versions`]).
     pub async fn list_versions(
         &self,
         bucket: &str,
@@ -368,7 +369,7 @@ impl Store {
         let object_bucket = self
             .blocking(move |inner| match inner.bucket(&bucket)? {
                 Bucket::Object(object_bucket) => Ok(Ok(object_bucket)),
-                Bucket::Folder(..) => Ok(Err(bucket)),
+                Bucket::Folder(bucket) => Ok(Err(bucket)),
             })
             .await?;
         match object_bucket {
@@ -382,67 +383,13 @@ impl Store {
                 })
                 .await
             }
-            Err(bucket) => self.list_folder_versions(&bucket, query).await,
+            Err(bucket) => self.list_folder_versions(bucket, query).await,
         }
-    }
-
-    /// A folder bucket's objects as `null` versions, from a plain listing.
-    async fn list_folder_versions(
-        &self,
-        bucket: &str,
-        query: VersionsQuery,
-    ) -> Result<VersionListing> {
-        if query
-            .version_marker
-            .as_deref()
-            .is_some_and(|v| v != NULL_VERSION)
-        {
-            return Err(StoreError::NoSuchVersion);
-        }
-        let after = query.key_marker.clone().map(|key| {
-            match common_prefix(&key, &query.prefix, query.delimiter.as_deref()) {
-                Some(common) => After::Prefix(common),
-                None => After::Key(key),
-            }
-        });
-        let listing = self
-            .list(
-                bucket,
-                ListQuery {
-                    prefix: query.prefix,
-                    delimiter: query.delimiter,
-                    after,
-                    max_keys: query.max_keys,
-                },
-            )
-            .await?;
-        let next = listing.next.map(|after| match after {
-            After::Key(key) => (key, Some(NULL_VERSION.to_owned())),
-            After::Prefix(prefix) => (prefix, None),
-        });
-        let versions = listing
-            .objects
-            .into_iter()
-            .map(|info| ObjectVersion {
-                info: ObjectInfo {
-                    version_id: Some(NULL_VERSION.to_owned()),
-                    ..info
-                },
-                latest: true,
-                delete_marker: false,
-            })
-            .collect();
-        Ok(VersionListing {
-            versions,
-            prefixes: listing.prefixes,
-            truncated: listing.truncated,
-            next,
-        })
     }
 }
 
 /// The common prefix `key` rolls up into: up to the first `delimiter` after `prefix`.
-fn common_prefix(key: &str, prefix: &str, delimiter: Option<&str>) -> Option<String> {
+pub(crate) fn common_prefix(key: &str, prefix: &str, delimiter: Option<&str>) -> Option<String> {
     let delimiter = delimiter.filter(|d| !d.is_empty())?;
     let rest = key.strip_prefix(prefix)?;
     let at = rest.find(delimiter)?;
@@ -557,7 +504,8 @@ fn list_versions_index(
 }
 
 /// An owned [`VersionsFrom`].
-enum Cursor {
+#[derive(Debug, Clone)]
+pub(crate) enum Cursor {
     Start,
     AfterKey(String),
     AfterVersion(String, i64),
@@ -565,7 +513,7 @@ enum Cursor {
 }
 
 impl Cursor {
-    fn as_versions_from(&self) -> VersionsFrom<'_> {
+    pub(crate) fn as_versions_from(&self) -> VersionsFrom<'_> {
         match self {
             Cursor::Start => VersionsFrom::Start,
             Cursor::AfterKey(key) => VersionsFrom::AfterKey(key),

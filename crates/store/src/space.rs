@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use crate::{Bucket, Inner, Store, StoreError, error::Result};
+use crate::{Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket};
 
 const MIB: u64 = 1024 * 1024;
 /// The least room kept free: enough for deletes and the index's log.
@@ -34,7 +34,7 @@ impl Inner {
     /// it's elsewhere.
     pub(crate) fn ensure_space(&self, bucket: &str, len: u64) -> Result<()> {
         let bucket_dir = match self.bucket(bucket)? {
-            Bucket::Folder(_, dir) => Some(dir),
+            Bucket::Folder(FolderBucket { dir, .. }) => Some(dir),
             Bucket::Object(_) => None,
         };
         for dir in [Some(self.tmp.as_path()), bucket_dir.as_deref()]

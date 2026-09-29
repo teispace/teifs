@@ -81,6 +81,16 @@ becomes one if the object bucket is deleted.
 - `.teifs-tmp` at the top of a bucket is reserved: writes to a bucket on another disk
   than the drive stage there, so the last step is an atomic rename on that disk. It's
   never listed and is emptied at every start.
+- With **versioning**, the file is always the current version; its id is the `objects`
+  row's `version_id` (`NULL`, or a row that no longer matches the file, means `null`).
+  Older versions and delete markers are `object_versions` rows under the bucket's id,
+  with their bytes in data files at `.teifs/buckets/<bucket id>/…` as an object
+  bucket's are, but **without a footer**: exactly the version's bytes. A file becomes an
+  older version by a hard link to its data file (a copy where links can't go) made
+  before anything replaces or removes it; an older version becomes the file again the
+  same way back. So a crash can leave a version twice (the file wins), never lose one.
+  A file changed by another program becomes the `null` version, as any file TeiFS
+  didn't write is. Folder keys (`key/`) have no versions.
 
 ### Object buckets
 
@@ -113,8 +123,8 @@ garbage is removed at the next start.
 
 | Table | Holds |
 |---|---|
-| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums and `checksumType`, absent for a whole-object checksum, `tags`, and `acl` when the object has one), and for multipart objects `parts` (JSON: each part's size and checksums). Rebuildable from the files, except the parts |
-| `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq` (higher is newer), `version_id` (`null` for one written without versioning on), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
+| `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums and `checksumType`, absent for a whole-object checksum, `tags`, and `acl` when the object has one), for multipart objects `parts` (JSON: each part's size and checksums), and `version_id` (the file's version id with versioning; `NULL` for `null`). Rebuildable from the files, except the parts and version ids |
+| `object_versions` | Object buckets, per version, and folder buckets' older versions and delete markers: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq` (higher is newer), `version_id` (`null` for one written without versioning on), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
 | `garbage` | Data files waiting to be removed |
 | `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt`, and every upload the checksum its object gets in `uploads.checksum` (JSON: `algorithm`, `type` `FULL_OBJECT` or `COMPOSITE`, `requested`); an upload created with a size cap keeps it in `uploads.max_size` (bytes, all parts together; `NULL` without one) |
 | `completed_uploads` | What each completed upload answered (ETag, size, checksums), kept 24 hours so a retried Complete gets the same answer |
