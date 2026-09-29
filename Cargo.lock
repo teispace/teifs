@@ -2907,9 +2907,11 @@ dependencies = [
 name = "teifs-iam"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64",
  "form_urlencoded",
  "percent-encoding",
+ "reqwest",
  "serde",
  "serde_json",
  "teifs-crypto",

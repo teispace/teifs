@@ -41,7 +41,7 @@ field the form sends. Its fields are read before any decision, at most 64 KiB of
 and the upload is authorized on the key the form names, as a PutObject would be; a form
 that couldn't be read is refused, never decided as if it had no fields. Error messages
 that quote a request are XML-escaped.
-The one unsigned request is the health check, `GET`/`HEAD /.teifs/health`: it answers
+The one unsigned request besides `AssumeRoleWithWebIdentity` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
 ordinary key that needs a signature. Any other unsigned request is anonymous: it's
@@ -150,9 +150,25 @@ the admin API, nor start other sessions (federated users' only ask `GetCallerIde
 a federated user has what both the caller's policies and the session policies allow,
 so none allows nothing. MinIO's `AssumeRole` without a role gives a user's own
 permissions narrowed, only to the user's own long-term key, and a policy may deny it.
-A session with an MFA code is refused, since TeiFS has no MFA devices. Tests:
-`crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/sessions.rs`,
-`crates/server/tests/sts.rs`, `crates/server/tests/admin.rs`.
+A session with an MFA code is refused, since TeiFS has no MFA devices.
+
+`AssumeRoleWithWebIdentity` is the one IAM or STS request answered unsigned, as on AWS,
+and a signature on it counts for nothing: only the token and the role's trust policy
+decide. The token must be signed by a key its provider publishes, with RS, PS or ES
+signatures only (`none` and `HS…`, whose key would be public, are refused before any key
+is looked at), by a key whose type, curve, `alg` and `use` fit; a header with `crit`
+is refused. Headers and claims are read strictly, so no two readers see different
+claims. The issuer must be one of the account's providers, the audience one of its
+client ids (a provider with none accepts no token), the token unexpired (`exp` is
+required; `nbf` and `iat` get a minute's leeway), and the subject present. Keys are
+fetched only from providers an administrator created, over `https` (or `http` to this
+machine), from the `jwks_uri` of a discovery document whose issuer is the provider's,
+with no redirects, a 5-second timeout and at most 256 KiB read; a flood of tokens naming
+unknown keys asks a provider at most once in 30 seconds. A trust policy's `Federated`
+principal names one provider's ARN, without wildcards. Tests:
+`crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/api/tests/web_identity.rs`,
+`crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
+`crates/server/tests/admin.rs`.
 
 ### 5. No default secrets
 There is no built-in access key or password. The first run generates random credentials

@@ -48,6 +48,34 @@ pub(crate) struct Claims {
     /// `SourceIdentity`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<String>,
+    /// The web identity that started it (`AssumeRoleWithWebIdentity`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web: Option<WebClaims>,
+}
+
+/// What a role session keeps of the web identity token that started it: the provider's
+/// condition keys its requests have (`idp.example.com:sub`), as on AWS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebClaims {
+    /// The provider's ARN (`aws:FederatedProvider`).
+    pub(crate) provider: String,
+    /// `aud`: the client id the token was for.
+    pub(crate) aud: String,
+    /// `sub`.
+    pub(crate) sub: String,
+    /// `amr`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) amr: Vec<String>,
+}
+
+impl WebClaims {
+    /// The provider's URL without its scheme: its condition keys' prefix.
+    pub(crate) fn prefix(&self) -> &str {
+        self.provider
+            .split_once(":oidc-provider/")
+            .map_or("", |(_, name)| name)
+    }
 }
 
 /// Whom a session acts as, by unique id.
@@ -80,6 +108,7 @@ impl Claims {
             tags: Vec::new(),
             transitive: Vec::new(),
             source: None,
+            web: None,
         }
     }
 }

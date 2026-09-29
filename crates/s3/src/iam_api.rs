@@ -8,10 +8,14 @@
 //! the request; the signature then covers the body as the client sent it. The route
 //! checks the hash against the body again itself, so a request whose body isn't what
 //! was signed (or that says `UNSIGNED-PAYLOAD`) is refused whatever s3s does with it.
+//!
+//! `AssumeRoleWithWebIdentity` is the exception, as on AWS: its web identity token says
+//! who is asking, so it's answered unsigned (the AWS CLI and SDKs send it so), and a
+//! signature on it counts for nothing.
 
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use s3s::{Body, S3Request, S3Response};
-use teifs_iam::{AuthError, Call, Iam, Reply};
+use teifs_iam::{AuthError, Call, Iam, Identity, Reply};
 
 use crate::{
     access::{Client, base_context, security_token},
@@ -103,12 +107,31 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
         ),
     };
     let Some(access_key) = req.credentials.as_ref().map(|c| c.access_key.clone()) else {
-        return refuse(
-            StatusCode::FORBIDDEN,
-            "MissingAuthenticationToken",
-            "Request is missing Authentication Token",
-        );
+        // Unsigned: only a request that carries its own proof of who's asking.
+        let body = match req.input.store_all_limited(MAX_FORM_BYTES).await {
+            Ok(body) => body,
+            Err(err) => {
+                let (status, code, message) = unreadable(err.as_ref(), INCOMPLETE);
+                return refuse(status, code, message);
+            }
+        };
+        if !Iam::is_web_identity(&body) {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "MissingAuthenticationToken",
+                "Request is missing Authentication Token",
+            );
+        }
+        return web_identity(iam, req, &body, request_id).await;
     };
+    let body = match signed_body(req, MAX_FORM_BYTES).await {
+        Ok(body) => body,
+        Err((status, code, message)) => return refuse(status, code, message),
+    };
+    // Whoever signed it has no part in a request that carries its own proof.
+    if req.service.as_deref() == Some("sts") && Iam::is_web_identity(&body) {
+        return web_identity(iam, req, &body, request_id).await;
+    }
     // A key deleted since its signature was checked is refused like any other, as is a
     // session whose user or role is gone.
     let token = security_token(&req.headers, &req.uri);
@@ -129,10 +152,6 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
             );
         }
     };
-    let body = match signed_body(req, MAX_FORM_BYTES).await {
-        Ok(body) => body,
-        Err((status, code, message)) => return refuse(status, code, message),
-    };
     let client = req.extensions.get::<Client>().copied().unwrap_or_default();
     let context = base_context(&identity, &req.headers, client, &iam.account());
     let call = Call {
@@ -150,6 +169,21 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
             "A form posted to / is an IAM or STS request, signed for service iam or sts.",
         ),
     }
+}
+
+/// Answers `AssumeRoleWithWebIdentity`, as the anonymous caller it is: its token says
+/// who is asking.
+async fn web_identity(iam: &Iam, req: &S3Request<Body>, body: &[u8], request_id: &str) -> Reply {
+    let identity = Identity::anonymous();
+    let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+    let context = base_context(&identity, &req.headers, client, &iam.account());
+    iam.serve_web_identity(&Call {
+        identity: &identity,
+        context: &context,
+        body,
+        request_id,
+    })
+    .await
 }
 
 #[cfg(test)]

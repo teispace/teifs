@@ -1097,3 +1097,4 @@ async fn role_condition_keys_hold_back_escalation() {
 
 mod oidc;
 mod sessions;
+mod web_identity;

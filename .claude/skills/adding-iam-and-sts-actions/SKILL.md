@@ -48,7 +48,12 @@ a table, authorizes it and answers in AWS's XML.
 5. **Temporary credentials.** Which APIs a session may call is decided in two places:
    `sts::permitted` (STS) and `Session::may_manage` (IAM and the admin API) in
    `crates/iam/src/snapshot.rs`. What a session is made of is `sessions::Claims`; a
-   change to it bumps `VERSION` only if older tokens can't be read the new way.
+   change to it bumps `VERSION` only if older tokens can't be read the new way (a new
+   optional field with `#[serde(default)]`, as `web`, doesn't).
+   An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`)
+   is answered unsigned: `Iam::is_web_identity` picks it out in
+   `crates/s3/src/iam_api.rs`, and `Iam::serve_web_identity` fetches what it needs
+   (the provider's keys, async) before the sync handler runs as the anonymous identity.
 6. **Tests**:
    - `every_parameter` in `crates/iam/src/api/tests.rs` needs the action's parameters,
      so `every_action_is_authorized` refuses it to a user without permissions;

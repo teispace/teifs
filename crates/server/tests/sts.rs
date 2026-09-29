@@ -431,3 +431,257 @@ async fn minio_assume_role_gives_a_users_own_permissions_narrowed() {
     assert_eq!(get(&session, "photos", "a.txt").await, "ok");
     assert_eq!(put(&session, "photos", "b.txt").await, "AccessDenied");
 }
+
+/// An OpenID Connect provider on a loopback port, signing with an ECDSA P-256 key: its
+/// URL, and a token it issues for `sub` with `claims` besides the usual ones.
+struct Idp {
+    url: String,
+    key: aws_lc_rs::signature::EcdsaKeyPair,
+}
+
+impl Idp {
+    async fn start() -> Self {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as _};
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let key = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).unwrap();
+        let point = key.public_key().as_ref();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let discovery = format!(r#"{{"issuer":"{url}","jwks_uri":"{url}/keys"}}"#);
+        let keys = format!(
+            r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"k1","use":"sig","alg":"ES256","x":"{}","y":"{}"}}]}}"#,
+            URL_SAFE_NO_PAD.encode(&point[1..33]),
+            URL_SAFE_NO_PAD.encode(&point[33..])
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let (discovery, keys) = (discovery.clone(), keys.clone());
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    let body = match request.split(' ').nth(1) {
+                        Some("/.well-known/openid-configuration") => discovery,
+                        Some("/keys") => keys,
+                        _ => String::new(),
+                    };
+                    let status = if body.is_empty() { 404 } else { 200 };
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        Self { url, key }
+    }
+
+    fn token(&self, sub: &str, claims: &str) -> String {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let signed = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256","kid":"k1","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(format!(
+                r#"{{"iss":"{}","sub":"{sub}","aud":"sts.amazonaws.com","iat":{now},"exp":{}{claims}}}"#,
+                self.url,
+                now + 300
+            ))
+        );
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let signature = self.key.sign(&rng, signed.as_bytes()).unwrap();
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()))
+    }
+}
+
+/// A form posted to STS, signed with the root key as other clients sign it (with the
+/// body's hash in `x-amz-content-sha256`): the answer's status and body.
+async fn signed_sts(server: &Server, form: &str) -> (u16, String) {
+    use aws_sigv4::{
+        http_request::{PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign},
+        sign::v4,
+    };
+    let url = format!("{}/", server.endpoint);
+    let host = url
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let identity =
+        aws_credential_types::Credentials::new(ACCESS_KEY, SECRET_KEY, None, None, "tests").into();
+    let mut settings = SigningSettings::default();
+    settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region("us-east-1")
+        .name("sts")
+        .time(SystemTime::now())
+        .settings(settings)
+        .build()
+        .unwrap()
+        .into();
+    let content_type = "application/x-www-form-urlencoded";
+    let headers = [("host", host.as_str()), ("content-type", content_type)];
+    let signable = SignableRequest::new(
+        "POST",
+        &url,
+        headers.into_iter(),
+        SignableBody::Bytes(form.as_bytes()),
+    )
+    .unwrap();
+    let (instructions, _) = sign(signable, &params).unwrap().into_parts();
+    let mut request = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", content_type)
+        .body(form.to_owned());
+    for (name, value) in instructions.headers() {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.unwrap();
+    (response.status().as_u16(), response.text().await.unwrap())
+}
+
+/// An STS client with no credentials at all, as a CI job has before it assumes a role.
+fn sts_unsigned(server: &Server) -> aws_sdk_sts::Client {
+    aws_sdk_sts::Client::from_conf(
+        aws_sdk_sts::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_sts::config::Region::new("us-east-1"))
+            .endpoint_url(&server.endpoint)
+            .build(),
+    )
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn web_identities_assume_roles_through_the_aws_sdk() {
+    let server = start().await;
+    let account = server.iam.account();
+    let idp = Idp::start().await;
+    let admin = iam(&server, &Keys::root());
+    let provider = admin
+        .create_open_id_connect_provider()
+        .url(&idp.url)
+        .client_id_list("sts.amazonaws.com")
+        .send()
+        .await
+        .unwrap()
+        .open_id_connect_provider_arn
+        .unwrap();
+    let name = idp.url.trim_start_matches("http://");
+    let trust = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"Federated":"{provider}"}},"Action":["sts:AssumeRoleWithWebIdentity","sts:TagSession"],"Condition":{{"StringEquals":{{"{name}:aud":"sts.amazonaws.com"}},"StringLike":{{"{name}:sub":"repo:acme/*"}}}}}}]}}"#
+    );
+    admin
+        .create_role()
+        .role_name("deploy")
+        .assume_role_policy_document(&trust)
+        .send()
+        .await
+        .unwrap();
+    admin
+        .put_role_policy()
+        .role_name("deploy")
+        .policy_name("photos")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":["arn:aws:s3:::photos","arn:aws:s3:::photos/*"],"Condition":{"StringEquals":{"aws:PrincipalTag/team":"web"}}}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    s3(&server, &Keys::root())
+        .create_bucket()
+        .bucket("photos")
+        .send()
+        .await
+        .unwrap();
+    let role_arn = format!("arn:aws:iam::{account}:role/deploy");
+
+    // Unsigned, as the SDK sends it: the token is the proof.
+    let anonymous = sts_unsigned(&server);
+    let token = idp.token(
+        "repo:acme/site:ref:refs/heads/main",
+        r#","https://aws.amazon.com/tags":{"principal_tags":{"team":["web"]}}"#,
+    );
+    // Signed (the SDK never signs it; others may), the signature counts for nothing,
+    // and the first request fetches the provider's keys as an unsigned one does.
+    let form = format!(
+        "Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn={role_arn}\
+         &RoleSessionName=signed&WebIdentityToken={token}"
+    );
+    let (status, body) = signed_sts(&server, &form).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("<AssumedRoleUser>"), "{body}");
+    let answer = anonymous
+        .assume_role_with_web_identity()
+        .role_arn(&role_arn)
+        .role_session_name("ci-42")
+        .web_identity_token(&token)
+        .duration_seconds(900)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        answer.subject_from_web_identity_token(),
+        Some("repo:acme/site:ref:refs/heads/main")
+    );
+    assert_eq!(answer.provider(), Some(provider.as_str()));
+    assert_eq!(answer.audience(), Some("sts.amazonaws.com"));
+    assert_eq!(
+        answer.assumed_role_user().unwrap().arn(),
+        format!("arn:aws:sts::{account}:assumed-role/deploy/ci-42")
+    );
+    let credentials = answer.credentials().unwrap();
+    assert!((890..=900).contains(&seconds_until(credentials.expiration())));
+
+    // The session signs S3 requests as the role, with the token's session tags.
+    let keys = Keys::temporary(credentials);
+    let session = s3(&server, &keys);
+    assert_eq!(put(&session, "photos", "a.jpg").await, "ok");
+    assert_eq!(get(&session, "photos", "a.jpg").await, "ok");
+    let caller = sts(&server, &keys)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        caller.arn(),
+        Some(format!("arn:aws:sts::{account}:assumed-role/deploy/ci-42").as_str())
+    );
+
+    // Signed or not, a subject the trust policy doesn't name is refused.
+    let other = idp.token("repo:evil/site:ref:refs/heads/main", "");
+    for client in [sts_unsigned(&server), sts(&server, &Keys::root())] {
+        let err = client
+            .assume_role_with_web_identity()
+            .role_arn(&role_arn)
+            .role_session_name("ci-43")
+            .web_identity_token(&other)
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(code::<(), _>(Err(err)), "AccessDenied");
+    }
+    // A forged token is refused as AWS refuses it.
+    let forged = format!("{}x", &token[..token.len() - 1]);
+    let err = anonymous
+        .assume_role_with_web_identity()
+        .role_arn(&role_arn)
+        .role_session_name("ci-44")
+        .web_identity_token(forged)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(code::<(), _>(Err(err)), "InvalidIdentityToken");
+}

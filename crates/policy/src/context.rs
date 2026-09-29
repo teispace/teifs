@@ -20,6 +20,9 @@ pub enum PrincipalKind {
     AssumedRole,
     /// A session a user started for someone else (`GetFederationToken`).
     FederatedUser,
+    /// Someone an OpenID Connect provider vouches for, asking for a role's session
+    /// (`AssumeRoleWithWebIdentity`).
+    WebIdentityUser,
     /// An unsigned request.
     Anonymous,
 }
@@ -33,6 +36,7 @@ impl PrincipalKind {
             Self::User => "User",
             Self::AssumedRole => "AssumedRole",
             Self::FederatedUser => "FederatedUser",
+            Self::WebIdentityUser => "WebIdentityUser",
             Self::Anonymous => "Anonymous",
         }
     }
@@ -53,6 +57,9 @@ pub struct Principal {
     role_arn: Option<String>,
     session_name: Option<String>,
     canonical_id: Option<String>,
+    /// The identity provider that vouched for it (`aws:FederatedProvider`): the web
+    /// identity itself, or a role session it started.
+    federated_provider: Option<String>,
     /// Whether a policy naming the principal's ARN (or a session's role) means this
     /// principal; see [`Self::unbound`].
     bound: bool,
@@ -71,6 +78,7 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            federated_provider: None,
             bound: true,
         }
     }
@@ -88,6 +96,7 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            federated_provider: None,
             bound: true,
         }
     }
@@ -112,6 +121,7 @@ impl Principal {
             role_arn: Some(format!("arn:aws:iam::{account}:role{role_path}{role_name}")),
             session_name: Some(session_name.to_owned()),
             canonical_id: None,
+            federated_provider: None,
             bound: true,
         }
     }
@@ -128,8 +138,36 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            federated_provider: None,
             bound: true,
         }
+    }
+
+    /// Someone the OpenID Connect provider `provider` (its ARN) vouches for as
+    /// `subject`, before they have a session: whom a trust policy's `Federated`
+    /// principal names.
+    #[must_use]
+    pub fn web_identity(provider: &str, subject: &str) -> Self {
+        Self {
+            kind: PrincipalKind::WebIdentityUser,
+            arn: None,
+            account: None,
+            user_id: format!("{provider}:{subject}"),
+            username: None,
+            role_arn: None,
+            session_name: None,
+            canonical_id: None,
+            federated_provider: Some(provider.to_owned()),
+            bound: true,
+        }
+    }
+
+    /// The same principal, started by someone the identity provider `provider` vouched
+    /// for (`aws:FederatedProvider`): a role session from `AssumeRoleWithWebIdentity`.
+    #[must_use]
+    pub fn with_federated_provider(mut self, provider: &str) -> Self {
+        self.federated_provider = Some(provider.to_owned());
+        self
     }
 
     /// Whoever sends an unsigned request.
@@ -144,6 +182,7 @@ impl Principal {
             role_arn: None,
             session_name: None,
             canonical_id: None,
+            federated_provider: None,
             bound: true,
         }
     }
@@ -204,6 +243,14 @@ impl Principal {
 
     pub(crate) fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()
+    }
+
+    /// The identity provider a web identity comes from, if this is one (not a session
+    /// it started): what a `Federated` principal names.
+    pub(crate) fn web_identity_provider(&self) -> Option<&str> {
+        (self.kind == PrincipalKind::WebIdentityUser)
+            .then_some(self.federated_provider.as_deref())
+            .flatten()
     }
 
     pub(crate) const fn is_bound(&self) -> bool {
@@ -326,6 +373,9 @@ pub struct Context {
     request_tag_keys: Vec<String>,
     /// `s3:RequestObjectTagKeys`: the keys of the `s3:RequestObjectTag`s.
     request_object_tag_keys: Vec<String>,
+    /// An identity provider's keys (`idp.example.com:sub`): the claims of a web
+    /// identity token, by the names policies give them.
+    claims: Vec<(Box<str>, Value)>,
 }
 
 impl Context {
@@ -350,6 +400,7 @@ impl Context {
             tags: Vec::new(),
             request_tag_keys: Vec::new(),
             request_object_tag_keys: Vec::new(),
+            claims: Vec::new(),
         }
     }
 
@@ -471,6 +522,22 @@ impl Context {
         self
     }
 
+    /// An identity provider's key (`idp.example.com:sub`), replacing any earlier value.
+    /// Its name compares without case, as condition keys' names do.
+    #[must_use]
+    pub fn with_claim(mut self, name: &str, value: impl Into<Value>) -> Self {
+        let value = value.into();
+        match self
+            .claims
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
+            Some((_, old)) => *old = value,
+            None => self.claims.push((name.into(), value)),
+        }
+        self
+    }
+
     /// The values the request has for `key`; none when it doesn't have the key.
     pub(crate) fn lookup(&self, key: &Key) -> Values<'_> {
         match key {
@@ -481,7 +548,11 @@ impl Context {
             Key::Iam(key) => get(&self.iam, key),
             Key::Sts(key) => get(&self.sts, key),
             Key::Tag(kind, name) => self.tag(*kind, name),
-            Key::Unknown(_) => Values::None,
+            Key::Unknown(name) => self
+                .claims
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map_or(Values::None, |(_, value)| value.values()),
         }
     }
 
@@ -516,10 +587,10 @@ impl Context {
                 Values::One(Item::Bool(false))
             }
             GlobalKey::TagKeys => Values::Many(&self.request_tag_keys),
+            GlobalKey::FederatedProvider => Values::text(principal.federated_provider.as_deref()),
             GlobalKey::CalledVia
             | GlobalKey::CalledViaFirst
             | GlobalKey::CalledViaLast
-            | GlobalKey::FederatedProvider
             | GlobalKey::MultiFactorAuthAge
             | GlobalKey::MultiFactorAuthPresent
             | GlobalKey::PrincipalOrgId
@@ -673,6 +744,35 @@ mod tests {
             .iter()
             .next()
             .map(|item| item.text().into_owned())
+    }
+
+    #[test]
+    fn web_identities_answer_their_providers_keys() {
+        let at = Date::from_unix_seconds(1_800_000_000);
+        let provider = "arn:aws:iam::123456789012:oidc-provider/idp.example.com";
+        let web = Context::new(Principal::web_identity(provider, "alice"), at)
+            .with_claim("idp.example.com:aud", "app");
+        assert_eq!(
+            first(&web, "aws:PrincipalType").as_deref(),
+            Some("WebIdentityUser")
+        );
+        assert_eq!(
+            first(&web, "aws:FederatedProvider").as_deref(),
+            Some(provider)
+        );
+        assert_eq!(first(&web, "aws:PrincipalArn"), None);
+        assert_eq!(first(&web, "aws:PrincipalAccount"), None);
+        assert_eq!(first(&web, "IDP.example.com:AUD").as_deref(), Some("app"));
+        assert_eq!(first(&web, "idp.example.com:sub"), None);
+        let session = Context::new(
+            Principal::session("123456789012", "/", "web", "AROAX", "s1")
+                .with_federated_provider(provider),
+            at,
+        );
+        assert_eq!(
+            first(&session, "aws:FederatedProvider").as_deref(),
+            Some(provider)
+        );
     }
 
     #[test]

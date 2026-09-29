@@ -84,6 +84,30 @@ impl Iam {
         })
     }
 
+    /// Whether a form is an STS request that carries its own proof of who is asking (a
+    /// web identity token): it's answered whether it's signed or not, as on AWS, and
+    /// whoever signed it has no part in it.
+    #[must_use]
+    pub fn is_web_identity(body: &[u8]) -> bool {
+        Params::parse(body).is_ok_and(|p| p.optional("Action") == Some(sts::WEB_IDENTITY))
+    }
+
+    /// Answers an [`Self::is_web_identity`] request, which `call` gives with the
+    /// anonymous identity: first fetches the signing keys of the provider its token
+    /// names, if they aren't known or the token is signed with a key that isn't.
+    pub async fn serve_web_identity(&self, call: &Call<'_>) -> Reply {
+        if let Ok(params) = Params::parse(call.body)
+            && let Some((iss, kid)) = params
+                .optional("WebIdentityToken")
+                .and_then(crate::oidc::issuer)
+            && let Ok(Some(url)) =
+                self.read(|s| Ok(s.oidc_provider_by_issuer(&iss).map(|p| p.url.clone())))
+        {
+            self.web_keys.refresh(&url, kid.as_deref()).await;
+        }
+        self.serve_sts(call)
+    }
+
     fn run(
         &self,
         call: &Call<'_>,

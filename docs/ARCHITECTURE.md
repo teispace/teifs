@@ -114,12 +114,26 @@ An OpenID Connect provider (`ops/oidc.rs`) is the issuer URL a web identity toke
 name, the audiences it may be for and the certificate thumbprints it may be pinned to;
 its ARN ends in the URL without the scheme, which is also what makes it unique.
 
+`AssumeRoleWithWebIdentity` (`oidc/`) checks such a token before the trust policy sees
+it. `oidc/jwt.rs` reads the token strictly (a JSON member named twice is refused) and
+verifies its signature with aws-lc-rs, only with asymmetric algorithms and only with a
+key that fits the algorithm; `oidc/keys.rs` fetches each provider's keys (OpenID
+Connect Discovery, then its `jwks_uri`) with reqwest and keeps them in memory, one
+fetch per provider at a time; `oidc/mod.rs` matches the issuer to a provider and checks
+audience, subject and times, and turns the claims into the provider's condition keys.
+Fetching is async and the STS API is not, so the S3 layer calls
+`Iam::serve_web_identity`, which makes sure the keys the token needs are known before it
+answers the request as any other STS call. The request is served as the anonymous
+identity whatever signed it: the trust policy's `Federated` principal matches a
+`WebIdentityUser` principal of that provider, and nothing else.
+
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
 derived from the id under the IAM key (HKDF, then HMAC), so a signature can be checked
 from the id alone; its session token is its claims (whom it acts as by unique id, when
 it was issued and expires, its session policies' documents, its tags, which of them are
-transitive, its source identity) as JSON sealed with AES-256-GCM under the IAM key and
+transitive, its source identity, and for a web identity's session the provider and the
+token's `aud`, `sub` and `amr`) as JSON sealed with AES-256-GCM under the IAM key and
 bound to the access key id, at most 6 KiB. A token works only with its own key and
 can't be forged or changed. Every request turns the claims into an `Identity` against
 IAM as it is now (`Snapshot::add_session`), so a role's or user's permissions changing

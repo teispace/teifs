@@ -14,7 +14,7 @@ use teifs_policy::{
 use zeroize::Zeroizing;
 
 use crate::{
-    sessions::{Claims, Who},
+    sessions::{Claims, WebClaims, Who},
     state::State,
 };
 
@@ -43,6 +43,8 @@ pub struct Session {
     source_identity: Option<Box<str>>,
     /// The session tags that pass on to the sessions it starts.
     transitive: Box<[(String, String)]>,
+    /// The web identity that started it, whose provider's keys its requests have.
+    web: Option<Box<WebClaims>>,
 }
 
 /// How a session was made, which decides the APIs it may call.
@@ -174,6 +176,15 @@ impl Identity {
             context = context.with_token_issue_time(session.issued());
             if let Some(source) = session.source_identity() {
                 context = context.with_source_identity(source);
+            }
+            if let Some(web) = &session.web {
+                let key = |name: &str| format!("{}:{name}", web.prefix());
+                context = context
+                    .with_claim(&key("aud"), web.aud.as_str())
+                    .with_claim(&key("sub"), web.sub.as_str());
+                if !web.amr.is_empty() {
+                    context = context.with_claim(&key("amr"), web.amr.clone());
+                }
             }
         }
         context
@@ -477,6 +488,7 @@ impl Snapshot {
             expires: claims.exp,
             source_identity: claims.source.as_deref().map(Into::into),
             transitive: transitive.clone(),
+            web: claims.web.clone().map(Box::new),
         };
         Some(match &claims.who {
             Who::Role {
@@ -485,14 +497,13 @@ impl Snapshot {
                 chained,
             } => {
                 let role = self.roles.get(role.as_str())?;
+                let mut principal =
+                    Principal::session(&self.account, &role.path, &role.name, &role.id, name);
+                if let Some(web) = &claims.web {
+                    principal = principal.with_federated_provider(&web.provider);
+                }
                 Identity {
-                    principal: Principal::session(
-                        &self.account,
-                        &role.path,
-                        &role.name,
-                        &role.id,
-                        name,
-                    ),
+                    principal,
                     root: false,
                     tags: merged(&role.tags, &claims.tags),
                     policies: role.policies.clone(),

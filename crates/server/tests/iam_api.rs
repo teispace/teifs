@@ -773,7 +773,7 @@ async fn only_the_body_that_was_signed_is_accepted() {
             "{name}: {body}"
         );
     }
-    // Unsigned, it's refused before anything is read.
+    // Unsigned, only a web identity token is answered.
     let reply = reqwest::Client::new()
         .post(&server.endpoint)
         .header("content-type", "application/x-www-form-urlencoded")

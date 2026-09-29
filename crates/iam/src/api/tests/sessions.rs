@@ -23,14 +23,14 @@ fn creds(body: &str) -> Creds {
 impl Drive {
     /// The session an answer's credentials sign as; their secret is the one that checks
     /// their signatures.
-    fn session(&self, body: &str) -> Arc<Identity> {
+    pub(super) fn session(&self, body: &str) -> Arc<Identity> {
         let c = creds(body);
         let secret = between(body, "<SecretAccessKey>", "</SecretAccessKey>");
         assert_eq!(self.iam.secret(&c.key).unwrap().as_str(), secret);
         self.iam.identify(&c.key, Some(&c.token)).unwrap()
     }
 
-    fn role_arn(&self, name: &str) -> String {
+    pub(super) fn role_arn(&self, name: &str) -> String {
         format!("arn:aws:iam::{}:role/{name}", self.account)
     }
 

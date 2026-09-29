@@ -30,6 +30,16 @@ behaviour; the on-disk format is always upgraded automatically.
   provider actions (audiences, certificate thumbprints, tags), with AWS's limits, and in
   IAM export and import. A provider's URL may also have a port, and `http://` for an
   identity provider on the same machine.
+- Web identity federation, as AWS has it: `AssumeRoleWithWebIdentity` exchanges an
+  OpenID Connect ID token (GitHub Actions, GitLab, Kubernetes, Google, Keycloak, any
+  provider with OpenID Connect Discovery) for a role's temporary credentials, unsigned as
+  the AWS CLI and SDKs send it. The token's signature (RS256/384/512, PS256/384/512,
+  ES256/384/512) is checked with the provider's published keys, fetched and kept as
+  its `Cache-Control` says, and its issuer, audience and expiry as AWS checks them.
+  Trust policies test the provider's keys (`token.actions.githubusercontent.com:sub`,
+  `:aud`, `:amr` and any other claim), `aws:FederatedProvider` and
+  `sts:RoleAuthorizedByIdp`; session tags and a source identity come from the token's
+  `https://aws.amazon.com/tags` and `source_identity` claims.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

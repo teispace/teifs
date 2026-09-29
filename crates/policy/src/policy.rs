@@ -81,6 +81,9 @@ enum PrincipalEntry {
     Arn(Box<str>),
     /// `{"CanonicalUser": "…"}`.
     Canonical(Box<str>),
+    /// `{"Federated": "…"}`: the identity provider (an OpenID Connect provider's ARN)
+    /// whose web identities may assume the role.
+    Federated(Box<str>),
     /// An AWS service or identity provider: never a TeiFS caller.
     Never,
 }
@@ -299,6 +302,25 @@ impl Policy {
             }
         }
         arns
+    }
+
+    /// The identity providers the policy names as `Federated` principals, each once.
+    #[must_use]
+    pub fn federated_providers(&self) -> Vec<&str> {
+        let mut providers: Vec<&str> = Vec::new();
+        let named = self
+            .statements
+            .iter()
+            .filter_map(|s| s.principal.as_ref())
+            .flat_map(|p| p.entries.iter());
+        for entry in named {
+            if let PrincipalEntry::Federated(provider) = entry
+                && !providers.contains(&&**provider)
+            {
+                providers.push(provider);
+            }
+        }
+        providers
     }
 
     /// The condition keys TeiFS doesn't know, which no request ever has: usually a typo.
@@ -544,7 +566,16 @@ impl PrincipalEntry {
             "CanonicalUser" if !value.is_empty() && value != "*" => {
                 Ok(Self::Canonical(value.into()))
             }
-            "Service" | "Federated" if !value.is_empty() => Ok(Self::Never),
+            "Federated" if !value.is_empty() => {
+                if value.contains(['*', '?']) {
+                    return Err(Error::new(format!(
+                        "`{value}`: a Federated principal names one identity provider, \
+                         without wildcards"
+                    )));
+                }
+                Ok(Self::Federated(value.into()))
+            }
+            "Service" if !value.is_empty() => Ok(Self::Never),
             "CanonicalUser" | "Service" | "Federated" => Err(bad()),
             other => Err(Error::new(format!(
                 "`{other}` isn't a kind of principal (AWS, CanonicalUser, Service, Federated)"
@@ -569,6 +600,9 @@ impl PrincipalEntry {
                 }
             }
             Self::Canonical(id) => (principal.canonical_id() == Some(id)).then_some(Grant::Named),
+            Self::Federated(provider) => {
+                (principal.web_identity_provider() == Some(provider)).then_some(Grant::Named)
+            }
             Self::Never => None,
         }
     }
@@ -587,6 +621,7 @@ impl PrincipalEntry {
                     && (principal.arn() == Some(arn) || principal.role_arn() == Some(arn))
             }
             Self::Canonical(id) => principal.canonical_id() == Some(id),
+            Self::Federated(provider) => principal.web_identity_provider() == Some(provider),
             Self::Never => false,
         }
     }
@@ -984,6 +1019,67 @@ mod tests {
             let message = refused(&statement(body), identity);
             assert!(message.contains(says), "{body}: {message}");
             assert!(message.starts_with("Statement 1"), "{message}");
+        }
+    }
+
+    #[test]
+    fn federated_principals_are_web_identities_of_their_provider() {
+        let provider = "arn:aws:iam::123456789012:oidc-provider/idp.example.com";
+        let trust = Policy::parse(
+            &statement(&format!(
+                r#""Effect": "Allow", "Action": "sts:AssumeRoleWithWebIdentity",
+                   "Principal": {{"Federated": "{provider}"}},
+                   "Condition": {{"StringEquals": {{"IDP.example.com:sub": "alice",
+                     "aws:FederatedProvider": "{provider}"}},
+                     "ForAnyValue:StringEquals": {{"idp.example.com:amr": "mfa"}}}}"#
+            )),
+            Kind::Trust,
+        )
+        .unwrap();
+        assert!(trust.principal_arns().is_empty(), "nothing to bind");
+        assert_eq!(trust.federated_providers(), [provider]);
+        let at = crate::Date::from_unix_seconds(0);
+        let context = |principal: Principal| {
+            crate::Context::new(principal, at)
+                .with_claim("idp.example.com:sub", "alice")
+                .with_claim(
+                    "idp.example.com:amr",
+                    vec!["pwd".to_owned(), "mfa".to_owned()],
+                )
+        };
+        let grant = |context: &crate::Context| {
+            trust.grant(&Request {
+                action: "sts:AssumeRoleWithWebIdentity",
+                resource: "arn:aws:iam::123456789012:role/web",
+                context,
+            })
+        };
+        let alice = context(Principal::web_identity(provider, "alice"));
+        assert_eq!(grant(&alice), Some(Grant::Named));
+        assert_eq!(
+            grant(&alice.clone().with_claim("IDP.EXAMPLE.COM:SUB", "bob")),
+            None,
+            "a claim is replaced by its name in any case"
+        );
+        let other = context(Principal::web_identity(
+            "arn:aws:iam::123456789012:oidc-provider/other.example.com",
+            "alice",
+        ));
+        assert_eq!(grant(&other), None);
+        // A role session its web identity started isn't the web identity.
+        let session = context(
+            Principal::session("123456789012", "/", "web", "AROAX", "s1")
+                .with_federated_provider(provider),
+        );
+        assert_eq!(grant(&session), None);
+        for principal in [
+            r#"{"Federated": "*"}"#,
+            r#"{"Federated": "arn:aws:iam::1:oidc-provider/*"}"#,
+        ] {
+            let body = format!(
+                r#""Effect": "Allow", "Action": "sts:AssumeRoleWithWebIdentity", "Principal": {principal}"#
+            );
+            assert!(refused(&statement(&body), Kind::Trust).contains("without wildcards"));
         }
     }
 

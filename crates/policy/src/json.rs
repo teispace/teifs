@@ -6,24 +6,33 @@ use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
+/// A JSON value read strictly: an object may not name a key twice. Policies are read
+/// this way, and so are the web identity tokens `AssumeRoleWithWebIdentity` takes.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Json {
+pub enum Json {
+    /// `null`.
     Null,
+    /// `true` or `false`.
     Bool(bool),
+    /// A number.
     Number(serde_json::Number),
+    /// A string.
     String(String),
+    /// A list.
     Array(Vec<Json>),
-    /// In document order.
+    /// An object, its members in document order.
     Object(Vec<(String, Json)>),
 }
 
 impl Json {
-    pub(crate) fn parse(text: &str) -> Result<Self, crate::Error> {
+    /// Parses `text`, refusing an object that names a key twice.
+    pub fn parse(text: &str) -> Result<Self, crate::Error> {
         serde_json::from_str(text).map_err(|e| crate::Error::new(format!("not valid JSON: {e}")))
     }
 
     /// What kind of value this is, for messages.
-    pub(crate) fn kind(&self) -> &'static str {
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::Null => "null",
             Self::Bool(_) => "a boolean",
@@ -31,6 +40,27 @@ impl Json {
             Self::String(_) => "a string",
             Self::Array(_) => "a list",
             Self::Object(_) => "an object",
+        }
+    }
+}
+
+impl Json {
+    /// The member `name` of an object; `None` for a missing member or another kind of
+    /// value.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Self> {
+        match self {
+            Self::Object(members) => members.iter().find(|(k, _)| k == name).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// The text of a string.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(text) => Some(text),
+            _ => None,
         }
     }
 }

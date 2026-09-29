@@ -10,6 +10,7 @@
 
 mod api;
 mod ids;
+mod oidc;
 mod ops;
 mod rules;
 mod sessions;
@@ -119,6 +120,8 @@ pub struct Iam {
     snapshot: RwLock<Arc<Snapshot>>,
     /// IAM's key, which seals session tokens and derives their secrets.
     tokens: DataKey,
+    /// The OpenID Connect providers' signing keys.
+    web_keys: oidc::KeyCache,
 }
 
 struct Inner {
@@ -184,6 +187,7 @@ impl Iam {
                 root,
             }),
             snapshot: RwLock::new(Arc::new(snapshot)),
+            web_keys: oidc::KeyCache::default(),
         })
     }
 

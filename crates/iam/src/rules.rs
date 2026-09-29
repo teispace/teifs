@@ -245,7 +245,7 @@ pub(crate) fn oidc_url(url: &str) -> Result<&str> {
 }
 
 /// Whether a URL's host is this machine: `localhost` or a loopback address.
-fn is_loopback(host: &str) -> bool {
+pub(crate) fn is_loopback(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
             .trim_start_matches('[')
