@@ -95,6 +95,8 @@ pub(crate) struct Endpoint {
     pub(crate) path: &'static str,
     pub(crate) needs: Needs,
     handler: Handler,
+    /// What it does, in a line: the reference (`docs/ADMIN_API.md`) shows it.
+    about: &'static str,
 }
 
 /// The account resource S3 Control's account-wide actions are decided on.
@@ -111,6 +113,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: "/",
         needs: Needs::PerCall,
         handler: Handler::Query,
+        about: "The IAM and STS Query APIs: each call names its action in the signed form",
     },
     Endpoint {
         api: Api::Control,
@@ -118,6 +121,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: control::PUBLIC_ACCESS_BLOCK,
         needs: Needs::Action("s3:GetAccountPublicAccessBlock", ACCOUNT),
         handler: Handler::GetAccountBlock,
+        about: "The account's Block Public Access settings",
     },
     Endpoint {
         api: Api::Control,
@@ -125,6 +129,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: control::PUBLIC_ACCESS_BLOCK,
         needs: Needs::Action("s3:PutAccountPublicAccessBlock", ACCOUNT),
         handler: Handler::PutAccountBlock,
+        about: "Sets the account's Block Public Access, combined with every bucket's own",
     },
     // AWS decides deleting with the permission to put.
     Endpoint {
@@ -133,6 +138,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: control::PUBLIC_ACCESS_BLOCK,
         needs: Needs::Action("s3:PutAccountPublicAccessBlock", ACCOUNT),
         handler: Handler::DeleteAccountBlock,
+        about: "Removes the account's Block Public Access, leaving each bucket's own",
     },
     Endpoint {
         api: Api::Admin,
@@ -140,6 +146,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_INFO,
         needs: Needs::Action("teifs:GetServerInfo", ANY),
         handler: Handler::Info,
+        about: "Version, drive, account, uptime and background jobs: `ServerInfo`",
     },
     Endpoint {
         api: Api::Admin,
@@ -147,6 +154,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_CONFIG,
         needs: Needs::Action("teifs:GetServerConfig", ANY),
         handler: Handler::Config,
+        about: "How the server was started, without secrets: `ServerConfig`",
     },
     Endpoint {
         api: Api::Admin,
@@ -154,6 +162,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_IAM,
         needs: Needs::Action("teifs:ExportIAM", ANY),
         handler: Handler::ExportIam,
+        about: "The account's IAM, access keys without their secrets: `IamExport`",
     },
     // Secrets, and an import that sets them and may take another account's id: the
     // root user's alone.
@@ -163,6 +172,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_IAM_SECRETS,
         needs: Needs::Root,
         handler: Handler::ExportIamSecrets,
+        about: "The account's IAM with access keys' secrets, to move it to another drive",
     },
     Endpoint {
         api: Api::Admin,
@@ -170,6 +180,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_IAM,
         needs: Needs::Root,
         handler: Handler::ImportIam,
+        about: "Imports an `IamExport` into an empty IAM, all or nothing: `ImportReport`; `?account=adopt` also takes its account id",
     },
     Endpoint {
         api: Api::Admin,
@@ -177,6 +188,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_ROOT_KEY,
         needs: Needs::Root,
         handler: Handler::RotateRootKey,
+        about: "Replaces a root key the drive generated and answers the new one: `RootKeyRotated`",
     },
 ];
 
@@ -194,6 +206,8 @@ pub struct EndpointInfo {
     pub root_only: bool,
     /// Its API.
     pub api: Api,
+    /// What it does, in a line.
+    pub about: &'static str,
 }
 
 /// Everything TeiFS serves besides S3's operations.
@@ -212,6 +226,7 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         },
         root_only: e.needs == Needs::Root,
         api: e.api,
+        about: e.about,
     })
 }
 
@@ -498,6 +513,55 @@ mod tests {
         assert_eq!(
             api(&Method::GET, &uri("/.teifs/admin/v2/info"), &path_style),
             None
+        );
+    }
+
+    /// The endpoint tables of `docs/ADMIN_API.md`.
+    fn reference() -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for (api, heading) in [
+            (Api::Admin, "The admin API"),
+            (Api::Control, "S3 Control"),
+            (Api::Query, "IAM and STS"),
+        ] {
+            let _ = write!(
+                out,
+                "\n### {heading}\n\n| Method | Path | What it does | Who may |\n|---|---|---|---|\n"
+            );
+            for e in endpoints().filter(|e| e.api == api) {
+                let who = match (e.action, e.root_only) {
+                    (Some(action), _) => format!("`{action}`"),
+                    (None, true) => "root user".to_owned(),
+                    (None, false) => "the action each call names".to_owned(),
+                };
+                let _ = writeln!(
+                    out,
+                    "| `{}` | `{}` | {} | {who} |",
+                    e.method, e.path, e.about
+                );
+            }
+        }
+        out.push('\n');
+        out
+    }
+
+    #[test]
+    fn the_admin_api_reference_is_current() {
+        const START: &str = "<!-- generated: endpoints -->\n";
+        const END: &str = "<!-- end generated -->";
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/ADMIN_API.md");
+        let doc = std::fs::read_to_string(path).unwrap();
+        let (before, rest) = doc.split_once(START).expect("the start marker");
+        let (_, after) = rest.split_once(END).expect("the end marker");
+        let current = format!("{before}{START}{}{END}{after}", reference());
+        if std::env::var_os("UPDATE_DOCS").is_some() {
+            std::fs::write(path, &current).unwrap();
+            return;
+        }
+        assert!(
+            doc == current,
+            "docs/ADMIN_API.md is out of date: run this test with UPDATE_DOCS=1"
         );
     }
 

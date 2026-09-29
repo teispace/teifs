@@ -7,6 +7,8 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `docs/ADMIN_API.md`: a reference for the admin API, S3 Control and the IAM and STS
+  route: every endpoint, who may call it, its messages and errors.
 - HTTPS: `teifs serve --certs-dir DIR` (MinIO's certificates folder layout, or a
   Kubernetes TLS secret's `tls.crt` and `tls.key`) or `--tls-cert` and `--tls-key`.
   Several certificates chosen by the name each client asks for, wildcards included;

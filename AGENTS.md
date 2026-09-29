@@ -45,7 +45,7 @@ apps/cli        the `teifs` command
 tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
 xtask           project tasks (`cargo xtask verify`)
 docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRYPTION_FORMAT,
-                COMPATIBILITY
+                COMPATIBILITY, ADMIN_API (its endpoint tables generated from the route table)
 ```
 
 ## Commands
@@ -72,7 +72,9 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRY
    operation, add an SDK test in `crates/server/tests/sdk.rs` next to the store test.
 4. Update the docs the change affects, in the same pull request: COMPATIBILITY for S3
    behaviour, ON_DISK_FORMAT for anything on disk, SECURITY_MODEL for a security rule,
-   ARCHITECTURE when the structure changes, the README for commands.
+   ARCHITECTURE when the structure changes, the README for commands. ADMIN_API's
+   endpoint tables are generated: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -E
+   'test(admin_api_reference)'`.
 5. Run `cargo xtask verify` and fix everything it reports.
 
 Recipes for the common changes are skills in [`.claude/skills/`](.claude/skills): plain

@@ -214,7 +214,8 @@ needs of its caller (`Needs`: an action on a resource, or `PerCall` for the Quer
 where IAM decides the action each call names), with no default, and the table refuses
 unsigned requests and unknown keys and decides the action before any handler runs. A
 test walks `teifs_s3::endpoints()` with an anonymous caller and a user without
-permissions. S3 Control (`control.rs`) is told apart from a bucket named `v20180820` by
+permissions, and another writes the table into `docs/ADMIN_API.md` (each entry's
+`about`), failing when the reference is out of date. S3 Control (`control.rs`) is told apart from a bucket named `v20180820` by
 its `x-amz-account-id` header, answers errors in its own `ErrorResponse` format, and
 serves the account's Block Public Access, kept in `system.db`'s `settings` table: every
 bucket's rules combine it with the bucket's own (`PublicAccessBlock::or`), and changing

@@ -236,29 +236,11 @@ location / {
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
 **The admin API** answers what AWS has no API for, as JSON under `/.teifs/admin/v1/`,
-signed like any S3 request:
-
-| Endpoint | What it does | Who may |
-|---|---|---|
-| `GET info` | Version, drive, account, uptime, background jobs | `teifs:GetServerInfo` |
-| `GET config` | How the server was started, without secrets | `teifs:GetServerConfig` |
-| `GET iam` | The account's users, groups, policies and keys (without secrets), as JSON | `teifs:ExportIAM` |
-| `GET iam/secrets` | The same with the keys' secrets, to move IAM to another drive | root user |
-| `PUT iam[?account=adopt]` | Imports an export into an empty IAM, all or nothing; `adopt` also takes its account id | root user |
-| `POST root-key` | Replaces the root key the drive generated: answers the new one, saves it in `.teifs/credentials.json`, and the old one stops working at once | root user |
-
-`teifs admin` calls them through an alias (`teifs admin info local`), and
-`teifs-client` is the same as a Rust library. The root user may call everything; users
-need the action in a policy. An import makes
-everything with the IAM API's own checks, gives users, groups and policies new unique
-ids (names and ARNs stay), numbers policy versions from `v1`, and skips keys exported
-without secrets. With curl, which reads the key from standard input so it stays off the
-command line:
-
-```sh
-printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
-  curl --config - --aws-sigv4 aws:amz:us-east-1:s3 http://127.0.0.1:9000/.teifs/admin/v1/info
-```
+signed like any S3 request: the server's version, drive, uptime and background jobs, how
+it was started, IAM export and import (to move users, keys and policies to another
+drive), and replacing a generated root key. `teifs admin` calls it through an alias
+(`teifs admin info local`), and `teifs-client` is the same as a Rust library;
+[docs/ADMIN_API.md](docs/ADMIN_API.md) lists every endpoint and who may call it.
 
 The export with secrets holds every user's keys: keep it like the credentials file. A
 root key given through `TEIFS_ACCESS_KEY`/`TEIFS_SECRET_KEY`, flags or a secret key file
