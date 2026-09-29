@@ -8,11 +8,12 @@
 //! provider is asked more than once in [`RETRY`]: a flood of made-up key ids can't
 //! make TeiFS flood the provider. When a provider can't be reached, the keys it last
 //! gave are used for up to a day. Only one fetch per provider runs at a time; requests
-//! that arrive meanwhile wait for its answer.
+//! that arrive meanwhile wait for its answer. The provider's certificate is trusted as
+//! [`super::tls`] says: by the system, or by one of the provider's thumbprints.
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -59,7 +60,8 @@ impl Entry {
 /// Every provider's keys, by the provider's URL.
 #[derive(Debug, Default)]
 pub(crate) struct KeyCache {
-    client: OnceLock<Result<Client, String>>,
+    /// An HTTP client for each set of thumbprints providers have.
+    clients: Mutex<HashMap<Vec<String>, Client>>,
     entries: Mutex<HashMap<String, Entry>>,
     /// One lock per provider, held while its keys are fetched.
     fetches: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -81,10 +83,10 @@ impl KeyCache {
         })
     }
 
-    /// Makes sure the keys of the provider at `url` are known, and have the key `kid` if
-    /// the provider does, fetching them if they need to be. A failure is kept, for
-    /// [`Self::keys`] to report.
-    pub(crate) async fn refresh(&self, url: &str, kid: Option<&str>) {
+    /// Makes sure the keys of the provider at `url` (with the certificate `thumbprints`)
+    /// are known, and have the key `kid` if the provider does, fetching them if they
+    /// need to be. A failure is kept, for [`Self::keys`] to report.
+    pub(crate) async fn refresh(&self, url: &str, thumbprints: &[String], kid: Option<&str>) {
         if !self.wants(url, kid, Instant::now()) {
             return;
         }
@@ -100,8 +102,8 @@ impl KeyCache {
         if !self.wants(url, kid, Instant::now()) {
             return;
         }
-        let fetched = match self.client() {
-            Ok(client) => fetch(client, url).await,
+        let fetched = match self.client(thumbprints) {
+            Ok(client) => fetch(&client, url).await,
             Err(err) => Err(err),
         };
         if let Err(err) = &fetched {
@@ -110,19 +112,24 @@ impl KeyCache {
         self.record(url, fetched, Instant::now());
     }
 
-    fn client(&self) -> Result<&Client, String> {
-        self.client
-            .get_or_init(|| {
-                Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .connect_timeout(TIMEOUT)
-                    .timeout(TIMEOUT)
-                    .user_agent(concat!("teifs/", env!("CARGO_PKG_VERSION")))
-                    .build()
-                    .map_err(|e| format!("no HTTP client: {e}"))
-            })
-            .as_ref()
-            .map_err(Clone::clone)
+    /// The client for providers with these `thumbprints` (a client is cheap to clone).
+    fn client(&self, thumbprints: &[String]) -> Result<Client, String> {
+        let mut key = thumbprints.to_vec();
+        key.sort_unstable();
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(client) = clients.get(&key) {
+            return Ok(client.clone());
+        }
+        let client = Client::builder()
+            .tls_backend_preconfigured(super::tls::config(&key)?)
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(TIMEOUT)
+            .timeout(TIMEOUT)
+            .user_agent(concat!("teifs/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| format!("no HTTP client: {e}"))?;
+        clients.insert(key, client.clone());
+        Ok(client)
     }
 
     /// Keeps what a fetch from the provider at `url` gave: its keys and how long to keep
@@ -300,7 +307,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
         net::TcpListener,
     };
 
@@ -321,63 +328,102 @@ pub(crate) mod tests {
 
     /// Serves `route` on a loopback port.
     pub(crate) async fn serve(route: Route) -> Provider {
+        serve_with(route, None).await
+    }
+
+    /// Serves `route` on a loopback port, over TLS with `tls` if given (its URL is then
+    /// `https://localhost:…`).
+    pub(crate) async fn serve_with(
+        route: Route,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> Provider {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let port = listener.local_addr().unwrap().port();
+        let url = if tls.is_some() {
+            format!("https://localhost:{port}")
+        } else {
+            format!("http://127.0.0.1:{port}")
+        };
+        let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
         let requests = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&requests);
         tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
+            while let Ok((socket, _)) = listener.accept().await {
                 count.fetch_add(1, Ordering::SeqCst);
                 let route = Arc::clone(&route);
+                let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    let mut request = Vec::new();
-                    let mut buffer = [0; 4096];
-                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        match socket.read(&mut buffer).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                    match acceptor {
+                        Some(acceptor) => {
+                            if let Ok(socket) = acceptor.accept(socket).await {
+                                answer(socket, &route).await;
+                            }
                         }
+                        None => answer(socket, &route).await,
                     }
-                    let request = String::from_utf8_lossy(&request);
-                    let path = request.split(' ').nth(1).unwrap_or("/").to_owned();
-                    let (status, headers, body) = route(&path);
-                    // `unsized` headers: no length, the body ends when the connection
-                    // closes.
-                    let length = if headers == UNSIZED {
-                        String::new()
-                    } else {
-                        format!("content-length: {}\r\n", body.len())
-                    };
-                    let headers = if headers == UNSIZED { "" } else { &headers };
-                    let response = format!(
-                        "HTTP/1.1 {status} X\r\n{length}connection: close\r\n{headers}\r\n{body}"
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
                 });
             }
         });
         Provider { url, requests }
     }
 
+    /// Reads one request from `socket` and answers it as `route` says.
+    async fn answer(mut socket: impl AsyncRead + AsyncWrite + Unpin, route: &Route) {
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let path = request.split(' ').nth(1).unwrap_or("/").to_owned();
+        let (status, headers, body) = route(&path);
+        // `unsized` headers: no length, the body ends when the connection closes.
+        let length = if headers == UNSIZED {
+            String::new()
+        } else {
+            format!("content-length: {}\r\n", body.len())
+        };
+        let headers = if headers == UNSIZED { "" } else { &headers };
+        let response =
+            format!("HTTP/1.1 {status} X\r\n{length}connection: close\r\n{headers}\r\n{body}");
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    }
+
     /// A provider that publishes `keys` (JWKs) as OpenID Connect Discovery says, its
     /// key set with `headers`; its URL is `{url}/idp`.
     pub(crate) async fn publishing(keys: Vec<String>, headers: &str) -> Provider {
+        publishing_with(keys, headers, None).await
+    }
+
+    /// [`publishing`], over TLS with `tls` if given.
+    pub(crate) async fn publishing_with(
+        keys: Vec<String>,
+        headers: &str,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> Provider {
         let keys = format!(r#"{{"keys":[{}]}}"#, keys.join(","));
         let headers = headers.to_owned();
         let base = Arc::new(Mutex::new(String::new()));
         let own = Arc::clone(&base);
-        let provider = serve(Arc::new(move |path: &str| {
-            let base = own.lock().unwrap().clone();
-            match path {
-                "/idp/.well-known/openid-configuration" => (
-                    200,
-                    String::new(),
-                    format!(r#"{{"issuer":"{base}/idp","jwks_uri":"{base}/keys"}}"#),
-                ),
-                "/keys" => (200, headers.clone(), keys.clone()),
-                _ => (404, String::new(), String::new()),
-            }
-        }))
+        let provider = serve_with(
+            Arc::new(move |path: &str| {
+                let base = own.lock().unwrap().clone();
+                match path {
+                    "/idp/.well-known/openid-configuration" => (
+                        200,
+                        String::new(),
+                        format!(r#"{{"issuer":"{base}/idp","jwks_uri":"{base}/keys"}}"#),
+                    ),
+                    "/keys" => (200, headers.clone(), keys.clone()),
+                    _ => (404, String::new(), String::new()),
+                }
+            }),
+            tls,
+        )
         .await;
         base.lock().unwrap().clone_from(&provider.url);
         provider
@@ -394,13 +440,13 @@ pub(crate) mod tests {
             cache.keys(&url).unwrap_err(),
             "its keys haven't been fetched"
         );
-        cache.refresh(&url, Some("k1")).await;
+        cache.refresh(&url, &[], Some("k1")).await;
         assert_eq!(cache.keys(&url).unwrap().len(), 1);
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
         // Kept: neither a known key nor an unknown one asks again straight away.
-        cache.refresh(&url, Some("k1")).await;
-        cache.refresh(&url, Some("k2")).await;
-        cache.refresh(&url, None).await;
+        cache.refresh(&url, &[], Some("k1")).await;
+        cache.refresh(&url, &[], Some("k2")).await;
+        cache.refresh(&url, &[], None).await;
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
         let entries = cache.entries();
         let entry = &entries[&url];
@@ -419,7 +465,7 @@ pub(crate) mod tests {
         let tasks: Vec<_> = (0..8)
             .map(|_| {
                 let (cache, url) = (Arc::clone(&cache), url.clone());
-                tokio::spawn(async move { cache.refresh(&url, Some("k1")).await })
+                tokio::spawn(async move { cache.refresh(&url, &[], Some("k1")).await })
             })
             .collect();
         for task in tasks {
@@ -475,7 +521,7 @@ pub(crate) mod tests {
             .await;
             base.lock().unwrap().clone_from(&provider.url);
             let cache = KeyCache::default();
-            cache.refresh(&provider.url, None).await;
+            cache.refresh(&provider.url, &[], None).await;
             let err = cache.keys(&provider.url).unwrap_err();
             assert!(err.contains(expected), "{config}: {err}");
         }
@@ -495,14 +541,14 @@ pub(crate) mod tests {
             ("/stream", "larger than 256 KiB"),
         ] {
             let url = format!("{}{path}", provider.url);
-            cache.refresh(&url, None).await;
+            cache.refresh(&url, &[], None).await;
             let err = cache.keys(&url).unwrap_err();
             assert!(err.contains(expected), "{path}: {err}");
         }
         let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
-        cache.refresh(&url, None).await;
+        cache.refresh(&url, &[], None).await;
         assert!(cache.keys(&url).unwrap_err().contains("couldn't be read"));
     }
 

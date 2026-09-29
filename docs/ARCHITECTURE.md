@@ -119,7 +119,9 @@ it. `oidc/jwt.rs` reads the token strictly (a JSON member named twice is refused
 verifies its signature with aws-lc-rs, only with asymmetric algorithms and only with a
 key that fits the algorithm; `oidc/keys.rs` fetches each provider's keys (OpenID
 Connect Discovery, then its `jwks_uri`) with reqwest and keeps them in memory, one
-fetch per provider at a time; `oidc/mod.rs` matches the issuer to a provider and checks
+fetch per provider at a time, with one client per set of thumbprints whose rustls
+verifier (`oidc/tls.rs`) tries the system's trust store and then the pinned
+certificates; `oidc/mod.rs` matches the issuer to a provider and checks
 audience, subject and times, and turns the claims into the provider's condition keys.
 Fetching is async and the STS API is not, so the S3 layer calls
 `Iam::serve_web_identity`, which makes sure the keys the token needs are known before it

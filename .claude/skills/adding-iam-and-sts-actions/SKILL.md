@@ -58,6 +58,8 @@ a table, authorizes it and answers in AWS's XML.
    is answered unsigned: `Iam::is_web_identity` picks it out in
    `crates/s3/src/iam_api.rs`, and `Iam::serve_web_identity` fetches what it needs
    (the provider's keys, async) before the sync handler runs as the anonymous identity.
+   Tests get a local identity provider from `oidc::keys::tests::publishing` (plain
+   HTTP) or `publishing_with` and `oidc::tls::tests::Authority` (TLS, own CA).
 6. **Tests**:
    - `every_parameter` in `crates/iam/src/api/tests.rs` needs the action's parameters,
      so `every_action_is_authorized` refuses it to a user without permissions;

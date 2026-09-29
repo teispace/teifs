@@ -827,3 +827,59 @@ async fn without_a_role_tokens_name_the_policies_as_minio_has_it() {
     d.iam.delete_oidc_provider(&provider).unwrap();
     assert!(d.iam.identify(&key, Some(&token)).is_err());
 }
+
+#[tokio::test]
+async fn providers_are_reached_through_the_certificates_they_pin() {
+    use crate::oidc::tls::tests::{Authority, server, thumbprint};
+
+    let ca = Authority::new("Company CA");
+    let (leaf, key) = ca.issue(
+        "localhost",
+        time::OffsetDateTime::now_utc() + time::Duration::days(30),
+    );
+    let signer = Signer::rsa();
+    let provider = crate::oidc::keys::tests::publishing_with(
+        vec![signer.jwk("k1", "")],
+        "",
+        Some(server(vec![leaf, ca.der.clone()], &key)),
+    )
+    .await;
+    let url = format!("{}/idp", provider.url);
+    let token = signer.token(
+        "RS256",
+        r#""kid":"k1""#,
+        &format!(
+            r#"{{"iss":"{url}","sub":"alice","aud":"app","exp":{}}}"#,
+            now_seconds() + 600
+        ),
+    );
+    // Pinned to the company's authority, and not.
+    for (thumbprints, reached) in [(vec![thumbprint(&ca.der)], true), (vec![], false)] {
+        let d = drive().await;
+        d.iam
+            .create_oidc_provider(&crate::NewOidcProvider {
+                url: &url,
+                client_ids: &["app".to_owned()],
+                thumbprints: &thumbprints,
+                ..crate::NewOidcProvider::default()
+            })
+            .unwrap();
+        let name = url.trim_start_matches("https://").to_owned();
+        trusting(&d, &d.oidc_arn(&name), "ci", &[], "");
+        let body = assuming(&d, "ci", &token, "");
+        let anonymous = Identity::anonymous();
+        let context = anonymous.context(Date::now());
+        let call = Call {
+            identity: &anonymous,
+            context: &context,
+            body: body.as_bytes(),
+            request_id: "req-1",
+        };
+        let reply = d.iam.serve_web_identity(&call).await;
+        if reached {
+            ok(reply, &body);
+        } else {
+            assert_eq!(code(&reply, &body), "IDPCommunicationError");
+        }
+    }
+}

@@ -9,6 +9,7 @@
 
 pub(crate) mod jwt;
 pub(crate) mod keys;
+pub(crate) mod tls;
 
 use teifs_policy::{Context, Json, Value};
 

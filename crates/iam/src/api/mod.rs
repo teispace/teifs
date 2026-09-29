@@ -100,10 +100,14 @@ impl Iam {
             && let Some((iss, kid)) = params
                 .optional("WebIdentityToken")
                 .and_then(crate::oidc::issuer)
-            && let Ok(Some(url)) =
-                self.read(|s| Ok(s.oidc_provider_by_issuer(&iss).map(|p| p.url.clone())))
+            && let Ok(Some((url, thumbprints))) = self.read(|s| {
+                Ok(s.oidc_provider_by_issuer(&iss)
+                    .map(|p| (p.url.clone(), p.thumbprints.clone())))
+            })
         {
-            self.web_keys.refresh(&url, kid.as_deref()).await;
+            self.web_keys
+                .refresh(&url, &thumbprints, kid.as_deref())
+                .await;
         }
         self.serve_sts(call)
     }

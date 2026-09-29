@@ -46,6 +46,10 @@ behaviour; the on-disk format is always upgraded automatically.
   `teifs:policy-claim`, a token's `policy` claim (or the claim the tag names) lists the
   managed policies its session gets, narrowed by a session policy, for as long as the
   token lasts or up to 365 days. Deleting the provider ends its sessions.
+- An OpenID Connect provider's thumbprints are used as AWS uses them: its keys are
+  fetched over a certificate the system trusts, or else one whose chain leads to a
+  certificate with one of its thumbprints (a company's own certificate authority, or a
+  self-signed server), with the host name and dates still checked.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

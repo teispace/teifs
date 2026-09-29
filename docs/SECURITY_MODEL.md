@@ -163,7 +163,10 @@ client ids (a provider with none accepts no token), the token unexpired (`exp` i
 required; `nbf` and `iat` get a minute's leeway), and the subject present. Keys are
 fetched only from providers an administrator created, over `https` (or `http` to this
 machine), from the `jwks_uri` of a discovery document whose issuer is the provider's,
-with no redirects, a 5-second timeout and at most 256 KiB read; a flood of tokens naming
+with no redirects, a 5-second timeout and at most 256 KiB read; the provider's
+certificate must be one the system trusts or chain to one its administrator pinned by
+thumbprint (SHA-1 is only a pin there, never a signature check: the chain's signatures,
+dates and host name are verified as for any certificate); a flood of tokens naming
 unknown keys asks a provider at most once in 30 seconds. A trust policy's `Federated`
 principal names one provider's ARN, without wildcards. A token names managed policies
 for itself (MinIO's way, without a role) only for a provider an administrator tagged
