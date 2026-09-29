@@ -91,6 +91,8 @@ pub struct Object {
     /// The endpoint's URL and access key: objects with the same can be copied by the
     /// server.
     pub endpoint: (String, String),
+    /// A version of it, as a source (`--version-id`); `None`: the current one.
+    pub version_id: Option<String>,
 }
 
 /// What's known about an object: from `HEAD` (with its type and metadata), or from a
@@ -112,6 +114,7 @@ impl Object {
             .head_object()
             .bucket(&self.bucket)
             .key(&self.key)
+            .set_version_id(self.version_id.clone())
             .send()
             .await
             .map_err(|e| Error::s3(&self.name, &e))?;
@@ -492,6 +495,7 @@ impl Transfers {
                     .get_object()
                     .bucket(&from.bucket)
                     .key(&from.key)
+                    .set_version_id(from.version_id.clone())
                     .set_if_match(head.etag.clone())
                     .checksum_mode(ChecksumMode::Enabled)
                     .send()
@@ -557,6 +561,7 @@ impl Transfers {
             .get_object()
             .bucket(&from.bucket)
             .key(&from.key)
+            .set_version_id(from.version_id.clone())
             .range(format!("bytes={}-{}", range.start, range.end - 1))
             .set_if_match(head.etag.clone())
             .send()
@@ -579,7 +584,7 @@ impl Transfers {
                 .copy_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
-                .copy_source(copy_source(&from.bucket, &from.key))
+                .copy_source(copy_source(from))
                 .set_copy_source_if_match(head.etag.clone())
                 .metadata_directive(MetadataDirective::Copy)
                 .send()
@@ -665,7 +670,7 @@ impl Transfers {
                         .key(&to.key)
                         .upload_id(upload_id)
                         .part_number(number)
-                        .copy_source(copy_source(&from.bucket, &from.key))
+                        .copy_source(copy_source(from))
                         .copy_source_range(format!("bytes={}-{}", range.start, range.end - 1))
                         .set_copy_source_if_match(head.etag.clone())
                         .send()
@@ -743,6 +748,7 @@ impl Transfers {
             .get_object()
             .bucket(&from.bucket)
             .key(&from.key)
+            .set_version_id(from.version_id.clone())
             .set_if_match(head.etag.clone())
             .checksum_mode(ChecksumMode::Enabled)
             .send()
@@ -856,18 +862,29 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// `bucket/key` for `x-amz-copy-source`, with the key percent-encoded (keeping `/`).
-fn copy_source(bucket: &str, key: &str) -> String {
+/// `bucket/key` for `x-amz-copy-source`, with the key percent-encoded (keeping `/`),
+/// and `?versionId=` when it names a version.
+fn copy_source(from: &Object) -> String {
+    let mut out = format!("{}/", from.bucket);
+    percent_encode(&mut out, &from.key, b"-_.~/");
+    if let Some(version) = &from.version_id {
+        // Encoded too: a version id from another service could hold anything.
+        out.push_str("?versionId=");
+        percent_encode(&mut out, version, b"-_.~");
+    }
+    out
+}
+
+/// Appends `text` percent-encoded, keeping letters, digits and the bytes in `keep`.
+fn percent_encode(out: &mut String, text: &str, keep: &[u8]) {
     use std::fmt::Write;
-    let mut out = format!("{bucket}/");
-    for byte in key.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-_.~/".contains(&byte) {
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || keep.contains(&byte) {
             out.push(char::from(byte));
         } else {
             let _ = write!(out, "%{byte:02X}");
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -907,9 +924,24 @@ mod tests {
 
     #[test]
     fn copy_sources_are_percent_encoded_but_keep_slashes() {
+        let client = Client::from_conf(
+            aws_sdk_s3::Config::builder()
+                .behavior_version_latest()
+                .build(),
+        );
+        let mut from = Object {
+            client,
+            bucket: "b".into(),
+            key: "a/b c+ü?.txt".into(),
+            name: String::new(),
+            endpoint: (String::new(), String::new()),
+            version_id: None,
+        };
+        assert_eq!(copy_source(&from), "b/a/b%20c%2B%C3%BC%3F.txt");
+        from.version_id = Some("v 1/&".into());
         assert_eq!(
-            copy_source("b", "a/b c+ü?.txt"),
-            "b/a/b%20c%2B%C3%BC%3F.txt"
+            copy_source(&from),
+            "b/a/b%20c%2B%C3%BC%3F.txt?versionId=v%201%2F%26"
         );
     }
 

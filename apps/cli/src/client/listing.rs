@@ -1,5 +1,5 @@
 //! Everything under a local folder or a key prefix, by path relative to it: what
-//! recursive copies and mirrors work through.
+//! recursive copies and mirrors work through; and every version under a key prefix.
 
 use std::{
     fs,
@@ -99,8 +99,132 @@ pub async fn remote(
     Ok(entries)
 }
 
+/// A version of an object, or a delete marker, from a versions listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    pub key: String,
+    /// Its version id (`null` for one written without versioning).
+    pub id: String,
+    /// Whether it's the key's current version.
+    pub latest: bool,
+    pub delete_marker: bool,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub etag: Option<String>,
+}
+
+/// S3 lists versions and delete markers apart: as one list, keys in order, each key's
+/// current version first, then newest to oldest (times are to the second, so the
+/// current one can't be told by its time alone).
+fn in_order(versions: &mut [Version]) {
+    versions.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then(b.latest.cmp(&a.latest))
+            .then(b.modified.cmp(&a.modified))
+    });
+}
+
+/// Every version and delete marker whose key starts with `prefix` (rolled up at
+/// `delimiter` into the common prefixes returned beside them): keys in order, each
+/// key's current version first, then newest to oldest.
+pub async fn versions(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+    delimiter: Option<&str>,
+    name: &str,
+) -> Result<(Vec<Version>, Vec<String>), Error> {
+    let (mut versions, mut prefixes) = (Vec::new(), Vec::new());
+    let (mut key_marker, mut version_marker) = (None, None);
+    loop {
+        let page = client
+            .list_object_versions()
+            .bucket(bucket)
+            .prefix(prefix)
+            .set_delimiter(delimiter.map(str::to_owned))
+            .set_key_marker(key_marker.take())
+            .set_version_id_marker(version_marker.take())
+            .send()
+            .await
+            .map_err(|e| Error::s3(format!("can't list the versions in {name}"), &e))?;
+        let time = |t: Option<&aws_sdk_s3::primitives::DateTime>| {
+            t.and_then(|t| SystemTime::try_from(*t).ok())
+        };
+        for v in page.versions() {
+            versions.push(Version {
+                key: v.key().unwrap_or_default().to_owned(),
+                id: v.version_id().unwrap_or("null").to_owned(),
+                latest: v.is_latest().unwrap_or(false),
+                delete_marker: false,
+                size: v.size().and_then(|s| u64::try_from(s).ok()).unwrap_or(0),
+                modified: time(v.last_modified()),
+                etag: v.e_tag().map(str::to_owned),
+            });
+        }
+        for m in page.delete_markers() {
+            versions.push(Version {
+                key: m.key().unwrap_or_default().to_owned(),
+                id: m.version_id().unwrap_or("null").to_owned(),
+                latest: m.is_latest().unwrap_or(false),
+                delete_marker: true,
+                size: 0,
+                modified: time(m.last_modified()),
+                etag: None,
+            });
+        }
+        prefixes.extend(
+            page.common_prefixes()
+                .iter()
+                .filter_map(|p| p.prefix().map(str::to_owned)),
+        );
+        if !page.is_truncated().unwrap_or(false) {
+            break;
+        }
+        key_marker = page.next_key_marker().map(str::to_owned);
+        version_marker = page.next_version_id_marker().map(str::to_owned);
+        if key_marker.is_none() {
+            // A truncated page that says nowhere to go on from would loop forever.
+            return Err(Error::general(format!(
+                "can't list the versions in {name}: the endpoint gave no marker to go on from"
+            )));
+        }
+    }
+    in_order(&mut versions);
+    prefixes.sort();
+    prefixes.dedup();
+    Ok((versions, prefixes))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn versions_list_by_key_current_first_then_newest() {
+        let at = |secs| Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        let version = |key: &str, id: &str, latest, secs| Version {
+            key: key.into(),
+            id: id.into(),
+            latest,
+            delete_marker: id.starts_with('m'),
+            size: 0,
+            modified: at(secs),
+            etag: None,
+        };
+        // As S3 answers: versions, then delete markers.
+        let mut versions = vec![
+            version("b", "v1", false, 5),
+            version("a", "v1", false, 3),
+            version("a", "v2", false, 9),
+            version("a", "m1", true, 9),
+        ];
+        in_order(&mut versions);
+        let order: Vec<_> = versions
+            .iter()
+            .map(|v| format!("{}:{}", v.key, v.id))
+            .collect();
+        assert_eq!(order, ["a:m1", "a:v2", "a:v1", "b:v1"]);
+    }
+
     use super::*;
 
     #[test]

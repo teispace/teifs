@@ -16,6 +16,11 @@ behaviour; the on-disk format is always upgraded automatically.
   bucket the current version stays the plain file, so the folder always shows the
   latest; older versions and delete markers are kept in the drive's system folder, and
   a file changed by another program is kept as the `null` version when it's replaced.
+- Versions from the command line: `teifs version enable|suspend|info`,
+  `ls --versions`, `--version-id` on `cat`, `stat` and `cp`, and `rm --version-id`
+  (one version for good) or `rm --versions` (all of a key's, asking first).
+  `stat` shows a bucket's versioning, and `rb --force` removes a bucket's older
+  versions and delete markers too.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

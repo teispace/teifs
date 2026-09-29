@@ -8,6 +8,7 @@ mod listing;
 mod target;
 mod transfer;
 pub(crate) mod trust;
+mod versions;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -32,6 +33,9 @@ pub enum Command {
         /// Everything under the prefix, not just one level.
         #[arg(short, long)]
         recursive: bool,
+        /// Every version and delete marker too, each key's newest first.
+        #[arg(long)]
+        versions: bool,
     },
     /// Make a bucket.
     Mb {
@@ -70,20 +74,39 @@ pub enum Command {
         /// Everything under each key prefix.
         #[arg(short, long)]
         recursive: bool,
-        /// With `--recursive`, delete without asking (as `--yes` does).
+        /// With `--recursive` or `--versions`, delete without asking (as `--yes` does).
         #[arg(long)]
         force: bool,
+        /// Remove this version of the key for good, instead of deleting the key (which,
+        /// in a bucket with versioning, only adds a delete marker).
+        #[arg(long, conflicts_with_all = ["recursive", "versions"])]
+        version_id: Option<String>,
+        /// Remove every version and delete marker of the key for good (with
+        /// `--recursive`, of every key under it). Asks first, unless `--force`.
+        #[arg(long)]
+        versions: bool,
     },
     /// Print objects to standard output.
     Cat {
         /// `ALIAS/BUCKET/KEY`, one or more.
         #[arg(required = true)]
         targets: Vec<String>,
+        /// Print this version of the object instead of the current one.
+        #[arg(long)]
+        version_id: Option<String>,
     },
     /// Show an object's or a bucket's details.
     Stat {
         /// `ALIAS/BUCKET[/KEY]`.
         target: String,
+        /// Show this version of the object instead of the current one.
+        #[arg(long)]
+        version_id: Option<String>,
+    },
+    /// Turn a bucket's versioning on, suspend it, or show it.
+    Version {
+        #[command(subcommand)]
+        action: VersionAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
@@ -115,6 +138,26 @@ pub enum Command {
         dry_run: bool,
         #[command(flatten)]
         transfer: TransferArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum VersionAction {
+    /// Keep every version: writes add one, deletes add a delete marker.
+    Enable {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Stop adding versions: writes and deletes replace the `null` version, and the
+    /// versions kept so far stay. Versioning never goes back to off.
+    Suspend {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Show whether versioning is on, suspended, or was never turned on.
+    Info {
+        /// `ALIAS/BUCKET`.
+        target: String,
     },
 }
 
@@ -173,6 +216,9 @@ pub struct CopyArgs {
     /// Copy folders and key prefixes with everything in them.
     #[arg(short, long)]
     recursive: bool,
+    /// Copy this version of the source (one object) instead of its current one.
+    #[arg(long, conflicts_with = "recursive")]
+    version_id: Option<String>,
     #[command(flatten)]
     transfer: TransferArgs,
 }

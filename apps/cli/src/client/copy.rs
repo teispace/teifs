@@ -82,6 +82,22 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
     if destination == STDIO || sources.iter().any(|s| s == STDIO) {
         return stdio(&args, remove_source, aliases).await;
     }
+    if let Some(version) = &args.version_id {
+        if remove_source {
+            return Err(Error::usage(format!(
+                "`mv` can't move one version: copy it with `teifs cp --version-id {version}`, then remove it with `teifs rm --version-id {version}`"
+            )));
+        }
+        let one_object = match sources {
+            [source] => matches!(Target::parse(source, aliases)?, Target::Remote(_)),
+            _ => false,
+        };
+        if !one_object {
+            return Err(Error::usage(
+                "--version-id names a version of one object: give one ALIAS/BUCKET/KEY to copy",
+            ));
+        }
+    }
     let destination = Target::parse(destination, aliases)?;
     let many = sources.len() > 1;
     let mut jobs = Vec::new();
@@ -89,7 +105,7 @@ pub async fn copy(args: CopyArgs, remove_source: bool, aliases: &Aliases) -> Res
     for source in sources {
         let source = Target::parse(source, aliases)?;
         match plan_copy(
-            &source,
+            (&source, args.version_id.as_deref()),
             &destination,
             args.recursive,
             many,
@@ -129,9 +145,14 @@ async fn stdio(args: &CopyArgs, remove_source: bool, aliases: &Aliases) -> Resul
     if args.recursive || (source == STDIO) == (destination == STDIO) {
         return Err(usage());
     }
+    if args.version_id.is_some() && source == STDIO {
+        return Err(Error::usage(
+            "standard input has no versions: drop --version-id",
+        ));
+    }
     if destination == STDIO {
         let remote = Target::parse(source, aliases)?.remote("copying to standard output")?;
-        return super::commands::cat(remote).await;
+        return super::commands::cat(remote, args.version_id.as_deref()).await;
     }
     let remote = Target::parse(destination, aliases)?.remote("copying standard input")?;
     remote.bucket()?;
@@ -164,7 +185,7 @@ async fn stdio(args: &CopyArgs, remove_source: bool, aliases: &Aliases) -> Resul
 /// Adds the jobs that copy `source` to `destination`; a folder's entries that can't be
 /// copied are reported in `planned` and the rest still go.
 async fn plan_copy(
-    source: &Target,
+    (source, version_id): (&Target, Option<&str>),
     destination: &Target,
     recursive: bool,
     many: bool,
@@ -222,7 +243,10 @@ async fn plan_copy(
                     from.display(&from.key)
                 )));
             }
-            let object = object(from, &from.key);
+            let object = Object {
+                version_id: version_id.map(str::to_owned),
+                ..object(from, &from.key)
+            };
             let head = match object.head().await {
                 Ok(head) => head,
                 Err(err) => {

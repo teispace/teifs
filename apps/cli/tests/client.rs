@@ -735,3 +735,145 @@ async fn plain_output_is_stable_for_scripts() {
     cli.ok(&["--yes", "rm", "-r", "t/plain/"]).await;
     assert!(!cli.ok(&["ls", "t/plain"]).await.contains("note.txt"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_are_listed_read_copied_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    fs::write(cli.path("one.txt"), "one").unwrap();
+    fs::write(cli.path("two.txt"), "two!").unwrap();
+    for layout in ["object", "folder"] {
+        let bucket = format!("t/v-{layout}");
+        let at = |key: &str| format!("{bucket}/{key}");
+        cli.ok(&["mb", &bucket, "--layout", layout]).await;
+        let info = records(&cli.ok(&["--json", "version", "info", &bucket]).await);
+        assert_eq!(info[0]["status"], "off");
+        cli.ok(&["version", "enable", &bucket]).await;
+        let stat = records(&cli.ok(&["--json", "stat", &bucket]).await);
+        assert_eq!(stat[0]["versioning"], "enabled", "{layout}");
+
+        cli.ok(&["cp", "one.txt", &at("a.txt")]).await;
+        cli.ok(&["cp", "two.txt", &at("a.txt")]).await;
+        let listed = records(&cli.ok(&["--json", "ls", "--versions", &bucket]).await);
+        assert_eq!(listed.len(), 2, "{layout}: {listed:?}");
+        assert!(
+            listed
+                .iter()
+                .all(|r| r["type"] == "version" && r["key"] == "a.txt")
+        );
+        assert_eq!(
+            (listed[0]["latest"].clone(), listed[0]["size"].clone()),
+            (true.into(), 4.into())
+        );
+        let v1 = listed[1]["versionId"].as_str().unwrap().to_owned();
+        let v2 = listed[0]["versionId"].as_str().unwrap().to_owned();
+        assert_eq!(listed[1]["latest"], false);
+
+        older_versions_are_read_and_copied(&cli, layout, &v1).await;
+        // One version of one object: not with mv, several sources, or a local file.
+        cli.fails(&["mv", "--version-id", &v1, &at("a.txt"), "x.txt"], 2)
+            .await;
+        cli.fails(
+            &[
+                "cp",
+                "--version-id",
+                &v1,
+                &at("a.txt"),
+                &at("b.txt"),
+                "dir/",
+            ],
+            2,
+        )
+        .await;
+        cli.fails(&["cp", "--version-id", &v1, "one.txt", &at("c.txt")], 2)
+            .await;
+
+        // A delete keeps the versions and adds a marker, shown as deleted and current.
+        cli.ok(&["rm", &at("a.txt")]).await;
+        let plain = cli.ok(&["ls", "--versions", &at("a.txt")]).await;
+        assert!(
+            plain.contains("deleted") && plain.contains("(current)"),
+            "{plain}"
+        );
+        // The marker is listed first, even made in the same second as the versions.
+        let listed = records(&cli.ok(&["--json", "ls", "--versions", &at("a.txt")]).await);
+        assert_eq!(listed[0]["type"], "deleteMarker", "{listed:?}");
+        assert_eq!(listed[0]["latest"], true);
+        cli.fails(&["cat", &at("a.txt")], 5).await;
+
+        // Removing one version for good; one that isn't there is an error, not a no-op.
+        cli.ok(&["rm", "--version-id", &v2, &at("a.txt")]).await;
+        cli.fails(&["rm", "--version-id", &"0".repeat(32), &at("a.txt")], 5)
+            .await;
+        // All of a key's versions go only when asked for twice, and only that key's.
+        cli.ok(&["cp", "one.txt", &at("a.txt2")]).await;
+        let err = cli.fails(&["rm", "--versions", &at("a.txt")], 2).await;
+        assert!(err.contains("--force"), "{err}");
+        let out = cli.ok(&["rm", "--versions", "--force", &at("a.txt")]).await;
+        assert!(out.contains("Removed 2 versions"), "{layout}: {out}");
+        let left = records(&cli.ok(&["--json", "ls", "--versions", &bucket]).await);
+        assert!(left.iter().all(|r| r["key"] != "a.txt"), "{left:?}");
+        assert!(left.iter().any(|r| r["key"] == "a.txt2"), "{left:?}");
+
+        cli.ok(&["version", "suspend", &bucket]).await;
+        let info = records(&cli.ok(&["--json", "version", "info", &bucket]).await);
+        assert_eq!(info[0]["status"], "suspended");
+        cli.fails(&["version", "info", &at("b.txt")], 2).await;
+        // --force removes a bucket's older versions and markers too.
+        cli.ok(&["rm", &at("b.txt")]).await;
+        cli.ok(&["rb", "--force", &bucket]).await;
+        cli.fails(&["ls", &bucket], 5).await;
+    }
+}
+
+/// `cat`, `stat` and `cp` of an older version `v1` of `a.txt` (whose bytes are `one`)
+/// in the bucket `v-LAYOUT`: down, across, through the client and in ranged parts.
+async fn older_versions_are_read_and_copied(cli: &Client, layout: &str, v1: &str) {
+    let at = |key: &str| format!("t/v-{layout}/{key}");
+    assert_eq!(
+        cli.ok(&["cat", "--version-id", v1, &at("a.txt")]).await,
+        "one"
+    );
+    let stat = records(
+        &cli.ok(&["--json", "stat", "--version-id", v1, &at("a.txt")])
+            .await,
+    );
+    assert_eq!(stat[0]["versionId"], v1);
+    assert_eq!(
+        cli.run(&["cp", "--version-id", v1, &at("a.txt"), "-"])
+            .await
+            .stdout,
+        "one"
+    );
+    cli.ok(&["cp", "--version-id", v1, &at("a.txt"), "old.txt"])
+        .await;
+    assert_eq!(fs::read_to_string(cli.path("old.txt")).unwrap(), "one");
+    cli.ok(&["cp", "--version-id", v1, &at("a.txt"), &at("b.txt")])
+        .await;
+    assert_eq!(cli.ok(&["cat", &at("b.txt")]).await, "one");
+    // Through the client too: across endpoints (`u` is the same server by another
+    // name), and in ranged parts.
+    let across = format!("u/v-{layout}/c.txt");
+    cli.ok(&["cp", "--version-id", v1, &at("a.txt"), &across])
+        .await;
+    assert_eq!(cli.ok(&["cat", &across]).await, "one");
+    fs::write(cli.path("big1"), data(6 * MIB, 1)).unwrap();
+    fs::write(cli.path("big2"), data(6 * MIB, 2)).unwrap();
+    cli.ok(&["cp", "big1", &at("big")]).await;
+    let first = records(&cli.ok(&["--json", "stat", &at("big")]).await);
+    let first = first[0]["versionId"].as_str().unwrap().to_owned();
+    cli.ok(&["cp", "big2", &at("big")]).await;
+    let get = [
+        "cp",
+        "--version-id",
+        &first,
+        &at("big"),
+        "got",
+        "--part-size",
+        "5MiB",
+    ];
+    cli.ok(&get).await;
+    assert_eq!(fs::read(cli.path("got")).unwrap(), data(6 * MIB, 1));
+    cli.ok(&["rm", "--versions", "--force", &at("big")]).await;
+    cli.ok(&["rm", "--versions", "--force", &across]).await;
+}

@@ -34,7 +34,11 @@ pub async fn run(command: Command) -> Result<(), Error> {
     let remote = |text: &str, what: &str| Target::parse(text, &aliases)?.remote(what);
     match command {
         Command::Alias { action } => alias_command(action, &mut aliases).await,
-        Command::Ls { target, recursive } => ls(remote(&target, "ls")?, recursive).await,
+        Command::Ls {
+            target,
+            recursive,
+            versions,
+        } => ls(remote(&target, "ls")?, recursive, versions).await,
         Command::Mb {
             target,
             layout,
@@ -47,19 +51,32 @@ pub async fn run(command: Command) -> Result<(), Error> {
             targets,
             recursive,
             force,
+            version_id,
+            versions,
         } => {
             for target in &targets {
-                rm(remote(target, "rm")?, recursive, force).await?;
+                let target = remote(target, "rm")?;
+                match (&version_id, versions) {
+                    (Some(id), _) => super::versions::rm_version(target, id).await?,
+                    (None, true) => super::versions::rm_versions(target, recursive, force).await?,
+                    (None, false) => rm(target, recursive, force).await?,
+                }
             }
             Ok(())
         }
-        Command::Cat { targets } => {
+        Command::Cat {
+            targets,
+            version_id,
+        } => {
             for target in &targets {
-                cat(remote(target, "cat")?).await?;
+                cat(remote(target, "cat")?, version_id.as_deref()).await?;
             }
             Ok(())
         }
-        Command::Stat { target } => stat(remote(&target, "stat")?).await,
+        Command::Stat { target, version_id } => {
+            stat(remote(&target, "stat")?, version_id.as_deref()).await
+        }
+        Command::Version { action } => super::versions::versioning(action, &aliases).await,
         Command::Presign {
             target,
             expires,
@@ -319,35 +336,30 @@ async fn list_buckets(client: &Client, alias_name: &str) -> Result<(), Error> {
     }
 }
 
-async fn ls(remote: Remote, recursive: bool) -> Result<(), Error> {
+async fn ls(remote: Remote, recursive: bool, versions: bool) -> Result<(), Error> {
     let client = remote.alias.client();
     let Some(bucket) = &remote.bucket else {
         return list_buckets(&client, &remote.alias_name).await;
     };
-    let mut prefix = remote.key.clone();
     let delimiter = (!recursive).then_some("/");
     let what = || format!("can't list {}", remote.display(&remote.key));
-    // `ls home/b/photos` shows what's in photos/, as a folder listing would.
-    if !recursive && !prefix.is_empty() && !prefix.ends_with('/') {
-        let first = client
-            .list_objects_v2()
-            .bucket(bucket)
-            .prefix(&prefix)
-            .set_delimiter(delimiter.map(str::to_owned))
-            .max_keys(2)
-            .send()
-            .await
-            .map_err(|e| Error::s3(what(), &e))?;
-        let folder = format!("{prefix}/");
-        if first.contents().is_empty()
-            && first.common_prefixes().len() == 1
-            && first.common_prefixes()[0].prefix() == Some(folder.as_str())
-        {
-            prefix = folder;
-        }
-    }
+    let prefix = if recursive {
+        remote.key.clone()
+    } else {
+        folder_or_prefix(&client, bucket, &remote.key, &remote.display(&remote.key)).await?
+    };
     // Names are shown below the folder being listed.
     let shown_from = prefix.rfind('/').map_or(0, |i| i + 1);
+    if versions {
+        let name = remote.display(&remote.key);
+        let any =
+            super::versions::ls(&client, bucket, &prefix, delimiter, shown_from, &name).await?;
+        return if any || prefix.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new(Kind::NotFound, format!("nothing at {name}")))
+        };
+    }
     let mut pages = client
         .list_objects_v2()
         .bucket(bucket)
@@ -413,6 +425,33 @@ async fn ls(remote: Remote, recursive: bool) -> Result<(), Error> {
         ));
     }
     Ok(())
+}
+
+/// What `ls` lists one level of for `key`: `photos/` when `photos` names only a folder
+/// (as a folder listing would show what's in it), else `key` as a prefix.
+async fn folder_or_prefix(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    name: &str,
+) -> Result<String, Error> {
+    if key.is_empty() || key.ends_with('/') {
+        return Ok(key.to_owned());
+    }
+    let first = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(key)
+        .delimiter("/")
+        .max_keys(2)
+        .send()
+        .await
+        .map_err(|e| Error::s3(format!("can't list {name}"), &e))?;
+    let folder = format!("{key}/");
+    let only_folder = first.contents().is_empty()
+        && first.common_prefixes().len() == 1
+        && first.common_prefixes()[0].prefix() == Some(folder.as_str());
+    Ok(if only_folder { folder } else { key.to_owned() })
 }
 
 async fn mb(
@@ -484,8 +523,16 @@ async fn rb(remote: Remote, force: bool) -> Result<(), Error> {
     let name = remote.display("");
     let client = remote.alias.client();
     if force {
-        let keys = listing::remote(&client, bucket, "", &name).await?;
-        let keys: Vec<String> = keys.into_iter().map(|e| e.relative).collect();
+        // Every version and delete marker, which a bucket that had versioning keeps;
+        // where versions can't be listed, every object.
+        let keys = match listing::versions(&client, bucket, "", None, &name).await {
+            Ok((versions, _)) => versions.into_iter().map(|v| (v.key, Some(v.id))).collect(),
+            Err(_) => listing::remote(&client, bucket, "", &name)
+                .await?
+                .into_iter()
+                .map(|e| (e.relative, None))
+                .collect(),
+        };
         delete_keys(&client, bucket, &name, keys).await?;
     }
     client
@@ -517,17 +564,18 @@ async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
     let name = remote.display(&remote.key);
     if recursive {
         // The key itself and what's "in" it (`photos` and `photos/…`, not `photos2`).
-        let keys: Vec<String> = listing::remote(&client, bucket, &remote.key, &name)
-            .await?
-            .into_iter()
-            .filter(|e| {
-                remote.key.is_empty()
-                    || remote.key.ends_with('/')
-                    || e.relative.is_empty()
-                    || e.relative.starts_with('/')
-            })
-            .map(|e| format!("{}{}", remote.key, e.relative))
-            .collect();
+        let keys: Vec<(String, Option<String>)> =
+            listing::remote(&client, bucket, &remote.key, &name)
+                .await?
+                .into_iter()
+                .filter(|e| {
+                    remote.key.is_empty()
+                        || remote.key.ends_with('/')
+                        || e.relative.is_empty()
+                        || e.relative.starts_with('/')
+                })
+                .map(|e| (format!("{}{}", remote.key, e.relative), None))
+                .collect();
         if keys.is_empty() {
             return Err(Error::new(Kind::NotFound, format!("nothing at {name}")));
         }
@@ -567,19 +615,26 @@ async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/// Deletes `keys` in batches, a few at once.
-async fn delete_keys(
+/// Deletes `keys` (each with a version to remove for good, or `None`: the key) in
+/// batches, a few at once.
+pub(super) async fn delete_keys(
     client: &Client,
     bucket: &str,
     name: &str,
-    keys: Vec<String>,
+    keys: Vec<(String, Option<String>)>,
 ) -> Result<(), Error> {
-    let batches: Vec<Vec<String>> = keys.chunks(DELETE_BATCH).map(<[String]>::to_vec).collect();
+    let batches: Vec<Vec<(String, Option<String>)>> =
+        keys.chunks(DELETE_BATCH).map(<[_]>::to_vec).collect();
     stream::iter(batches)
         .map(|batch| async move {
             let objects = batch
                 .into_iter()
-                .map(|key| ObjectIdentifier::builder().key(key).build())
+                .map(|(key, version)| {
+                    ObjectIdentifier::builder()
+                        .key(key)
+                        .set_version_id(version)
+                        .build()
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| Error::general(e.to_string()))?;
             let delete = Delete::builder()
@@ -613,7 +668,7 @@ async fn delete_keys(
         .await
 }
 
-pub(super) async fn cat(remote: Remote) -> Result<(), Error> {
+pub(super) async fn cat(remote: Remote, version_id: Option<&str>) -> Result<(), Error> {
     use tokio::io::AsyncWriteExt;
     let bucket = remote.bucket()?;
     let name = remote.display(&remote.key);
@@ -623,6 +678,7 @@ pub(super) async fn cat(remote: Remote) -> Result<(), Error> {
         .get_object()
         .bucket(bucket)
         .key(&remote.key)
+        .set_version_id(version_id.map(str::to_owned))
         .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
         .send()
         .await
@@ -646,7 +702,7 @@ pub(super) async fn cat(remote: Remote) -> Result<(), Error> {
         .map_err(|e| Error::general(format!("can't write {name} out: {e}")))
 }
 
-async fn stat(remote: Remote) -> Result<(), Error> {
+async fn stat(remote: Remote, version_id: Option<&str>) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let client = remote.alias.client();
     if remote.key.is_empty() {
@@ -661,17 +717,27 @@ async fn stat(remote: Remote) -> Result<(), Error> {
             .bucket_region()
             .unwrap_or(&remote.alias.region)
             .to_owned();
+        // A service without versioning just doesn't say.
+        let versioning = super::versions::status(&client, bucket).await.ok();
+        let mut fields = vec![("Bucket", name.clone()), ("Region", region.clone())];
+        fields.extend(versioning.map(|v| ("Versioning", v.to_owned())));
         ui::details(
-            &[("Bucket", name.clone()), ("Region", region.clone())],
-            || json!({"type": "bucket", "name": name, "region": region}),
+            &fields,
+            || json!({"type": "bucket", "name": name, "region": region, "versioning": versioning}),
         );
         return Ok(());
+    }
+    if version_id.is_some() && remote.is_folder() {
+        return Err(Error::usage(
+            "--version-id names a version of an object: give its key",
+        ));
     }
     let name = remote.display(&remote.key);
     let out = client
         .head_object()
         .bucket(bucket)
         .key(&remote.key)
+        .set_version_id(version_id.map(str::to_owned))
         .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
         .send()
         .await;
@@ -860,6 +926,7 @@ pub(super) fn object(remote: &Remote, key: &str) -> Object {
         key: key.to_owned(),
         name: remote.display(key),
         endpoint: (remote.alias.url.clone(), remote.alias.access_key.clone()),
+        version_id: None,
     }
 }
 
