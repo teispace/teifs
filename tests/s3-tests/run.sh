@@ -60,8 +60,8 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 
-sed -e "s/@PORT@/$PORT/" -e "s/@ACCESS_KEY@/$ACCESS_KEY/" -e "s/@SECRET_KEY@/$SECRET_KEY/" \
-  "$HERE/s3tests.conf.in" > "$WORK/s3tests.conf"
+S3TESTS_PORT="$PORT" S3TESTS_ACCESS_KEY="$ACCESS_KEY" S3TESTS_SECRET_KEY="$SECRET_KEY" \
+  "$WORK/venv/bin/python" "$HERE/users.py" "$HERE/s3tests.conf.in" "$WORK/s3tests.conf"
 
 # Tests marked fails_on_aws check another server's own behaviour, not S3's.
 set +e

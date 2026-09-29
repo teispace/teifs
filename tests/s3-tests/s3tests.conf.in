@@ -1,6 +1,6 @@
-# ceph/s3-tests configuration for a local TeiFS server. run.sh fills in the port.
-# TeiFS has one set of credentials until users arrive, so every user the suite knows
-# uses them; tests that need two users fail and are listed as not yet implemented.
+# ceph/s3-tests configuration for a local TeiFS server. users.py fills in the port and
+# keys: alt is an IAM user without permissions of its own (README.md), and every other
+# user the suite knows uses the root user's key.
 [DEFAULT]
 host = 127.0.0.1
 port = @PORT@
@@ -24,8 +24,8 @@ secret_key = @SECRET_KEY@
 display_name = alt
 user_id = alt
 email = alt@example.com
-access_key = @ACCESS_KEY@
-secret_key = @SECRET_KEY@
+access_key = @ALT_ACCESS_KEY@
+secret_key = @ALT_SECRET_KEY@
 
 [s3 tenant]
 display_name = tenant

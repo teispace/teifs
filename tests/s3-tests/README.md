@@ -44,7 +44,11 @@ and `--allow-sse-c`, and with Signature V2 allowed (`TEIFS_ALLOW_SIGV2`), becaus
 suite signs its POST forms and some requests with it. TeiFS's own tests prove the
 current AWS defaults.
 
-## One set of credentials
+## Users
 
-Until TeiFS has users, every user the suite knows (main, alt, tenant, IAM) uses the same
-credentials. Tests that need a second user fail and stay in `unimplemented.txt`.
+The suite's main user is the drive's root user. Its alt user stands for another AWS
+account, which may do only what a bucket's policy or ACL grants it: `users.py` makes it
+an IAM user with no permissions of its own (only `s3:ListAllMyBuckets`, for the suite's
+cleanup) and writes its key into the configuration. A drive is one account, so tests
+that need alt to own buckets or objects of its own are excluded, and say so. The tenant
+and IAM users still use the root user's key.

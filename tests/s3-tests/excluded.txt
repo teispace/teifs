@@ -4,3 +4,33 @@ test_bucket_create_exists  # the test reads e.status, which botocore's ClientErr
 test_sse_kms_no_key  # expects aws:kms without a key id to fail (Ceph RGW); AWS uses the account's managed key, and TeiFS uses teifs-default the same way
 test_bucket_create_bad_date_none_aws2  # botocore adds the Date it signs after the test removes x-amz-date, so the request is valid (the suite's own TODO; fails_on_rgw); it passed only while Signature V2 was refused
 test_object_create_bad_date_none_aws2  # botocore adds the Date it signs after the test removes x-amz-date, so the request is valid (the suite's own TODO; fails_on_rgw); it passed only while Signature V2 was refused
+test_bucket_recreate_not_overriding  # passes only when re-creating an owned bucket returns 200 (AWS us-east-1's legacy behaviour); TeiFS answers 409 BucketAlreadyOwnedByYou like every other AWS region
+test_bucket_acl_canned  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_bucket_acl_canned_publicreadwrite  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_bucket_acl_canned_authenticatedread  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_put_bucket_acl_grant_group_read  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_object_acl_canned_during_create  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_object_acl_canned  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_object_acl_canned_publicreadwrite  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_object_acl_canned_authenticatedread  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_object_acl_canned_bucketownerread  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_object_acl_canned_bucketownerfullcontrol  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_object_acl_full_control_verify_attributes  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_bucket_recreate_overwrite_acl  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_bucket_recreate_new_acl  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_bucket_policy_put_obj_copy_source  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_bucket_policy_put_obj_copy_source_meta  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_bucket_policy_upload_part_copy  # needs alt to be another AWS account, with its own buckets and canonical id; a TeiFS drive is one account, and alt is an IAM user in it
+test_get_bucket_policy_status  # expects a policy status for a bucket without a bucket policy; AWS answers NoSuchBucketPolicy, and its status never counts ACLs
+test_get_public_acl_bucket_policy_status  # expects a policy status for a bucket without a bucket policy; AWS answers NoSuchBucketPolicy, and its status never counts ACLs
+test_get_authpublic_acl_bucket_policy_status  # expects a policy status for a bucket without a bucket policy; AWS answers NoSuchBucketPolicy, and its status never counts ACLs
+test_get_publicpolicy_acl_bucket_policy_status  # expects a policy status for a bucket without a bucket policy; AWS answers NoSuchBucketPolicy, and its status never counts ACLs
+test_get_nonpublicpolicy_acl_bucket_policy_status  # expects a policy status for a bucket without a bucket policy; AWS answers NoSuchBucketPolicy, and its status never counts ACLs
+test_get_nonpublicpolicy_principal_bucket_policy_status  # names a Ceph tenant as a principal (arn:aws:iam::s3tenant1:root); AWS account ids are 12 digits and AWS refuses the policy
+test_block_public_policy_with_principal  # names a Ceph tenant as a principal (arn:aws:iam::s3tenant1:root); AWS account ids are 12 digits and AWS refuses the policy
+test_bucket_policy_different_tenant  # Ceph tenants (tenant:bucket names), which S3 doesn't have
+test_bucket_policy_tenanted_bucket  # Ceph tenants (tenant:bucket names), which S3 doesn't have
+test_bucket_policy_deny_self_denied_policy_confirm_header  # expects a bucket policy to lock the account's root user out of the bucket's policy; AWS always lets the root user get, put and delete it
+test_bucket_policy_set_condition_operator_end_with_IfExists  # expects the bucket owner refused where a policy allows only others; AWS lets the owner in by its own permissions
+test_bucket_policy_put_obj_request_obj_tag  # adds the tag header to the main client, not alt's, so alt's upload has no tag and is refused (the suite's own TODO)
+test_bucket_policy_put_obj_grant  # PutObject with x-amz-grant-* headers also needs s3:PutObjectAcl on AWS, which the test's policy doesn't grant; and needs alt to be another account
