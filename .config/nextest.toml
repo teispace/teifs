@@ -1,9 +1,10 @@
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
-# A test's output pipes must close within 5 s of it exiting. Shorter windows (100 ms,
-# then 1 s) were missed by tests that spawn nothing, under a full parallel run on macOS;
-# a real leak (a child process left running) holds them open for good and still fails.
-leak-timeout = { period = "5s", result = "fail" }
+# A test's output pipes must close within 15 s of it exiting. Shorter windows (100 ms,
+# 1 s, then 5 s) were missed by tests that spawn nothing, or wait for every process they
+# spawn, under a full parallel run on macOS; a real leak (a child process left running)
+# holds them open for good and still fails.
+leak-timeout = { period = "15s", result = "fail" }
 
 [profile.ci]
 fail-fast = false
