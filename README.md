@@ -172,6 +172,17 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list; account-wide Block Public Access (`aws s3control put-public-access-block`) |
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
+**The admin API** answers what AWS has no API for, as JSON under `/.teifs/admin/v1/`,
+signed like any S3 request: `GET info` (version, drive, account, uptime, background
+jobs) and `GET config` (how the server was started, without secrets). Users need
+`teifs:GetServerInfo` or `teifs:GetServerConfig` in a policy; the root user may always.
+With curl, which reads the key from standard input so it stays off the command line:
+
+```sh
+printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
+  curl --config - --aws-sigv4 aws:amz:us-east-1:s3 http://127.0.0.1:9000/.teifs/admin/v1/info
+```
+
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`teifs key list|create|rotate`), or in a Vault or OpenBao transit engine

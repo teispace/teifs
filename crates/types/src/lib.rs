@@ -1,7 +1,8 @@
 //! Shared TeiFS types with no I/O: bucket names and object keys with their rules, what
-//! is known about an object, and ETags.
+//! is known about an object, ETags, and the admin API's messages.
 
 mod acl;
+pub mod admin;
 mod names;
 mod object;
 

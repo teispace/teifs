@@ -1,7 +1,8 @@
 //! Requests signed the way any Signature V4 tool signs them, for endpoints the SDKs don't call.
 
 /// A request signed with Signature V4 for service `s3`, as any tool can make one: the status and
-/// body of the answer.
+/// body of the answer. A `host` among `headers` is sent (and signed) instead of the server's, as
+/// a virtual-hosted-style request would be, without needing the name to resolve.
 pub async fn signed(
     server: &crate::common::Server,
     (access_key, secret): (&str, &str),
@@ -16,8 +17,13 @@ pub async fn signed(
     };
     let url = format!("{}{path}", server.endpoint);
     let host = server.endpoint.trim_start_matches("http://").to_owned();
-    let mut all: Vec<(&str, &str)> = vec![("host", &host)];
-    all.extend_from_slice(headers);
+    let mut all: Vec<(&str, &str)> = headers.to_vec();
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        all.push(("host", &host));
+    }
     let identity =
         aws_credential_types::Credentials::new(access_key, secret, None, None, "tests").into();
     let mut settings = SigningSettings::default();

@@ -107,6 +107,7 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
     let (_dir, store) = store().await;
     let id = upload(&store).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
+    assert!(store.job_status().is_empty());
     let jobs = store.start_jobs(&JobOptions {
         upload_expiry: Some(Duration::ZERO),
         pace: 0.0,
@@ -130,6 +131,8 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
     ));
     assert!(status["expire-uploads"].last_progress.is_some());
     assert!(status.contains_key("housekeeping") && status.contains_key("sweep-staging"));
+    // The drive reports the same, for whoever holds it rather than the jobs.
+    assert!(store.job_status()["expire-uploads"].items >= 1);
     // Stopping doesn't wait for the idle intervals.
     tokio::time::timeout(Duration::from_secs(5), jobs.stop())
         .await

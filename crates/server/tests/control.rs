@@ -1,7 +1,7 @@
 //! S3 Control's account-level Block Public Access over the official SDK, as AWS applies
 //! it (with every bucket's own settings, the most restrictive winning), and the table of
-//! everything served besides S3's operations: each endpoint refuses anonymous callers
-//! and users without its permission.
+//! everything served besides S3's operations (IAM, STS, S3 Control, the admin API): each
+//! endpoint refuses anonymous callers and users without its permission.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,6 +23,7 @@ mod signing;
 
 use common::{ACCESS_KEY, SECRET_KEY, Server, anonymous, client, code, start, user};
 use signing::signed;
+use teifs_s3::Api;
 
 /// Sends every request to the server, where AWS's SDKs would put the account in the
 /// host name.
@@ -219,14 +220,13 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
     let key = server.iam.create_access_key("nobody").unwrap();
     let mut walked = 0;
     for endpoint in teifs_s3::endpoints() {
-        let mut headers = vec![("content-type", "application/x-www-form-urlencoded")];
-        if endpoint.control {
-            headers = vec![("x-amz-account-id", account.as_str())];
-        }
-        let body: &[u8] = if endpoint.control {
-            b""
-        } else {
-            b"Action=ListUsers&Version=2010-05-08"
+        let (headers, body): (Vec<(&str, &str)>, &[u8]) = match endpoint.api {
+            Api::Query => (
+                vec![("content-type", "application/x-www-form-urlencoded")],
+                b"Action=ListUsers&Version=2010-05-08",
+            ),
+            Api::Control => (vec![("x-amz-account-id", account.as_str())], b""),
+            Api::Admin => (Vec::new(), b""),
         };
         let method = Method::from_bytes(endpoint.method.as_bytes()).unwrap();
         let mut unsigned = reqwest::Client::new()
@@ -247,7 +247,7 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
         )
         .await;
         // IAM's Query API names its action in the body (s3 isn't its signing service).
-        if endpoint.action.is_some() {
+        if endpoint.action.is_some() || endpoint.root_only {
             assert_eq!(status, 403, "{endpoint:?}: {answer}");
             assert!(answer.contains("AccessDenied"), "{endpoint:?}: {answer}");
         } else {
@@ -255,7 +255,7 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
         }
         walked += 1;
     }
-    assert!(walked >= 4);
+    assert!(walked >= 6);
 }
 
 #[tokio::test]

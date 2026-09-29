@@ -148,7 +148,14 @@ permissions. S3 Control (`control.rs`) is told apart from a bucket named `v20180
 its `x-amz-account-id` header, answers errors in its own `ErrorResponse` format, and
 serves the account's Block Public Access, kept in `system.db`'s `settings` table: every
 bucket's rules combine it with the bucket's own (`PublicAccessBlock::or`), and changing
-it forgets every bucket's cached rules.
+it forgets every bucket's cached rules. The admin API (`admin.rs`) is JSON under
+`/.teifs/admin/v1/`, which no path-style bucket request can reach (a bucket name can't
+start with a dot); a virtual-hosted-style request (`bucket.domain/.teifs/…`) is that
+bucket's key, so the route compares the `Host` header with the served domains, which
+s3s doesn't pass to it. Its actions are `teifs:*`, or `Needs::Root` for what only the
+root user may do. Its messages are in `teifs_types::admin`, for the server and clients
+alike; the server hands the service its settings (`Options::config`), and the drive
+keeps its jobs' status (`Store::job_status`) for whoever holds it.
 
 ### The protocol layer: s3s
 

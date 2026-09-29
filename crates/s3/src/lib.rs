@@ -3,6 +3,7 @@
 
 mod access;
 mod acl;
+mod admin;
 mod bucket_access;
 mod checksums;
 mod control;
@@ -33,7 +34,7 @@ pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
-pub use routes::{EndpointInfo, endpoints};
+pub use routes::{Api, EndpointInfo, endpoints};
 
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
@@ -59,6 +60,9 @@ pub struct Options {
     /// Access, for applications that upload with public ACLs. Off, they start as AWS's do
     /// now.
     pub legacy_bucket_defaults: bool,
+    /// How the server was started, as the admin API reports it; `None` when whoever
+    /// embeds the service doesn't say.
+    pub config: Option<teifs_types::admin::ServerConfig>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -87,6 +91,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             iam,
             store: store.clone(),
             rules,
+            domains: options.domains.clone(),
+            started: std::time::SystemTime::now(),
+            config: options.config.map(Arc::new),
         });
     }
     let host = if options.domains.is_empty() {

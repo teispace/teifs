@@ -15,6 +15,7 @@ use std::{
 use std::sync::Arc;
 use teifs_iam::{Iam, RootKey};
 use teifs_s3::Options;
+use teifs_types::admin::{KmsConfig, ServerConfig};
 
 use teifs_store::{
     BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions, TransitKms,
@@ -211,6 +212,55 @@ pub fn default_keyring(drive: &str) -> Result<PathBuf, ServerError> {
     Ok(dir.join("teifs").join("keys").join(format!("{drive}.json")))
 }
 
+/// How the server was started, as the admin API reports it (no secrets).
+fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> ServerConfig {
+    ServerConfig {
+        listen: listen.to_string(),
+        domains: config.domains.clone(),
+        default_layout: match config.default_layout {
+            Layout::Folder => "folder",
+            Layout::Object => "object",
+        }
+        .into(),
+        durability: match config.durability {
+            Durability::Strict => "strict",
+            Durability::Relaxed => "relaxed",
+            Durability::None => "none",
+        }
+        .into(),
+        key_names: match config.key_rules {
+            KeyRules::Portable => "portable",
+            KeyRules::Host => "host",
+        }
+        .into(),
+        kms: match kms {
+            KmsLocation::Keyring { path, .. } => KmsConfig::Keyring {
+                path: path.display().to_string(),
+            },
+            KmsLocation::Transit(address) => KmsConfig::Transit {
+                address: address.clone(),
+            },
+        },
+        root_credentials: if config.credentials.is_some() {
+            "given"
+        } else {
+            "drive"
+        }
+        .into(),
+        allow_sse_c: config.allow_sse_c,
+        plain_http_is_secure: config
+            .plain_http_is_secure
+            .unwrap_or_else(|| config.listen.ip().is_loopback()),
+        allow_sig_v2: config.allow_sig_v2,
+        legacy_bucket_defaults: config.legacy_bucket_defaults,
+        upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
+        job_pace: config.jobs.pace,
+        header_timeout_seconds: config.limits.header_timeout.as_secs(),
+        body_timeout_seconds: config.limits.body_timeout.as_secs(),
+        max_connections: config.limits.max_connections,
+    }
+}
+
 impl Server {
     /// Opens the drive and starts listening.
     pub async fn bind(config: Config) -> Result<Self, ServerError> {
@@ -236,8 +286,8 @@ impl Server {
             source,
         })?;
         let (kms, location) = open_kms(
-            config.kms_transit,
-            config.kms_keyring,
+            config.kms_transit.clone(),
+            config.kms_keyring.clone(),
             &store.format().drive,
         )?;
         store
@@ -246,6 +296,20 @@ impl Server {
                 path: config.dir.clone(),
                 source,
             })?;
+        let listener =
+            TcpListener::bind(config.listen)
+                .await
+                .map_err(|source| ServerError::Listen {
+                    address: config.listen,
+                    source,
+                })?;
+        let listen = listener
+            .local_addr()
+            .map_err(|source| ServerError::Listen {
+                address: config.listen,
+                source,
+            })?;
+        let admin_config = admin_config(&config, &location, listen);
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
@@ -271,22 +335,14 @@ impl Server {
                 iam: Some(iam.clone()),
                 domains: config.domains,
                 default_layout: config.default_layout,
-                plain_http_is_secure: config
-                    .plain_http_is_secure
-                    .unwrap_or_else(|| config.listen.ip().is_loopback()),
+                plain_http_is_secure: admin_config.plain_http_is_secure,
                 body_timeout: Some(config.limits.body_timeout),
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
+                config: Some(admin_config),
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
-        let listener =
-            TcpListener::bind(config.listen)
-                .await
-                .map_err(|source| ServerError::Listen {
-                    address: config.listen,
-                    source,
-                })?;
         Ok(Self {
             store,
             jobs: config.jobs,

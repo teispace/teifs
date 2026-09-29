@@ -52,11 +52,13 @@ applications that upload with public ACLs; it is off by default. The account's B
 Public Access settings (S3 Control) apply with every bucket's, each setting on where
 either has it, so one setting closes every bucket at once.
 
-### 2. Every endpoint declares what it authorizes (*built for IAM, STS and S3 Control; admin endpoints next*)
+### 2. Every endpoint declares what it authorizes (*built for IAM, STS, S3 Control and the admin API*)
 Everything served besides S3's operations is one table (`crates/s3/src/routes.rs`) in
-which each endpoint states what it needs: an action on a resource, or, for the IAM and
-STS Query APIs, the action each call names, which IAM decides. The field has no
-default, so an endpoint can't be added without it. The table refuses unsigned requests
+which each endpoint states what it needs: an action on a resource, the root user only,
+or, for the IAM and STS Query APIs, the action each call names, which IAM decides. The
+field has no default, so an endpoint can't be added without it. The admin API's actions
+are `teifs:*`, which only a policy naming them grants (`s3:*` doesn't); it never
+returns secrets unless an endpoint says so and only the root user may call it. The table refuses unsigned requests
 and unknown keys and decides the action before the handler runs; a test walks every
 endpoint as an anonymous caller and as a user without permissions. The health check is
 the one unsigned endpoint (above). Profiling and debug endpoints will be off by default

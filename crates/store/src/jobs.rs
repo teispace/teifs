@@ -196,12 +196,16 @@ fn millis_of(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// What each job has done, by name: kept with the drive, so anything holding the
+/// [`Store`] can report it.
+pub(crate) type StatusMap = Arc<Mutex<BTreeMap<&'static str, JobStatus>>>;
+
 /// The running background jobs. Dropping this doesn't stop them; [`Jobs::stop`] does.
 #[derive(Debug)]
 pub struct Jobs {
     cancel: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
-    status: Arc<Mutex<BTreeMap<&'static str, JobStatus>>>,
+    status: StatusMap,
 }
 
 impl Jobs {
@@ -227,6 +231,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Store {
+    /// What each background job has done since the drive opened, by name; empty until
+    /// [`Store::start_jobs`].
+    #[must_use]
+    pub fn job_status(&self) -> BTreeMap<&'static str, JobStatus> {
+        lock(&self.inner.jobs).clone()
+    }
+
     /// Starts the background jobs. Call once, from within a Tokio runtime.
     #[must_use]
     pub fn start_jobs(&self, options: &JobOptions) -> Jobs {
@@ -239,7 +250,7 @@ impl Store {
             jobs.push(Box::new(ExpireUploads { after }));
         }
         let cancel = CancellationToken::new();
-        let status = Arc::new(Mutex::new(BTreeMap::new()));
+        let status = Arc::clone(&self.inner.jobs);
         let tasks = jobs
             .into_iter()
             .map(|job| {
@@ -265,7 +276,7 @@ async fn run(
     inner: Arc<Inner>,
     pace: f64,
     cancel: CancellationToken,
-    status: Arc<Mutex<BTreeMap<&'static str, JobStatus>>>,
+    status: StatusMap,
 ) {
     let name = job.name();
     lock(&status).insert(name, JobStatus::default());

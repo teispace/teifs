@@ -28,6 +28,10 @@ behaviour; the on-disk format is always upgraded automatically.
 - Account-wide Block Public Access, with AWS's S3 Control API
   (`aws s3control get|put|delete-public-access-block`): it applies with every bucket's
   own settings, the most restrictive winning.
+- An admin API for what AWS has no API for: JSON under `/.teifs/admin/v1/`, signed like
+  S3 requests (`curl --aws-sigv4` works), authorized with `teifs:*` actions in IAM
+  policies. `GET info` reports the version, drive, account, uptime and background jobs;
+  `GET config` how the server was started, without secrets.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.

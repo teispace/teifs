@@ -1,4 +1,5 @@
-//! Every request that isn't an S3 operation: the IAM and STS Query APIs and S3 Control.
+//! Every request that isn't an S3 operation: the IAM and STS Query APIs, S3 Control and
+//! TeiFS's admin API.
 //! s3s hands them to one custom route, [`Routes`], before it parses a path as a bucket
 //! and key, and after it has checked the signature.
 //!
@@ -9,28 +10,33 @@
 //! endpoint's action is decided with the caller's policies (the root user may always).
 //! A test walks the table with an anonymous caller and a user without permissions.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3Route};
 use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
+use teifs_types::admin::{ADMIN_CONFIG, ADMIN_INFO, ADMIN_PREFIX, ServerConfig};
 
 use crate::{
     access::{Client, base_context},
+    admin,
     bucket_access::Rules,
     control, iam_api,
 };
 
 /// Which API a request is for, told apart before anything else is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Api {
+pub enum Api {
     /// IAM and STS: a signed form posted to `/`.
     Query,
     /// S3 Control: `/v20180820/…` with the `x-amz-account-id` header, which no S3
     /// request sends (so a bucket named `v20180820` stays a bucket).
     Control,
+    /// TeiFS's admin API: JSON under `/.teifs/admin/v1/`, which can't be a bucket (but
+    /// can be a key, so virtual-hosted-style requests are never for it).
+    Admin,
 }
 
 /// What an endpoint needs of its caller.
@@ -40,6 +46,8 @@ pub(crate) enum Needs {
     Action(&'static str, &'static str),
     /// The Query APIs name an action in each call's body, and IAM decides it.
     PerCall,
+    /// Only the account's root user, whatever policies say.
+    Root,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +76,8 @@ enum Handler {
     GetAccountBlock,
     PutAccountBlock,
     DeleteAccountBlock,
+    Info,
+    Config,
 }
 
 /// One endpoint.
@@ -82,6 +92,9 @@ pub(crate) struct Endpoint {
 
 /// The account resource S3 Control's account-wide actions are decided on.
 const ACCOUNT: &str = teifs_policy::S3_ACCOUNT_RESOURCE;
+
+/// The resource of the admin API's actions, which are about the server, not a resource.
+const ANY: &str = "*";
 
 /// Everything served besides S3's operations.
 pub(crate) static ENDPOINTS: &[Endpoint] = &[
@@ -114,6 +127,20 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("s3:PutAccountPublicAccessBlock", ACCOUNT),
         handler: Handler::DeleteAccountBlock,
     },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_INFO,
+        needs: Needs::Action("teifs:GetServerInfo", ANY),
+        handler: Handler::Info,
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_CONFIG,
+        needs: Needs::Action("teifs:GetServerConfig", ANY),
+        handler: Handler::Config,
+    },
 ];
 
 /// One endpoint, as [`endpoints`] describes it.
@@ -123,10 +150,13 @@ pub struct EndpointInfo {
     pub method: &'static str,
     /// Its path.
     pub path: &'static str,
-    /// The action it needs; none when each call names its own (IAM and STS).
+    /// The action it needs; none when each call names its own (IAM and STS) or only the
+    /// root user may call it.
     pub action: Option<&'static str>,
-    /// Whether it's S3 Control's, which requests reach with `x-amz-account-id`.
-    pub control: bool,
+    /// Whether only the root user may call it.
+    pub root_only: bool,
+    /// Its API.
+    pub api: Api,
 }
 
 /// Everything TeiFS serves besides S3's operations.
@@ -141,20 +171,23 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         path: e.path,
         action: match e.needs {
             Needs::Action(action, _) => Some(action),
-            Needs::PerCall => None,
+            Needs::PerCall | Needs::Root => None,
         },
-        control: e.api == Api::Control,
+        root_only: e.needs == Needs::Root,
+        api: e.api,
     })
 }
 
-/// Which API a request is for, if it isn't an S3 operation.
-fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Api> {
+/// Which API a request is for, if it isn't an S3 operation; `domains` are those of
+/// virtual-hosted-style requests.
+fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap, domains: &[String]) -> Option<Api> {
+    let path = uri.path();
     if iam_api::is_form_post(method, uri, headers) {
         Some(Api::Query)
-    } else if headers.contains_key(control::ACCOUNT_HEADER)
-        && uri.path().starts_with(control::PREFIX)
-    {
+    } else if headers.contains_key(control::ACCOUNT_HEADER) && path.starts_with(control::PREFIX) {
         Some(Api::Control)
+    } else if path.starts_with(ADMIN_PREFIX) && !admin::is_virtual_hosted(headers, domains) {
+        Some(Api::Admin)
     } else {
         None
     }
@@ -173,6 +206,12 @@ pub(crate) struct Routes {
     pub(crate) iam: Arc<Iam>,
     pub(crate) store: Store,
     pub(crate) rules: Arc<Rules>,
+    /// The domains of virtual-hosted-style requests.
+    pub(crate) domains: Vec<String>,
+    /// When the service was built: the server's start, as the admin API reports it.
+    pub(crate) started: SystemTime,
+    /// How the server was started, for the admin API.
+    pub(crate) config: Option<Arc<ServerConfig>>,
 }
 
 #[async_trait::async_trait]
@@ -184,7 +223,7 @@ impl S3Route for Routes {
         headers: &HeaderMap,
         _: &mut http::Extensions,
     ) -> bool {
-        api_of(method, uri, headers).is_some()
+        api_of(method, uri, headers, &self.domains).is_some()
     }
 
     /// Everything is decided in [`Self::call`], where each API answers in its format.
@@ -193,40 +232,53 @@ impl S3Route for Routes {
     }
 
     async fn call(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
-        let api = api_of(&req.method, &req.uri, &req.headers).expect("matched by is_match");
-        if api == Api::Query {
-            return Ok(iam_api::serve(&self.iam, req).await);
-        }
-        // Every other API is S3 Control, which answers errors in its own format.
-        Ok(self
-            .control(req)
-            .await
-            .unwrap_or_else(|err| control::error_response(&err)))
+        let api = api_of(&req.method, &req.uri, &req.headers, &self.domains)
+            .expect("matched by is_match");
+        // Each API answers errors in its own format.
+        Ok(match api {
+            Api::Query => iam_api::serve(&self.iam, req).await,
+            Api::Control => self
+                .serve(api, req)
+                .await
+                .unwrap_or_else(|err| control::error_response(&err)),
+            Api::Admin => self
+                .serve(api, req)
+                .await
+                .unwrap_or_else(|err| admin::error_response(&err)),
+        })
     }
 }
 
 impl Routes {
-    async fn control(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
-        let api = Api::Control;
+    /// Authenticates, finds the endpoint, decides whether the caller may call it, and
+    /// calls it.
+    async fn serve(&self, api: Api, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
         let identity = self.authenticate(&req)?;
-        let Some(endpoint) = endpoint(api, &req.method, req.uri.path()) else {
-            return Err(S3Error::with_message(
+        let endpoint = endpoint(api, &req.method, req.uri.path()).ok_or_else(|| match api {
+            Api::Admin => admin::not_found(),
+            Api::Control | Api::Query => S3Error::with_message(
                 S3ErrorCode::NotImplemented,
                 "TeiFS serves the account's Block Public Access from S3 Control, and nothing \
                  else yet.",
-            ));
-        };
-        if let Needs::Action(action, resource) = endpoint.needs {
-            let client = req.extensions.get::<Client>().copied().unwrap_or_default();
-            let context = base_context(&identity, &req.headers, client, &self.iam.account());
-            if !identity
-                .decide(&context, action, resource, None)
-                .is_allowed()
-            {
-                return Err(denied());
+            ),
+        })?;
+        let allowed = match endpoint.needs {
+            Needs::Action(action, resource) => {
+                let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+                let context = base_context(&identity, &req.headers, client, &self.iam.account());
+                identity
+                    .decide(&context, action, resource, None)
+                    .is_allowed()
             }
+            Needs::Root => identity.is_root(),
+            Needs::PerCall => false,
+        };
+        if !allowed {
+            return Err(denied());
         }
-        control::check_account(&req.headers, &self.iam.account())?;
+        if api == Api::Control {
+            control::check_account(&req.headers, &self.iam.account())?;
+        }
         match endpoint.handler {
             Handler::GetAccountBlock => control::get_public_access_block(&self.store).await,
             Handler::PutAccountBlock => {
@@ -235,7 +287,9 @@ impl Routes {
             Handler::DeleteAccountBlock => {
                 control::delete_public_access_block(&self.store, &self.rules).await
             }
-            Handler::Query => unreachable!("answered above"),
+            Handler::Info => Ok(admin::info(&self.store, &self.iam, self.started)),
+            Handler::Config => admin::config(self.config.as_deref()),
+            Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
 
@@ -344,16 +398,40 @@ mod tests {
         let account = headers(&[("x-amz-account-id", "123456789012")]);
         let uri = |s: &str| s.parse::<Uri>().unwrap();
         let block = uri(control::PUBLIC_ACCESS_BLOCK);
-        assert_eq!(api_of(&Method::POST, &uri("/"), &form), Some(Api::Query));
-        assert_eq!(api_of(&Method::GET, &block, &account), Some(Api::Control));
+        let domains = ["localhost".to_owned()];
+        let api = |method: &Method, uri: &Uri, headers: &HeaderMap| {
+            api_of(method, uri, headers, &domains)
+        };
+        assert_eq!(api(&Method::POST, &uri("/"), &form), Some(Api::Query));
+        assert_eq!(api(&Method::GET, &block, &account), Some(Api::Control));
         assert_eq!(
-            api_of(&Method::GET, &uri("/v20180820/other"), &account),
+            api(&Method::GET, &uri("/v20180820/other"), &account),
             Some(Api::Control)
         );
         // Without the header, it's a bucket named v20180820 and its keys.
-        assert_eq!(api_of(&Method::GET, &block, &HeaderMap::new()), None);
-        assert_eq!(api_of(&Method::GET, &uri("/bucket/key"), &account), None);
-        assert_eq!(api_of(&Method::GET, &uri("/"), &form), None);
+        assert_eq!(api(&Method::GET, &block, &HeaderMap::new()), None);
+        assert_eq!(api(&Method::GET, &uri("/bucket/key"), &account), None);
+        assert_eq!(api(&Method::GET, &uri("/"), &form), None);
+        // The admin API, unless the host names a bucket: then it's that bucket's key.
+        let info = uri(ADMIN_INFO);
+        let path_style = headers(&[("host", "localhost:9000")]);
+        let bucket = headers(&[("host", "photos.localhost:9000")]);
+        assert_eq!(api(&Method::GET, &info, &path_style), Some(Api::Admin));
+        assert_eq!(
+            api(
+                &Method::DELETE,
+                &uri("/.teifs/admin/v1/x"),
+                &HeaderMap::new()
+            ),
+            Some(Api::Admin)
+        );
+        assert_eq!(api(&Method::GET, &info, &bucket), None);
+        let key = uri("/photos/.teifs/admin/v1/info");
+        assert_eq!(api(&Method::GET, &key, &path_style), None);
+        assert_eq!(
+            api(&Method::GET, &uri("/.teifs/admin/v2/info"), &path_style),
+            None
+        );
     }
 
     #[test]
@@ -365,8 +443,11 @@ mod tests {
             assert!(std::ptr::eq(found, e), "{e:?} is shadowed");
             match e.needs {
                 Needs::PerCall => assert_eq!(e.api, Api::Query),
+                Needs::Root => assert_ne!(e.api, Api::Query),
                 Needs::Action(action, resource) => {
                     assert!(action.contains(':') && !resource.is_empty(), "{e:?}");
+                    let service = if e.api == Api::Admin { "teifs:" } else { "s3:" };
+                    assert!(action.starts_with(service), "{e:?}");
                 }
             }
         }

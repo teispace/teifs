@@ -236,6 +236,8 @@ struct Inner {
     kms: std::sync::OnceLock<Arc<dyn Kms>>,
     /// The encryption settings of object buckets that have none of their own.
     default_encryption: BucketEncryption,
+    /// What each background job has done since the drive opened.
+    jobs: jobs::StatusMap,
 }
 
 /// How hard a write is made to survive a power cut before it's acknowledged.
@@ -331,6 +333,7 @@ impl Store {
             system: Mutex::new(system_db),
             format,
             kms: std::sync::OnceLock::new(),
+            jobs: jobs::StatusMap::default(),
             default_encryption: options
                 .default_encryption
                 .unwrap_or_else(BucketEncryption::aws_default),
