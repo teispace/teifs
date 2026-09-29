@@ -5,10 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aws_sdk_iam::{
-    Client,
-    config::{Credentials, Region},
-};
+use aws_sdk_iam::{Client, config::Region};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use teifs_client::Zeroizing;
@@ -209,13 +206,7 @@ fn client(alias: &Alias) -> Client {
         .behavior_version_latest()
         .region(Region::new(alias.region.clone()))
         .endpoint_url(&alias.url)
-        .credentials_provider(Credentials::new(
-            &alias.access_key,
-            &alias.secret_key,
-            None,
-            None,
-            "teifs-alias",
-        ))
+        .credentials_provider(alias.credentials())
         .build();
     Client::from_conf(config)
 }
@@ -408,9 +399,12 @@ fn save_key(
     aliases: &mut Aliases,
 ) -> Result<Option<String>, Error> {
     if let Some(alias_name) = &output.save_alias {
+        // A user's own long-term key: none of the server alias's session.
         let alias = Alias {
             access_key: id.to_owned(),
             secret_key: secret.to_owned(),
+            session_token: None,
+            expires: None,
             ..server.clone()
         };
         aliases.set(alias_name, alias)?;

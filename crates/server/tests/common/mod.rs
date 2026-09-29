@@ -2,6 +2,8 @@
 
 #![allow(dead_code, reason = "each test binary uses a different part")]
 
+pub mod idp;
+
 use aws_sdk_s3::{
     Client,
     config::{Credentials, Region},

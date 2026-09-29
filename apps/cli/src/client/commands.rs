@@ -139,6 +139,8 @@ async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
         secret_key,
         region,
         path_style: !virtual_hosted,
+        session_token: None,
+        expires: None,
     };
     if !no_check {
         alias.client().list_buckets().send().await.map_err(|e| {
@@ -169,17 +171,24 @@ async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
 }
 
 fn list_aliases(aliases: &Aliases) {
-    let mut table = ui::Table::new(&["NAME", "URL", "ACCESS KEY", "FROM"]);
+    let mut table = ui::Table::new(&["NAME", "URL", "ACCESS KEY", "EXPIRES", "FROM"]);
     let mut records = Vec::new();
     for (name, alias, origin) in aliases.all() {
         let from = match origin {
             Origin::File => "file".to_owned(),
             Origin::Env => format!("{}{}", alias::ENV_PREFIX, name.to_ascii_uppercase()),
         };
+        let expires = match alias.expires_ms() {
+            Some(_) if alias.expired() => "expired".to_owned(),
+            Some(ms) => crate::units::date(crate::units::from_ms(ms)),
+            None if alias.session_token.is_some() => "temporary".to_owned(),
+            None => String::new(),
+        };
         table.row(vec![
             name.to_owned(),
             alias.url.clone(),
             alias.access_key.clone(),
+            expires,
             from.clone(),
         ]);
         records.push(json!({
@@ -189,6 +198,8 @@ fn list_aliases(aliases: &Aliases) {
             "accessKey": alias.access_key,
             "region": alias.region,
             "pathStyle": alias.path_style,
+            "temporary": alias.session_token.is_some(),
+            "expiresMs": alias.expires_ms(),
             "from": from,
         }));
     }

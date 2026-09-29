@@ -15,6 +15,7 @@ mod config;
 mod error;
 mod health;
 mod init;
+mod sts;
 mod ui;
 mod units;
 
@@ -84,6 +85,12 @@ enum Command {
     Admin {
         #[command(subcommand)]
         action: admin::AdminAction,
+    },
+    /// Temporary credentials: whom an alias signs as, a role's session, or a session
+    /// for a CI job's OpenID Connect token.
+    Sts {
+        #[command(subcommand)]
+        action: sts::StsAction,
     },
     /// Check that a TeiFS server answers its health check (exit code 0 when it does);
     /// for container health checks and scripts.
@@ -409,6 +416,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Key { action } => Ok(key(action).await?),
         Command::Client(command) => client::run(command).await,
         Command::Admin { action } => admin::run(action).await,
+        Command::Sts { action } => sts::run(action).await,
     }
 }
 

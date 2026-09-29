@@ -46,6 +46,13 @@ behaviour; the on-disk format is always upgraded automatically.
   `teifs:policy-claim`, a token's `policy` claim (or the claim the tag names) lists the
   managed policies its session gets, narrowed by a session policy, for as long as the
   token lasts or up to 365 days. Deleting the provider ends its sessions.
+- `teifs sts`: `whoami`, `assume` (a role's session, or MinIO's session for a user's
+  own permissions) and `assume-web` (a CI job's OpenID Connect token, from AWS's
+  `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`). Temporary credentials are saved as
+  an alias that keeps its session token and expiry (and is refused once expired, with
+  what to do), or written in the AWS CLI's `credential_process` format. Aliases in the
+  environment take a session token too (`https://KEY:SECRET:TOKEN@host`, as `mc`
+  does), and every command, `teifs admin` included, signs with it.
 - An OpenID Connect provider's thumbprints are used as AWS uses them: its keys are
   fetched over a certificate the system trusts, or else one whose chain leads to a
   certificate with one of its thumbprints (a company's own certificate authority, or a

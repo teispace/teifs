@@ -198,7 +198,9 @@ fn kind_of(status: u16, code: &str) -> Kind {
             "AccessDenied"
             | "InvalidAccessKeyId"
             | "SignatureDoesNotMatch"
-            | "AuthorizationHeaderMalformed",
+            | "AuthorizationHeaderMalformed"
+            | "ExpiredToken"
+            | "InvalidToken",
         )
         | (401 | 403, _) => Kind::Auth,
         (
@@ -224,6 +226,10 @@ fn hint_for(code: &str) -> Option<&'static str> {
         "InvalidAccessKeyId" => Some("check the alias's access key: `teifs alias set`"),
         "SignatureDoesNotMatch" => Some("check the alias's secret key: `teifs alias set`"),
         "RequestTimeTooSkewed" => Some("this computer's clock is off: set it right"),
+        "ExpiredToken" | "InvalidToken" | "InvalidClientTokenId" => Some(
+            "the alias's temporary credentials have expired or were revoked: get new ones \
+             with `teifs sts assume`, or check its keys with `teifs alias set`",
+        ),
         "MalformedPolicyDocument" => {
             Some("check the policy file: it's an IAM policy document, as JSON")
         }

@@ -329,6 +329,8 @@ fn add_alias(
         secret_key,
         region: alias::DEFAULT_REGION.to_owned(),
         path_style: true,
+        session_token: None,
+        expires: None,
     };
     if let Some((existing, _)) = aliases.get(&name)
         && *existing != alias

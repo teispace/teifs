@@ -4,7 +4,11 @@
 //! They're kept in `aliases.toml` in the user's configuration folder (or the file
 //! `TEIFS_CLIENT_CONFIG` names), readable only by its owner as `~/.aws/credentials` is.
 //! `TEIFS_ALIAS_<NAME>=https://ACCESS_KEY:SECRET_KEY@host` defines one for a single run
-//! (in CI, say), and wins over the file.
+//! (in CI, say), and wins over the file; `https://ACCESS_KEY:SECRET_KEY:SESSION_TOKEN@host`
+//! one with temporary credentials, as MinIO's `mc` takes them.
+//!
+//! An alias with temporary credentials (`teifs sts assume`) keeps their session token
+//! and when they expire.
 
 use std::{
     collections::BTreeMap,
@@ -42,6 +46,12 @@ pub struct Alias {
     /// most self-hosted servers expect, rather than as a host name (`bucket.host/key`).
     #[serde(default = "yes")]
     pub path_style: bool,
+    /// Temporary credentials' session token. Never printed, as the secret key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+    /// When temporary credentials expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<toml::value::Datetime>,
 }
 
 fn default_region() -> String {
@@ -59,27 +69,61 @@ impl fmt::Debug for Alias {
             .field("access_key", &self.access_key)
             .field("region", &self.region)
             .field("path_style", &self.path_style)
+            .field("temporary", &self.session_token.is_some())
+            .field("expires", &self.expires)
             .finish_non_exhaustive()
     }
 }
 
 impl Alias {
+    /// Its keys, as the AWS SDKs take them.
+    pub fn credentials(&self) -> Credentials {
+        Credentials::new(
+            &self.access_key,
+            &self.secret_key,
+            self.session_token.clone(),
+            None,
+            "teifs-alias",
+        )
+    }
+
     /// An S3 client for this alias.
     pub fn client(&self) -> Client {
         let config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()
             .region(Region::new(self.region.clone()))
             .endpoint_url(&self.url)
-            .credentials_provider(Credentials::new(
-                &self.access_key,
-                &self.secret_key,
-                None,
-                None,
-                "teifs-alias",
-            ))
+            .credentials_provider(self.credentials())
             .force_path_style(self.path_style)
             .build();
         Client::from_conf(config)
+    }
+
+    /// When its temporary credentials expire, in milliseconds since the Unix epoch.
+    pub fn expires_ms(&self) -> Option<i64> {
+        self.expires.as_ref().and_then(crate::units::datetime_ms)
+    }
+
+    /// Whether its temporary credentials have expired.
+    pub fn expired(&self) -> bool {
+        self.expires_ms()
+            .is_some_and(|ms| ms <= crate::units::now_ms())
+    }
+
+    /// Refuses the alias `name` when its temporary credentials have expired, before a
+    /// request fails with them.
+    pub fn check_fresh(&self, name: &str) -> Result<(), Error> {
+        match self.expires_ms() {
+            Some(ms) if self.expired() => Err(Error::new(
+                super::Kind::Auth,
+                format!(
+                    "the temporary credentials of alias `{name}` expired at {} UTC",
+                    crate::units::date(crate::units::from_ms(ms))
+                ),
+            )
+            .with_hint("get new ones with `teifs sts assume`")),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -248,14 +292,21 @@ pub fn check_url(url: &str) -> Result<String, String> {
     Ok(url.to_owned())
 }
 
-/// Parses `https://ACCESS_KEY:SECRET_KEY@host[:port]` (keys percent-encoded if needed).
+/// Parses `https://ACCESS_KEY:SECRET_KEY[:SESSION_TOKEN]@host[:port]` (each
+/// percent-encoded if needed).
 fn from_env(value: &str) -> Result<Alias, String> {
     let bad = || "expected https://ACCESS_KEY:SECRET_KEY@host".to_owned();
     let (scheme, rest) = value.split_once("://").ok_or_else(bad)?;
     let (keys, host) = rest.rsplit_once('@').ok_or_else(bad)?;
-    let (access, secret) = keys.split_once(':').ok_or_else(bad)?;
+    let mut parts = keys.split(':');
+    let (Some(access), Some(secret), token, None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(bad());
+    };
     let (access, secret) = (percent_decode(access)?, percent_decode(secret)?);
-    if access.is_empty() || secret.is_empty() {
+    let token = token.map(percent_decode).transpose()?;
+    if access.is_empty() || secret.is_empty() || token.as_ref().is_some_and(String::is_empty) {
         return Err(bad());
     }
     Ok(Alias {
@@ -264,6 +315,8 @@ fn from_env(value: &str) -> Result<Alias, String> {
         secret_key: secret,
         region: default_region(),
         path_style: true,
+        session_token: token,
+        expires: None,
     })
 }
 
@@ -330,7 +383,12 @@ mod tests {
         assert_eq!(alias.url, "https://s3.example.com:9000");
         assert_eq!(alias.access_key, "AKID");
         assert_eq!(alias.secret_key, "se/cr@et");
+        assert_eq!(alias.session_token, None);
+        let temporary = from_env("https://TSIA:secret:to%2Bken%3D@h").unwrap();
+        assert_eq!(temporary.session_token.as_deref(), Some("to+ken="));
         for bad in [
+            "https://a:b:@h",
+            "https://a:b:c:d@h",
             "https://s3.example.com",
             "https://:s@h",
             "https://a:@h",
@@ -344,7 +402,9 @@ mod tests {
 
     #[test]
     fn debug_never_shows_the_secret() {
-        let alias = from_env("https://AKID:very-secret-key@h").unwrap();
-        assert!(!format!("{alias:?}").contains("very-secret-key"));
+        let alias = from_env("https://AKID:very-secret-key:session-token@h").unwrap();
+        let debug = format!("{alias:?}");
+        assert!(!debug.contains("very-secret-key") && !debug.contains("session-token"));
+        assert!(debug.contains("temporary: true"), "{debug}");
     }
 }

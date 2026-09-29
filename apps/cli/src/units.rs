@@ -75,6 +75,52 @@ pub fn rfc3339(time: SystemTime) -> String {
     date(time).replacen(' ', "T", 1) + "Z"
 }
 
+/// Now, in milliseconds since the Unix epoch.
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// A time in milliseconds since the Unix epoch as a TOML date and time (UTC).
+pub fn datetime(ms: i64) -> toml::value::Datetime {
+    rfc3339(from_ms(ms))
+        .parse()
+        .expect("RFC 3339 text is a TOML date and time")
+}
+
+/// A TOML date and time with an offset, in milliseconds since the Unix epoch; none for
+/// one without a date, a time or an offset (a local time says no moment).
+pub fn datetime_ms(at: &toml::value::Datetime) -> Option<i64> {
+    let (date, time) = (at.date?, at.time?);
+    let offset_minutes = match at.offset? {
+        toml::value::Offset::Z => 0,
+        toml::value::Offset::Custom { minutes } => i64::from(minutes),
+    };
+    let days = days_from_civil(
+        i64::from(date.year),
+        u32::from(date.month),
+        u32::from(date.day),
+    );
+    let seconds = days * 86_400
+        + i64::from(time.hour) * 3600
+        + i64::from(time.minute) * 60
+        + i64::from(time.second.unwrap_or(0))
+        - offset_minutes * 60;
+    Some(seconds * 1000 + i64::from(time.nanosecond.unwrap_or(0) / 1_000_000))
+}
+
+/// A calendar date to days since 1970-01-01 (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = i64::from(if m > 2 { m - 3 } else { m + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Parses a size: bytes, or a number with `KiB`, `MiB` or `GiB` (`K`, `M`, `G` too).
 pub fn parse_size(text: &str) -> Result<u64, String> {
     let text = text.trim();
@@ -124,6 +170,26 @@ pub fn rate(bytes: u64, elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toml_times_are_moments() {
+        for ms in [
+            0,
+            1_000,
+            951_782_400_000,
+            1_790_000_000_123,
+            4_102_444_800_000,
+        ] {
+            assert_eq!(datetime_ms(&datetime(ms)), Some(ms / 1000 * 1000), "{ms}");
+        }
+        let at = |text: &str| datetime_ms(&text.parse().unwrap());
+        assert_eq!(at("1970-01-01T01:00:00+01:00"), Some(0));
+        assert_eq!(at("1969-12-31T23:30:00-00:30"), Some(0));
+        assert_eq!(at("2000-02-29T00:00:00.250Z"), Some(951_782_400_250));
+        assert_eq!(at("2000-02-29T00:00:00"), None);
+        assert_eq!(at("2000-02-29"), None);
+        assert_eq!(at("00:00:00"), None);
+    }
 
     #[test]
     fn sizes_parse_with_units() {

@@ -259,8 +259,13 @@ never printed (`Debug` leaves them out). A download writes only below the folder
 given: keys with `..`, `.`, empty or absolute parts (and, on Windows, `\` or `:`) are
 refused instead of mapped to a path. `teifs init` never prints the secret key (aliases
 read it from the drive's file), writes no secret into the drive's settings, and refuses a
-keyring on the drive itself. `--json` output and error records carry no secrets. Tests:
-`apps/cli/tests/client.rs`, `apps/cli/tests/init.rs`, `apps/cli/src/client/target.rs`.
+keyring on the drive itself. `--json` output and error records carry no secrets.
+Temporary credentials (`teifs sts`) are kept the same way, their session token as secret
+as the key; they go to the terminal only with `--output -`, never replace an alias with
+long-term keys, and an alias whose credentials expired is refused before it's used. A
+new user's key saved as an alias never inherits the session of the alias that made it.
+Tests: `apps/cli/tests/client.rs`, `apps/cli/tests/init.rs`, `apps/cli/tests/sts.rs`,
+`apps/cli/src/client/target.rs`.
 
 ## Data safety
 

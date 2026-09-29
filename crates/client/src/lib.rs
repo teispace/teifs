@@ -79,6 +79,8 @@ pub struct Client {
     endpoint: Url,
     access_key: String,
     secret: Zeroizing<String>,
+    /// Temporary credentials' session token.
+    session_token: Option<Zeroizing<String>>,
     region: String,
 }
 
@@ -116,8 +118,17 @@ impl Client {
             endpoint: url,
             access_key: access_key.to_owned(),
             secret,
+            session_token: None,
             region: DEFAULT_REGION.to_owned(),
         })
+    }
+
+    /// Signs with temporary credentials: the key is theirs, and this their session
+    /// token.
+    #[must_use]
+    pub fn with_session_token(mut self, token: Zeroizing<String>) -> Self {
+        self.session_token = Some(token);
+        self
     }
 
     /// Signs for `region` instead.
@@ -212,7 +223,7 @@ impl Client {
         let identity = aws_credential_types::Credentials::new(
             &self.access_key,
             self.secret.as_str(),
-            None,
+            self.session_token.as_deref().cloned(),
             None,
             "teifs-client",
         )

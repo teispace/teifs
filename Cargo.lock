@@ -2975,8 +2975,11 @@ version = "0.1.0"
 dependencies = [
  "anstream",
  "anstyle",
+ "aws-lc-rs",
  "aws-sdk-iam",
  "aws-sdk-s3",
+ "aws-sdk-sts",
+ "base64",
  "bytes",
  "clap",
  "clap_complete",

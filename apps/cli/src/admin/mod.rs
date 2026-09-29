@@ -130,10 +130,12 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
 }
 
 fn alias<'a>(aliases: &'a Aliases, name: &str) -> Result<(&'a Alias, Origin), Error> {
-    aliases.get(name).ok_or_else(|| {
+    let found = aliases.get(name).ok_or_else(|| {
         Error::new(Kind::NotFound, format!("there's no alias `{name}`"))
             .with_hint("see `teifs alias ls`, or add one with `teifs alias set`")
-    })
+    })?;
+    found.0.check_fresh(name)?;
+    Ok(found)
 }
 
 fn client_for(alias: &Alias) -> Result<Client, Error> {
@@ -142,7 +144,13 @@ fn client_for(alias: &Alias) -> Result<Client, Error> {
         &alias.access_key,
         Zeroizing::new(alias.secret_key.clone()),
     )
-    .map(|client| client.with_region(&alias.region))
+    .map(|client| {
+        let client = client.with_region(&alias.region);
+        match &alias.session_token {
+            Some(token) => client.with_session_token(Zeroizing::new(token.clone())),
+            None => client,
+        }
+    })
     .map_err(|e| Error::admin("can't use the alias", &e))
 }
 

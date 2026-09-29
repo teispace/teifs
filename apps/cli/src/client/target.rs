@@ -79,6 +79,7 @@ impl Target {
             }
             return Ok(Self::Local(PathBuf::from(text)));
         };
+        alias.check_fresh(first)?;
         let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
         Ok(Self::Remote(Remote {
             alias_name: first.to_owned(),
