@@ -1,6 +1,6 @@
 //! HTTPS: certificates chosen by the name a client asks for, reloaded when their files
-//! change, plain HTTP on the HTTPS port answered with a hint, `aws:SecureTransport`
-//! and SSE-C keys decided by the connection.
+//! change, plain HTTP on the HTTPS port answered with a hint, `aws:SecureTransport`,
+//! `s3:TlsVersion` and SSE-C keys decided by the connection.
 
 #![allow(
     clippy::unwrap_used,
@@ -198,6 +198,61 @@ async fn https_requests_are_secure_transport() {
         .send()
         .await;
     assert_eq!(denied.unwrap_err().code(), Some("AccessDenied"));
+}
+
+/// Anyone may read `open/*` over TLS 1.3 or later.
+const TLS_13_ONLY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::open/*","Condition":{"NumericGreaterThanEquals":{"s3:TlsVersion":"1.3"}}}]}"#;
+
+/// A bucket `open` with an object `a` that `TLS_13_ONLY` governs.
+async fn tls_13_only(s3: &aws_sdk_s3::Client) {
+    s3.create_bucket().bucket("open").send().await.unwrap();
+    s3.delete_public_access_block()
+        .bucket("open")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket("open")
+        .policy(TLS_13_ONLY)
+        .send()
+        .await
+        .unwrap();
+    s3.put_object()
+        .bucket("open")
+        .key("a")
+        .body(ByteStream::from_static(b"a"))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn policies_see_the_tls_version() {
+    let ca = Authority::new();
+    let certs = tempfile::tempdir().unwrap();
+    ca.issue_into(certs.path(), &["127.0.0.1"]);
+    let (server, _) = https(certs.path(), None).await;
+    tls_13_only(&ca.client(&server)).await;
+    let url = format!("{}/open/a", server.endpoint);
+    let status = |client: reqwest::Client| {
+        let url = url.clone();
+        async move { client.get(url).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(status(ca.reqwest()).await, 200);
+    let tls_12 = ca
+        .reqwest_builder()
+        .tls_version_max(reqwest::tls::Version::TLS_1_2)
+        .build()
+        .unwrap();
+    assert_eq!(status(tls_12).await, 403);
+
+    // Plain HTTP has no TLS version, so a condition on it isn't met.
+    let plain = common::start().await;
+    tls_13_only(&common::client(&plain, common::SECRET_KEY)).await;
+    let answer = reqwest::get(format!("{}/open/a", plain.endpoint))
+        .await
+        .unwrap();
+    assert_eq!(answer.status().as_u16(), 403);
 }
 
 #[tokio::test]

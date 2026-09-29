@@ -8,8 +8,12 @@
 //! (`sts.rs`); a trust policy is the only way into a role (`crates/iam`,
 //! `trust_policies_decide_who_may_assume_a_role`).
 
+use std::time::{Duration, SystemTime};
+
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{Client, primitives::ByteStream, types::Tag, types::Tagging};
+use aws_sdk_s3::{
+    Client, presigning::PresigningConfig, primitives::ByteStream, types::Tag, types::Tagging,
+};
 
 use crate::{
     common::{SECRET_KEY, Server, client, code, start, user},
@@ -320,6 +324,52 @@ async fn an_objects_own_tags_decide_what_policies_say() {
     );
     assert_eq!(get(&staff, "records", "secret.txt").await, "ok");
     assert_eq!(get(&visitor, "records", "secret.txt").await, "ok");
+}
+
+/// A presigned link's age is how long ago it was signed, as AWS measures it for
+/// `s3:signatureAge`: a Deny on old links refuses one signed twenty minutes ago however
+/// long it's valid, and headers signed now have no age to test.
+#[tokio::test]
+async fn a_presigned_links_age_is_when_it_was_signed() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("aged").send().await.unwrap();
+    put(&root, "aged", "a", None).await;
+    root.put_bucket_policy()
+        .bucket("aged")
+        .policy(policy(
+            r#"{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::aged/*","Condition":{"NumericGreaterThan":{"s3:signatureAge":"600000"}}}"#,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let link = |age: Duration| {
+        let root = root.clone();
+        async move {
+            let config = PresigningConfig::builder()
+                .start_time(SystemTime::now() - age)
+                .expires_in(Duration::from_hours(1))
+                .build()
+                .unwrap();
+            let link = root
+                .get_object()
+                .bucket("aged")
+                .key("a")
+                .presigned(config)
+                .await
+                .unwrap();
+            reqwest::get(link.uri()).await.unwrap().status().as_u16()
+        }
+    };
+    assert_eq!(link(Duration::ZERO).await, 200);
+    assert_eq!(link(Duration::from_mins(9)).await, 200);
+    assert_eq!(link(Duration::from_mins(20)).await, 403);
+    root.get_object()
+        .bucket("aged")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
 }
 
 /// An S3 client for a federated user whose session `policy` narrows a user allowed

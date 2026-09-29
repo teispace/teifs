@@ -47,6 +47,9 @@ pub struct Client {
     pub ip: Option<IpAddr>,
     /// Whether it came over TLS.
     pub secure: bool,
+    /// The TLS version it connected with, `1.2` or `1.3` (`s3:TlsVersion`): none over
+    /// plain HTTP, or when a proxy names a client whose connection it can't vouch for.
+    pub tls: Option<&'static str>,
 }
 
 /// Looks up signing secrets in IAM.
@@ -746,6 +749,9 @@ fn context(
     let headers = cx.headers();
     let header = |name: &str| field(cx, form, name);
     let mut context = base_context(identity, headers, client, account);
+    if let Some(version) = client.tls.and_then(Number::parse) {
+        context = context.with(S3Key::TlsVersion, version);
+    }
     for (name, key) in HEADER_KEYS {
         if let Some(value) = header(name) {
             context = context.with(*key, value.to_owned());
@@ -771,6 +777,9 @@ fn context(
                 S3Key::SignatureVersion,
                 signature_version(form.signed_v4()).to_owned(),
             );
+            if let Some(age) = form.field("x-amz-date").and_then(signature_age) {
+                context = context.with(S3Key::SignatureAge, age);
+            }
         }
         form.tags()?
     } else {
@@ -787,11 +796,16 @@ fn context(
     Ok(context)
 }
 
-/// How a signed request was signed (`s3:authType`, `s3:signatureversion`); an anonymous
-/// request has neither.
-fn with_signature(context: Context, cx: &S3AccessContext<'_>) -> Context {
+/// How a signed request was signed (`s3:authType`, `s3:signatureversion`, and for a
+/// presigned link `s3:signatureAge`); an anonymous request has none of them.
+fn with_signature(mut context: Context, cx: &S3AccessContext<'_>) -> Context {
     let presigned = query(cx, "X-Amz-Signature").is_some() || query(cx, "Signature").is_some();
     let sig_v4 = is_sig_v4(cx);
+    // Only presigned requests have an age, as on AWS: a header signature is checked
+    // against the clock instead.
+    if presigned && let Some(age) = query(cx, "X-Amz-Date").as_deref().and_then(signature_age) {
+        context = context.with(S3Key::SignatureAge, age);
+    }
     context
         .with(
             S3Key::AuthType,
@@ -818,6 +832,34 @@ fn is_sig_v4(cx: &S3AccessContext<'_>) -> bool {
             .is_some_and(|a| a.starts_with("AWS4-"))
 }
 
+/// `s3:signatureAge`: the milliseconds since `signed` (Signature V4's
+/// `YYYYMMDDTHHMMSSZ`), none when it isn't that. A date ahead of the clock, which the
+/// signature check allows within its skew, is no age at all.
+fn signature_age(signed: &str) -> Option<Number> {
+    let signed = amz_date(signed)?;
+    let age = Date::now().millis_since(signed).max(0);
+    Some(Number::from_int(age))
+}
+
+/// A Signature V4 date, `20260929T123000Z`.
+fn amz_date(text: &str) -> Option<Date> {
+    let bytes = text.as_bytes();
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    if bytes.len() != 16 || bytes[8] != b'T' || bytes[15] != b'Z' || !digits(0..8) || !digits(9..15)
+    {
+        return None;
+    }
+    Date::parse(&format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &text[0..4],
+        &text[4..6],
+        &text[6..8],
+        &text[9..11],
+        &text[11..13],
+        &text[13..15]
+    ))
+}
+
 /// `s3:signatureversion` for Signature V4 or V2.
 const fn signature_version(v4: bool) -> &'static str {
     if v4 { "AWS4-HMAC-SHA256" } else { "AWS" }
@@ -826,6 +868,36 @@ const fn signature_version(v4: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_v4_dates_give_an_age() {
+        assert_eq!(
+            amz_date("20260929T123005Z"),
+            Date::parse("2026-09-29T12:30:05Z")
+        );
+        for bad in [
+            "",
+            "2026-09-29T12:30:05Z",
+            "20260929T123005",
+            "20260929 123005Z",
+            "20260929T12300aZ",
+            "20261329T123005Z",
+            "20260929T123005Zx",
+        ] {
+            assert_eq!(amz_date(bad), None, "{bad:?}");
+        }
+        let age = |secs: i64| {
+            let then = Date::now().unix_seconds() - i128::from(secs);
+            let text = Date::from_unix_seconds(i64::try_from(then).unwrap()).to_string();
+            let compact: String = text.chars().filter(|c| *c != '-' && *c != ':').collect();
+            signature_age(&compact).and_then(Number::whole)
+        };
+        let ten_minutes = age(600).unwrap();
+        assert!((600_000..605_000).contains(&ten_minutes), "{ten_minutes}");
+        // Ahead of the clock is no age, not a negative one.
+        assert_eq!(age(-300), Some(0));
+        assert_eq!(signature_age("yesterday"), None);
+    }
 
     #[test]
     fn session_tokens_come_from_the_header_or_a_presigned_query() {

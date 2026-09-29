@@ -134,13 +134,20 @@ impl Connection {
             _ => return,
         }
         let Some(tls) = tls else {
-            return self.serve(socket, false).await;
+            return self.serve(socket, None).await;
         };
         if first[0] != TLS_HANDSHAKE {
             return refuse_plain_http(socket).await;
         }
         match tokio::time::timeout(timeout, tls.accept(socket)).await {
-            Ok(Ok(stream)) => self.serve(stream, true).await,
+            Ok(Ok(stream)) => {
+                let version = match stream.get_ref().1.protocol_version() {
+                    Some(rustls::ProtocolVersion::TLSv1_3) => Some("1.3"),
+                    Some(rustls::ProtocolVersion::TLSv1_2) => Some("1.2"),
+                    _ => None,
+                };
+                self.serve(stream, version).await;
+            }
             Ok(Err(err)) => {
                 tracing::debug!(peer = %self.peer, error = %err, "TLS handshake failed");
             }
@@ -148,13 +155,15 @@ impl Connection {
         }
     }
 
-    async fn serve<I>(self, io: I, secure: bool)
+    /// Serves one connection; `tls` is its TLS version, none for plain HTTP.
+    async fn serve<I>(self, io: I, tls: Option<&'static str>)
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let service = self.service.for_client(teifs_s3::Client {
             ip: Some(self.peer.ip()),
-            secure,
+            secure: tls.is_some(),
+            tls,
         });
         let connection = self.http.serve_connection(TokioIo::new(io), service);
         if let Err(err) = self.watcher.watch(connection.into_owned()).await {

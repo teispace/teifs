@@ -154,10 +154,14 @@ impl TrustedProxies {
                 .next_back()
                 .map(|proto| proto.trim().eq_ignore_ascii_case("https")),
         };
+        // The connection's TLS version is the client's only when the client is the
+        // proxy itself and nothing says otherwise.
+        let own = client.ip == Some(ip) && secure.is_none();
         crate::Client {
             ip: client.ip,
             // Without a word on the scheme, the proxy's own connection decides.
             secure: secure.unwrap_or(peer.secure),
+            tls: if own { peer.tls } else { None },
         }
     }
 }
@@ -234,6 +238,7 @@ mod tests {
         crate::Client {
             ip: Some(ip.parse().unwrap()),
             secure,
+            tls: secure.then_some("1.3"),
         }
     }
 
@@ -280,6 +285,24 @@ mod tests {
         // No peer address, nothing to decide.
         let unknown = crate::Client::default();
         assert_eq!(proxies.client(unknown, &headers(&spoofed)), unknown);
+    }
+
+    #[test]
+    fn a_tls_version_is_kept_only_for_the_connection_it_describes() {
+        let proxies = TrustedProxies::new(&["10.0.0.0/8"], ProxyHeader::XForwardedFor).unwrap();
+        let tls = |from: &str, pairs: &[(&'static str, &str)]| {
+            proxies.client(peer(from, true), &headers(pairs)).tls
+        };
+        // A client of its own, or a proxy that says nothing: its own connection's.
+        assert_eq!(
+            tls("198.51.100.1", &[("x-forwarded-for", "1.1.1.1")]),
+            Some("1.3")
+        );
+        assert_eq!(tls("10.0.0.1", &[]), Some("1.3"));
+        // A client the proxy names, or a scheme it states: the proxy's hop says nothing
+        // of the client's.
+        assert_eq!(tls("10.0.0.1", &[("x-forwarded-for", "203.0.113.9")]), None);
+        assert_eq!(tls("10.0.0.1", &[("x-forwarded-proto", "https")]), None);
     }
 
     #[test]

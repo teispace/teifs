@@ -239,7 +239,8 @@ entry stops the walk at the last trusted proxy, never at an address the client c
 have written (`crates/s3/src/proxy.rs`, tested in `crates/server/tests/proxy.rs`). The
 scheme a proxy reports (`X-Forwarded-Proto`, or `Forwarded`'s `proto`) decides
 `aws:SecureTransport` and SSE-C; a client that could lie about it would only weaken its
-own connection. With a proxy trusted, a server listening on loopback no longer counts
+own connection. A proxy never reports a TLS version, so once it names a client or a
+scheme, `s3:TlsVersion` is absent rather than the proxy's own hop's. With a proxy trusted, a server listening on loopback no longer counts
 plain HTTP as secure, since the proxy may be passing on plain HTTP from anywhere.
 
 ### 9. Untrusted content is never rendered in a privileged page (*planned*)
@@ -319,7 +320,8 @@ HTTPS uses rustls with aws-lc-rs: TLS 1.3 and 1.2 only, rustls's default cipher 
 no client certificates (`crates/server/src/tls.rs`). Every certificate must parse and
 match its key before the server starts or a reload uses it; a reload that fails keeps
 the certificates in use, and is reported once per change. Each connection's `secure`
-flag (`aws:SecureTransport`, SSE-C) comes from the listener, never from a header.
+flag (`aws:SecureTransport`, SSE-C) and TLS version (`s3:TlsVersion`) come from the
+listener, never from a header.
 `teifs health` checks a server's handshake signature but not whom its certificate names
 (it sends nothing secret and reads only a status), so it works with private CAs and
 certificates for public names while it asks `127.0.0.1`.

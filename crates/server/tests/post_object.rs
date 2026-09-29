@@ -7,7 +7,7 @@
     reason = "test helpers fail the test on any error"
 )]
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_s3::primitives::ByteStream;
 use base64::Engine;
@@ -49,12 +49,22 @@ fn dates(now: SystemTime) -> (String, String) {
 /// A form's fields, signed by `(access key, secret)`: `fields`, and a policy with
 /// `conditions` and those the signature's own fields need.
 fn signed(
-    (access_key, secret): (&str, &str),
+    key: (&str, &str),
     expiration: &str,
     conditions: &[Value],
     fields: &[(&str, &str)],
 ) -> Vec<(String, String)> {
-    let now = SystemTime::now();
+    signed_at(key, SystemTime::now(), expiration, conditions, fields)
+}
+
+/// [`signed`] as of `now`.
+fn signed_at(
+    (access_key, secret): (&str, &str),
+    now: SystemTime,
+    expiration: &str,
+    conditions: &[Value],
+    fields: &[(&str, &str)],
+) -> Vec<(String, String)> {
     let (date, stamp) = dates(now);
     let credential = format!("{access_key}/{date}/us-east-1/s3/aws4_request");
     let mut all = conditions.to_vec();
@@ -431,6 +441,38 @@ async fn users_upload_only_where_their_policies_allow() {
         .send()
         .await;
     assert_eq!(common::code(put), "AccessDenied");
+}
+
+/// `s3:signatureAge` of a form is the time since its `x-amz-date`. (s3s refuses forms
+/// signed more than 15 minutes ago, which AWS accepts until their policy expires.)
+#[tokio::test]
+async fn a_forms_age_is_when_it_was_signed() {
+    let server = start().await;
+    bucket(&server, "aged").await;
+    client(&server, SECRET_KEY)
+        .put_bucket_policy()
+        .bucket("aged")
+        .policy(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::aged/*","Condition":{"NumericGreaterThan":{"s3:signatureAge":"300000"}}}]}"#)
+        .send()
+        .await
+        .unwrap();
+    let form = |age: Duration| {
+        signed_at(
+            (ACCESS_KEY, SECRET_KEY),
+            SystemTime::now() - age,
+            FAR,
+            &[
+                json!({"bucket": "aged"}),
+                json!(["starts-with", "$key", ""]),
+            ],
+            &[("key", "a")],
+        )
+    };
+    let Answer { status, body, .. } = post(&server, "aged", &form(Duration::ZERO), b"a").await;
+    assert_eq!(status, 204, "{body}");
+    let Answer { status, body, .. } =
+        post(&server, "aged", &form(Duration::from_mins(10)), b"a").await;
+    assert_eq!(status, 403, "{body}");
 }
 
 #[tokio::test]

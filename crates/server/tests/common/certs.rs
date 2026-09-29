@@ -169,9 +169,12 @@ impl Authority {
 
     /// A plain HTTP client that trusts this authority.
     pub fn reqwest(&self) -> reqwest::Client {
+        self.reqwest_builder().build().unwrap()
+    }
+
+    /// [`Self::reqwest`], to be configured further.
+    pub fn reqwest_builder(&self) -> reqwest::ClientBuilder {
         reqwest::Client::builder()
             .tls_certs_only([reqwest::Certificate::from_pem(self.pem.as_bytes()).unwrap()])
-            .build()
-            .unwrap()
     }
 }

@@ -94,6 +94,14 @@ impl Date {
         Self(i128::from(seconds) * NANOS)
     }
 
+    /// Milliseconds from `earlier` to this instant (rounded toward zero), negative when
+    /// `earlier` is later.
+    #[must_use]
+    pub fn millis_since(self, earlier: Self) -> i64 {
+        let millis = (self.0 - earlier.0) / 1_000_000;
+        i64::try_from(millis).unwrap_or(if millis < 0 { i64::MIN } else { i64::MAX })
+    }
+
     /// Whole seconds since 1970-01-01T00:00:00Z (rounded down).
     #[must_use]
     pub const fn unix_seconds(self) -> i128 {
@@ -355,6 +363,16 @@ mod tests {
         }
         assert!(n(&"9".repeat(40)).is_none(), "too large");
         assert!(n(&"9".repeat(29)).is_some());
+    }
+
+    #[test]
+    fn milliseconds_between_dates() {
+        let at = |text: &str| Date::parse(text).unwrap();
+        let later = at("2026-09-29T12:30:01.5Z");
+        assert_eq!(later.millis_since(at("2026-09-29T12:30:00Z")), 1_500);
+        assert_eq!(at("2026-09-29T12:30:00Z").millis_since(later), -1_500);
+        assert_eq!(Date(i128::MAX).millis_since(Date(0)), i64::MAX);
+        assert_eq!(Date(i128::MIN / 2).millis_since(Date(0)), i64::MIN);
     }
 
     #[test]

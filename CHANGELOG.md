@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Policies can test `s3:TlsVersion` (the HTTPS connection's TLS version) and
+  `s3:signatureAge` (how long ago a presigned link or form was signed, in
+  milliseconds), as on AWS.
 - `docs/ADMIN_API.md`: a reference for the admin API, S3 Control and the IAM and STS
   route: every endpoint, who may call it, its messages and errors.
 - HTTPS: `teifs serve --certs-dir DIR` (MinIO's certificates folder layout, or a
