@@ -5,21 +5,21 @@
 
 use std::path::{Path, PathBuf};
 
-use aws_sdk_iam::{Client, config::Region};
+use aws_sdk_iam::Client;
 use clap::{Args, Subcommand};
-use serde_json::{Value, json};
+use serde_json::json;
 use teifs_client::Zeroizing;
 
-use super::alias;
+use super::{
+    alias,
+    policy::{POLICY_NAME, PolicyArgs},
+};
 use crate::{
     client::alias::{Alias, Aliases, check_name},
     error::{Error, Kind},
     ui,
     units::{date, from_ms},
 };
-
-/// The inline policy `user add` and `user policy` set.
-const POLICY_NAME: &str = "teifs-access";
 
 #[derive(Subcommand)]
 pub enum UserAction {
@@ -91,18 +91,6 @@ pub enum KeyAction {
     },
 }
 
-/// What a user may do.
-#[derive(Args)]
-pub struct PolicyArgs {
-    /// `readonly` (read and list), `readwrite` (all of S3), `admin` (everything: IAM
-    /// and the admin API too), or a file with an IAM policy document.
-    #[arg(long)]
-    policy: String,
-    /// Only this bucket, for `readonly` and `readwrite` (repeatable).
-    #[arg(long = "bucket", value_name = "BUCKET")]
-    buckets: Vec<String>,
-}
-
 /// Where a new access key goes.
 #[derive(Args)]
 #[group(required = true, multiple = false)]
@@ -134,7 +122,7 @@ impl UserAction {
 
 pub async fn run(mut aliases: Aliases, action: UserAction) -> Result<(), Error> {
     let server = alias(&aliases, action.alias())?.0.clone();
-    let iam = client(&server);
+    let iam = super::iam(&server);
     match action {
         UserAction::Add {
             name, policy, key, ..
@@ -197,60 +185,6 @@ pub async fn run(mut aliases: Aliases, action: UserAction) -> Result<(), Error> 
                 Ok(())
             }
         },
-    }
-}
-
-/// An IAM client for the alias's server, signing with its keys.
-fn client(alias: &Alias) -> Client {
-    let config = aws_sdk_iam::Config::builder()
-        .behavior_version_latest()
-        .region(Region::new(alias.region.clone()))
-        .endpoint_url(&alias.url)
-        .credentials_provider(alias.credentials())
-        .build();
-    Client::from_conf(config)
-}
-
-impl PolicyArgs {
-    /// The policy document: a preset's, or the file's.
-    fn document(&self) -> Result<String, Error> {
-        let preset = |actions: Value| {
-            let statements = if self.buckets.is_empty() {
-                json!([{"Effect": "Allow", "Action": actions, "Resource": "*"}])
-            } else {
-                let resources: Vec<String> = self
-                    .buckets
-                    .iter()
-                    .flat_map(|b| [format!("arn:aws:s3:::{b}"), format!("arn:aws:s3:::{b}/*")])
-                    .collect();
-                json!([
-                    {"Effect": "Allow", "Action": actions, "Resource": resources},
-                    // So listing buckets works: it shows the names, never their contents.
-                    {"Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "*"},
-                ])
-            };
-            json!({"Version": "2012-10-17", "Statement": statements}).to_string()
-        };
-        match (self.policy.as_str(), self.buckets.is_empty()) {
-            ("readonly", _) => Ok(preset(json!(["s3:Get*", "s3:List*"]))),
-            ("readwrite", _) => Ok(preset(json!("s3:*"))),
-            ("admin", true) => Ok(preset(json!("*"))),
-            ("admin", false) => Err(Error::usage("an admin can't be limited to buckets")
-                .with_hint("use --policy readwrite with --bucket")),
-            (_, false) => Err(Error::usage("--bucket is for readonly and readwrite")
-                .with_hint("name the buckets in the policy file")),
-            (file, true) => std::fs::read_to_string(file).map_err(|e| {
-                let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                    Kind::NotFound
-                } else {
-                    Kind::General
-                };
-                Error::new(
-                    kind,
-                    format!("`{file}` isn't readonly, readwrite, admin or a policy file: {e}"),
-                )
-            }),
-        }
     }
 }
 

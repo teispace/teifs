@@ -160,6 +160,9 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |
 | `teifs admin user ls\|rm\|policy ALIAS …` \| `user key add\|ls\|rm ALIAS NAME …` | List, delete or re-permission users; add, list and delete their keys |
+| `teifs admin role add ALIAS NAME --trust account\|user:NAME\|github:OWNER/REPO\|oidc:HOST --sub S\|FILE --policy … [--max-session 12h]` | A role with a policy, in one step, trusting the account, a user, a GitHub repository's workflows or an OpenID Connect provider's subjects |
+| `teifs admin role ls\|rm\|policy\|trust ALIAS …` | List roles and whom they trust, delete them (their sessions end), change their policy or trust |
+| `teifs admin oidc add ALIAS URL --client-id ID [--thumbprint HEX] [--policy-claim [CLAIM]]` \| `oidc ls\|rm ALIAS …` | OpenID Connect providers whose tokens get credentials, with MinIO's policy claim if asked for |
 | `teifs sts whoami ALIAS` | Whom an alias signs as |
 | `teifs sts assume ALIAS [ROLE] [--session-name N] [--duration 1h] [--policy FILE] [--external-id ID] [--tag K=V]… --save-alias NEW\|-o FILE` | Temporary credentials: a role's session, or without a role (MinIO's way) the user's own permissions narrowed; saved as an alias that knows when it expires, or as the AWS CLI's `credential_process` output |
 | `teifs sts assume-web SERVER [--role ARN] [--token-file F] … --save-alias NEW\|-o FILE` | A CI job's OpenID Connect token for temporary credentials (reads `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`) |

@@ -234,7 +234,7 @@ fn signing(aliases: &Aliases, name: &str) -> Result<Alias, Error> {
 }
 
 /// An STS client for the alias's server, signing with its keys if `signed`.
-fn client(alias: &Alias, signed: bool) -> Client {
+pub(crate) fn client(alias: &Alias, signed: bool) -> Client {
     let mut config = aws_sdk_sts::Config::builder()
         .behavior_version_latest()
         .region(Region::new(alias.region.clone()))

@@ -104,6 +104,12 @@ behaviour; the on-disk format is always upgraded automatically.
   or to an owner-only file, never printed unless asked for with `--output -`. Also
   `ls`, `rm` (keys, policies and groups first), `policy`, and `key add|ls|rm`. It
   speaks AWS's IAM API, and a user that can't be finished isn't left behind.
+- `teifs admin role`: a role with a policy in one step, trusting the account, a user,
+  a GitHub repository (`github:OWNER/REPO[:SUBJECT]`) or any OpenID Connect provider's
+  subjects (`oidc:HOST --sub PATTERN`), or a trust policy file; `ls` sums up whom each
+  role trusts, `policy` and `trust` change them, `rm` ends its sessions. `teifs admin
+  oidc add|ls|rm`: OpenID Connect providers, with `--policy-claim` for MinIO's sessions
+  without a role.
 - Rotate the root key without a restart: `POST /.teifs/admin/v1/root-key` replaces a
   drive-generated root key, saves it in `.teifs/credentials.json` and answers it; the
   old key stops working at once.

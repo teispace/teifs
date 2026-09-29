@@ -60,7 +60,9 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                output: styles, tables, progress bars, prompts, `--json`.
                                `src/init.rs` is `teifs init`; `src/admin/` is
                                `teifs admin`, on `teifs-client`, and its `users.rs`
-                               `teifs admin user`, on the AWS SDK's IAM client;
+                               `teifs admin user`, `roles.rs` `teifs admin role`
+                               and `oidc.rs` `teifs admin oidc`, on the AWS SDK's
+                               IAM client, with `policy.rs` their policy presets;
                                `src/sts.rs` is `teifs sts`, on its STS client.
                                `Alias::credentials` gives every client the alias's
                                keys and session token.

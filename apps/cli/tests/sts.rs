@@ -332,3 +332,309 @@ fn now_ms() -> i64 {
     )
     .unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn roles_and_providers_in_one_step() {
+    let server = start().await;
+    let account = server.iam.account();
+    let mut cli = as_user(&server);
+    user(&server, "bob", Some(ALLOW_ALL));
+    let bob = server.iam.create_access_key("bob").unwrap();
+    let address = server.endpoint.trim_start_matches("http://");
+    cli.env.push((
+        "TEIFS_ALIAS_B".to_owned(),
+        format!("http://{}:{}@{address}", bob.info.id, bob.secret.as_str()),
+    ));
+    cli.ok(&["mb", "t/photos"]).await;
+    cli.ok(&["mb", "t/other"]).await;
+    let file = cli.path("a.txt");
+    fs::write(&file, "a").unwrap();
+    let file = file.to_str().unwrap();
+
+    // Trusting the account, for one bucket, with longer sessions.
+    cli.ok(&[
+        "admin",
+        "role",
+        "add",
+        "t",
+        "deploy",
+        "--trust",
+        "account",
+        "--policy",
+        "readwrite",
+        "--bucket",
+        "photos",
+        "--max-session",
+        "2h",
+    ])
+    .await;
+    cli.ok(&[
+        "sts",
+        "assume",
+        "a",
+        "deploy",
+        "--duration",
+        "2h",
+        "--save-alias",
+        "d",
+    ])
+    .await;
+    cli.ok(&["cp", file, "d/photos/a.txt"]).await;
+    cli.fails(&["cp", file, "d/other/a.txt"], 4).await;
+    // Trusting one user.
+    cli.ok(&[
+        "admin",
+        "role",
+        "add",
+        "t",
+        "solo",
+        "--trust",
+        "user:alice",
+        "--policy",
+        "readonly",
+    ])
+    .await;
+    cli.ok(&["sts", "assume", "a", "solo", "-o", "-"]).await;
+    cli.fails(&["sts", "assume", "b", "solo", "-o", "-"], 4)
+        .await;
+    let roles = records(&cli.ok(&["--json", "admin", "role", "ls", "t"]).await);
+    let deploy = roles.iter().find(|r| r["name"] == "deploy").unwrap();
+    assert_eq!(deploy["trusts"], serde_json::json!(["account"]));
+    assert_eq!(deploy["policies"], serde_json::json!(["teifs-access"]));
+    assert_eq!(deploy["maxSessionSeconds"], 7200);
+    let solo = roles.iter().find(|r| r["name"] == "solo").unwrap();
+    assert_eq!(solo["trusts"], serde_json::json!(["user/alice"]));
+    assert!(
+        cli.ok(&["admin", "role", "ls", "t"])
+            .await
+            .contains("user/alice")
+    );
+
+    // Changing what it may do and whom it trusts.
+    cli.ok(&[
+        "admin", "role", "policy", "t", "deploy", "--policy", "readonly",
+    ])
+    .await;
+    cli.fails(&["cp", file, "d/photos/b.txt"], 4).await;
+    cli.ok(&["admin", "role", "trust", "t", "solo", "--trust", "account"])
+        .await;
+    cli.ok(&["sts", "assume", "b", "solo", "-o", "-"]).await;
+
+    // Refused before anything changes.
+    let err = cli
+        .fails(
+            &[
+                "admin",
+                "role",
+                "add",
+                "t",
+                "x",
+                "--trust",
+                "user:nobody",
+                "--policy",
+                "readonly",
+            ],
+            5,
+        )
+        .await;
+    assert!(err.contains("nobody"), "{err}");
+    let err = cli
+        .fails(
+            &[
+                "admin",
+                "role",
+                "add",
+                "t",
+                "x",
+                "--trust",
+                "nothing.json",
+                "--policy",
+                "readonly",
+            ],
+            5,
+        )
+        .await;
+    assert!(err.contains("github:OWNER/REPO"), "{err}");
+    cli.fails(
+        &[
+            "admin", "role", "add", "t", "x", "--trust", "account", "--sub", "a", "--policy",
+            "readonly",
+        ],
+        2,
+    )
+    .await;
+    let err = cli
+        .fails(
+            &[
+                "admin",
+                "role",
+                "add",
+                "t",
+                "x",
+                "--trust",
+                "github:acme/site",
+                "--policy",
+                "readonly",
+            ],
+            5,
+        )
+        .await;
+    assert!(err.contains("teifs admin oidc add"), "{err}");
+    // A policy the server refuses leaves no half-made role behind.
+    let bad = cli.path("bad-policy.json");
+    fs::write(
+        &bad,
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Maybe"}]}"#,
+    )
+    .unwrap();
+    cli.fails(
+        &[
+            "admin",
+            "role",
+            "add",
+            "t",
+            "x",
+            "--trust",
+            "account",
+            "--policy",
+            bad.to_str().unwrap(),
+        ],
+        2,
+    )
+    .await;
+    assert_eq!(
+        records(&cli.ok(&["--json", "admin", "role", "ls", "t"]).await).len(),
+        2
+    );
+
+    // An OpenID Connect provider, and a role for some of its subjects.
+    let idp = Idp::start().await;
+    let host = idp.url.trim_start_matches("http://").to_owned();
+    cli.ok(&[
+        "admin",
+        "oidc",
+        "add",
+        "t",
+        "https://0.idp.example.com",
+        "--client-id",
+        "other",
+    ])
+    .await;
+    cli.ok(&[
+        "admin",
+        "oidc",
+        "add",
+        "t",
+        &idp.url,
+        "--client-id",
+        "sts.amazonaws.com",
+        "--policy-claim",
+    ])
+    .await;
+    let providers = records(&cli.ok(&["--json", "admin", "oidc", "ls", "t"]).await);
+    let ours = providers
+        .iter()
+        .find(|p| p["url"] == host.as_str())
+        .unwrap();
+    assert_eq!(ours["policyClaim"], "policy");
+    assert_eq!(providers.len(), 2);
+    cli.fails(
+        &[
+            "admin",
+            "role",
+            "add",
+            "t",
+            "ci",
+            "--trust",
+            &format!("oidc:{host}"),
+            "--policy",
+            "readwrite",
+        ],
+        2,
+    )
+    .await;
+    cli.ok(&[
+        "admin",
+        "role",
+        "add",
+        "t",
+        "ci",
+        "--trust",
+        &format!("oidc:{host}"),
+        "--sub",
+        "repo:acme/*",
+        "--policy",
+        "readwrite",
+    ])
+    .await;
+    let role = format!("arn:aws:iam::{account}:role/ci");
+    let token = cli.path("token");
+    let token_path = token.to_str().unwrap();
+    for (sub, works) in [("repo:acme/site", true), ("repo:evil/site", false)] {
+        fs::write(&token, idp.token(sub, "")).unwrap();
+        let args = [
+            "sts",
+            "assume-web",
+            &server.endpoint,
+            "--role",
+            &role,
+            "--token-file",
+            token_path,
+            "-o",
+            "-",
+        ];
+        if works {
+            cli.ok(&args).await;
+        } else {
+            cli.fails(&args, 4).await;
+        }
+    }
+    // The provider lets its tokens name policies, for sessions without a role.
+    fs::write(&token, idp.token("anyone", r#","policy":"nothing""#)).unwrap();
+    let err = cli
+        .fails(
+            &[
+                "sts",
+                "assume-web",
+                &server.endpoint,
+                "--token-file",
+                token_path,
+                "-o",
+                "-",
+            ],
+            1,
+        )
+        .await;
+    assert!(err.contains("None of the given policies"), "{err}");
+
+    // Deleting asks first, and without a terminal to ask on it doesn't guess.
+    let err = cli.fails(&["admin", "role", "rm", "t", "deploy"], 2).await;
+    assert!(err.contains("--yes"), "{err}");
+    let err = cli.fails(&["admin", "oidc", "rm", "t", &host], 2).await;
+    assert!(err.contains("--yes"), "{err}");
+    assert_eq!(
+        records(&cli.ok(&["--json", "admin", "oidc", "ls", "t"]).await).len(),
+        2
+    );
+
+    // Deleting a role ends its sessions, whatever policies it has; deleting a provider,
+    // its tokens' use.
+    let extra = server
+        .iam
+        .create_policy("extra", None, None, ALLOW_ALL, &[])
+        .unwrap();
+    server
+        .iam
+        .attach(Owner::Role("deploy"), &extra.arn)
+        .unwrap();
+    cli.ok(&["-y", "admin", "role", "rm", "t", "deploy"]).await;
+    cli.fails(&["ls", "d/photos"], 4).await;
+    cli.ok(&["-y", "admin", "role", "rm", "t", "ci"]).await;
+    cli.ok(&["-y", "admin", "oidc", "rm", "t", &idp.url]).await;
+    let providers = records(&cli.ok(&["--json", "admin", "oidc", "ls", "t"]).await);
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["url"], "0.idp.example.com");
+    cli.fails(&["-y", "admin", "oidc", "rm", "t", &host], 5)
+        .await;
+}

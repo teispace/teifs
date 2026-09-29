@@ -1,7 +1,11 @@
 //! `teifs admin`: a TeiFS server's admin API through an alias — what the server is and
 //! how it was started, moving its IAM, replacing its root key, and users with their keys
-//! and policies (over AWS's IAM API, which `aws iam --endpoint-url …` speaks too).
+//! and policies, roles and OpenID Connect providers (over AWS's IAM API, which `aws iam
+//! --endpoint-url …` speaks too).
 
+mod oidc;
+mod policy;
+mod roles;
 mod users;
 
 use std::{
@@ -49,6 +53,16 @@ pub enum AdminAction {
     User {
         #[command(subcommand)]
         action: users::UserAction,
+    },
+    /// Add, list and delete roles: whom they trust and what they may do.
+    Role {
+        #[command(subcommand)]
+        action: roles::RoleAction,
+    },
+    /// Add, list and delete OpenID Connect providers, whose tokens get credentials.
+    Oidc {
+        #[command(subcommand)]
+        action: oidc::OidcAction,
     },
 }
 
@@ -126,6 +140,8 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
             action: RootKeyAction::Rotate { alias },
         } => rotate(aliases, &alias).await,
         AdminAction::User { action } => users::run(aliases, action).await,
+        AdminAction::Role { action } => roles::run(&aliases, action).await,
+        AdminAction::Oidc { action } => oidc::run(&aliases, action).await,
     }
 }
 
@@ -152,6 +168,17 @@ fn client_for(alias: &Alias) -> Result<Client, Error> {
         }
     })
     .map_err(|e| Error::admin("can't use the alias", &e))
+}
+
+/// An IAM client for the alias's server, signing with its keys.
+fn iam(alias: &Alias) -> aws_sdk_iam::Client {
+    let config = aws_sdk_iam::Config::builder()
+        .behavior_version_latest()
+        .region(aws_sdk_iam::config::Region::new(alias.region.clone()))
+        .endpoint_url(&alias.url)
+        .credentials_provider(alias.credentials())
+        .build();
+    aws_sdk_iam::Client::from_conf(config)
 }
 
 fn client(aliases: &Aliases, name: &str) -> Result<Client, Error> {
