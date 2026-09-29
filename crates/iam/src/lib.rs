@@ -14,6 +14,7 @@ mod ops;
 mod rules;
 mod snapshot;
 mod state;
+mod transfer;
 
 use std::{
     path::Path,

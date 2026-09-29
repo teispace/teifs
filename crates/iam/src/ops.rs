@@ -292,11 +292,11 @@ fn removed<'k>(
 }
 
 impl Draft<'_> {
-    fn write(&mut self, write: IamWrite) {
+    pub(crate) fn write(&mut self, write: IamWrite) {
         self.writes.push(write);
     }
 
-    fn user(&self, name: &str) -> Result<Arc<User>> {
+    pub(crate) fn user(&self, name: &str) -> Result<Arc<User>> {
         self.state.user_named(name).cloned()
     }
 
@@ -336,7 +336,7 @@ impl Draft<'_> {
             .insert(policy.row.id.clone(), Arc::new(policy));
     }
 
-    fn save_key(&mut self, key: Key) {
+    pub(crate) fn save_key(&mut self, key: Key) {
         self.write(IamWrite::PutKey(AccessKeyRow {
             id: key.id.clone(),
             user_id: key.user.clone(),
@@ -366,6 +366,290 @@ impl Draft<'_> {
             Owner::User(name) => OwnerRef::User(self.user(name)?),
             Owner::Group(name) => OwnerRef::Group(self.group(name)?),
         })
+    }
+}
+
+/// The operations that change IAM, each with all of its checks: [`Iam`]'s methods run
+/// one in a change of its own, and an import runs many in one.
+impl Draft<'_> {
+    /// [`Iam::create_user`], as part of a change.
+    pub(crate) fn create_user(
+        &mut self,
+        name: &str,
+        path: Option<&str>,
+        tags: &[(String, String)],
+        boundary: Option<&str>,
+    ) -> Result<UserInfo> {
+        rules::name("user name", name, rules::USER_NAME)?;
+        let path = path.unwrap_or("/");
+        rules::path(path)?;
+        checked_tags(TagKeys::User, tags)?;
+        let tags = merged(TagKeys::User, &[], tags)?;
+        if self.state.user_name_taken(name, None) {
+            return Err(IamError::EntityAlreadyExists(format!(
+                "User with name {name} already exists."
+            )));
+        }
+        if self.state.users.len() >= MAX_USERS {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for UsersPerAccount: {MAX_USERS}"
+            )));
+        }
+        let boundary = boundary
+            .map(|arn| self.policy(arn).map(|p| p.row.id.clone()))
+            .transpose()?;
+        let user = User {
+            id: self.new_id(ids::Kind::User),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            created_ms: self.now,
+            boundary,
+            tags: tags.clone(),
+            inline: BTreeMap::new(),
+            attached: std::collections::BTreeSet::new(),
+        };
+        let id = user.id.clone();
+        self.save_user(user);
+        for (key, value) in &tags {
+            self.write(IamWrite::PutUserTag(id.clone(), key.clone(), value.clone()));
+        }
+        Ok(user_info(&self.state, &self.state.users[&id]))
+    }
+
+    /// [`Iam::create_group`], as part of a change.
+    pub(crate) fn create_group(&mut self, name: &str, path: Option<&str>) -> Result<GroupInfo> {
+        rules::name("group name", name, rules::OTHER_NAME)?;
+        let path = path.unwrap_or("/");
+        rules::path(path)?;
+        if self.state.group_name_taken(name, None) {
+            return Err(IamError::EntityAlreadyExists(format!(
+                "Group with name {name} already exists."
+            )));
+        }
+        if self.state.groups.len() >= MAX_GROUPS {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for GroupsPerAccount: {MAX_GROUPS}"
+            )));
+        }
+        let group = Group {
+            id: self.new_id(ids::Kind::Group),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            created_ms: self.now,
+            members: std::collections::BTreeSet::new(),
+            inline: BTreeMap::new(),
+            attached: std::collections::BTreeSet::new(),
+        };
+        let info = group_info(&self.state, &group);
+        self.save_group(group);
+        Ok(info)
+    }
+
+    /// [`Iam::add_user_to_group`], as part of a change.
+    pub(crate) fn add_user_to_group(&mut self, group: &str, user: &str) -> Result<()> {
+        let group = self.group(group)?;
+        let user = self.user(user)?;
+        if group.members.contains(&user.id) {
+            return Ok(());
+        }
+        if self.state.groups_of(&user.id).count() >= MAX_GROUPS_PER_USER {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for GroupsPerUser: {MAX_GROUPS_PER_USER}"
+            )));
+        }
+        let mut group = Arc::unwrap_or_clone(group);
+        group.members.insert(user.id.clone());
+        self.write(IamWrite::AddMember(group.id.clone(), user.id.clone()));
+        self.state.groups.insert(group.id.clone(), Arc::new(group));
+        Ok(())
+    }
+
+    /// [`Iam::create_policy`], as part of a change.
+    pub(crate) fn create_policy(
+        &mut self,
+        name: &str,
+        path: Option<&str>,
+        description: Option<&str>,
+        document: &str,
+        tags: &[(String, String)],
+    ) -> Result<PolicyInfo> {
+        rules::name("policy name", name, rules::OTHER_NAME)?;
+        checked_tags(TagKeys::Policy, tags)?;
+        let tags = merged(TagKeys::Policy, &[], tags)?;
+        let path = path.unwrap_or("/");
+        rules::path(path)?;
+        let description = description.unwrap_or_default();
+        rules::description(description)?;
+        let document = Document::parse(document)?;
+        managed_size(&document)?;
+        if self
+            .state
+            .policies
+            .values()
+            .any(|p| p.row.name.eq_ignore_ascii_case(name))
+        {
+            return Err(IamError::EntityAlreadyExists(format!(
+                "A policy called {name} already exists. Duplicate names are not allowed."
+            )));
+        }
+        if self.state.policies.len() >= MAX_POLICIES {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for PoliciesPerAccount: {MAX_POLICIES}"
+            )));
+        }
+        let row = PolicyRow {
+            id: self.new_id(ids::Kind::Policy),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            description: description.to_owned(),
+            default_version: 1,
+            latest_version: 1,
+            created_ms: self.now,
+            updated_ms: self.now,
+        };
+        self.write(IamWrite::PutPolicy(row.clone()));
+        self.write(IamWrite::PutVersion(PolicyVersionRow {
+            policy_id: row.id.clone(),
+            version: 1,
+            document: document.text.to_string(),
+            created_ms: self.now,
+        }));
+        let policy = Managed {
+            versions: BTreeMap::from([(
+                1,
+                Version {
+                    document,
+                    created_ms: self.now,
+                },
+            )]),
+            row,
+            tags,
+        };
+        for (key, value) in &policy.tags {
+            self.write(IamWrite::PutPolicyTag(
+                policy.row.id.clone(),
+                key.clone(),
+                value.clone(),
+            ));
+        }
+        let info = policy_info(&self.state, &policy);
+        self.state
+            .policies
+            .insert(policy.row.id.clone(), Arc::new(policy));
+        Ok(info)
+    }
+
+    /// [`Iam::create_policy_version`], as part of a change.
+    pub(crate) fn create_policy_version(
+        &mut self,
+        arn: &str,
+        document: &str,
+        set_default: bool,
+    ) -> Result<PolicyVersionInfo> {
+        let document = Document::parse(document)?;
+        managed_size(&document)?;
+        let mut policy = Arc::unwrap_or_clone(self.policy(arn)?);
+        if policy.versions.len() >= MAX_VERSIONS {
+            return Err(IamError::LimitExceeded(format!(
+                "A managed policy can have up to {MAX_VERSIONS} versions. Before you create a new version, you \
+                 must delete an existing version."
+            )));
+        }
+        let number = policy.row.latest_version + 1;
+        policy.row.latest_version = number;
+        if set_default {
+            policy.row.default_version = number;
+            policy.row.updated_ms = self.now;
+        }
+        self.write(IamWrite::PutVersion(PolicyVersionRow {
+            policy_id: policy.row.id.clone(),
+            version: number,
+            document: document.text.to_string(),
+            created_ms: self.now,
+        }));
+        let version = Version {
+            document,
+            created_ms: self.now,
+        };
+        let info = version_info(&policy, number, &version);
+        policy.versions.insert(number, version);
+        self.save_policy(policy);
+        Ok(info)
+    }
+
+    /// [`Iam::set_default_policy_version`], as part of a change.
+    pub(crate) fn set_default_policy_version(&mut self, arn: &str, version: &str) -> Result<()> {
+        let number = rules::version_id(version)?;
+        let mut policy = Arc::unwrap_or_clone(self.policy(arn)?);
+        if !policy.versions.contains_key(&number) {
+            return Err(no_such_version(arn, version));
+        }
+        if policy.row.default_version != number {
+            policy.row.default_version = number;
+            policy.row.updated_ms = self.now;
+            self.save_policy(policy);
+        }
+        Ok(())
+    }
+
+    /// [`Iam::attach`], as part of a change.
+    pub(crate) fn attach(&mut self, owner: Owner<'_>, arn: &str) -> Result<()> {
+        let owner = self.owner(owner)?;
+        let policy = self.policy(arn)?;
+        let id = policy.row.id.clone();
+        if owner.attached().contains(&id) {
+            return Ok(());
+        }
+        if owner.attached().len() >= MAX_ATTACHED {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for PoliciesPer{}: {MAX_ATTACHED}",
+                if owner.kind() == "user" {
+                    "User"
+                } else {
+                    "Group"
+                }
+            )));
+        }
+        self.write(IamWrite::Attach(owner.id().to_owned(), id.clone()));
+        owner.update(self, |_, attached| {
+            attached.insert(id);
+        });
+        Ok(())
+    }
+
+    /// [`Iam::put_inline`], as part of a change.
+    pub(crate) fn put_inline(
+        &mut self,
+        owner: Owner<'_>,
+        name: &str,
+        document: &str,
+    ) -> Result<()> {
+        rules::name("policy name", name, rules::OTHER_NAME)?;
+        let document = Document::parse(document)?;
+        let owner = self.owner(owner)?;
+        let others: usize = owner
+            .inline()
+            .iter()
+            .filter(|(n, _)| *n != name)
+            .map(|(_, doc)| doc.size)
+            .sum();
+        if others + document.size > owner.inline_limit() {
+            return Err(IamError::LimitExceeded(format!(
+                "Maximum policy size of {} bytes exceeded for {} {}",
+                owner.inline_limit(),
+                owner.kind(),
+                owner.name()
+            )));
+        }
+        self.write(IamWrite::PutInline(InlineRow {
+            owner: owner.id().to_owned(),
+            name: name.to_owned(),
+            document: document.text.to_string(),
+        }));
+        owner.update(self, |inline, _| {
+            inline.insert(name.to_owned(), document);
+        });
+        Ok(())
     }
 }
 
@@ -449,42 +733,7 @@ impl Iam {
         tags: &[(String, String)],
         boundary: Option<&str>,
     ) -> Result<UserInfo> {
-        rules::name("user name", name, rules::USER_NAME)?;
-        let path = path.unwrap_or("/");
-        rules::path(path)?;
-        checked_tags(TagKeys::User, tags)?;
-        let tags = merged(TagKeys::User, &[], tags)?;
-        self.change(|d| {
-            if d.state.user_name_taken(name, None) {
-                return Err(IamError::EntityAlreadyExists(format!(
-                    "User with name {name} already exists."
-                )));
-            }
-            if d.state.users.len() >= MAX_USERS {
-                return Err(IamError::LimitExceeded(format!(
-                    "Cannot exceed quota for UsersPerAccount: {MAX_USERS}"
-                )));
-            }
-            let boundary = boundary
-                .map(|arn| d.policy(arn).map(|p| p.row.id.clone()))
-                .transpose()?;
-            let user = User {
-                id: d.new_id(ids::Kind::User),
-                name: name.to_owned(),
-                path: path.to_owned(),
-                created_ms: d.now,
-                boundary,
-                tags: tags.clone(),
-                inline: BTreeMap::new(),
-                attached: std::collections::BTreeSet::new(),
-            };
-            let id = user.id.clone();
-            d.save_user(user);
-            for (key, value) in &tags {
-                d.write(IamWrite::PutUserTag(id.clone(), key.clone(), value.clone()));
-            }
-            Ok(user_info(&d.state, &d.state.users[&id]))
-        })
+        self.change(|d| d.create_user(name, path, tags, boundary))
     }
 
     /// A user (`GetUser`).
@@ -725,33 +974,7 @@ fn owned_key(d: &Draft<'_>, user: &str, id: &str) -> Result<Arc<Key>> {
 impl Iam {
     /// Creates a group (`CreateGroup`).
     pub fn create_group(&self, name: &str, path: Option<&str>) -> Result<GroupInfo> {
-        rules::name("group name", name, rules::OTHER_NAME)?;
-        let path = path.unwrap_or("/");
-        rules::path(path)?;
-        self.change(|d| {
-            if d.state.group_name_taken(name, None) {
-                return Err(IamError::EntityAlreadyExists(format!(
-                    "Group with name {name} already exists."
-                )));
-            }
-            if d.state.groups.len() >= MAX_GROUPS {
-                return Err(IamError::LimitExceeded(format!(
-                    "Cannot exceed quota for GroupsPerAccount: {MAX_GROUPS}"
-                )));
-            }
-            let group = Group {
-                id: d.new_id(ids::Kind::Group),
-                name: name.to_owned(),
-                path: path.to_owned(),
-                created_ms: d.now,
-                members: std::collections::BTreeSet::new(),
-                inline: BTreeMap::new(),
-                attached: std::collections::BTreeSet::new(),
-            };
-            let info = group_info(&d.state, &group);
-            d.save_group(group);
-            Ok(info)
-        })
+        self.change(|d| d.create_group(name, path))
     }
 
     /// A group and its users, by name (`GetGroup`).
@@ -848,23 +1071,7 @@ impl Iam {
 
     /// Adds a user to a group; adding a member again does nothing (`AddUserToGroup`).
     pub fn add_user_to_group(&self, group: &str, user: &str) -> Result<()> {
-        self.change(|d| {
-            let group = d.group(group)?;
-            let user = d.user(user)?;
-            if group.members.contains(&user.id) {
-                return Ok(());
-            }
-            if d.state.groups_of(&user.id).count() >= MAX_GROUPS_PER_USER {
-                return Err(IamError::LimitExceeded(format!(
-                    "Cannot exceed quota for GroupsPerUser: {MAX_GROUPS_PER_USER}"
-                )));
-            }
-            let mut group = Arc::unwrap_or_clone(group);
-            group.members.insert(user.id.clone());
-            d.write(IamWrite::AddMember(group.id.clone(), user.id.clone()));
-            d.state.groups.insert(group.id.clone(), Arc::new(group));
-            Ok(())
-        })
+        self.change(|d| d.add_user_to_group(group, user))
     }
 
     /// Removes a user from a group (`RemoveUserFromGroup`).
@@ -908,71 +1115,7 @@ impl Iam {
         document: &str,
         tags: &[(String, String)],
     ) -> Result<PolicyInfo> {
-        rules::name("policy name", name, rules::OTHER_NAME)?;
-        checked_tags(TagKeys::Policy, tags)?;
-        let tags = merged(TagKeys::Policy, &[], tags)?;
-        let path = path.unwrap_or("/");
-        rules::path(path)?;
-        let description = description.unwrap_or_default();
-        rules::description(description)?;
-        let document = Document::parse(document)?;
-        managed_size(&document)?;
-        self.change(|d| {
-            if d.state
-                .policies
-                .values()
-                .any(|p| p.row.name.eq_ignore_ascii_case(name))
-            {
-                return Err(IamError::EntityAlreadyExists(format!(
-                    "A policy called {name} already exists. Duplicate names are not allowed."
-                )));
-            }
-            if d.state.policies.len() >= MAX_POLICIES {
-                return Err(IamError::LimitExceeded(format!(
-                    "Cannot exceed quota for PoliciesPerAccount: {MAX_POLICIES}"
-                )));
-            }
-            let row = PolicyRow {
-                id: d.new_id(ids::Kind::Policy),
-                name: name.to_owned(),
-                path: path.to_owned(),
-                description: description.to_owned(),
-                default_version: 1,
-                latest_version: 1,
-                created_ms: d.now,
-                updated_ms: d.now,
-            };
-            d.write(IamWrite::PutPolicy(row.clone()));
-            d.write(IamWrite::PutVersion(PolicyVersionRow {
-                policy_id: row.id.clone(),
-                version: 1,
-                document: document.text.to_string(),
-                created_ms: d.now,
-            }));
-            let policy = Managed {
-                versions: BTreeMap::from([(
-                    1,
-                    Version {
-                        document,
-                        created_ms: d.now,
-                    },
-                )]),
-                row,
-                tags,
-            };
-            for (key, value) in &policy.tags {
-                d.write(IamWrite::PutPolicyTag(
-                    policy.row.id.clone(),
-                    key.clone(),
-                    value.clone(),
-                ));
-            }
-            let info = policy_info(&d.state, &policy);
-            d.state
-                .policies
-                .insert(policy.row.id.clone(), Arc::new(policy));
-            Ok(info)
-        })
+        self.change(|d| d.create_policy(name, path, description, document, tags))
     }
 
     /// Adds or replaces a managed policy's tags; keys are case sensitive (`TagPolicy`).
@@ -1067,34 +1210,7 @@ impl Iam {
         document: &str,
         set_default: bool,
     ) -> Result<PolicyVersionInfo> {
-        let document = Document::parse(document)?;
-        managed_size(&document)?;
-        self.change(|d| {
-            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
-            if policy.versions.len() >= MAX_VERSIONS {
-                return Err(IamError::LimitExceeded(format!(
-                    "A managed policy can have up to {MAX_VERSIONS} versions. Before you create a new version, you \
-                     must delete an existing version."
-                )));
-            }
-            let number = policy.row.latest_version + 1;
-            policy.row.latest_version = number;
-            if set_default {
-                policy.row.default_version = number;
-                policy.row.updated_ms = d.now;
-            }
-            d.write(IamWrite::PutVersion(PolicyVersionRow {
-                policy_id: policy.row.id.clone(),
-                version: number,
-                document: document.text.to_string(),
-                created_ms: d.now,
-            }));
-            let version = Version { document, created_ms: d.now };
-            let info = version_info(&policy, number, &version);
-            policy.versions.insert(number, version);
-            d.save_policy(policy);
-            Ok(info)
-        })
+        self.change(|d| d.create_policy_version(arn, document, set_default))
     }
 
     /// A version of a managed policy (`GetPolicyVersion`).
@@ -1146,19 +1262,7 @@ impl Iam {
 
     /// Makes a version the one in effect (`SetDefaultPolicyVersion`).
     pub fn set_default_policy_version(&self, arn: &str, version: &str) -> Result<()> {
-        let number = rules::version_id(version)?;
-        self.change(|d| {
-            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
-            if !policy.versions.contains_key(&number) {
-                return Err(no_such_version(arn, version));
-            }
-            if policy.row.default_version != number {
-                policy.row.default_version = number;
-                policy.row.updated_ms = d.now;
-                d.save_policy(policy);
-            }
-            Ok(())
-        })
+        self.change(|d| d.set_default_policy_version(arn, version))
     }
 }
 
@@ -1171,29 +1275,7 @@ impl Iam {
     /// Attaches a managed policy to a user or group; attaching it again does nothing
     /// (`AttachUserPolicy`, `AttachGroupPolicy`).
     pub fn attach(&self, owner: Owner<'_>, arn: &str) -> Result<()> {
-        self.change(|d| {
-            let owner = d.owner(owner)?;
-            let policy = d.policy(arn)?;
-            let id = policy.row.id.clone();
-            if owner.attached().contains(&id) {
-                return Ok(());
-            }
-            if owner.attached().len() >= MAX_ATTACHED {
-                return Err(IamError::LimitExceeded(format!(
-                    "Cannot exceed quota for PoliciesPer{}: {MAX_ATTACHED}",
-                    if owner.kind() == "user" {
-                        "User"
-                    } else {
-                        "Group"
-                    }
-                )));
-            }
-            d.write(IamWrite::Attach(owner.id().to_owned(), id.clone()));
-            owner.update(d, |_, attached| {
-                attached.insert(id);
-            });
-            Ok(())
-        })
+        self.change(|d| d.attach(owner, arn))
     }
 
     /// Detaches a managed policy (`DetachUserPolicy`, `DetachGroupPolicy`).
@@ -1277,34 +1359,7 @@ impl Iam {
 
     /// Adds or replaces an inline policy (`PutUserPolicy`, `PutGroupPolicy`).
     pub fn put_inline(&self, owner: Owner<'_>, name: &str, document: &str) -> Result<()> {
-        rules::name("policy name", name, rules::OTHER_NAME)?;
-        let document = Document::parse(document)?;
-        self.change(|d| {
-            let owner = d.owner(owner)?;
-            let others: usize = owner
-                .inline()
-                .iter()
-                .filter(|(n, _)| *n != name)
-                .map(|(_, doc)| doc.size)
-                .sum();
-            if others + document.size > owner.inline_limit() {
-                return Err(IamError::LimitExceeded(format!(
-                    "Maximum policy size of {} bytes exceeded for {} {}",
-                    owner.inline_limit(),
-                    owner.kind(),
-                    owner.name()
-                )));
-            }
-            d.write(IamWrite::PutInline(InlineRow {
-                owner: owner.id().to_owned(),
-                name: name.to_owned(),
-                document: document.text.to_string(),
-            }));
-            owner.update(d, |inline, _| {
-                inline.insert(name.to_owned(), document);
-            });
-            Ok(())
-        })
+        self.change(|d| d.put_inline(owner, name, document))
     }
 
     /// An inline policy's document (`GetUserPolicy`, `GetGroupPolicy`).

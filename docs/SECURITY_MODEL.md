@@ -58,7 +58,11 @@ which each endpoint states what it needs: an action on a resource, the root user
 or, for the IAM and STS Query APIs, the action each call names, which IAM decides. The
 field has no default, so an endpoint can't be added without it. The admin API's actions
 are `teifs:*`, which only a policy naming them grants (`s3:*` doesn't); it never
-returns secrets unless an endpoint says so and only the root user may call it. The table refuses unsigned requests
+returns secrets unless an endpoint says so and only the root user may call it: the IAM
+export with secrets (sent `Cache-Control: no-store`) and the import, which sets secrets
+and may change the account's id. An import goes through the same checks as the IAM API
+(names, documents, quotas; imported secrets must be at least 32 printable characters;
+no key may take the root's id), only into an empty IAM, in one transaction. The table refuses unsigned requests
 and unknown keys and decides the action before the handler runs; a test walks every
 endpoint as an anonymous caller and as a user without permissions. The health check is
 the one unsigned endpoint (above). Profiling and debug endpoints will be off by default

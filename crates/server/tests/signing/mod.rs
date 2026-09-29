@@ -5,12 +5,26 @@
 /// a virtual-hosted-style request would be, without needing the name to resolve.
 pub async fn signed(
     server: &crate::common::Server,
-    (access_key, secret): (&str, &str),
+    key: (&str, &str),
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> (u16, String) {
+    let response = signed_response(server, key, method, path, headers, body).await;
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+/// [`signed`], answering the whole response.
+pub async fn signed_response(
+    server: &crate::common::Server,
+    (access_key, secret): (&str, &str),
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> reqwest::Response {
     use aws_sigv4::{
         http_request::{PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign},
         sign::v4,
@@ -49,7 +63,5 @@ pub async fn signed(
     for (name, value) in headers.iter().copied().chain(instructions.headers()) {
         request = request.header(name, value);
     }
-    let response = request.send().await.unwrap();
-    let status = response.status().as_u16();
-    (status, response.text().await.unwrap())
+    request.send().await.unwrap()
 }

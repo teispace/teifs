@@ -17,6 +17,163 @@ pub const ADMIN_INFO: &str = "/.teifs/admin/v1/info";
 /// `GET`: [`ServerConfig`].
 pub const ADMIN_CONFIG: &str = "/.teifs/admin/v1/config";
 
+/// `GET`: the account's IAM as an [`IamExport`], access keys without their secrets.
+/// `PUT`: imports an [`IamExport`] into an empty IAM (root user only), answering an
+/// [`ImportReport`]; `?account=adopt` also takes the export's account id.
+pub const ADMIN_IAM: &str = "/.teifs/admin/v1/iam";
+
+/// `GET`: the account's IAM with access keys' secrets (root user only).
+pub const ADMIN_IAM_SECRETS: &str = "/.teifs/admin/v1/iam/secrets";
+
+/// The format of an [`IamExport`]; a server refuses any other.
+pub const IAM_FORMAT: &str = "teifs-iam/1";
+
+/// An account's IAM: its managed policies, groups and users, which refer to each other
+/// by name, so an export can be imported into another drive's account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IamExport {
+    /// [`IAM_FORMAT`].
+    pub format: String,
+    /// The account it was exported from.
+    pub account: String,
+    /// Customer-managed policies.
+    pub policies: Vec<ExportedPolicy>,
+    /// Groups.
+    pub groups: Vec<ExportedGroup>,
+    /// Users.
+    pub users: Vec<ExportedUser>,
+}
+
+/// A customer-managed policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedPolicy {
+    /// Its name.
+    pub name: String,
+    /// Its path.
+    pub path: String,
+    /// Its description.
+    #[serde(default)]
+    pub description: String,
+    /// Its tags.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    /// Its versions, oldest first; one is the default. An import numbers them again from
+    /// `v1`.
+    pub versions: Vec<ExportedVersion>,
+}
+
+/// A version of a managed policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedVersion {
+    /// The document, as given.
+    pub document: String,
+    /// Whether it's the version in effect.
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// A group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedGroup {
+    /// Its name.
+    pub name: String,
+    /// Its path.
+    pub path: String,
+    /// Its inline policies' documents, by name.
+    #[serde(default)]
+    pub inline: BTreeMap<String, String>,
+    /// The names of the managed policies attached to it.
+    #[serde(default)]
+    pub attached: Vec<String>,
+}
+
+/// A user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedUser {
+    /// Its name.
+    pub name: String,
+    /// Its path.
+    pub path: String,
+    /// Its tags.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    /// The name of the managed policy that is its permissions boundary.
+    #[serde(default)]
+    pub boundary: Option<String>,
+    /// The names of the groups it's in.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Its inline policies' documents, by name.
+    #[serde(default)]
+    pub inline: BTreeMap<String, String>,
+    /// The names of the managed policies attached to it.
+    #[serde(default)]
+    pub attached: Vec<String>,
+    /// Its access keys, oldest first.
+    #[serde(default)]
+    pub access_keys: Vec<ExportedKey>,
+}
+
+/// An access key.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedKey {
+    /// The access key id.
+    pub id: String,
+    /// Whether requests signed with it are accepted.
+    pub active: bool,
+    /// When it was created, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+    /// Its secret key: only in an export with secrets. An import skips a key without
+    /// one (and reports it), since no one could sign with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+impl std::fmt::Debug for ExportedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportedKey")
+            .field("id", &self.id)
+            .field("active", &self.active)
+            .field("created_ms", &self.created_ms)
+            .field("secret", &self.secret.as_ref().map(|_| "…"))
+            .finish()
+    }
+}
+
+/// A tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tag {
+    /// Its key.
+    pub key: String,
+    /// Its value.
+    pub value: String,
+}
+
+/// What an import made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    /// The account's id after the import.
+    pub account: String,
+    /// Managed policies created.
+    pub policies: usize,
+    /// Groups created.
+    pub groups: usize,
+    /// Users created.
+    pub users: usize,
+    /// Access keys imported.
+    pub access_keys: usize,
+    /// Access keys skipped because the export has no secret for them.
+    pub keys_without_secrets: Vec<String>,
+}
+
 /// What a server is and how it's doing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,11 +283,37 @@ mod tests {
 
     #[test]
     fn paths_are_under_the_prefix_and_never_a_bucket() {
-        for path in [ADMIN_INFO, ADMIN_CONFIG] {
+        for path in [ADMIN_INFO, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS] {
             assert!(path.starts_with(ADMIN_PREFIX), "{path}");
         }
         let first = ADMIN_PREFIX.trim_start_matches('/').split('/').next();
         assert!(crate::check_bucket(first.unwrap_or_default()).is_err());
+    }
+
+    #[test]
+    fn exported_secrets_never_show_in_debug_output() {
+        let key = ExportedKey {
+            id: "TKIAEXAMPLE".into(),
+            active: true,
+            created_ms: 1,
+            secret: Some("do-not-print".into()),
+        };
+        assert!(!format!("{key:?}").contains("do-not-print"));
+        let json = serde_json::to_value(ExportedKey {
+            secret: None,
+            ..key
+        })
+        .unwrap();
+        assert!(json.get("secret").is_none(), "{json}");
+    }
+
+    #[test]
+    fn an_export_with_unknown_fields_is_refused() {
+        let export = serde_json::json!({
+            "format": IAM_FORMAT, "account": "123456789012",
+            "policies": [], "groups": [], "users": [{"name": "a", "path": "/", "admin": true}]
+        });
+        assert!(serde_json::from_value::<IamExport>(export).is_err());
     }
 
     #[test]

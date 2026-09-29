@@ -155,7 +155,11 @@ bucket's key, so the route compares the `Host` header with the served domains, w
 s3s doesn't pass to it. Its actions are `teifs:*`, or `Needs::Root` for what only the
 root user may do. Its messages are in `teifs_types::admin`, for the server and clients
 alike; the server hands the service its settings (`Options::config`), and the drive
-keeps its jobs' status (`Store::job_status`) for whoever holds it.
+keeps its jobs' status (`Store::job_status`) for whoever holds it. IAM's changing
+operations are methods of a `Draft` (a copy of the state and the writes to make), each
+with all of its checks; `Iam`'s public methods run one per change, and `Iam::import`
+(`transfer.rs`) runs many in one, so an import is checked exactly as the IAM API is and
+lands in one transaction or not at all.
 
 ### The protocol layer: s3s
 

@@ -728,3 +728,241 @@ async fn concurrent_changes_are_serialized() {
     }
     assert_eq!(iam.users(None).unwrap().len(), 200);
 }
+
+/// An IAM with something of everything: versions, tags, a boundary, groups, inline and
+/// attached policies, and an active and an inactive key.
+fn populate(iam: &Iam) {
+    let tags = [("team".to_owned(), "a".to_owned())];
+    let read = iam
+        .create_policy("read", Some("/eng/"), Some("photos"), READ_PHOTOS, &tags)
+        .unwrap()
+        .arn;
+    iam.create_policy_version(&read, ALLOW_ALL, true).unwrap();
+    iam.create_policy_version(&read, HOME, false).unwrap();
+    let boundary = iam
+        .create_policy("boundary", None, None, ALLOW_ALL, &[])
+        .unwrap()
+        .arn;
+    iam.create_group("devs", Some("/eng/")).unwrap();
+    iam.put_inline(Owner::Group("devs"), "home", HOME).unwrap();
+    iam.attach(Owner::Group("devs"), &read).unwrap();
+    iam.create_user("alice", Some("/eng/"), &tags, Some(&boundary))
+        .unwrap();
+    iam.add_user_to_group("devs", "alice").unwrap();
+    iam.put_inline(Owner::User("alice"), "no-delete", DENY_DELETE)
+        .unwrap();
+    iam.attach(Owner::User("alice"), &read).unwrap();
+    iam.create_access_key("alice").unwrap();
+    let old = iam.create_access_key("alice").unwrap();
+    iam.update_access_key("alice", &old.info.id, false).unwrap();
+    iam.create_user("bob", None, &[], None).unwrap();
+}
+
+#[tokio::test]
+async fn an_export_imports_into_another_drive_as_it_was() {
+    let (source, target) = (Drive::new(), Drive::new());
+    let from = source.open().await;
+    populate(&from);
+    let export = from.export(true);
+    assert_eq!(export.format, teifs_types::admin::IAM_FORMAT);
+    let read = &export
+        .policies
+        .iter()
+        .find(|p| p.name == "read")
+        .unwrap()
+        .versions;
+    assert_eq!(
+        read.iter().map(|v| v.is_default).collect::<Vec<_>>(),
+        [false, true, false]
+    );
+
+    let to = target.open().await;
+    assert_ne!(to.account(), from.account());
+    let report = to.import(&export, true).unwrap();
+    assert_eq!(
+        (
+            report.policies,
+            report.groups,
+            report.users,
+            report.access_keys
+        ),
+        (2, 1, 2, 2)
+    );
+    assert!(report.keys_without_secrets.is_empty());
+    assert_eq!(report.account, from.account());
+    // Everything is as it was, and stays so when the drive opens again.
+    assert_eq!(to.export(true), export);
+    drop(to);
+    let to = target.open().await;
+    assert_eq!(to.export(true), export);
+    // The keys sign as before: the active one for alice, with the same secret.
+    for key in &export.users[0].access_keys {
+        let credential = to.credential(&key.id);
+        if key.active {
+            let credential = credential.unwrap();
+            assert_eq!(Some(credential.secret.as_str()), key.secret.as_deref());
+            // The same user by name and ARN (unique ids are made anew, as by CreateUser).
+            assert_eq!(
+                credential.identity.principal().arn(),
+                from.credential(&key.id).unwrap().identity.principal().arn()
+            );
+        } else {
+            assert!(credential.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_export_without_secrets_brings_no_keys() {
+    let (source, target) = (Drive::new(), Drive::new());
+    let from = source.open().await;
+    populate(&from);
+    let export = from.export(false);
+    assert!(
+        export
+            .users
+            .iter()
+            .flat_map(|u| &u.access_keys)
+            .all(|k| k.secret.is_none())
+    );
+    let to = target.open().await;
+    let account = to.account();
+    let report = to.import(&export, false).unwrap();
+    assert_eq!(report.access_keys, 0);
+    assert_eq!(report.keys_without_secrets.len(), 2);
+    assert!(to.access_keys("alice").unwrap().is_empty());
+    // Without adopting, the account keeps its id.
+    assert_eq!((report.account, to.account()), (account.clone(), account));
+}
+
+#[tokio::test]
+async fn an_import_is_all_or_nothing() {
+    let (source, target) = (Drive::new(), Drive::new());
+    let from = source.open().await;
+    populate(&from);
+    let good = from.export(true);
+    let to = target.open().await;
+    let account = to.account();
+    let empty = to.export(true);
+    let broken = |change: &dyn Fn(&mut teifs_types::admin::IamExport)| {
+        let mut export = good.clone();
+        change(&mut export);
+        export
+    };
+    // Each fails at the very end, after everything before it was made.
+    // A key for bob, valid but for what each case changes.
+    let key_for_bob = |change: &dyn Fn(&mut teifs_types::admin::ExportedKey)| {
+        broken(&|e| {
+            let mut key = e.users[0].access_keys[0].clone();
+            key.id = "TKIAIMPORTEDKEY00001".into();
+            change(&mut key);
+            e.users[1].access_keys.push(key);
+        })
+    };
+    let cases: [(&str, teifs_types::admin::IamExport); 9] = [
+        ("InvalidInput", key_for_bob(&|k| k.created_ms = i64::MAX)),
+        (
+            "InvalidInput",
+            key_for_bob(&|k| k.secret = Some(format!("{} ", "s".repeat(39)))),
+        ),
+        (
+            "LimitExceeded",
+            broken(&|e| {
+                let mut key = e.users[0].access_keys[0].clone();
+                key.id = "TKIAIMPORTEDKEY00002".into();
+                e.users[0].access_keys.push(key);
+            }),
+        ),
+        (
+            "NoSuchEntity",
+            broken(&|e| e.users[1].attached.push("missing".into())),
+        ),
+        (
+            "MalformedPolicyDocument",
+            broken(&|e| {
+                e.users[1].inline.insert("bad".into(), "{}".into());
+            }),
+        ),
+        (
+            "InvalidInput",
+            broken(&|e| e.users[1].name = "no spaces allowed".into()),
+        ),
+        (
+            "NoSuchEntity",
+            broken(&|e| e.users[1].groups.push("missing".into())),
+        ),
+        (
+            "InvalidInput",
+            broken(&|e| {
+                let mut key = e.users[0].access_keys[0].clone();
+                key.id = "TKIASHORTSECRET0001".into();
+                key.secret = Some("short".into());
+                e.users[1].access_keys.push(key);
+            }),
+        ),
+        (
+            "EntityAlreadyExists",
+            broken(&|e| {
+                let key = e.users[0].access_keys[0].clone();
+                e.users[1].access_keys.push(key);
+            }),
+        ),
+    ];
+    for (expected, export) in cases {
+        assert_eq!(code(to.import(&export, true)), expected);
+        assert_eq!(to.export(true), empty, "{expected}");
+        assert_eq!(to.account(), account);
+    }
+    // Nothing was left behind in the database either.
+    drop(to);
+    let to = target.open().await;
+    assert_eq!(to.export(true), empty);
+    to.import(&good, true).unwrap();
+}
+
+#[tokio::test]
+async fn an_import_is_refused_what_it_cannot_bring() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    let empty = iam.export(true);
+    let mut export = empty.clone();
+    export.format = "teifs-iam/2".into();
+    assert_eq!(code(iam.import(&export, false)), "InvalidInput");
+    let mut export = empty.clone();
+    export.account = "12345".into();
+    assert_eq!(code(iam.import(&export, true)), "InvalidInput");
+    // Adopting the account alone is fine...
+    export.account = "210987654321".into();
+    iam.import(&export, true).unwrap();
+    assert_eq!(iam.account(), "210987654321");
+    // ...but only into an empty IAM.
+    iam.create_user("carol", None, &[], None).unwrap();
+    assert_eq!(code(iam.import(&empty, false)), "EntityAlreadyExists");
+    // No key may take the root's id, and a policy needs exactly one default version.
+    let other = Drive::new();
+    let kms = LocalKms::open(other.keyring()).unwrap();
+    let root = RootKey {
+        access_key: "TFROOTKEY00000000000".into(),
+        secret: Zeroizing::new("root-secret".into()),
+    };
+    let iam = Iam::open(&other.db(), "drive-2", &kms, Some(root))
+        .await
+        .unwrap();
+    let source = Drive::new();
+    let from = source.open().await;
+    populate(&from);
+    let mut export = from.export(true);
+    let mut taken = export.clone();
+    taken.users[0].access_keys[0].id = "TFROOTKEY00000000000".into();
+    assert_eq!(code(iam.import(&taken, false)), "EntityAlreadyExists");
+    let read = export
+        .policies
+        .iter()
+        .position(|p| p.name == "read")
+        .unwrap();
+    export.policies[read].versions[0].is_default = true;
+    assert_eq!(code(iam.import(&export, false)), "InvalidInput");
+    export.policies[read].versions.clear();
+    assert_eq!(code(iam.import(&export, false)), "InvalidInput");
+    assert!(iam.users(None).unwrap().is_empty());
+}

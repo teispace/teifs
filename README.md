@@ -173,15 +173,28 @@ each comes from. The secret key never goes in the file, and is never printed.
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
 **The admin API** answers what AWS has no API for, as JSON under `/.teifs/admin/v1/`,
-signed like any S3 request: `GET info` (version, drive, account, uptime, background
-jobs) and `GET config` (how the server was started, without secrets). Users need
-`teifs:GetServerInfo` or `teifs:GetServerConfig` in a policy; the root user may always.
-With curl, which reads the key from standard input so it stays off the command line:
+signed like any S3 request:
+
+| Endpoint | What it does | Who may |
+|---|---|---|
+| `GET info` | Version, drive, account, uptime, background jobs | `teifs:GetServerInfo` |
+| `GET config` | How the server was started, without secrets | `teifs:GetServerConfig` |
+| `GET iam` | The account's users, groups, policies and keys (without secrets), as JSON | `teifs:ExportIAM` |
+| `GET iam/secrets` | The same with the keys' secrets, to move IAM to another drive | root user |
+| `PUT iam[?account=adopt]` | Imports an export into an empty IAM, all or nothing; `adopt` also takes its account id | root user |
+
+The root user may call everything; users need the action in a policy. An import makes
+everything with the IAM API's own checks, gives users, groups and policies new unique
+ids (names and ARNs stay), numbers policy versions from `v1`, and skips keys exported
+without secrets. With curl, which reads the key from standard input so it stays off the
+command line:
 
 ```sh
 printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
   curl --config - --aws-sigv4 aws:amz:us-east-1:s3 http://127.0.0.1:9000/.teifs/admin/v1/info
 ```
+
+The export with secrets holds every user's keys: keep it like the credentials file.
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, and SSE-C with your own keys. The keys live in a keyring outside the drive

@@ -13,6 +13,7 @@ publish.workspace = true
 teifs-meta.workspace = true
 teifs-crypto.workspace = true
 teifs-policy.workspace = true
+teifs-types.workspace = true
 base64.workspace = true
 form_urlencoded.workspace = true
 percent-encoding.workspace = true

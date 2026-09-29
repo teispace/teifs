@@ -10,14 +10,15 @@ use std::time::{Duration, Instant};
 
 use aws_sdk_s3::primitives::ByteStream;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_INFO, AdminError, KmsConfig, ServerConfig, ServerInfo,
+    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, AdminError, IamExport, ImportReport,
+    KmsConfig, ServerConfig, ServerInfo,
 };
 
 mod common;
 mod signing;
 
-use common::{ACCESS_KEY, SECRET_KEY, Server, client, start, start_with, user};
-use signing::signed;
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, client_as, start, start_with, user};
+use signing::{signed, signed_response};
 
 const ROOT: (&str, &str) = (ACCESS_KEY, SECRET_KEY);
 
@@ -179,4 +180,124 @@ async fn a_bucket_keeps_keys_that_look_like_the_admin_api() {
         serde_json::from_str::<ServerInfo>(&answer).is_ok(),
         "{answer}"
     );
+}
+
+const READER: &str = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":["s3:ListAllMyBuckets","s3:ListBucket"],"Resource":"*"}}"#;
+
+async fn import(server: &Server, query: &str, body: &[u8]) -> (u16, String) {
+    let path = format!("{ADMIN_IAM}{query}");
+    signed(server, ROOT, "PUT", &path, &[], body).await
+}
+
+#[tokio::test]
+async fn iam_moves_to_another_server_and_its_keys_keep_working() {
+    let (from, to) = (start().await, start().await);
+    user(&from, "reader", Some(READER));
+    let key = from.iam.create_access_key("reader").unwrap();
+    client(&from, SECRET_KEY)
+        .create_bucket()
+        .bucket("photos")
+        .send()
+        .await
+        .unwrap();
+    let (status, exported) = get(&from, ROOT, ADMIN_IAM_SECRETS).await;
+    assert_eq!(status, 200, "{exported}");
+    assert!(exported.contains(key.secret.as_str()));
+
+    let (status, answer) = import(&to, "?account=adopt", exported.as_bytes()).await;
+    assert_eq!(status, 200, "{answer}");
+    let report: ImportReport = serde_json::from_str(&answer).unwrap();
+    assert_eq!((report.users, report.access_keys), (1, 2));
+    assert_eq!(report.account, from.iam.account());
+    assert_eq!(to.iam.account(), from.iam.account());
+    // The user signs on the new server with the same key, with the same permissions.
+    to.iam.create_user("someone-else", None, &[], None).unwrap();
+    client(&to, SECRET_KEY)
+        .create_bucket()
+        .bucket("photos")
+        .send()
+        .await
+        .unwrap();
+    let reader = client_as(&to, &key.info.id, &key.secret);
+    let listed = reader.list_objects_v2().bucket("photos").send().await;
+    assert!(listed.is_ok(), "{listed:?}");
+    let put = reader.create_bucket().bucket("other").send().await;
+    assert_eq!(common::code(put), "AccessDenied");
+    // Exports without secrets match, but for the user created since.
+    let (_, before) = get(&from, ROOT, ADMIN_IAM).await;
+    let (_, after) = get(&to, ROOT, ADMIN_IAM).await;
+    let (before, mut after): (IamExport, IamExport) = (
+        serde_json::from_str(&before).unwrap(),
+        serde_json::from_str(&after).unwrap(),
+    );
+    after.users.retain(|u| u.name != "someone-else");
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn only_the_root_user_sees_secrets_or_imports() {
+    let server = start().await;
+    let everything = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":["teifs:*","iam:*"],"Resource":"*"}}"#;
+    user(&server, "admin", Some(everything));
+    let admin = server.iam.create_access_key("admin").unwrap();
+    let admin = (admin.info.id.as_str(), admin.secret.as_str());
+    let (status, answer) = get(&server, admin, ADMIN_IAM).await;
+    assert_eq!(status, 200, "{answer}");
+    assert!(!answer.contains("\"secret\""), "{answer}");
+    let (status, answer) = get(&server, admin, ADMIN_IAM_SECRETS).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
+    let (status, answer) = signed(&server, admin, "PUT", ADMIN_IAM, &[], answer.as_bytes()).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
+    // The root user's export isn't kept by caches on the way.
+    let answer = signed_response(&server, ROOT, "GET", ADMIN_IAM_SECRETS, &[], b"").await;
+    assert_eq!(answer.status().as_u16(), 200);
+    assert_eq!(answer.headers()["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn imports_are_checked_before_anything_changes() {
+    let server = start().await;
+    let (_, empty) = get(&server, ROOT, ADMIN_IAM_SECRETS).await;
+    let (status, answer) = import(&server, "", b"{not json").await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "MalformedJSON")
+    );
+    let (status, answer) = import(&server, "?account=take", empty.as_bytes()).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "InvalidArgument")
+    );
+    let mut export: IamExport = serde_json::from_str(&empty).unwrap();
+    export.format = "teifs-iam/9".into();
+    let body = serde_json::to_vec(&export).unwrap();
+    let (status, answer) = import(&server, "", &body).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "InvalidInput")
+    );
+    // A user whose policy doesn't parse: nothing is made.
+    let with_user = r#"{"format":"teifs-iam/1","account":"123456789012","policies":[],"groups":[],
+        "users":[{"name":"a","path":"/"},{"name":"b","path":"/","inline":{"p":"{}"}}]}"#;
+    let (status, answer) = import(&server, "", with_user.as_bytes()).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "MalformedPolicyDocument")
+    );
+    assert!(server.iam.users(None).unwrap().is_empty());
+    // Into an IAM that has users, never.
+    server.iam.create_user("carol", None, &[], None).unwrap();
+    let (status, answer) = import(&server, "", empty.as_bytes()).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (409, "EntityAlreadyExists")
+    );
+    let (_, now) = get(&server, ROOT, ADMIN_IAM_SECRETS).await;
+    assert!(now.contains("carol"));
 }

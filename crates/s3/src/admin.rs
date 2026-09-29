@@ -3,13 +3,22 @@
 //! `curl --aws-sigv4` and awscurl call it too). [`crate::routes`] decides who may call
 //! it; the messages are in [`teifs_types::admin`].
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use http::{HeaderMap, HeaderValue, StatusCode, header};
-use s3s::{Body, S3Error, S3ErrorCode, S3Response, S3Result};
-use teifs_iam::Iam;
+use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
+use teifs_iam::{Iam, IamError};
 use teifs_store::{JobStatus, Store};
-use teifs_types::admin::{AdminError, JobInfo, ServerConfig, ServerInfo};
+use teifs_types::admin::{AdminError, IamExport, JobInfo, ServerConfig, ServerInfo};
+
+use crate::routes::{s3_refusal, signed_body};
+
+/// The largest IAM import accepted: AWS's quotas filled with the largest documents
+/// (1 500 policies of five 6 KiB versions) fit, with room for users and groups.
+pub(crate) const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 
 /// An admin API error, as JSON.
 pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
@@ -39,6 +48,24 @@ fn json(value: &impl serde::Serialize) -> S3Response<Body> {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+/// An error with its own code and status.
+fn error(status: StatusCode, code: &str, message: impl Into<String>) -> S3Error {
+    let mut err =
+        S3Error::with_message(S3ErrorCode::Custom(code.to_owned().into()), message.into());
+    err.set_status_code(status);
+    err
+}
+
+/// An IAM error, with IAM's code and status.
+fn iam_error(err: IamError) -> S3Error {
+    let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if status.is_server_error() {
+        tracing::error!(error = %err, "an IAM import failed");
+        return S3Error::internal_error(err);
+    }
+    error(status, err.code(), err.to_string())
 }
 
 /// A path the admin API doesn't serve.
@@ -115,6 +142,57 @@ pub(crate) fn config(config: Option<&ServerConfig>) -> S3Result<S3Response<Body>
     Ok(json(config))
 }
 
+/// `GET iam` and `GET iam/secrets`: never cached, since one of them holds secrets.
+pub(crate) fn export(iam: &Iam, secrets: bool) -> S3Response<Body> {
+    let mut response = json(&iam.export(secrets));
+    response
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Whether `PUT iam` adopts the export's account: `?account=adopt` or `keep` (the
+/// default); anything else is refused rather than guessed.
+fn adopt_account(query: Option<&str>) -> S3Result<bool> {
+    let mut adopt = false;
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        adopt = match (name.as_ref(), value.as_ref()) {
+            ("account", "adopt") => true,
+            ("account", "keep") => false,
+            _ => {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The only parameter is account=adopt or account=keep.",
+                ));
+            }
+        };
+    }
+    Ok(adopt)
+}
+
+/// `PUT iam`. Bucket rules cached before stay right: principals are matched when each
+/// request is decided, and whether a policy is public doesn't depend on the account.
+pub(crate) async fn import(iam: &Arc<Iam>, mut req: S3Request<Body>) -> S3Result<S3Response<Body>> {
+    let adopt = adopt_account(req.uri.query())?;
+    let body = signed_body(&mut req, MAX_IMPORT_BYTES)
+        .await
+        .map_err(s3_refusal)?;
+    let export: IamExport = serde_json::from_slice(&body).map_err(|e| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "MalformedJSON",
+            format!("The body isn't an IAM export: {e}"),
+        )
+    })?;
+    let iam = Arc::clone(iam);
+    let report = tokio::task::spawn_blocking(move || iam.import(&export, adopt))
+        .await
+        .map_err(S3Error::internal_error)?
+        .map_err(iam_error)?;
+    Ok(json(&report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +228,16 @@ mod tests {
         }
         assert!(!is_virtual_hosted(&HeaderMap::new(), &domains));
         assert!(!is_virtual_hosted(&host("bucket.localhost"), &[]));
+    }
+
+    #[test]
+    fn only_account_adopt_or_keep_is_a_parameter() {
+        assert!(!adopt_account(None).unwrap());
+        assert!(!adopt_account(Some("account=keep")).unwrap());
+        assert!(adopt_account(Some("account=adopt")).unwrap());
+        for bad in ["account=yes", "adopt", "account=adopt&x=1", "Account=adopt"] {
+            assert!(adopt_account(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

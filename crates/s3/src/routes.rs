@@ -17,7 +17,9 @@ use http::{HeaderMap, Method, StatusCode, Uri};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3Route};
 use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
-use teifs_types::admin::{ADMIN_CONFIG, ADMIN_INFO, ADMIN_PREFIX, ServerConfig};
+use teifs_types::admin::{
+    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX, ServerConfig,
+};
 
 use crate::{
     access::{Client, base_context},
@@ -78,6 +80,9 @@ enum Handler {
     DeleteAccountBlock,
     Info,
     Config,
+    ExportIam,
+    ExportIamSecrets,
+    ImportIam,
 }
 
 /// One endpoint.
@@ -140,6 +145,29 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_CONFIG,
         needs: Needs::Action("teifs:GetServerConfig", ANY),
         handler: Handler::Config,
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_IAM,
+        needs: Needs::Action("teifs:ExportIAM", ANY),
+        handler: Handler::ExportIam,
+    },
+    // Secrets, and an import that sets them and may take another account's id: the
+    // root user's alone.
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_IAM_SECRETS,
+        needs: Needs::Root,
+        handler: Handler::ExportIamSecrets,
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Put,
+        path: ADMIN_IAM,
+        needs: Needs::Root,
+        handler: Handler::ImportIam,
     },
 ];
 
@@ -289,6 +317,9 @@ impl Routes {
             }
             Handler::Info => Ok(admin::info(&self.store, &self.iam, self.started)),
             Handler::Config => admin::config(self.config.as_deref()),
+            Handler::ExportIam => Ok(admin::export(&self.iam, false)),
+            Handler::ExportIamSecrets => Ok(admin::export(&self.iam, true)),
+            Handler::ImportIam => admin::import(&self.iam, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

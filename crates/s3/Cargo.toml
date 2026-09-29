@@ -15,6 +15,7 @@ teifs-iam.workspace = true
 teifs-policy.workspace = true
 teifs-types.workspace = true
 serde.workspace = true
+form_urlencoded.workspace = true
 s3s.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

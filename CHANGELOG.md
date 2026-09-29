@@ -32,6 +32,10 @@ behaviour; the on-disk format is always upgraded automatically.
   S3 requests (`curl --aws-sigv4` works), authorized with `teifs:*` actions in IAM
   policies. `GET info` reports the version, drive, account, uptime and background jobs;
   `GET config` how the server was started, without secrets.
+- Move IAM between drives: `GET /.teifs/admin/v1/iam` exports users, groups, policies
+  and keys as JSON (with the keys' secrets from `iam/secrets`, for the root user only),
+  and `PUT /.teifs/admin/v1/iam` imports an export into an empty IAM, all or nothing,
+  with the IAM API's own checks; `?account=adopt` also takes the export's account id.
 - `teifs cp - ALIAS/BUCKET/KEY` uploads standard input of any size (parts sent in
   parallel, holding one per request in memory; an upload that fails is aborted), and
   `teifs cp ALIAS/BUCKET/KEY -` writes an object to standard output.
