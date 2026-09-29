@@ -1,6 +1,6 @@
 //! Store errors as S3 errors, and request bodies that failed mid-stream.
 
-use s3s::{S3Error, S3ErrorCode, StdError, s3_error};
+use s3s::{S3Error, S3ErrorCode, StdError, s3_error, stream::upload_stream::UploadStreamError};
 use teifs_store::{NameError, StoreError};
 
 /// Maps a store error to the S3 error a client expects.
@@ -96,7 +96,18 @@ pub(crate) fn from_body(err: StdError) -> S3Error {
     if err.is::<s3s::BodySizeLimitExceeded>() {
         return S3Error::with_source(S3ErrorCode::EntityTooLarge, err);
     }
-    if let Some(e) = err.downcast_ref::<s3s::stream::upload_stream::UploadStreamError>() {
+    if let Some(e) = err.downcast_ref::<UploadStreamError>() {
+        if matches!(e, UploadStreamError::Sha256Mismatch) {
+            // AWS's answer when the body isn't what `x-amz-content-sha256` signed (s3s
+            // would say `BadDigest`, which is about Content-MD5).
+            let mut s3 = S3Error::with_message(
+                S3ErrorCode::Custom("XAmzContentSHA256Mismatch".into()),
+                "The provided 'x-amz-content-sha256' header does not match what was computed.",
+            );
+            s3.set_status_code(http::StatusCode::BAD_REQUEST);
+            s3.set_source(err);
+            return s3;
+        }
         return S3Error::with_source(e.to_s3_error_code(), err);
     }
     if let Some(e) = err.downcast_ref::<s3s::stream::aws_chunked_stream::AwsChunkedStreamError>() {
@@ -119,6 +130,15 @@ impl<T> StoreResultExt<T> for Result<T, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_that_isnt_what_was_signed_is_awss_mismatch() {
+        let s3 = from_body(Box::new(UploadStreamError::Sha256Mismatch));
+        assert_eq!(s3.code().as_str(), "XAmzContentSHA256Mismatch");
+        assert_eq!(s3.status_code(), Some(http::StatusCode::BAD_REQUEST));
+        let short = from_body(Box::new(UploadStreamError::Incomplete));
+        assert_eq!(short.code().as_str(), "IncompleteBody");
+    }
 
     #[test]
     fn a_full_disk_is_507_whatever_noticed_it() {

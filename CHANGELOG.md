@@ -17,6 +17,8 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs alias set … --ca-cert FILE` (or `TEIFS_CA_CERT` for every alias) trusts a
   private or self-signed certificate authority besides the system's, for every command
   that uses the alias: S3, `teifs admin`, IAM and STS. A certificate error suggests it.
+- A body that doesn't match its signed `x-amz-content-sha256` is refused with AWS's
+  `XAmzContentSHA256Mismatch` (was `BadDigest`).
 - SSE-C keys are refused on plain HTTP for every request, as on AWS: reads, `HEAD` and
   copy sources too, not only writes.
 - Reverse proxies: `teifs serve --trusted-proxy CIDR` (repeatable) lets the proxies there
