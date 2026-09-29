@@ -10,6 +10,7 @@
 mod groups;
 mod params;
 mod policies;
+mod roles;
 mod users;
 mod xml;
 
@@ -280,6 +281,7 @@ enum On {
     Any,
     User,
     Group,
+    Role,
     Policy,
 }
 
@@ -301,6 +303,24 @@ const TAG_KEYS: &[&str] = &["aws:TagKeys"];
 const BOUNDARY: &[&str] = &["iam:PermissionsBoundary"];
 const POLICY_ARN: &[&str] = &["iam:PolicyARN"];
 const BOUNDARY_AND_POLICY_ARN: &[&str] = &["iam:PermissionsBoundary", "iam:PolicyARN"];
+/// Roles' actions also name `iam:RoleTemplateARN`, which no TeiFS role has.
+const BOUNDARY_TEMPLATE: &[&str] = &["iam:PermissionsBoundary", "iam:RoleTemplateARN"];
+const CREATE_ROLE: &[&str] = &[
+    "aws:RequestTag/${TagKey}",
+    "aws:TagKeys",
+    "iam:PermissionsBoundary",
+    "iam:RoleTemplateARN",
+];
+const ATTACH_ROLE: &[&str] = &[
+    "iam:PermissionsBoundary",
+    "iam:PolicyARN",
+    "iam:RoleTemplateARN",
+];
+const TAG_ROLE: &[&str] = &[
+    "aws:RequestTag/${TagKey}",
+    "aws:TagKeys",
+    "iam:RoleTemplateARN",
+];
 
 macro_rules! actions {
     ($($name:ident: $on:ident, $keys:expr, $run:path;)*) => {
@@ -364,6 +384,25 @@ actions! {
     GetGroupPolicy: Group, &[], policies::get_group_inline;
     ListGroupPolicies: Group, &[], policies::list_group_inline;
     DeleteGroupPolicy: Group, &[], policies::delete_group_inline;
+    CreateRole: Role, CREATE_ROLE, roles::create;
+    GetRole: Role, BOUNDARY_TEMPLATE, roles::get;
+    ListRoles: Any, &[], roles::list;
+    UpdateRole: Role, BOUNDARY, roles::update;
+    UpdateRoleDescription: Role, BOUNDARY, roles::update_description;
+    DeleteRole: Role, BOUNDARY, roles::delete;
+    UpdateAssumeRolePolicy: Role, BOUNDARY, roles::update_trust;
+    TagRole: Role, TAG_ROLE, roles::tag;
+    UntagRole: Role, TAG_KEYS, roles::untag;
+    ListRoleTags: Role, &[], roles::list_tags;
+    PutRolePermissionsBoundary: Role, BOUNDARY_TEMPLATE, roles::put_boundary;
+    DeleteRolePermissionsBoundary: Role, BOUNDARY, roles::delete_boundary;
+    AttachRolePolicy: Role, ATTACH_ROLE, policies::attach_role;
+    DetachRolePolicy: Role, BOUNDARY_AND_POLICY_ARN, policies::detach_role;
+    ListAttachedRolePolicies: Role, &[], policies::attached_role;
+    PutRolePolicy: Role, BOUNDARY_TEMPLATE, policies::put_role_inline;
+    GetRolePolicy: Role, &[], policies::get_role_inline;
+    ListRolePolicies: Role, &[], policies::list_role_inline;
+    DeleteRolePolicy: Role, BOUNDARY, policies::delete_role_inline;
     GetAccountSummary: Any, &[], account_summary;
 }
 
@@ -375,9 +414,10 @@ struct Resource {
     /// The entity's name and path as stored (or as given, for one that doesn't exist).
     name: String,
     path: String,
-    /// `aws:ResourceTag` (and `iam:ResourceTag` for users).
+    /// `aws:ResourceTag` (and `iam:ResourceTag` for users and roles).
     tags: Vec<(String, String)>,
-    /// A user's permissions boundary (`iam:PermissionsBoundary` of actions on it).
+    /// A user's or role's permissions boundary (`iam:PermissionsBoundary` of actions
+    /// on it).
     boundary: Option<String>,
 }
 
@@ -416,7 +456,7 @@ impl Run<'_> {
             let mut c = context.clone();
             for (key, value) in &resource.tags {
                 c = c.with_tag(TagKind::Resource, key, value);
-                if resource.on == On::User {
+                if matches!(resource.on, On::User | On::Role) {
                     c = c.with_tag(TagKind::IamResource, key, value);
                 }
             }
@@ -444,6 +484,7 @@ impl Run<'_> {
         let kind = match on {
             On::User => "user",
             On::Group => "group",
+            On::Role => "role",
             On::Policy => "policy",
             On::Any => unreachable!("only named resources are made"),
         };
@@ -507,6 +548,28 @@ impl Run<'_> {
             .ok()
             .flatten()
             .unwrap_or_else(|| self.new_resource(On::Group, "/", name))
+    }
+
+    /// The role called `name`, or the ARN it would have.
+    fn role(&self, name: &str) -> Resource {
+        self.iam
+            .read(|s| {
+                Ok(s.role_named(name).ok().map(|r| Resource {
+                    on: On::Role,
+                    arn: s.role_arn(r),
+                    name: r.name.clone(),
+                    path: r.path.clone(),
+                    tags: r.tags.clone(),
+                    boundary: r
+                        .boundary
+                        .as_ref()
+                        .and_then(|id| s.policies.get(id))
+                        .map(|p| s.policy_arn(&p.row)),
+                }))
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.new_resource(On::Role, "/", name))
     }
 
     /// The managed policy with this ARN, or the ARN as given.
@@ -580,21 +643,26 @@ fn account_summary(r: &Run<'_>) -> Out {
         Ok([
             ("Users", s.users.len()),
             ("Groups", s.groups.len()),
+            ("Roles", s.roles.len()),
             ("Policies", s.policies.len()),
         ])
     })?;
     let quotas = [
         ("UsersQuota", rules::MAX_USERS),
         ("GroupsQuota", rules::MAX_GROUPS),
+        ("RolesQuota", rules::MAX_ROLES),
         ("PoliciesQuota", rules::MAX_POLICIES),
         ("GroupsPerUserQuota", rules::MAX_GROUPS_PER_USER),
         ("AttachedPoliciesPerUserQuota", rules::MAX_ATTACHED),
         ("AttachedPoliciesPerGroupQuota", rules::MAX_ATTACHED),
+        ("AttachedPoliciesPerRoleQuota", rules::MAX_ATTACHED),
         ("AccessKeysPerUserQuota", rules::MAX_KEYS_PER_USER),
         ("VersionsPerPolicyQuota", rules::MAX_VERSIONS),
         ("PolicySizeQuota", rules::MANAGED_SIZE),
         ("UserPolicySizeQuota", rules::USER_INLINE_TOTAL),
         ("GroupPolicySizeQuota", rules::GROUP_INLINE_TOTAL),
+        ("RolePolicySizeQuota", rules::ROLE_INLINE_TOTAL),
+        ("AssumeRolePolicySizeQuota", rules::TRUST_SIZE),
         ("AccountMFAEnabled", 0),
     ];
     answer(|x| {

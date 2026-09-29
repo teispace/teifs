@@ -127,7 +127,9 @@ delegated administrators can be held to specific policies and boundaries
 to the entity's own ARN before policies are read, since ARNs compare with case and a
 Deny must not be dodged by spelling. A user without a permission is refused every
 action (a test runs all of them). An IAM request's body is acted on only if it's the
-body the signature covers (`UNSIGNED-PAYLOAD` is refused). The root user's key belongs
+body the signature covers (`UNSIGNED-PAYLOAD` is refused). A role's trust policy binds
+the users and roles it names to their unique ids when it's set, so deleting a principal
+and making another of the same name doesn't hand it the role. The root user's key belongs
 to the drive's configuration and can't be created or changed through IAM; bulk import
 will go through the same checks as single changes.
 

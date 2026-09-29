@@ -8,7 +8,7 @@ use std::{
 };
 
 use teifs_crypto::DataKey;
-use teifs_meta::{AccessKeyRow, IamRows, InlineRow, PolicyRow, PolicyVersionRow};
+use teifs_meta::{AccessKeyRow, IamRows, InlineRow, PolicyRow, PolicyVersionRow, RoleRow};
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
 
@@ -24,10 +24,26 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    /// Checks and parses a document given to IAM.
+    /// Checks and parses a policy given to IAM for a user, group or role.
     pub(crate) fn parse(text: &str) -> Result<Self> {
+        Self::parse_as(text, PolicyKind::Identity)
+    }
+
+    /// Checks and parses a role's trust policy, within its size limit.
+    pub(crate) fn trust(text: &str) -> Result<Self> {
+        let document = Self::parse_as(text, PolicyKind::Trust)?;
+        if document.size > crate::rules::TRUST_SIZE {
+            return Err(IamError::LimitExceeded(format!(
+                "Cannot exceed quota for ACLSizePerRole: {}",
+                crate::rules::TRUST_SIZE
+            )));
+        }
+        Ok(document)
+    }
+
+    fn parse_as(text: &str, kind: PolicyKind) -> Result<Self> {
         let size = crate::rules::document(text)?;
-        let policy = Policy::parse(text, PolicyKind::Identity)
+        let policy = Policy::parse(text, kind)
             .map_err(|e| IamError::MalformedPolicyDocument(e.to_string()))?;
         Ok(Self {
             text: text.into(),
@@ -66,6 +82,46 @@ pub(crate) struct Group {
     pub(crate) members: BTreeSet<String>,
     pub(crate) inline: BTreeMap<String, Document>,
     pub(crate) attached: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Role {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) description: String,
+    pub(crate) created_ms: i64,
+    /// Who may assume it.
+    pub(crate) trust: Document,
+    /// The users and roles `trust` names (ARN → unique id when it was set): a principal
+    /// deleted and made again under the same name isn't trusted, as on AWS.
+    pub(crate) principals: BTreeMap<String, String>,
+    /// The longest session it allows, in seconds.
+    pub(crate) max_session: u32,
+    /// The managed policy that is its permissions boundary.
+    pub(crate) boundary: Option<String>,
+    /// Keys compare without case, as for users.
+    pub(crate) tags: Vec<(String, String)>,
+    pub(crate) inline: BTreeMap<String, Document>,
+    pub(crate) attached: BTreeSet<String>,
+}
+
+impl Role {
+    /// The row that stores it.
+    pub(crate) fn row(&self) -> RoleRow {
+        RoleRow {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            path: self.path.clone(),
+            description: self.description.clone(),
+            trust: self.trust.text.to_string(),
+            principals: serde_json::to_string(&self.principals)
+                .expect("a map of strings serializes"),
+            max_session: self.max_session,
+            created_ms: self.created_ms,
+            boundary: self.boundary.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +176,7 @@ pub(crate) struct State {
     pub(crate) account: Arc<str>,
     pub(crate) users: BTreeMap<String, Arc<User>>,
     pub(crate) groups: BTreeMap<String, Arc<Group>>,
+    pub(crate) roles: BTreeMap<String, Arc<Role>>,
     pub(crate) policies: BTreeMap<String, Arc<Managed>>,
     pub(crate) keys: BTreeMap<String, Arc<Key>>,
 }
@@ -166,6 +223,7 @@ impl State {
                 (g.id, group)
             })
             .collect();
+        let mut roles = load_roles(rows.roles, rows.role_tags)?;
         for (user, key, value) in rows.user_tags {
             if let Some(u) = users.get_mut(&user) {
                 u.tags.push((key, value));
@@ -188,6 +246,8 @@ impl State {
                 u.inline.insert(name, document);
             } else if let Some(g) = groups.get_mut(&owner) {
                 g.inline.insert(name, document);
+            } else if let Some(r) = roles.get_mut(&owner) {
+                r.inline.insert(name, document);
             }
         }
         for (owner, policy) in rows.attached {
@@ -195,6 +255,8 @@ impl State {
                 u.attached.insert(policy);
             } else if let Some(g) = groups.get_mut(&owner) {
                 g.attached.insert(policy);
+            } else if let Some(r) = roles.get_mut(&owner) {
+                r.attached.insert(policy);
             }
         }
         state.users = users.into_iter().map(|(id, u)| (id, Arc::new(u))).collect();
@@ -202,6 +264,7 @@ impl State {
             .into_iter()
             .map(|(id, g)| (id, Arc::new(g)))
             .collect();
+        state.roles = roles.into_iter().map(|(id, r)| (id, Arc::new(r))).collect();
         Ok(state)
     }
 
@@ -222,6 +285,16 @@ impl State {
             .find(|g| g.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| {
                 IamError::NoSuchEntity(format!("The group with name {name} cannot be found."))
+            })
+    }
+
+    /// The role with this name (compared without case).
+    pub(crate) fn role_named(&self, name: &str) -> Result<&Arc<Role>> {
+        self.roles
+            .values()
+            .find(|r| r.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                IamError::NoSuchEntity(format!("The role with name {name} cannot be found."))
             })
     }
 
@@ -264,7 +337,7 @@ impl State {
             .filter(move |g| g.members.contains(user))
     }
 
-    /// How many users and groups a managed policy is attached to.
+    /// How many users, groups and roles a managed policy is attached to.
     pub(crate) fn attachments(&self, policy: &str) -> usize {
         self.users
             .values()
@@ -275,14 +348,24 @@ impl State {
                 .values()
                 .filter(|g| g.attached.contains(policy))
                 .count()
+            + self
+                .roles
+                .values()
+                .filter(|r| r.attached.contains(policy))
+                .count()
     }
 
-    /// How many users have a managed policy as their permissions boundary.
+    /// How many users and roles have a managed policy as their permissions boundary.
     pub(crate) fn boundary_uses(&self, policy: &str) -> usize {
         self.users
             .values()
             .filter(|u| u.boundary.as_deref() == Some(policy))
             .count()
+            + self
+                .roles
+                .values()
+                .filter(|r| r.boundary.as_deref() == Some(policy))
+                .count()
     }
 
     pub(crate) fn user_arn(&self, user: &User) -> String {
@@ -291,6 +374,10 @@ impl State {
 
     pub(crate) fn group_arn(&self, group: &Group) -> String {
         arn(&self.account, "group", &group.path, &group.name)
+    }
+
+    pub(crate) fn role_arn(&self, role: &Role) -> String {
+        arn(&self.account, "role", &role.path, &role.name)
     }
 
     pub(crate) fn policy_arn(&self, policy: &PolicyRow) -> String {
@@ -308,6 +395,16 @@ impl State {
         self.groups
             .values()
             .any(|g| Some(g.id.as_str()) != except && g.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The unique id of the user or role with this ARN in this account, if there's one.
+    pub(crate) fn id_of(&self, arn: &str) -> Option<&str> {
+        let users = self.users.values().map(|u| (self.user_arn(u), &u.id));
+        let roles = self.roles.values().map(|r| (self.role_arn(r), &r.id));
+        users
+            .chain(roles)
+            .find(|(a, _)| a == arn)
+            .map(|(_, id)| id.as_str())
     }
 }
 
@@ -356,6 +453,42 @@ fn load_policies(
     Ok(policies)
 }
 
+/// Roles, with their tags; their policies are added by the caller.
+fn load_roles(
+    rows: Vec<RoleRow>,
+    tags: Vec<(String, String, String)>,
+) -> Result<BTreeMap<String, Role>> {
+    let mut roles: BTreeMap<String, Role> = rows
+        .into_iter()
+        .map(|r| {
+            let place = format!("role {}", r.name);
+            let role = Role {
+                trust: Document::parse_as(&r.trust, PolicyKind::Trust)
+                    .map_err(|e| IamError::Stored(format!("{place}'s trust policy: {e}")))?,
+                principals: serde_json::from_str(&r.principals)
+                    .map_err(|e| IamError::Stored(format!("{place}'s principals: {e}")))?,
+                id: r.id.clone(),
+                name: r.name,
+                path: r.path,
+                description: r.description,
+                created_ms: r.created_ms,
+                max_session: r.max_session,
+                boundary: r.boundary,
+                tags: Vec::new(),
+                inline: BTreeMap::new(),
+                attached: BTreeSet::new(),
+            };
+            Ok((r.id, role))
+        })
+        .collect::<Result<_>>()?;
+    for (role, key, value) in tags {
+        if let Some(r) = roles.get_mut(&role) {
+            r.tags.push((key, value));
+        }
+    }
+    Ok(roles)
+}
+
 fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, Arc<Key>>> {
     let mut keys = BTreeMap::new();
     for row in rows {
@@ -379,7 +512,7 @@ fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, 
     Ok(keys)
 }
 
-/// The ARN of the `kind` (`user`, `group`, `policy`) called `name` under `path`.
+/// The ARN of the `kind` (`user`, `group`, `role`, `policy`) called `name` under `path`.
 pub(crate) fn arn(account: &str, kind: &str, path: &str, name: &str) -> String {
     format!("arn:aws:iam::{account}:{kind}{path}{name}")
 }

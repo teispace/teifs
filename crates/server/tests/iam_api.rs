@@ -349,6 +349,187 @@ async fn the_aws_sdk_manages_iam_on_the_s3_endpoint() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn the_aws_sdk_manages_roles() {
+    let server = start().await;
+    let iam = iam_as(&server, ACCESS_KEY, SECRET_KEY);
+    let account = server.iam.account();
+    let trust = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"sts:AssumeRole","Principal":{{"AWS":"arn:aws:iam::{account}:root"}}}}]}}"#
+    );
+    let policy = iam
+        .create_policy()
+        .policy_name("read")
+        .policy_document(READ_PHOTOS)
+        .send()
+        .await
+        .unwrap()
+        .policy
+        .unwrap()
+        .arn
+        .unwrap();
+    let role = iam
+        .create_role()
+        .role_name("reader")
+        .path("/svc/")
+        .assume_role_policy_document(&trust)
+        .description("reads photos")
+        .max_session_duration(7200)
+        .permissions_boundary(&policy)
+        .tags(tag("team", "a"))
+        .send()
+        .await
+        .unwrap()
+        .role
+        .unwrap();
+    assert_eq!(role.arn, format!("arn:aws:iam::{account}:role/svc/reader"));
+    assert!(role.role_id.starts_with("AROA"), "{}", role.role_id);
+    assert_eq!(role.max_session_duration, Some(7200));
+    assert_eq!(
+        percent_decode(role.assume_role_policy_document.as_deref().unwrap()),
+        trust
+    );
+
+    let got = iam
+        .get_role()
+        .role_name("READER")
+        .send()
+        .await
+        .unwrap()
+        .role
+        .unwrap();
+    assert_eq!(got.description.as_deref(), Some("reads photos"));
+    assert_eq!(
+        got.permissions_boundary
+            .as_ref()
+            .and_then(|b| b.permissions_boundary_arn.as_deref()),
+        Some(policy.as_str())
+    );
+    assert_eq!(got.tags().len(), 1);
+    iam.update_role()
+        .role_name("reader")
+        .max_session_duration(43_200)
+        .send()
+        .await
+        .unwrap();
+    let updated = iam
+        .update_role_description()
+        .role_name("reader")
+        .description("reads more")
+        .send()
+        .await
+        .unwrap()
+        .role
+        .unwrap();
+    assert_eq!(
+        (updated.description.as_deref(), updated.max_session_duration),
+        (Some("reads more"), Some(43_200))
+    );
+    let listed = iam.list_roles().path_prefix("/svc/").send().await.unwrap();
+    assert_eq!(listed.roles().len(), 1);
+    assert!(listed.roles()[0].tags().is_empty(), "lists leave tags out");
+
+    iam.put_role_policy()
+        .role_name("reader")
+        .policy_name("inline")
+        .policy_document(READ_PHOTOS)
+        .send()
+        .await
+        .unwrap();
+    let inline = iam
+        .get_role_policy()
+        .role_name("reader")
+        .policy_name("inline")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(percent_decode(&inline.policy_document), READ_PHOTOS);
+    iam.attach_role_policy()
+        .role_name("reader")
+        .policy_arn(&policy)
+        .send()
+        .await
+        .unwrap();
+    let entities = iam
+        .list_entities_for_policy()
+        .policy_arn(&policy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        entities
+            .policy_roles()
+            .iter()
+            .map(|r| r.role_name.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("reader")]
+    );
+    let conflict = iam
+        .delete_role()
+        .role_name("reader")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code(), Some("DeleteConflict"));
+
+    iam.update_assume_role_policy()
+        .role_name("reader")
+        .policy_document(trust.replace("sts:AssumeRole", "sts:TagSession"))
+        .send()
+        .await
+        .unwrap();
+    let malformed = iam
+        .update_assume_role_policy()
+        .role_name("reader")
+        .policy_document(READ_PHOTOS)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(malformed.code(), Some("MalformedPolicyDocument"));
+    iam.untag_role()
+        .role_name("reader")
+        .tag_keys("TEAM")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        iam.list_role_tags()
+            .role_name("reader")
+            .send()
+            .await
+            .unwrap()
+            .tags()
+            .is_empty()
+    );
+    let summary = iam.get_account_summary().send().await.unwrap();
+    assert_eq!(
+        summary.summary_map().unwrap().get(&SummaryKeyType::Roles),
+        Some(&1)
+    );
+
+    iam.delete_role_policy()
+        .role_name("reader")
+        .policy_name("inline")
+        .send()
+        .await
+        .unwrap();
+    iam.detach_role_policy()
+        .role_name("reader")
+        .policy_arn(&policy)
+        .send()
+        .await
+        .unwrap();
+    iam.delete_role_permissions_boundary()
+        .role_name("reader")
+        .send()
+        .await
+        .unwrap();
+    iam.delete_role().role_name("reader").send().await.unwrap();
+    let missing = iam.get_role().role_name("reader").send().await.unwrap_err();
+    assert_eq!(missing.code(), Some("NoSuchEntity"));
+}
+
+#[tokio::test]
 async fn users_manage_their_own_keys() {
     let server = start().await;
     let iam = iam_as(&server, ACCESS_KEY, SECRET_KEY);

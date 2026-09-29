@@ -20,7 +20,8 @@ mod versions;
 
 pub use db::backup;
 pub use iam::{
-    AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, PolicyRow, PolicyVersionRow, UserRow,
+    AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, PolicyRow, PolicyVersionRow, RoleRow,
+    UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System};

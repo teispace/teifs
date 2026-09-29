@@ -28,6 +28,8 @@ const MIGRATIONS: &[&str] = &[
         name  TEXT PRIMARY KEY,
         value TEXT NOT NULL
      ) WITHOUT ROWID;",
+    // 5: IAM roles.
+    crate::iam::ROLES_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

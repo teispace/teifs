@@ -89,7 +89,7 @@ narrows" on thousands of random policies.
 
 ### IAM
 
-`teifs-iam` keeps a drive's users, access keys, groups and policies in `system.db` and
+`teifs-iam` keeps a drive's users, access keys, groups, roles and policies in `system.db` and
 the whole state in memory. A change (`Iam::change`) edits a copy of the state (entities
 are behind `Arc`s, so the copy is cheap), checks AWS's rules against it, writes every
 row it touched in one transaction, and only then swaps the copy in and rebuilds the
@@ -102,6 +102,12 @@ AES-256-GCM under an IAM key, bound to its access key id; the IAM key is sealed 
 drive's KMS under the context `{teifs:drive, teifs:purpose=iam}`. A stored policy that
 no longer parses stops IAM from starting rather than being skipped, since skipping a
 Deny would widen access.
+
+A role's trust policy is a policy of its own kind (`Kind::Trust`): principals and `sts:`
+actions only, no `Resource` (it's the role). When it's set, the account's users and roles
+it names are resolved to their unique ids and kept with the role (`principals`), which
+is how AWS keeps a principal that's deleted and made again under the same name from
+inheriting the trust.
 
 `teifs-s3` enforces it (`access.rs`): `Auth` gives s3s each key's secret, and `Access`
 runs before every operation. It builds the request's condition context (the connection

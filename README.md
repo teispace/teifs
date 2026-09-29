@@ -214,7 +214,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** roles and temporary credentials, versioning, Object Lock, lifecycle rules, website
+**Not yet:** temporary credentials (STS `AssumeRole` and the like), versioning, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

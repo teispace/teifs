@@ -370,8 +370,14 @@ async fn import(client: &Client, file: &Path, adopt_account: bool) -> Result<(),
     }
     ui::done(
         format!(
-            "Imported {} users, {} groups, {} policies and {} access keys into account {}",
-            report.users, report.groups, report.policies, report.access_keys, report.account
+            "Imported {} users, {} groups, {} roles, {} policies and {} access keys into \
+             account {}",
+            report.users,
+            report.groups,
+            report.roles,
+            report.policies,
+            report.access_keys,
+            report.account
         ),
         || record("iamImport", &report),
     );

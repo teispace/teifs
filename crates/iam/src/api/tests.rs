@@ -39,6 +39,7 @@ fn actions_match_aws_service_reference() {
             On::Any => None,
             On::User => Some("user"),
             On::Group => Some("group"),
+            On::Role => Some("role"),
             On::Policy => Some("policy"),
         };
         assert_eq!(
@@ -76,6 +77,12 @@ fn actions_match_aws_service_reference() {
         ["aws:ResourceTag/${TagKey}".to_owned()].into()
     );
     assert!(resource_keys("group").is_empty());
+    assert_eq!(
+        resource_keys("role"),
+        ["aws:ResourceTag/${TagKey}", "iam:ResourceTag/${TagKey}"]
+            .map(str::to_owned)
+            .into()
+    );
     // Every `iam:` key AWS defines is one policies can name.
     let ours: BTreeSet<String> = IamKey::ALL
         .iter()
@@ -157,6 +164,34 @@ impl Drive {
     fn policy_arn(&self, name: &str) -> String {
         format!("arn:aws:iam::{}:policy/{name}", self.account)
     }
+
+    /// A trust policy that lets the account's own principals assume a role, if their
+    /// policies allow them.
+    fn trust_account(&self) -> String {
+        trust(&format!(
+            r#"{{"AWS":"arn:aws:iam::{}:root"}}"#,
+            self.account
+        ))
+    }
+
+    fn role(&self, name: &str) -> crate::RoleInfo {
+        self.iam
+            .create_role(
+                name,
+                &crate::NewRole {
+                    trust: &self.trust_account(),
+                    ..crate::NewRole::default()
+                },
+            )
+            .unwrap()
+    }
+}
+
+/// A trust policy that lets `principal` assume the role.
+fn trust(principal: &str) -> String {
+    format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{principal},"Action":"sts:AssumeRole"}}]}}"#
+    )
 }
 
 fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
@@ -232,7 +267,7 @@ async fn answers_are_shaped_as_aws_answers() {
 
     for (body, code) in [
         ("UserName=a", "MissingAction"),
-        ("Action=CreateRole", "InvalidAction"),
+        ("Action=CreateInstanceProfile", "InvalidAction"),
         ("Action=ListUsers&Version=2011-06-15", "InvalidAction"),
         ("Action=CreateUser", "ValidationError"),
         ("Action=CreateUser&UserName=a&UserName=b", "ValidationError"),
@@ -344,11 +379,13 @@ async fn documents_and_pages_round_trip() {
 fn every_parameter(d: &Drive, key: &str) -> String {
     let arn = enc(&d.policy_arn("managed"));
     format!(
-        "UserName=target&GroupName=group&PolicyArn={arn}&PolicyName=inline\
+        "UserName=target&GroupName=group&RoleName=role&PolicyArn={arn}&PolicyName=inline\
          &PolicyDocument={}&AccessKeyId={key}&Status=Inactive&VersionId=v1\
          &PermissionsBoundary={arn}&Tags.member.1.Key=k&Tags.member.1.Value=v\
-         &TagKeys.member.1=k&NewPath=%2Fmoved%2F",
-        enc(ALLOW_ALL)
+         &TagKeys.member.1=k&NewPath=%2Fmoved%2F&AssumeRolePolicyDocument={}\
+         &Description=d&MaxSessionDuration=7200",
+        enc(ALLOW_ALL),
+        enc(&d.trust_account())
     )
 }
 
@@ -358,6 +395,7 @@ async fn every_action_is_authorized() {
     d.iam.create_user("target", None, &[], None).unwrap();
     let key = d.iam.create_access_key("target").unwrap().info.id;
     d.iam.create_group("group", None).unwrap();
+    d.role("role");
     d.iam
         .create_policy("managed", None, None, ALLOW_ALL, &[])
         .unwrap();
@@ -590,4 +628,398 @@ async fn iam_condition_keys_hold_back_escalation() {
     d.ok(&caller, "Action=DeleteUser&UserName=t");
     assert!(d.iam.user("b").is_ok());
     assert!(d.iam.user("t").is_err());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn roles_are_made_changed_and_deleted_as_on_aws() {
+    let d = drive().await;
+    let root = d.root();
+    d.iam
+        .create_policy("managed", None, None, ALLOW_ALL, &[])
+        .unwrap();
+    let arn = enc(&d.policy_arn("managed"));
+    let body = d.ok(
+        &root,
+        &format!(
+            "Action=CreateRole&RoleName=Reader&Path=%2Fsvc%2F&Description=reads\
+             &MaxSessionDuration=7200&AssumeRolePolicyDocument={}&PermissionsBoundary={arn}\
+             &Tags.member.1.Key=team&Tags.member.1.Value=a",
+            enc(&d.trust_account())
+        ),
+    );
+    let role_arn = format!("arn:aws:iam::{}:role/svc/Reader", d.account);
+    assert!(
+        body.contains("<Role><Path>/svc/</Path><RoleName>Reader</RoleName><RoleId>AROA"),
+        "{body}"
+    );
+    assert!(body.contains(&format!("<Arn>{role_arn}</Arn>")));
+    assert!(body.contains(&format!(
+        "<AssumeRolePolicyDocument>{}</AssumeRolePolicyDocument>",
+        super::encoded(&d.trust_account())
+    )));
+    assert!(body.contains("<Description>reads</Description><MaxSessionDuration>7200"));
+    assert!(body.contains("<PermissionsBoundaryArn>arn:aws:iam::"));
+    assert!(body.contains("<Tags><member><Key>team</Key><Value>a</Value></member></Tags>"));
+
+    // Names compare without case; lists leave out tags, boundaries and last use.
+    let body = d.ok(&root, "Action=GetRole&RoleName=reader");
+    assert!(body.contains("<RoleLastUsed></RoleLastUsed>") || body.contains("<RoleLastUsed/>"));
+    let body = d.ok(&root, "Action=ListRoles&PathPrefix=%2Fsvc");
+    assert!(body.contains("<RoleName>Reader</RoleName>"));
+    assert!(!body.contains("<Tags>") && !body.contains("PermissionsBoundary"));
+    assert!(
+        !d.ok(&root, "Action=ListRoles&PathPrefix=%2Fother")
+            .contains("RoleName")
+    );
+
+    d.ok(
+        &root,
+        "Action=UpdateRole&RoleName=Reader&MaxSessionDuration=43200",
+    );
+    let body = d.ok(
+        &root,
+        "Action=UpdateRoleDescription&RoleName=Reader&Description=reads+more",
+    );
+    assert!(body.contains("<Description>reads more</Description><MaxSessionDuration>43200"));
+    d.ok(
+        &root,
+        "Action=TagRole&RoleName=Reader&Tags.member.1.Key=TEAM&Tags.member.1.Value=b",
+    );
+    let body = d.ok(&root, "Action=ListRoleTags&RoleName=Reader");
+    assert!(
+        body.contains("<member><Key>TEAM</Key><Value>b</Value></member></Tags>"),
+        "tag keys compare without case: {body}"
+    );
+    d.ok(
+        &root,
+        "Action=UntagRole&RoleName=Reader&TagKeys.member.1=team",
+    );
+    assert!(
+        !d.ok(&root, "Action=ListRoleTags&RoleName=Reader")
+            .contains("<Key>")
+    );
+
+    // Its policies, and what they make a DeleteRole or DeletePolicy conflict with.
+    d.ok(
+        &root,
+        &format!("Action=AttachRolePolicy&RoleName=Reader&PolicyArn={arn}"),
+    );
+    d.ok(
+        &root,
+        &format!(
+            "Action=PutRolePolicy&RoleName=Reader&PolicyName=inline&PolicyDocument={}",
+            enc(ALLOW_ALL)
+        ),
+    );
+    let body = d.ok(
+        &root,
+        &format!("Action=ListEntitiesForPolicy&PolicyArn={arn}"),
+    );
+    assert!(
+        body.contains("<PolicyRoles><member><RoleName>Reader</RoleName><RoleId>AROA"),
+        "{body}"
+    );
+    let body = d.ok(
+        &root,
+        &format!(
+            "Action=ListEntitiesForPolicy&PolicyArn={arn}&PolicyUsageFilter=PermissionsBoundary\
+             &EntityFilter=Role"
+        ),
+    );
+    assert!(body.contains("<RoleName>Reader</RoleName>"), "{body}");
+    let body = d.ok(
+        &root,
+        &format!(
+            "Action=ListEntitiesForPolicy&PolicyArn={arn}&PolicyUsageFilter=PermissionsPolicy"
+        ),
+    );
+    assert!(body.contains("<RoleName>Reader</RoleName>"), "{body}");
+    let body = d.ok(&root, &format!("Action=GetPolicy&PolicyArn={arn}"));
+    assert!(
+        body.contains(
+            "<AttachmentCount>1</AttachmentCount><PermissionsBoundaryUsageCount>1\
+             </PermissionsBoundaryUsageCount>"
+        ),
+        "{body}"
+    );
+    let body = d.ok(
+        &root,
+        "Action=GetRolePolicy&RoleName=Reader&PolicyName=inline",
+    );
+    assert!(body.contains("<RoleName>Reader</RoleName><PolicyName>inline</PolicyName>"));
+    assert!(
+        d.ok(&root, "Action=ListRolePolicies&RoleName=Reader")
+            .contains("<PolicyNames><member>inline</member></PolicyNames>")
+    );
+    assert!(
+        d.ok(&root, "Action=ListAttachedRolePolicies&RoleName=Reader")
+            .contains("<PolicyName>managed</PolicyName>")
+    );
+    let summary = d.ok(&root, "Action=GetAccountSummary");
+    for entry in [
+        "<key>Roles</key><value>1</value>",
+        "<key>RolesQuota</key><value>1000</value>",
+        "<key>AssumeRolePolicySizeQuota</key><value>2048</value>",
+        "<key>RolePolicySizeQuota</key><value>10240</value>",
+    ] {
+        assert!(summary.contains(entry), "{entry}");
+    }
+    assert_eq!(
+        d.code(&root, "Action=DeleteRole&RoleName=Reader"),
+        "DeleteConflict"
+    );
+    assert_eq!(
+        d.code(&root, &format!("Action=DeletePolicy&PolicyArn={arn}")),
+        "DeleteConflict"
+    );
+    // Each alone is a conflict too.
+    d.ok(
+        &root,
+        &format!("Action=DetachRolePolicy&RoleName=Reader&PolicyArn={arn}"),
+    );
+    assert_eq!(
+        d.code(&root, "Action=DeleteRole&RoleName=Reader"),
+        "DeleteConflict"
+    );
+    d.ok(
+        &root,
+        "Action=DeleteRolePolicy&RoleName=Reader&PolicyName=inline",
+    );
+    d.ok(
+        &root,
+        &format!("Action=AttachRolePolicy&RoleName=Reader&PolicyArn={arn}"),
+    );
+    assert_eq!(
+        d.code(&root, "Action=DeleteRole&RoleName=Reader"),
+        "DeleteConflict"
+    );
+    d.ok(
+        &root,
+        "Action=DeleteRolePermissionsBoundary&RoleName=Reader",
+    );
+    assert_eq!(
+        d.code(&root, &format!("Action=DeletePolicy&PolicyArn={arn}")),
+        "DeleteConflict",
+        "still attached to the role"
+    );
+    d.ok(
+        &root,
+        &format!("Action=PutRolePermissionsBoundary&RoleName=Reader&PermissionsBoundary={arn}"),
+    );
+    d.ok(
+        &root,
+        &format!("Action=DetachRolePolicy&RoleName=Reader&PolicyArn={arn}"),
+    );
+    assert_eq!(
+        d.code(&root, &format!("Action=DeletePolicy&PolicyArn={arn}")),
+        "DeleteConflict",
+        "still the role's boundary"
+    );
+    d.ok(
+        &root,
+        "Action=DeleteRolePermissionsBoundary&RoleName=Reader",
+    );
+    assert_eq!(
+        d.code(
+            &root,
+            "Action=DeleteRolePermissionsBoundary&RoleName=Reader"
+        ),
+        "NoSuchEntity"
+    );
+    d.ok(&root, "Action=DeleteRole&RoleName=reader");
+    assert_eq!(
+        d.code(&root, "Action=GetRole&RoleName=Reader"),
+        "NoSuchEntity"
+    );
+    d.ok(&root, &format!("Action=DeletePolicy&PolicyArn={arn}"));
+}
+
+#[tokio::test]
+async fn roles_are_checked_as_aws_checks_them() {
+    let d = drive().await;
+    let root = d.root();
+    d.role("taken");
+    let create = |extra: &str, trust: &str| {
+        format!(
+            "Action=CreateRole&RoleName=r&AssumeRolePolicyDocument={}{extra}",
+            enc(trust)
+        )
+    };
+    let account = d.trust_account();
+    for (body, code) in [
+        (
+            create("", &account).replace("RoleName=r", "RoleName=TAKEN"),
+            "EntityAlreadyExists",
+        ),
+        (create("&MaxSessionDuration=3599", &account), "InvalidInput"),
+        (
+            create("&MaxSessionDuration=43201", &account),
+            "InvalidInput",
+        ),
+        (
+            create("&MaxSessionDuration=1h", &account),
+            "ValidationError",
+        ),
+        (create("&Path=nope", &account), "InvalidInput"),
+        (
+            create(&format!("&Description={}", "x".repeat(1001)), &account),
+            "InvalidInput",
+        ),
+        // A trust policy names principals and sts: actions only, and no Resource.
+        (create("", ALLOW_ALL), "MalformedPolicyDocument"),
+        (
+            create("", &account.replace("sts:AssumeRole", "s3:GetObject")),
+            "MalformedPolicyDocument",
+        ),
+        // AWS resolves the account's users and roles when the policy is set.
+        (
+            create(
+                "",
+                &trust(&format!(
+                    r#"{{"AWS":"arn:aws:iam::{}:user/ghost"}}"#,
+                    d.account
+                )),
+            ),
+            "MalformedPolicyDocument",
+        ),
+        (
+            create(
+                "",
+                &trust(&format!(
+                    r#"{{"AWS":["arn:aws:iam::{}:role/taken","{}"]}}"#,
+                    d.account,
+                    "x".repeat(2100)
+                )),
+            ),
+            "MalformedPolicyDocument",
+        ),
+    ] {
+        assert_eq!(d.code(&root, &body), code, "{body}");
+    }
+    let big = trust(&format!(
+        r#"{{"AWS":[{}]}}"#,
+        vec![format!(r#""arn:aws:iam::{}:role/taken""#, d.account); 50].join(",")
+    ));
+    assert_eq!(
+        d.code(&root, &create("", &big)),
+        "LimitExceeded",
+        "over 2048"
+    );
+
+    // Principals of other accounts, sessions and the account itself aren't looked up.
+    d.iam.create_user("alice", None, &[], None).unwrap();
+    let named = trust(&format!(
+        r#"{{"AWS":["arn:aws:iam::{0}:user/alice","arn:aws:iam::{0}:role/taken",
+            "arn:aws:iam::111122223333:user/bob","arn:aws:sts::{0}:assumed-role/taken/s",
+            "{0}"]}}"#,
+        d.account
+    ));
+    d.ok(&root, &create("", &named));
+    let bound = d
+        .iam
+        .read(|s| Ok(s.role_named("r")?.principals.clone()))
+        .unwrap();
+    let alice = d.iam.user("alice").unwrap();
+    let taken = d.iam.role("taken").unwrap();
+    assert_eq!(
+        bound.into_iter().collect::<Vec<_>>(),
+        [(taken.arn, taken.id), (alice.arn, alice.id)]
+    );
+    assert_eq!(
+        d.code(
+            &root,
+            &format!(
+                "Action=UpdateAssumeRolePolicy&RoleName=r&PolicyDocument={}",
+                enc(&trust(&format!(
+                    r#"{{"AWS":"arn:aws:iam::{}:role/r2"}}"#,
+                    d.account
+                )))
+            )
+        ),
+        "MalformedPolicyDocument"
+    );
+    assert_eq!(d.iam.role("r").unwrap().trust, named, "unchanged");
+}
+
+#[tokio::test]
+async fn role_condition_keys_hold_back_escalation() {
+    let d = drive().await;
+    for name in ["boundary", "other"] {
+        d.iam
+            .create_policy(name, None, None, ALLOW_ALL, &[])
+            .unwrap();
+    }
+    let boundary = d.policy_arn("boundary");
+    let caller = d.identity(&d.user(
+        "delegate",
+        &policy(&[
+            // Only roles bounded by `boundary`, and only their inline policies.
+            statement(
+                "Allow",
+                "iam:CreateRole",
+                "*",
+                &format!(r#"{{"StringEquals":{{"iam:PermissionsBoundary":"{boundary}"}}}}"#),
+            ),
+            statement(
+                "Allow",
+                "iam:PutRolePolicy",
+                "*",
+                &format!(r#"{{"StringEquals":{{"iam:PermissionsBoundary":"{boundary}"}}}}"#),
+            ),
+            statement(
+                "Allow",
+                "iam:DeleteRole",
+                "*",
+                r#"{"StringEquals":{"iam:ResourceTag/team":"a"}}"#,
+            ),
+            statement(
+                "Allow",
+                "iam:GetRole",
+                "*",
+                r#"{"StringEquals":{"aws:ResourceTag/team":"a"}}"#,
+            ),
+        ]),
+    ));
+    let create = |name: &str, boundary: &str| {
+        format!(
+            "Action=CreateRole&RoleName={name}&AssumeRolePolicyDocument={}\
+             &PermissionsBoundary={}",
+            enc(&d.trust_account()),
+            enc(&d.policy_arn(boundary))
+        )
+    };
+    assert_eq!(d.code(&caller, &create("free", "other")), "AccessDenied");
+    assert_eq!(
+        d.code(
+            &caller,
+            &create("free", "other").replace("&PermissionsBoundary=", "&Nothing=")
+        ),
+        "AccessDenied"
+    );
+    d.ok(&caller, &create("bounded", "boundary"));
+    d.role("unbounded");
+    let put = |role: &str| {
+        format!(
+            "Action=PutRolePolicy&RoleName={role}&PolicyName=p&PolicyDocument={}",
+            enc(ALLOW_ALL)
+        )
+    };
+    assert_eq!(d.code(&caller, &put("unbounded")), "AccessDenied");
+    d.ok(&caller, &put("bounded"));
+
+    // Tags on the role decide through iam:ResourceTag and aws:ResourceTag.
+    let tagged = |value: &str| vec![("team".to_owned(), value.to_owned())];
+    d.iam.tag_role("unbounded", &tagged("b")).unwrap();
+    assert_eq!(
+        d.code(&caller, "Action=GetRole&RoleName=unbounded"),
+        "AccessDenied"
+    );
+    assert_eq!(
+        d.code(&caller, "Action=DeleteRole&RoleName=unbounded"),
+        "AccessDenied"
+    );
+    d.iam.tag_role("unbounded", &tagged("a")).unwrap();
+    d.ok(&caller, "Action=GetRole&RoleName=UNBOUNDED");
+    d.ok(&caller, "Action=DeleteRole&RoleName=unbounded");
 }

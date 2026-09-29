@@ -67,6 +67,9 @@ pub struct IamExport {
     pub groups: Vec<ExportedGroup>,
     /// Users.
     pub users: Vec<ExportedUser>,
+    /// Roles.
+    #[serde(default)]
+    pub roles: Vec<ExportedRole>,
 }
 
 /// A customer-managed policy.
@@ -143,6 +146,35 @@ pub struct ExportedUser {
     pub access_keys: Vec<ExportedKey>,
 }
 
+/// A role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedRole {
+    /// Its name.
+    pub name: String,
+    /// Its path.
+    pub path: String,
+    /// Its description.
+    #[serde(default)]
+    pub description: String,
+    /// Its trust policy: who may assume it.
+    pub trust_policy: String,
+    /// The longest session it allows, in seconds.
+    pub max_session_duration: u32,
+    /// Its tags.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    /// The name of the managed policy that is its permissions boundary.
+    #[serde(default)]
+    pub boundary: Option<String>,
+    /// Its inline policies' documents, by name.
+    #[serde(default)]
+    pub inline: BTreeMap<String, String>,
+    /// The names of the managed policies attached to it.
+    #[serde(default)]
+    pub attached: Vec<String>,
+}
+
 /// An access key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -192,6 +224,9 @@ pub struct ImportReport {
     pub groups: usize,
     /// Users created.
     pub users: usize,
+    /// Roles created.
+    #[serde(default)]
+    pub roles: usize,
     /// Access keys imported.
     pub access_keys: usize,
     /// Access keys skipped because the export has no secret for them.

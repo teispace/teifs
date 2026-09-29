@@ -9,7 +9,7 @@
 use std::{path::Path, sync::Arc};
 
 use teifs_crypto::LocalKms;
-use teifs_iam::{Iam, IamError, Owner, RootKey};
+use teifs_iam::{Iam, IamError, NewRole, Owner, RootKey};
 use teifs_policy::{Context, Date, Decision, Policies, Request, evaluate};
 use zeroize::Zeroizing;
 
@@ -603,7 +603,8 @@ async fn attachments_are_limited_and_listed() {
     let attached = iam.attached(Owner::Group("g"), None).unwrap();
     assert_eq!(attached.len(), 10);
     assert_eq!(attached[0].name, "p00");
-    let (groups, users) = iam.entities_for_policy(&arns[0]).unwrap();
+    let (groups, users, roles) = iam.entities_for_policy(&arns[0]).unwrap();
+    assert!(roles.is_empty());
     assert_eq!((groups.len(), users.len()), (1, 1));
     assert_eq!(iam.policies(None, true).unwrap().len(), 10);
     assert_eq!(iam.policies(None, false).unwrap().len(), 11);
@@ -756,6 +757,36 @@ fn populate(iam: &Iam) {
     let old = iam.create_access_key("alice").unwrap();
     iam.update_access_key("alice", &old.info.id, false).unwrap();
     iam.create_user("bob", None, &[], None).unwrap();
+    // `admin` trusts `worker`, which an import makes after it.
+    let account = iam.account();
+    let trust = |who: &str| {
+        format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"sts:AssumeRole",
+            "Principal":{{"AWS":"arn:aws:iam::{account}:{who}"}}}}]}}"#
+        )
+    };
+    iam.create_role(
+        "worker",
+        &NewRole {
+            path: Some("/svc/"),
+            trust: &trust("user/eng/alice"),
+            description: Some("runs jobs"),
+            max_session: Some(7200),
+            tags: &tags,
+            boundary: Some(&boundary),
+        },
+    )
+    .unwrap();
+    iam.put_inline(Owner::Role("worker"), "home", HOME).unwrap();
+    iam.attach(Owner::Role("worker"), &read).unwrap();
+    iam.create_role(
+        "admin",
+        &NewRole {
+            trust: &trust("role/svc/worker"),
+            ..NewRole::default()
+        },
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -784,9 +815,14 @@ async fn an_export_imports_into_another_drive_as_it_was() {
             report.policies,
             report.groups,
             report.users,
+            report.roles,
             report.access_keys
         ),
-        (2, 1, 2, 2)
+        (2, 1, 2, 2, 2)
+    );
+    assert_eq!(
+        export.roles.iter().map(|r| &*r.name).collect::<Vec<_>>(),
+        ["admin", "worker"]
     );
     assert!(report.keys_without_secrets.is_empty());
     assert_eq!(report.account, from.account());

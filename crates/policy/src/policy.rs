@@ -34,6 +34,9 @@ pub enum Kind {
     /// On a resource (a bucket policy): every statement names a `Principal` or
     /// `NotPrincipal`.
     Resource,
+    /// A role's trust policy: who may assume the role. Every statement names a
+    /// `Principal` and only `sts:` actions, and no `Resource` (it's always the role).
+    Trust,
 }
 
 /// A parsed policy.
@@ -278,6 +281,26 @@ impl Policy {
         })
     }
 
+    /// The user, role and session ARNs the policy names as principals, each once, in
+    /// the order they first appear (`NotPrincipal` included).
+    #[must_use]
+    pub fn principal_arns(&self) -> Vec<&str> {
+        let mut arns: Vec<&str> = Vec::new();
+        let named = self
+            .statements
+            .iter()
+            .filter_map(|s| s.principal.as_ref())
+            .flat_map(|p| p.entries.iter());
+        for entry in named {
+            if let PrincipalEntry::Arn(arn) = entry
+                && !arns.contains(&&**arn)
+            {
+                arns.push(arn);
+            }
+        }
+        arns
+    }
+
     /// The condition keys TeiFS doesn't know, which no request ever has: usually a typo.
     pub fn unknown_condition_keys(&self) -> impl Iterator<Item = &str> {
         self.statements
@@ -361,7 +384,8 @@ impl Statement {
                 "Action" | "NotAction" => {
                     not_both(actions.as_ref(), "Action", "NotAction")?;
                     actions = Some(
-                        Actions::parse(&value, name == "NotAction").map_err(|e| e.within(&name))?,
+                        Actions::parse(&value, name == "NotAction", kind)
+                            .map_err(|e| e.within(&name))?,
                     );
                 }
                 "Resource" | "NotResource" => {
@@ -379,13 +403,24 @@ impl Statement {
             }
         }
         let effect = effect.ok_or_else(|| Error::new("a statement needs an Effect"))?;
+        if kind == Kind::Trust {
+            if resources.is_some() {
+                return Err(Error::new(
+                    "a trust policy names no Resource or NotResource: it's always the role",
+                ));
+            }
+            resources = Some(Resources {
+                negated: false,
+                templates: [Template::plain("*")].into(),
+            });
+        }
         match (kind, &principal) {
             (Kind::Identity, Some(_)) => {
                 return Err(Error::new(
                     "an identity policy applies to whoever holds it, so it names no Principal",
                 ));
             }
-            (Kind::Resource, None) => {
+            (Kind::Resource | Kind::Trust, None) => {
                 return Err(Error::new(
                     "a resource policy's statement names a Principal",
                 ));
@@ -554,10 +589,22 @@ impl PrincipalEntry {
 }
 
 impl Actions {
-    fn parse(json: &Json, negated: bool) -> Result<Self, Error> {
+    fn parse(json: &Json, negated: bool, kind: Kind) -> Result<Self, Error> {
+        if kind == Kind::Trust && negated {
+            return Err(Error::new("a trust policy names its actions with Action"));
+        }
         let patterns = strings(json)?
             .into_iter()
             .map(|action| {
+                if kind == Kind::Trust
+                    && !action
+                        .get(..4)
+                        .is_some_and(|service| service.eq_ignore_ascii_case("sts:"))
+                {
+                    return Err(Error::new(format!(
+                        "`{action}`: a trust policy allows only sts: actions (sts:AssumeRole)"
+                    )));
+                }
                 let valid = action == "*"
                     || action.split_once(':').is_some_and(|(service, name)| {
                         !service.is_empty()
@@ -680,6 +727,70 @@ mod tests {
 
     fn statement(body: &str) -> String {
         format!(r#"{{"Version": "2012-10-17", "Statement": {{{body}}}}}"#)
+    }
+
+    #[test]
+    fn trust_policies_name_principals_and_sts_actions_only() {
+        let trust = Policy::parse(
+            &statement(
+                r#""Effect": "Allow", "Action": ["sts:AssumeRole", "sts:TagSession"],
+                   "Principal": {"AWS": "arn:aws:iam::123456789012:user/alice"}"#,
+            ),
+            Kind::Trust,
+        )
+        .unwrap();
+        assert_eq!(trust.kind(), Kind::Trust);
+        assert_eq!(
+            trust.principal_arns(),
+            ["arn:aws:iam::123456789012:user/alice"]
+        );
+        let role = "arn:aws:iam::123456789012:role/reader";
+        let context = |principal| crate::Context::new(principal, crate::Date::from_unix_seconds(0));
+        let alice = context(Principal::user("123456789012", "/", "alice", "AIDAA"));
+        let bob = context(Principal::user("123456789012", "/", "bob", "AIDAB"));
+        let request = |action, context| Request {
+            action,
+            resource: role,
+            context,
+        };
+        assert_eq!(
+            trust.grant(&request("sts:AssumeRole", &alice)),
+            Some(Grant::Named)
+        );
+        assert_eq!(
+            trust.grant(&request("sts:assumerole", &alice)),
+            Some(Grant::Named),
+            "actions compare without case"
+        );
+        assert_eq!(trust.grant(&request("sts:AssumeRole", &bob)), None);
+        assert_eq!(trust.grant(&request("sts:SetSourceIdentity", &alice)), None);
+
+        for (body, why) in [
+            (
+                r#""Effect": "Allow", "Action": "sts:AssumeRole""#,
+                "names a Principal",
+            ),
+            (
+                r#""Effect": "Allow", "Action": "sts:AssumeRole", "Principal": "*",
+                   "Resource": "*""#,
+                "names no Resource",
+            ),
+            (
+                r#""Effect": "Allow", "Action": "s3:GetObject", "Principal": "*""#,
+                "only sts: actions",
+            ),
+            (
+                r#""Effect": "Allow", "Action": "*", "Principal": "*""#,
+                "only sts: actions",
+            ),
+            (
+                r#""Effect": "Deny", "NotAction": "sts:AssumeRole", "Principal": "*""#,
+                "with Action",
+            ),
+        ] {
+            let err = refused(&statement(body), Kind::Trust);
+            assert!(err.contains(why), "{body}: {err}");
+        }
     }
 
     #[test]

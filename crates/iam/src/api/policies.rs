@@ -6,7 +6,7 @@ use super::{
     ApiError, On, Out, Resource, Run, answer, done, encoded, paged, truncation, with_boundary,
     with_request_tags, xml::Xml,
 };
-use crate::{GroupInfo, Iam, Owner, PolicyInfo, PolicyVersionInfo, UserInfo};
+use crate::{Iam, Owner, PolicyInfo, PolicyVersionInfo};
 
 /// A managed policy as IAM answers with it; `ListPolicies` leaves out the description
 /// and tags, as AWS's does.
@@ -156,9 +156,29 @@ pub(super) fn set_default_version(r: &Run<'_>) -> Out {
 }
 
 /// Who uses a policy, for `ListEntitiesForPolicy`.
-enum Entity {
-    Group(GroupInfo),
-    User(UserInfo),
+struct Entity {
+    kind: EntityKind,
+    name: String,
+    id: String,
+    path: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntityKind {
+    Group,
+    Role,
+    User,
+}
+
+impl EntityKind {
+    /// Its element in the answer, and the elements of its name and id.
+    fn elements(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Group => ("PolicyGroups", "GroupName", "GroupId"),
+            Self::Role => ("PolicyRoles", "RoleName", "RoleId"),
+            Self::User => ("PolicyUsers", "UserName", "UserId"),
+        }
+    }
 }
 
 pub(super) fn entities(r: &Run<'_>) -> Out {
@@ -180,60 +200,61 @@ pub(super) fn entities(r: &Run<'_>) -> Out {
     let prefix = r.path_prefix()?;
     let page = r.page()?;
     r.check("iam:ListEntitiesForPolicy", &r.policy(arn))?;
-    let (groups, mut users) = r.iam.entities_for_policy(arn)?;
+    let (groups, users, roles) = r.iam.entities_for_policy(arn)?;
     let policies = usage != Some("PermissionsBoundary");
     let boundaries = usage != Some("PermissionsPolicy");
     let wanted = |kind: &str| filter.is_none_or(|f| f == kind);
     let mut all: Vec<Entity> = Vec::new();
+    let mut add = |kind, name: String, id: String, path: String| {
+        if !all.iter().any(|e| e.id == id) {
+            all.push(Entity {
+                kind,
+                name,
+                id,
+                path,
+            });
+        }
+    };
     if wanted("Group") && policies {
-        all.extend(groups.into_iter().map(Entity::Group));
+        for g in groups {
+            add(EntityKind::Group, g.name, g.id, g.path);
+        }
     }
     if wanted("User") {
-        if !policies {
-            users.clear();
-        }
-        if boundaries {
-            for user in r.iam.users_with_boundary(arn)? {
-                if !users.iter().any(|u| u.id == user.id) {
-                    users.push(user);
-                }
-            }
-        }
-        all.extend(users.into_iter().map(Entity::User));
-    }
-    all.retain(|e| {
-        let path = match e {
-            Entity::Group(g) => &g.path,
-            Entity::User(u) => &u.path,
+        let bounded = if boundaries {
+            r.iam.users_with_boundary(arn)?
+        } else {
+            Vec::new()
         };
-        prefix.is_none_or(|p| path.starts_with(p))
+        let attached = if policies { users } else { Vec::new() };
+        for u in attached.into_iter().chain(bounded) {
+            add(EntityKind::User, u.name, u.id, u.path);
+        }
+    }
+    if wanted("Role") {
+        let bounded = if boundaries {
+            r.iam.roles_with_boundary(arn)?
+        } else {
+            Vec::new()
+        };
+        let attached = if policies { roles } else { Vec::new() };
+        for role in attached.into_iter().chain(bounded) {
+            add(EntityKind::Role, role.name, role.id, role.path);
+        }
+    }
+    all.retain(|e| prefix.is_none_or(|p| e.path.starts_with(p)));
+    let (all, marker) = paged(all, &page, |e| {
+        let (element, ..) = e.kind.elements();
+        format!("{element}{}", e.name.to_ascii_lowercase())
     });
-    let (all, marker) = paged(all, &page, |e| match e {
-        Entity::Group(g) => format!("g{}", g.name.to_ascii_lowercase()),
-        Entity::User(u) => format!("u{}", u.name.to_ascii_lowercase()),
-    });
-    let groups: Vec<&GroupInfo> = all
-        .iter()
-        .filter_map(|e| match e {
-            Entity::Group(g) => Some(g),
-            Entity::User(_) => None,
-        })
-        .collect();
-    let users: Vec<&UserInfo> = all
-        .iter()
-        .filter_map(|e| match e {
-            Entity::User(u) => Some(u),
-            Entity::Group(_) => None,
-        })
-        .collect();
     answer(|x| {
-        x.members("PolicyGroups", &groups, |x, g| {
-            x.text("GroupName", &g.name).text("GroupId", &g.id);
-        })
-        .members("PolicyUsers", &users, |x, u| {
-            x.text("UserName", &u.name).text("UserId", &u.id);
-        })
-        .members::<()>("PolicyRoles", &[], |_, ()| {});
+        for kind in [EntityKind::Group, EntityKind::User, EntityKind::Role] {
+            let (element, name, id) = kind.elements();
+            let these: Vec<&Entity> = all.iter().filter(|e| e.kind == kind).collect();
+            x.members(element, &these, |x, e| {
+                x.text(name, &e.name).text(id, &e.id);
+            });
+        }
         truncation(x, marker.as_deref());
     })
 }
@@ -268,11 +289,12 @@ pub(super) fn list_tags(r: &Run<'_>) -> Out {
     })
 }
 
-/// Users or groups, for the actions that come in both kinds.
+/// Users, groups or roles, for the actions that come in each kind.
 #[derive(Clone, Copy)]
 enum Kind {
     User,
     Group,
+    Role,
 }
 
 impl Kind {
@@ -280,6 +302,7 @@ impl Kind {
         match self {
             Self::User => "UserName",
             Self::Group => "GroupName",
+            Self::Role => "RoleName",
         }
     }
 
@@ -289,11 +312,12 @@ impl Kind {
         Ok(match self {
             Self::User => (Owner::User(name), r.user(name)),
             Self::Group => (Owner::Group(name), r.group(name)),
+            Self::Role => (Owner::Role(name), r.role(name)),
         })
     }
 }
 
-/// `iam:PermissionsBoundary` of an action on a user: the boundary it has.
+/// `iam:PermissionsBoundary` of an action on a user or role: the boundary it has.
 fn owner_context(r: &Run<'_>, owner: &Resource) -> teifs_policy::Context {
     with_boundary(r.context(), owner.boundary.as_deref())
 }
@@ -329,6 +353,14 @@ pub(super) fn detach_group(r: &Run<'_>) -> Out {
     attachment(r, Kind::Group, "iam:DetachGroupPolicy", Iam::detach)
 }
 
+pub(super) fn attach_role(r: &Run<'_>) -> Out {
+    attachment(r, Kind::Role, "iam:AttachRolePolicy", Iam::attach)
+}
+
+pub(super) fn detach_role(r: &Run<'_>) -> Out {
+    attachment(r, Kind::Role, "iam:DetachRolePolicy", Iam::detach)
+}
+
 fn attached(r: &Run<'_>, kind: Kind, action: &str) -> Out {
     let (owner, resource) = kind.owner(r)?;
     let prefix = r.path_prefix()?;
@@ -353,6 +385,10 @@ pub(super) fn attached_group(r: &Run<'_>) -> Out {
     attached(r, Kind::Group, "iam:ListAttachedGroupPolicies")
 }
 
+pub(super) fn attached_role(r: &Run<'_>) -> Out {
+    attached(r, Kind::Role, "iam:ListAttachedRolePolicies")
+}
+
 fn put_inline(r: &Run<'_>, kind: Kind, action: &str) -> Out {
     let (owner, resource) = kind.owner(r)?;
     let name = r.p.required("PolicyName")?;
@@ -368,6 +404,10 @@ pub(super) fn put_user_inline(r: &Run<'_>) -> Out {
 
 pub(super) fn put_group_inline(r: &Run<'_>) -> Out {
     put_inline(r, Kind::Group, "iam:PutGroupPolicy")
+}
+
+pub(super) fn put_role_inline(r: &Run<'_>) -> Out {
+    put_inline(r, Kind::Role, "iam:PutRolePolicy")
 }
 
 fn get_inline(r: &Run<'_>, kind: Kind, action: &str) -> Out {
@@ -388,6 +428,10 @@ pub(super) fn get_user_inline(r: &Run<'_>) -> Out {
 
 pub(super) fn get_group_inline(r: &Run<'_>) -> Out {
     get_inline(r, Kind::Group, "iam:GetGroupPolicy")
+}
+
+pub(super) fn get_role_inline(r: &Run<'_>) -> Out {
+    get_inline(r, Kind::Role, "iam:GetRolePolicy")
 }
 
 fn list_inline(r: &Run<'_>, kind: Kind, action: &str) -> Out {
@@ -411,6 +455,10 @@ pub(super) fn list_group_inline(r: &Run<'_>) -> Out {
     list_inline(r, Kind::Group, "iam:ListGroupPolicies")
 }
 
+pub(super) fn list_role_inline(r: &Run<'_>) -> Out {
+    list_inline(r, Kind::Role, "iam:ListRolePolicies")
+}
+
 fn delete_inline(r: &Run<'_>, kind: Kind, action: &str) -> Out {
     let (owner, resource) = kind.owner(r)?;
     let name = r.p.required("PolicyName")?;
@@ -425,4 +473,8 @@ pub(super) fn delete_user_inline(r: &Run<'_>) -> Out {
 
 pub(super) fn delete_group_inline(r: &Run<'_>) -> Out {
     delete_inline(r, Kind::Group, "iam:DeleteGroupPolicy")
+}
+
+pub(super) fn delete_role_inline(r: &Run<'_>) -> Out {
+    delete_inline(r, Kind::Role, "iam:DeleteRolePolicy")
 }

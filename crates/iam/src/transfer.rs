@@ -7,12 +7,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
-    ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion, IAM_FORMAT,
-    IamExport, ImportReport, Tag,
+    ExportedGroup, ExportedKey, ExportedPolicy, ExportedRole, ExportedUser, ExportedVersion,
+    IAM_FORMAT, IamExport, ImportReport, Tag,
 };
 
 use crate::{
-    ACCOUNT, Draft, Iam, IamError, Owner, Result,
+    ACCOUNT, Draft, Iam, IamError, NewRole, Owner, Result,
     rules::MAX_KEYS_PER_USER,
     state::{Key, State},
 };
@@ -113,12 +113,29 @@ fn export(state: &State, secrets: bool) -> IamExport {
         })
         .collect();
     users.sort_by_cached_key(|u| u.name.to_ascii_lowercase());
+    let mut roles: Vec<ExportedRole> = state
+        .roles
+        .values()
+        .map(|r| ExportedRole {
+            name: r.name.clone(),
+            path: r.path.clone(),
+            description: r.description.clone(),
+            trust_policy: r.trust.text.to_string(),
+            max_session_duration: r.max_session,
+            tags: tags(&r.tags),
+            boundary: policy_names(state, r.boundary.iter()).pop(),
+            inline: inline(&r.inline),
+            attached: policy_names(state, r.attached.iter()),
+        })
+        .collect();
+    roles.sort_by_cached_key(|r| r.name.to_ascii_lowercase());
     IamExport {
         format: IAM_FORMAT.to_owned(),
         account: state.account.to_string(),
         policies,
         groups,
         users,
+        roles,
     }
 }
 
@@ -134,7 +151,8 @@ impl Iam {
         export(&self.inner().state, secrets)
     }
 
-    /// Makes `export` in this IAM, which must have no users, groups, policies or keys;
+    /// Makes `export` in this IAM, which must have no users, groups, roles, policies or
+    /// keys;
     /// with `adopt_account`, the account takes the export's id too. All or nothing.
     pub fn import(&self, export: &IamExport, adopt_account: bool) -> Result<ImportReport> {
         if export.format != IAM_FORMAT {
@@ -151,9 +169,14 @@ impl Iam {
         }
         self.change(|d| {
             let s = &d.state;
-            if !(s.users.is_empty() && s.groups.is_empty() && s.policies.is_empty()) {
+            if !(s.users.is_empty()
+                && s.groups.is_empty()
+                && s.roles.is_empty()
+                && s.policies.is_empty())
+            {
                 return Err(IamError::EntityAlreadyExists(
-                    "IAM already has users, groups or policies: import only into an empty IAM."
+                    "IAM already has users, groups, roles or policies: import only into an \
+                     empty IAM."
                         .into(),
                 ));
             }
@@ -183,6 +206,7 @@ impl Iam {
                 policies: export.policies.len(),
                 groups: export.groups.len(),
                 users: export.users.len(),
+                roles: export.roles.len(),
                 access_keys: 0,
                 keys_without_secrets: Vec::new(),
             };
@@ -212,9 +236,44 @@ impl Iam {
                     }
                 }
             }
+            import_roles(d, &export.roles, &arn)?;
             Ok(report)
         })
     }
+}
+
+/// Creates the roles once the users exist. A trust policy may name another role, so
+/// every role is made first with a trust policy that trusts no one, then given its own.
+fn import_roles(
+    d: &mut Draft<'_>,
+    roles: &[ExportedRole],
+    arn: &impl Fn(&str) -> Result<String>,
+) -> Result<()> {
+    const NO_ONE: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"sts:AssumeRole"}]}"#;
+    for role in roles {
+        let boundary = role.boundary.as_deref().map(arn).transpose()?;
+        d.create_role(
+            &role.name,
+            &NewRole {
+                path: Some(&role.path),
+                trust: NO_ONE,
+                description: Some(&role.description),
+                max_session: Some(role.max_session_duration),
+                tags: &pairs(&role.tags),
+                boundary: boundary.as_deref(),
+            },
+        )?;
+        for (name, document) in &role.inline {
+            d.put_inline(Owner::Role(&role.name), name, document)?;
+        }
+        for policy in &role.attached {
+            d.attach(Owner::Role(&role.name), &arn(policy)?)?;
+        }
+    }
+    for role in roles {
+        d.set_trust(&role.name, &role.trust_policy)?;
+    }
+    Ok(())
 }
 
 /// Creates the policies with every version, the default one in effect: their ARNs by

@@ -13,6 +13,11 @@ behaviour; the on-disk format is always upgraded automatically.
   allow. Manage it all with `aws iam --endpoint-url …` or any SDK: the IAM API (50
   actions, each authorized with AWS's condition keys) and STS `GetCallerIdentity` are
   served on the S3 endpoint. Access key secrets are stored sealed by the drive's KMS.
+- IAM roles: CreateRole and the rest of AWS's role actions (trust policies, inline and
+  attached policies, tags, permissions boundaries, maximum session length), in
+  `ListEntitiesForPolicy`, `GetAccountSummary` and IAM export and import. A trust policy
+  is checked as AWS checks it, and the users and roles it names are bound to their
+  unique ids.
 - Bucket policies, as AWS has them: Put/Get/DeleteBucketPolicy and
   GetBucketPolicyStatus, checked when stored and applied to every request, the root
   user's included (who can always fix the policy). Unsigned requests get what a policy

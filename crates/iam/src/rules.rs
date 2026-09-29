@@ -8,30 +8,40 @@ pub(crate) const MAX_USERS: usize = 5000;
 pub(crate) const MAX_GROUPS: usize = 300;
 /// Customer-managed policies per account.
 pub(crate) const MAX_POLICIES: usize = 1500;
+/// Roles per account.
+pub(crate) const MAX_ROLES: usize = 1000;
 /// Groups a user can be in.
 pub(crate) const MAX_GROUPS_PER_USER: usize = 10;
-/// Managed policies attached to one user or group.
+/// Managed policies attached to one user, group or role.
 pub(crate) const MAX_ATTACHED: usize = 10;
 /// Access keys per user.
 pub(crate) const MAX_KEYS_PER_USER: usize = 2;
 /// Versions a managed policy keeps.
 pub(crate) const MAX_VERSIONS: usize = 5;
-/// Tags on one user.
+/// Tags on one user, role or policy.
 pub(crate) const MAX_TAGS: usize = 50;
 
-/// The longest user name.
+/// The longest user or role name.
 pub(crate) const USER_NAME: usize = 64;
 /// The longest group, policy or inline policy name.
 pub(crate) const OTHER_NAME: usize = 128;
-/// The longest managed policy description.
+/// The longest managed policy or role description.
 pub(crate) const DESCRIPTION: usize = 1000;
 
 /// Policy sizes count characters other than white space.
 pub(crate) const USER_INLINE_TOTAL: usize = 2048;
 /// All of a group's inline policies together.
 pub(crate) const GROUP_INLINE_TOTAL: usize = 5120;
+/// All of a role's inline policies together.
+pub(crate) const ROLE_INLINE_TOTAL: usize = 10_240;
 /// One managed policy version.
 pub(crate) const MANAGED_SIZE: usize = 6144;
+/// A role's trust policy.
+pub(crate) const TRUST_SIZE: usize = 2048;
+
+/// The shortest and longest session a role may be set to allow, in seconds; a role
+/// allows one hour unless set otherwise.
+pub(crate) const ROLE_SESSION: std::ops::RangeInclusive<u32> = 3600..=43_200;
 /// The longest document accepted at all, white space included.
 const DOCUMENT_LENGTH: usize = 131_072;
 
@@ -135,8 +145,8 @@ pub(crate) fn document(text: &str) -> Result<usize> {
     Ok(size)
 }
 
-/// A managed policy's description: at most 1000 of tab, line breaks and U+0020–U+00FF,
-/// as AWS allows.
+/// A managed policy's or role's description: at most 1000 of tab, line breaks and
+/// U+0020–U+00FF, as AWS allows.
 pub(crate) fn description(text: &str) -> Result<()> {
     let ok = text.chars().count() <= DESCRIPTION
         && text
@@ -148,6 +158,19 @@ pub(crate) fn description(text: &str) -> Result<()> {
         Err(IamError::InvalidInput(format!(
             "a description is at most {DESCRIPTION} characters, of tab, line breaks and \
              U+0020 to U+00FF"
+        )))
+    }
+}
+
+/// A role's longest session (`MaxSessionDuration`), in seconds.
+pub(crate) fn max_session(seconds: u32) -> Result<u32> {
+    if ROLE_SESSION.contains(&seconds) {
+        Ok(seconds)
+    } else {
+        Err(IamError::InvalidInput(format!(
+            "MaxSessionDuration is {} to {} seconds (1 to 12 hours), not {seconds}",
+            ROLE_SESSION.start(),
+            ROLE_SESSION.end()
         )))
     }
 }
@@ -235,6 +258,16 @@ mod tests {
         }
         for bad in ["日本", "\u{0}", "\u{7F}x\u{100}", &"x".repeat(1001)] {
             assert!(description(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn max_sessions() {
+        for good in [3600, 7200, 43_200] {
+            assert_eq!(max_session(good).unwrap(), good);
+        }
+        for bad in [0, 900, 3599, 43_201] {
+            assert!(max_session(bad).is_err(), "{bad}");
         }
     }
 

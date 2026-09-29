@@ -80,6 +80,26 @@ pub(crate) const MIGRATION: &str = "
         created_ms INTEGER NOT NULL
     ) WITHOUT ROWID;";
 
+/// Roles: migration 5 (inline policies and attachments name them by id, like users).
+pub(crate) const ROLES_MIGRATION: &str = "
+    CREATE TABLE iam_roles (
+        id          TEXT    PRIMARY KEY,
+        name        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+        path        TEXT    NOT NULL,
+        description TEXT    NOT NULL,
+        trust       TEXT    NOT NULL,
+        principals  TEXT    NOT NULL,
+        max_session INTEGER NOT NULL,
+        created_ms  INTEGER NOT NULL,
+        boundary    TEXT    REFERENCES iam_policies (id)
+    ) WITHOUT ROWID;
+    CREATE TABLE iam_role_tags (
+        role_id TEXT NOT NULL REFERENCES iam_roles (id) ON DELETE CASCADE,
+        key     TEXT NOT NULL COLLATE NOCASE,
+        value   TEXT NOT NULL,
+        PRIMARY KEY (role_id, key)
+    ) WITHOUT ROWID;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -89,6 +109,30 @@ pub struct UserRow {
     pub name: String,
     /// Its path (`/` or `/…/`).
     pub path: String,
+    /// When it was created, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+    /// The id of the managed policy that is its permissions boundary.
+    pub boundary: Option<String>,
+}
+
+/// A role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleRow {
+    /// Its unique id.
+    pub id: String,
+    /// Its name, unique without case.
+    pub name: String,
+    /// Its path.
+    pub path: String,
+    /// Its description.
+    pub description: String,
+    /// Its trust policy (who may assume it), as given.
+    pub trust: String,
+    /// The users and roles its trust policy names, bound to their unique ids when it was
+    /// set (JSON, which `teifs-iam` owns): one deleted and made again isn't trusted.
+    pub principals: String,
+    /// The longest session it allows, in seconds.
+    pub max_session: u32,
     /// When it was created, in milliseconds since the Unix epoch.
     pub created_ms: i64,
     /// The id of the managed policy that is its permissions boundary.
@@ -192,6 +236,10 @@ pub struct IamRows {
     pub groups: Vec<GroupRow>,
     /// Group memberships: (group id, user id).
     pub members: Vec<(String, String)>,
+    /// Roles.
+    pub roles: Vec<RoleRow>,
+    /// Roles' tags: (role id, key, value).
+    pub role_tags: Vec<(String, String, String)>,
     /// Managed policies.
     pub policies: Vec<PolicyRow>,
     /// Their tags: (policy id, key, value); keys are case sensitive.
@@ -228,6 +276,14 @@ pub enum IamWrite {
     AddMember(String, String),
     /// Removes a user from a group.
     RemoveMember(String, String),
+    /// Adds or updates a role.
+    PutRole(RoleRow),
+    /// Deletes a role (and its tags).
+    DeleteRole(String),
+    /// Sets a role's tag (keys compare without case; the given case is kept).
+    PutRoleTag(String, String, String),
+    /// Removes a role's tag.
+    DeleteRoleTag(String, String),
     /// Adds or updates a managed policy.
     PutPolicy(PolicyRow),
     /// Deletes a managed policy and its versions.
@@ -289,6 +345,10 @@ impl System {
                 .collect::<rusqlite::Result<_>>()?,
             members: all("SELECT group_id, user_id FROM iam_members ORDER BY group_id, user_id")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+            roles: roles(conn)?,
+            role_tags: all("SELECT role_id, key, value FROM iam_role_tags ORDER BY role_id, key")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?,
             policies: all(
                 "SELECT id, name, path, description, default_version, latest_version, created_ms,
@@ -365,6 +425,29 @@ impl System {
     }
 }
 
+fn roles(conn: &rusqlite::Connection) -> Result<Vec<RoleRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT id, name, path, description, trust, principals, max_session, created_ms,
+               boundary
+             FROM iam_roles ORDER BY id",
+        )?
+        .query_map([], |r| {
+            Ok(RoleRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                path: r.get(2)?,
+                description: r.get(3)?,
+                trust: r.get(4)?,
+                principals: r.get(5)?,
+                max_session: r.get(6)?,
+                created_ms: r.get(7)?,
+                boundary: r.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 #[allow(clippy::too_many_lines, reason = "one statement per kind of write")]
 fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
     let run = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Result<()> {
@@ -406,6 +489,36 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::RemoveMember(group, user) => run(
             "DELETE FROM iam_members WHERE group_id = ?1 AND user_id = ?2",
             params![group, user],
+        ),
+        IamWrite::PutRole(r) => run(
+            "INSERT INTO iam_roles
+               (id, name, path, description, trust, principals, max_session, created_ms,
+                boundary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (id) DO UPDATE SET description = excluded.description,
+               trust = excluded.trust, principals = excluded.principals,
+               max_session = excluded.max_session, boundary = excluded.boundary",
+            params![
+                r.id,
+                r.name,
+                r.path,
+                r.description,
+                r.trust,
+                r.principals,
+                r.max_session,
+                r.created_ms,
+                r.boundary
+            ],
+        ),
+        IamWrite::DeleteRole(id) => run("DELETE FROM iam_roles WHERE id = ?1", params![id]),
+        IamWrite::PutRoleTag(role, key, value) => run(
+            "INSERT INTO iam_role_tags (role_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (role_id, key) DO UPDATE SET key = excluded.key, value = excluded.value",
+            params![role, key, value],
+        ),
+        IamWrite::DeleteRoleTag(role, key) => run(
+            "DELETE FROM iam_role_tags WHERE role_id = ?1 AND key = ?2",
+            params![role, key],
         ),
         IamWrite::PutPolicy(p) => run(
             "INSERT INTO iam_policies
@@ -589,6 +702,71 @@ mod tests {
             system.iam_rows().unwrap().user_tags.is_empty(),
             "tags go with the user"
         );
+    }
+
+    #[test]
+    fn roles_round_trip_and_keep_their_tags_on_update() {
+        let (_dir, mut system) = open();
+        let role = RoleRow {
+            id: "AROA1".into(),
+            name: "reader".into(),
+            path: "/svc/".into(),
+            description: "reads".into(),
+            trust: "{}".into(),
+            principals: "{}".into(),
+            max_session: 3600,
+            created_ms: 7,
+            boundary: Some("P1".into()),
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutPolicy(policy("P1")),
+                IamWrite::PutRole(role.clone()),
+                IamWrite::PutRoleTag("AROA1".into(), "Team".into(), "a".into()),
+                IamWrite::PutInline(InlineRow {
+                    owner: "AROA1".into(),
+                    name: "read".into(),
+                    document: "{}".into(),
+                }),
+                IamWrite::Attach("AROA1".into(), "P1".into()),
+            ])
+            .unwrap();
+        let changed = RoleRow {
+            description: "reads more".into(),
+            trust: "{\"x\":1}".into(),
+            principals: "{\"a\":\"b\"}".into(),
+            max_session: 43200,
+            boundary: None,
+            ..role.clone()
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutRole(changed.clone()),
+                IamWrite::PutRoleTag("AROA1".into(), "team".into(), "b".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(rows.roles, [changed]);
+        assert_eq!(
+            rows.role_tags,
+            [("AROA1".into(), "team".into(), "b".into())]
+        );
+        assert_eq!(rows.attached, [("AROA1".into(), "P1".into())]);
+        assert!(
+            system
+                .iam_apply(&[IamWrite::PutRole(RoleRow {
+                    id: "AROA2".into(),
+                    name: "READER".into(),
+                    ..role
+                })])
+                .is_err(),
+            "role names are unique without case"
+        );
+        system
+            .iam_apply(&[IamWrite::DeleteRole("AROA1".into())])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert!(rows.roles.is_empty() && rows.role_tags.is_empty());
     }
 
     #[test]

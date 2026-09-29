@@ -12,6 +12,7 @@ pub(crate) enum Kind {
     User,
     Group,
     Policy,
+    Role,
 }
 
 /// A new unique id: the kind's prefix and 17 random base32 characters (21 in all).
@@ -20,6 +21,7 @@ pub(crate) fn unique(kind: Kind) -> String {
         Kind::User => "AIDA",
         Kind::Group => "AGPA",
         Kind::Policy => "ANPA",
+        Kind::Role => "AROA",
     };
     format!("{prefix}{}", base32(17))
 }
@@ -69,6 +71,7 @@ mod tests {
         assert!(id.bytes().all(|b| BASE32.contains(&b)));
         assert!(unique(Kind::Group).starts_with("AGPA"));
         assert!(unique(Kind::Policy).starts_with("ANPA"));
+        assert!(unique(Kind::Role).starts_with("AROA"));
         let key = access_key();
         assert_eq!(key.len(), 20);
         assert!(key.starts_with("TKIA"));

@@ -1,5 +1,7 @@
 //! IAM's operations, with AWS's rules and messages.
 
+mod roles;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use teifs_meta::{
@@ -13,8 +15,10 @@ use crate::{
         self, MAX_ATTACHED, MAX_GROUPS, MAX_GROUPS_PER_USER, MAX_KEYS_PER_USER, MAX_POLICIES,
         MAX_TAGS, MAX_USERS, MAX_VERSIONS,
     },
-    state::{Document, Group, Key, Managed, State, User, Version},
+    state::{Document, Group, Key, Managed, Role, State, User, Version},
 };
+
+pub use roles::{NewRole, RoleInfo};
 
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +139,8 @@ pub enum Owner<'a> {
     User(&'a str),
     /// A group.
     Group(&'a str),
+    /// A role.
+    Role(&'a str),
 }
 
 fn user_info(state: &State, user: &User) -> UserInfo {
@@ -353,6 +359,7 @@ impl Draft<'_> {
             let id = ids::unique(kind);
             if !self.state.users.contains_key(&id)
                 && !self.state.groups.contains_key(&id)
+                && !self.state.roles.contains_key(&id)
                 && !self.state.policies.contains_key(&id)
             {
                 return id;
@@ -365,6 +372,7 @@ impl Draft<'_> {
         Ok(match owner {
             Owner::User(name) => OwnerRef::User(self.user(name)?),
             Owner::Group(name) => OwnerRef::Group(self.group(name)?),
+            Owner::Role(name) => OwnerRef::Role(self.role(name)?),
         })
     }
 }
@@ -603,10 +611,10 @@ impl Draft<'_> {
         if owner.attached().len() >= MAX_ATTACHED {
             return Err(IamError::LimitExceeded(format!(
                 "Cannot exceed quota for PoliciesPer{}: {MAX_ATTACHED}",
-                if owner.kind() == "user" {
-                    "User"
-                } else {
-                    "Group"
+                match owner {
+                    OwnerRef::User(_) => "User",
+                    OwnerRef::Group(_) => "Group",
+                    OwnerRef::Role(_) => "Role",
                 }
             )));
         }
@@ -657,6 +665,7 @@ impl Draft<'_> {
 enum OwnerRef {
     User(Arc<User>),
     Group(Arc<Group>),
+    Role(Arc<Role>),
 }
 
 impl OwnerRef {
@@ -664,6 +673,7 @@ impl OwnerRef {
         match self {
             Self::User(u) => &u.id,
             Self::Group(g) => &g.id,
+            Self::Role(r) => &r.id,
         }
     }
 
@@ -671,6 +681,7 @@ impl OwnerRef {
         match self {
             Self::User(_) => "user",
             Self::Group(_) => "group",
+            Self::Role(_) => "role",
         }
     }
 
@@ -678,6 +689,7 @@ impl OwnerRef {
         match self {
             Self::User(u) => &u.name,
             Self::Group(g) => &g.name,
+            Self::Role(r) => &r.name,
         }
     }
 
@@ -685,6 +697,7 @@ impl OwnerRef {
         match self {
             Self::User(u) => &u.inline,
             Self::Group(g) => &g.inline,
+            Self::Role(r) => &r.inline,
         }
     }
 
@@ -692,6 +705,7 @@ impl OwnerRef {
         match self {
             Self::User(u) => &u.attached,
             Self::Group(g) => &g.attached,
+            Self::Role(r) => &r.attached,
         }
     }
 
@@ -699,6 +713,7 @@ impl OwnerRef {
         match self {
             Self::User(_) => rules::USER_INLINE_TOTAL,
             Self::Group(_) => rules::GROUP_INLINE_TOTAL,
+            Self::Role(_) => rules::ROLE_INLINE_TOTAL,
         }
     }
 
@@ -718,6 +733,11 @@ impl OwnerRef {
                 let mut g = Arc::unwrap_or_clone(g);
                 f(&mut g.inline, &mut g.attached);
                 draft.state.groups.insert(g.id.clone(), Arc::new(g));
+            }
+            Self::Role(r) => {
+                let mut r = Arc::unwrap_or_clone(r);
+                f(&mut r.inline, &mut r.attached);
+                draft.state.roles.insert(r.id.clone(), Arc::new(r));
             }
         }
     }
@@ -1305,6 +1325,7 @@ impl Iam {
             let ids = match owner {
                 Owner::User(name) => &s.user_named(name)?.attached,
                 Owner::Group(name) => &s.group_named(name)?.attached,
+                Owner::Role(name) => &s.role_named(name)?.attached,
             };
             let policies = ids
                 .iter()
@@ -1319,8 +1340,12 @@ impl Iam {
         })
     }
 
-    /// The groups and users a managed policy is attached to (`ListEntitiesForPolicy`).
-    pub fn entities_for_policy(&self, arn: &str) -> Result<(Vec<GroupInfo>, Vec<UserInfo>)> {
+    /// The groups, users and roles a managed policy is attached to
+    /// (`ListEntitiesForPolicy`).
+    pub fn entities_for_policy(
+        &self,
+        arn: &str,
+    ) -> Result<(Vec<GroupInfo>, Vec<UserInfo>, Vec<RoleInfo>)> {
         self.read(|s| {
             let id = &s.policy_by_arn(arn)?.row.id;
             let groups = s
@@ -1335,9 +1360,16 @@ impl Iam {
                 .filter(|u| u.attached.contains(id))
                 .map(|u| user_info(s, u))
                 .collect();
+            let roles = s
+                .roles
+                .values()
+                .filter(|r| r.attached.contains(id))
+                .map(|r| roles::role_info(s, r))
+                .collect();
             Ok((
                 by_name(groups, |g: &GroupInfo| &g.name),
                 by_name(users, |u: &UserInfo| &u.name),
+                by_name(roles, |r: &RoleInfo| &r.name),
             ))
         })
     }
@@ -1368,6 +1400,7 @@ impl Iam {
             let (inline, kind) = match owner {
                 Owner::User(n) => (&s.user_named(n)?.inline, "user"),
                 Owner::Group(n) => (&s.group_named(n)?.inline, "group"),
+                Owner::Role(n) => (&s.role_named(n)?.inline, "role"),
             };
             inline.get(name).map(|d| d.text.to_string()).ok_or_else(|| {
                 IamError::NoSuchEntity(format!(
@@ -1384,6 +1417,7 @@ impl Iam {
             let inline = match owner {
                 Owner::User(n) => &s.user_named(n)?.inline,
                 Owner::Group(n) => &s.group_named(n)?.inline,
+                Owner::Role(n) => &s.role_named(n)?.inline,
             };
             Ok(inline.keys().cloned().collect())
         })
