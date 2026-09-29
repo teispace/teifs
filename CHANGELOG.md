@@ -30,6 +30,11 @@ behaviour; the on-disk format is always upgraded automatically.
   is lifted; governance gives way only to a caller allowed
   `s3:BypassGovernanceRetention` who asks. Versioning can't be suspended under Object
   Lock. All 39 Object Lock tests of the s3-tests suite pass.
+- Object Lock from the command line, with mc's names: `mb --with-lock`,
+  `teifs retention set|clear|info` (for an object, every object under a prefix with
+  `-r`, or a bucket's default with `--default`), `teifs legalhold set|clear|info`, and
+  `rm --bypass` for governance-locked versions. `stat` shows an object's retention and
+  legal hold and a bucket's Object Lock.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

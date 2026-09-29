@@ -43,7 +43,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
             target,
             layout,
             ignore_existing,
-        } => mb(remote(&target, "mb")?, layout, ignore_existing).await,
+            with_lock,
+        } => mb(remote(&target, "mb")?, layout, ignore_existing, with_lock).await,
         Command::Rb { target, force } => rb(remote(&target, "rb")?, force).await,
         Command::Cp(args) => super::copy::copy(args, false, &aliases).await,
         Command::Mv(args) => super::copy::copy(args, true, &aliases).await,
@@ -53,12 +54,20 @@ pub async fn run(command: Command) -> Result<(), Error> {
             force,
             version_id,
             versions,
+            bypass,
         } => {
+            if bypass && version_id.is_none() && !versions {
+                return Err(Error::usage(
+                    "--bypass removes locked versions: use it with --version-id or --versions",
+                ));
+            }
             for target in &targets {
                 let target = remote(target, "rm")?;
                 match (&version_id, versions) {
-                    (Some(id), _) => super::versions::rm_version(target, id).await?,
-                    (None, true) => super::versions::rm_versions(target, recursive, force).await?,
+                    (Some(id), _) => super::versions::rm_version(target, id, bypass).await?,
+                    (None, true) => {
+                        super::versions::rm_versions(target, recursive, force, bypass).await?;
+                    }
                     (None, false) => rm(target, recursive, force).await?,
                 }
             }
@@ -77,6 +86,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
             stat(remote(&target, "stat")?, version_id.as_deref()).await
         }
         Command::Version { action } => super::versions::versioning(action, &aliases).await,
+        Command::Retention { action } => super::lock::retention(action, &aliases).await,
+        Command::Legalhold { action } => super::lock::legal_hold(action, &aliases).await,
         Command::Presign {
             target,
             expires,
@@ -458,6 +469,7 @@ async fn mb(
     remote: Remote,
     layout: Option<crate::LayoutArg>,
     ignore_existing: bool,
+    with_lock: bool,
 ) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let name = remote.display("");
@@ -470,7 +482,8 @@ async fn mb(
     let request = client
         .create_bucket()
         .bucket(bucket)
-        .set_create_bucket_configuration(configuration);
+        .set_create_bucket_configuration(configuration)
+        .set_object_lock_enabled_for_bucket(with_lock.then_some(true));
     let result = match layout {
         Some(layout) => {
             let value = match layout {
@@ -533,7 +546,7 @@ async fn rb(remote: Remote, force: bool) -> Result<(), Error> {
                 .map(|e| (e.relative, None))
                 .collect(),
         };
-        delete_keys(&client, bucket, &name, keys).await?;
+        delete_keys(&client, bucket, &name, keys, false).await?;
     }
     client
         .delete_bucket()
@@ -563,19 +576,11 @@ async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
     let client = remote.alias.client();
     let name = remote.display(&remote.key);
     if recursive {
-        // The key itself and what's "in" it (`photos` and `photos/…`, not `photos2`).
-        let keys: Vec<(String, Option<String>)> =
-            listing::remote(&client, bucket, &remote.key, &name)
-                .await?
-                .into_iter()
-                .filter(|e| {
-                    remote.key.is_empty()
-                        || remote.key.ends_with('/')
-                        || e.relative.is_empty()
-                        || e.relative.starts_with('/')
-                })
-                .map(|e| (format!("{}{}", remote.key, e.relative), None))
-                .collect();
+        let keys: Vec<(String, Option<String>)> = keys_under(&client, bucket, &remote, &name)
+            .await?
+            .into_iter()
+            .map(|key| (key, None))
+            .collect();
         if keys.is_empty() {
             return Err(Error::new(Kind::NotFound, format!("nothing at {name}")));
         }
@@ -585,7 +590,7 @@ async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
             ui::note("Nothing was deleted.");
             return Ok(());
         }
-        delete_keys(&client, bucket, &name, keys).await?;
+        delete_keys(&client, bucket, &name, keys, false).await?;
         ui::done(
             format!("Removed {count} object{} under {name}", plural(count)),
             || json!({"type": "remove", "prefix": name, "count": count}),
@@ -615,13 +620,35 @@ async fn rm(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
+/// The keys of the objects at `remote`'s key and "in" it (`photos` and `photos/…`, not
+/// `photos2`); every key when it names none.
+pub(super) async fn keys_under(
+    client: &Client,
+    bucket: &str,
+    remote: &Remote,
+    name: &str,
+) -> Result<Vec<String>, Error> {
+    Ok(listing::remote(client, bucket, &remote.key, name)
+        .await?
+        .into_iter()
+        .filter(|e| {
+            remote.key.is_empty()
+                || remote.key.ends_with('/')
+                || e.relative.is_empty()
+                || e.relative.starts_with('/')
+        })
+        .map(|e| format!("{}{}", remote.key, e.relative))
+        .collect())
+}
+
 /// Deletes `keys` (each with a version to remove for good, or `None`: the key) in
-/// batches, a few at once.
+/// batches, a few at once; `bypass` removes versions a governance retention keeps.
 pub(super) async fn delete_keys(
     client: &Client,
     bucket: &str,
     name: &str,
     keys: Vec<(String, Option<String>)>,
+    bypass: bool,
 ) -> Result<(), Error> {
     let batches: Vec<Vec<(String, Option<String>)>> =
         keys.chunks(DELETE_BATCH).map(<[_]>::to_vec).collect();
@@ -646,6 +673,7 @@ pub(super) async fn delete_keys(
                 .delete_objects()
                 .bucket(bucket)
                 .delete(delete)
+                .set_bypass_governance_retention(bypass.then_some(true))
                 .send()
                 .await
                 .map_err(|e| Error::s3(format!("can't delete in {name}"), &e))?;
@@ -719,11 +747,13 @@ async fn stat(remote: Remote, version_id: Option<&str>) -> Result<(), Error> {
             .to_owned();
         // A service without versioning just doesn't say.
         let versioning = super::versions::status(&client, bucket).await.ok();
+        let lock = super::lock::bucket_lock(&client, bucket).await;
         let mut fields = vec![("Bucket", name.clone()), ("Region", region.clone())];
         fields.extend(versioning.map(|v| ("Versioning", v.to_owned())));
+        fields.extend(lock.clone().map(|l| ("Object Lock", l)));
         ui::details(
             &fields,
-            || json!({"type": "bucket", "name": name, "region": region, "versioning": versioning}),
+            || json!({"type": "bucket", "name": name, "region": region, "versioning": versioning, "objectLock": lock}),
         );
         return Ok(());
     }
@@ -795,6 +825,14 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
         ("SHA1", text(out.checksum_sha1())),
         ("SHA256", text(out.checksum_sha256())),
     ];
+    let retention = out.object_lock_mode().map(|mode| {
+        super::lock::retention_text(mode.as_str(), out.object_lock_retain_until_date())
+    });
+    let legal_hold = out
+        .object_lock_legal_hold_status()
+        .map(|s| s.as_str().to_ascii_lowercase());
+    fields.extend(retention.clone().map(|r| ("Retention", r)));
+    fields.extend(legal_hold.clone().map(|h| ("Legal hold", h)));
     fields.extend(
         metadata
             .iter()
@@ -823,6 +861,14 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
                 "sha256": out.checksum_sha256(),
             },
             "metadata": metadata,
+            "retention": out.object_lock_mode().map(|mode| json!({
+                "mode": mode.as_str(),
+                "retainUntil": out
+                    .object_lock_retain_until_date()
+                    .and_then(|t| std::time::SystemTime::try_from(*t).ok())
+                    .map(rfc3339),
+            })),
+            "legalHold": legal_hold,
         })
     });
 }

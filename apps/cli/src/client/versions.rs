@@ -95,8 +95,13 @@ fn version_record(v: &Version) -> serde_json::Value {
     })
 }
 
-/// Removes one version of a key for good.
-pub(super) async fn rm_version(remote: Remote, version_id: &str) -> Result<(), Error> {
+/// Removes one version of a key for good; `bypass` removes one a governance retention
+/// keeps.
+pub(super) async fn rm_version(
+    remote: Remote,
+    version_id: &str,
+    bypass: bool,
+) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let name = remote.display(&remote.key);
     if remote.key.is_empty() {
@@ -125,6 +130,7 @@ pub(super) async fn rm_version(remote: Remote, version_id: &str) -> Result<(), E
         .bucket(bucket)
         .key(&remote.key)
         .version_id(version_id)
+        .set_bypass_governance_retention(bypass.then_some(true))
         .send()
         .await
         .map_err(|e| Error::s3(format!("can't remove version {version_id} of {name}"), &e))?;
@@ -136,8 +142,14 @@ pub(super) async fn rm_version(remote: Remote, version_id: &str) -> Result<(), E
 }
 
 /// Removes every version and delete marker of a key (with `recursive`, of every key
-/// under it) for good, after asking unless `force`.
-pub(super) async fn rm_versions(remote: Remote, recursive: bool, force: bool) -> Result<(), Error> {
+/// under it) for good, after asking unless `force`; `bypass` removes ones a governance
+/// retention keeps.
+pub(super) async fn rm_versions(
+    remote: Remote,
+    recursive: bool,
+    force: bool,
+    bypass: bool,
+) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let name = remote.display(&remote.key);
     if remote.key.is_empty() && !recursive {
@@ -174,7 +186,7 @@ pub(super) async fn rm_versions(remote: Remote, recursive: bool, force: bool) ->
         return Ok(());
     }
     let pairs = versions.into_iter().map(|v| (v.key, Some(v.id))).collect();
-    delete_keys(&client, bucket, &name, pairs).await?;
+    delete_keys(&client, bucket, &name, pairs, bypass).await?;
     ui::done(
         format!("Removed {count} version{} at {name}", plural(count)),
         || json!({"type": "remove", "prefix": name, "versions": count}),

@@ -877,3 +877,120 @@ async fn older_versions_are_read_and_copied(cli: &Client, layout: &str, v1: &str
     cli.ok(&["rm", "--versions", "--force", &at("big")]).await;
     cli.ok(&["rm", "--versions", "--force", &across]).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn objects_are_locked_held_and_released() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    fs::write(cli.path("one.txt"), "one").unwrap();
+    for layout in ["object", "folder"] {
+        let bucket = format!("t/l-{layout}");
+        let at = |key: &str| format!("{bucket}/{key}");
+        cli.ok(&["mb", "--with-lock", &bucket, "--layout", layout])
+            .await;
+        let stat = records(&cli.ok(&["--json", "stat", &bucket]).await);
+        assert_eq!(stat[0]["versioning"], "enabled", "{layout}");
+        assert_eq!(stat[0]["objectLock"], "on, no default retention");
+
+        default_retention_is_set_shown_and_cleared(&cli, &bucket, layout).await;
+
+        // A governance retention gives way only to --bypass.
+        let listed = records(&cli.ok(&["--json", "ls", "--versions", &at("a.txt")]).await);
+        let v1 = listed[0]["versionId"].as_str().unwrap().to_owned();
+        cli.fails(&["rm", "--version-id", &v1, &at("a.txt")], 4)
+            .await;
+        cli.fails(&["retention", "clear", &at("a.txt")], 4).await;
+        cli.ok(&["rm", "--version-id", &v1, "--bypass", &at("a.txt")])
+            .await;
+        cli.fails(&["rm", "--bypass", &at("a.txt")], 2).await;
+
+        // Compliance and a legal hold, on every object under a prefix.
+        cli.ok(&["cp", "one.txt", &at("docs/b.txt")]).await;
+        cli.ok(&["cp", "one.txt", &at("docs/c.txt")]).await;
+        let out = cli
+            .ok(&["retention", "set", "-r", "compliance", "1d", &at("docs/")])
+            .await;
+        assert!(
+            out.contains("docs/b.txt: COMPLIANCE until") && out.contains("docs/c.txt"),
+            "{out}"
+        );
+        cli.ok(&["legalhold", "set", &at("docs/b.txt")]).await;
+        let stat = records(&cli.ok(&["--json", "stat", &at("docs/b.txt")]).await);
+        assert_eq!(stat[0]["retention"]["mode"], "COMPLIANCE", "{layout}");
+        assert_eq!(stat[0]["legalHold"], "on");
+        let info = records(
+            &cli.ok(&["--json", "legalhold", "info", &at("docs/c.txt")])
+                .await,
+        );
+        assert_eq!(info[0]["on"], false);
+        let err = cli
+            .fails(
+                &[
+                    "rm",
+                    "--versions",
+                    "-r",
+                    "--force",
+                    "--bypass",
+                    &at("docs/"),
+                ],
+                1,
+            )
+            .await;
+        assert!(err.contains("can't delete 2 objects"), "{err}");
+        cli.ok(&["legalhold", "clear", &at("docs/b.txt")]).await;
+        let info = records(
+            &cli.ok(&["--json", "legalhold", "info", &at("docs/b.txt")])
+                .await,
+        );
+        assert_eq!(info[0]["on"], false);
+
+        // Every version of a key, governance-locked, goes with --bypass only.
+        cli.ok(&["cp", "one.txt", &at("g.txt")]).await;
+        cli.ok(&["retention", "set", "governance", "1d", &at("g.txt")])
+            .await;
+        cli.fails(&["rm", "--versions", "--force", &at("g.txt")], 1)
+            .await;
+        cli.ok(&["rm", "--versions", "--force", "--bypass", &at("g.txt")])
+            .await;
+
+        // Versioning can't be suspended under Object Lock.
+        cli.fails(&["version", "suspend", &bucket], 6).await;
+    }
+    // A bucket without Object Lock can't take a default until versioning is on.
+    cli.ok(&["mb", "t/plain-lock"]).await;
+    let err = cli
+        .fails(
+            &[
+                "retention",
+                "set",
+                "--default",
+                "compliance",
+                "1y",
+                "t/plain-lock",
+            ],
+            6,
+        )
+        .await;
+    assert!(err.contains("version enable"), "{err}");
+    cli.fails(
+        &["retention", "set", "governance", "0d", "t/plain-lock/a"],
+        2,
+    )
+    .await;
+}
+
+async fn default_retention_is_set_shown_and_cleared(cli: &Client, bucket: &str, layout: &str) {
+    let at = |key: &str| format!("{bucket}/{key}");
+    // A default for new objects, shown and removed again.
+    cli.ok(&["retention", "set", "--default", "governance", "30d", bucket])
+        .await;
+    let info = records(
+        &cli.ok(&["--json", "retention", "info", "--default", bucket])
+            .await,
+    );
+    assert_eq!(info[0]["status"], "on, new objects kept GOVERNANCE for 30d");
+    cli.ok(&["cp", "one.txt", &at("a.txt")]).await;
+    let info = records(&cli.ok(&["--json", "retention", "info", &at("a.txt")]).await);
+    assert_eq!(info[0]["mode"], "GOVERNANCE", "{layout}");
+    cli.ok(&["retention", "clear", "--default", bucket]).await;
+}

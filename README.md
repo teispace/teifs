@@ -198,12 +198,14 @@ location / {
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
 | `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys, and a CA to trust with `--ca-cert` (`TEIFS_ALIAS_NAME=https://KEY:SECRET[:TOKEN]@host` for one run) |
 | `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r] [--versions]` | List buckets or objects; `--versions` shows every version and delete marker |
-| `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `rb --force`) |
+| `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `mb --with-lock` for Object Lock, `rb --force`) |
 | `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output; `cp --version-id ID` copies an older version |
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way |
-| `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`); `--version-id ID` removes one version for good, `--versions` all of a key's (asks first) |
-| `teifs cat\|stat ALIAS/BUCKET/KEY [--version-id ID]` | Print an object, or show its details (a bucket's too, with its versioning) |
+| `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`); `--version-id ID` removes one version for good, `--versions` all of a key's (asks first); `--bypass` removes governance-locked versions |
+| `teifs cat\|stat ALIAS/BUCKET/KEY [--version-id ID]` | Print an object, or show its details with its retention and legal hold (a bucket's too, with its versioning and Object Lock) |
 | `teifs version enable\|suspend\|info ALIAS/BUCKET` | Turn a bucket's versioning on, suspend it, or show it |
+| `teifs retention set governance\|compliance 30d\|1y TARGET` \| `clear\|info TARGET` | Keep objects from deletion for a time (`-r` for a prefix, `--version-id`, `--bypass` to shorten governance), or with `--default` set a bucket's default retention |
+| `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |

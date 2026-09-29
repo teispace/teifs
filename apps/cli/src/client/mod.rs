@@ -5,6 +5,7 @@ pub(crate) mod alias;
 mod commands;
 mod copy;
 mod listing;
+mod lock;
 mod target;
 mod transfer;
 pub(crate) mod trust;
@@ -48,6 +49,10 @@ pub enum Command {
         /// Succeed if the bucket is already there and yours.
         #[arg(long)]
         ignore_existing: bool,
+        /// With Object Lock, so objects can be kept from deletion for a time or until
+        /// released (this turns versioning on for good).
+        #[arg(long)]
+        with_lock: bool,
     },
     /// Remove a bucket.
     Rb {
@@ -85,6 +90,10 @@ pub enum Command {
         /// `--recursive`, of every key under it). Asks first, unless `--force`.
         #[arg(long)]
         versions: bool,
+        /// With `--version-id` or `--versions`: remove versions that a governance-mode
+        /// retention keeps (needs `s3:BypassGovernanceRetention`).
+        #[arg(long)]
+        bypass: bool,
     },
     /// Print objects to standard output.
     Cat {
@@ -107,6 +116,17 @@ pub enum Command {
     Version {
         #[command(subcommand)]
         action: VersionAction,
+    },
+    /// Keep objects from deletion until a date (Object Lock retention), or set a
+    /// bucket's default retention.
+    Retention {
+        #[command(subcommand)]
+        action: RetentionAction,
+    },
+    /// Keep objects from deletion until released (an Object Lock legal hold).
+    Legalhold {
+        #[command(subcommand)]
+        action: LegalHoldAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
@@ -159,6 +179,96 @@ pub enum VersionAction {
         /// `ALIAS/BUCKET`.
         target: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum RetentionAction {
+    /// Keep objects for a time: governance (only those allowed to bypass it may remove
+    /// them early) or compliance (nobody may). With `--default`, what new objects in the
+    /// bucket get.
+    Set {
+        /// `governance` or `compliance`.
+        #[arg(value_enum)]
+        mode: LockModeArg,
+        /// For how long, from now: days or years, like `30d` or `1y`.
+        #[arg(value_parser = lock::parse_validity)]
+        validity: teifs_store::RetentionPeriod,
+        #[command(flatten)]
+        lock: RetentionArgs,
+    },
+    /// Remove objects' retention (a governance one needs `--bypass`; a compliance one
+    /// can't be removed), or with `--default`, the bucket's default.
+    Clear {
+        #[command(flatten)]
+        lock: RetentionArgs,
+    },
+    /// Show an object's retention, or with `--default`, the bucket's Object Lock.
+    Info {
+        /// `ALIAS/BUCKET/KEY` (`ALIAS/BUCKET` with `--default`).
+        target: String,
+        /// The bucket's default retention instead.
+        #[arg(long)]
+        default: bool,
+        /// A version of the object instead of the current one.
+        #[arg(long, conflicts_with = "default")]
+        version_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LegalHoldAction {
+    /// Place a legal hold: nobody may remove the object until it's lifted.
+    Set {
+        #[command(flatten)]
+        objects: HoldArgs,
+    },
+    /// Lift a legal hold.
+    Clear {
+        #[command(flatten)]
+        objects: HoldArgs,
+    },
+    /// Show whether an object is under a legal hold.
+    Info {
+        /// `ALIAS/BUCKET/KEY`.
+        target: String,
+        /// A version of the object instead of the current one.
+        #[arg(long)]
+        version_id: Option<String>,
+    },
+}
+
+/// An Object Lock retention mode.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum LockModeArg {
+    Governance,
+    Compliance,
+}
+
+/// The objects a lock command changes.
+#[derive(Args)]
+pub struct HoldArgs {
+    /// `ALIAS/BUCKET/KEY` (with `-r`, a prefix).
+    target: String,
+    /// A version of the object instead of the current one.
+    #[arg(long, conflicts_with = "recursive")]
+    version_id: Option<String>,
+    /// Every object under the prefix (their current versions).
+    #[arg(short, long)]
+    recursive: bool,
+}
+
+/// `retention set` and `clear`.
+#[derive(Args)]
+pub struct RetentionArgs {
+    #[command(flatten)]
+    objects: HoldArgs,
+    /// The bucket's default retention instead (give `ALIAS/BUCKET`).
+    #[arg(long, conflicts_with_all = ["version_id", "recursive", "bypass"])]
+    default: bool,
+    /// Shorten or remove a governance-mode retention, or make it compliance (needs
+    /// `s3:BypassGovernanceRetention`).
+    #[arg(long)]
+    bypass: bool,
 }
 
 #[derive(Subcommand)]
