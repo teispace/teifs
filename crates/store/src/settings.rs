@@ -8,6 +8,10 @@ use teifs_types::{Acl, SseMode};
 
 use crate::{Bucket, Inner, Store, StoreError, error::Result, now_ms};
 
+/// Why a bucket's tags can't be replaced or deleted as a whole.
+const ABAC_TAGS: &str = "The bucket's tags decide access (ABAC is enabled): change them with \
+                         TagResource and UntagResource";
+
 /// A bucket's settings. Unknown fields from a newer TeiFS are kept.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +30,10 @@ struct BucketConfig {
     ownership: Option<ObjectOwnership>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     acl: Option<Acl>,
+    /// Whether the bucket's tags decide access (S3's ABAC), which also means only
+    /// `TagResource` and `UntagResource` change them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    abac: bool,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -182,6 +190,8 @@ pub struct BucketAccess {
     pub acl: Option<Acl>,
     /// The account's Block Public Access settings, which apply with the bucket's.
     pub account_public_access_block: Option<PublicAccessBlock>,
+    /// The bucket's tags when they decide access (ABAC is on); none otherwise.
+    pub abac_tags: Option<BTreeMap<String, String>>,
 }
 
 /// How a new bucket starts, beyond its layout. The default is AWS's: ACLs disabled and
@@ -195,6 +205,8 @@ pub struct NewBucket {
     pub block_public_access: bool,
     /// Its ACL (the caller checks it against the ownership); none is private.
     pub acl: Option<Acl>,
+    /// Its tags (checked by the caller); none has none.
+    pub tags: Option<BTreeMap<String, String>>,
 }
 
 impl Default for NewBucket {
@@ -203,6 +215,7 @@ impl Default for NewBucket {
             ownership: Some(ObjectOwnership::default()),
             block_public_access: true,
             acl: None,
+            tags: None,
         }
     }
 }
@@ -214,6 +227,7 @@ fn new_bucket(options: NewBucket) -> BucketConfig {
             .then_some(PublicAccessBlock::ALL),
         ownership: options.ownership,
         acl: options.acl,
+        tags: options.tags,
         ..BucketConfig::default()
     }
 }
@@ -307,6 +321,7 @@ impl Store {
                 ownership: config.ownership,
                 acl: config.acl,
                 account_public_access_block: account_block(&system)?,
+                abac_tags: config.abac.then(|| config.tags.unwrap_or_default()),
             })
         })
         .await
@@ -388,13 +403,64 @@ impl Store {
         .await
     }
 
-    /// Replaces a bucket's tags; `None` removes them.
+    /// Replaces a bucket's tags; `None` removes them. Refused while ABAC is on, when
+    /// only [`Self::tag_bucket`] and [`Self::untag_bucket`] change them, as on AWS.
     pub async fn set_bucket_tags(
         &self,
         bucket: &str,
         tags: Option<BTreeMap<String, String>>,
     ) -> Result<()> {
-        self.change_config(bucket, move |config| config.tags = tags)
+        self.try_change_config(bucket, move |config| {
+            if config.abac {
+                return Err(StoreError::InvalidRequest(ABAC_TAGS));
+            }
+            config.tags = tags;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Adds `tags` to a bucket's, replacing the values of keys it has; refused when that
+    /// would make more than `max` ([`StoreError::TooManyTags`]).
+    pub async fn tag_bucket(
+        &self,
+        bucket: &str,
+        tags: BTreeMap<String, String>,
+        max: usize,
+    ) -> Result<()> {
+        self.try_change_config(bucket, move |config| {
+            let mut all = config.tags.take().unwrap_or_default();
+            all.extend(tags);
+            if all.len() > max {
+                return Err(StoreError::TooManyTags(max));
+            }
+            config.tags = Some(all).filter(|all| !all.is_empty());
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes the tags with these keys from a bucket; keys it doesn't have are ignored.
+    pub async fn untag_bucket(&self, bucket: &str, keys: Vec<String>) -> Result<()> {
+        self.change_config(bucket, move |config| {
+            if let Some(tags) = &mut config.tags {
+                for key in &keys {
+                    tags.remove(key);
+                }
+            }
+            config.tags = config.tags.take().filter(|tags| !tags.is_empty());
+        })
+        .await
+    }
+
+    /// Whether a bucket's tags decide access (S3's ABAC status).
+    pub async fn bucket_abac(&self, bucket: &str) -> Result<bool> {
+        Ok(self.config(bucket).await?.abac)
+    }
+
+    /// Turns a bucket's ABAC on or off.
+    pub async fn set_bucket_abac(&self, bucket: &str, enabled: bool) -> Result<()> {
+        self.change_config(bucket, move |config| config.abac = enabled)
             .await
     }
 

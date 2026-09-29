@@ -184,6 +184,14 @@ from its attributes only then) for object permissions, as AWS maps ACL permissio
 actions, and never past the caller's permissions boundary. Root requests on buckets
 without a policy skip all of it.
 
+A bucket with ABAC on has its tags in its rules (`BucketRules::resource_tags`), and
+`with_resource_tags` adds them to the context (`aws:ResourceTag`, `s3:BucketTag`) of
+each permission on the bucket or its objects, a copy's source with its own bucket's.
+`CreateBucket`'s tags and location are in its body, which s3s parses after `check`, so
+`check` leaves a `Deferred` in the extensions and the `S3Access::create_bucket` hook,
+which s3s runs after parsing, decides it (`s3:TagResource` with the tags as
+`aws:RequestTag`); the handler refuses a request still `Deferred`.
+
 ACLs (`acl.rs`) are read from canned ACLs, `x-amz-grant-*` headers or an
 `AccessControlPolicy` body into `teifs_types::Acl`, whose grantees are the owner and
 S3's groups (a drive is one account). A bucket's ACL and Object Ownership live in its
@@ -210,8 +218,10 @@ checks it again (`routes::signed_body`), so only the body that was signed is act
 Everything that isn't an S3 operation goes through one table (`routes.rs`), because s3s
 hands such requests to a single custom route, before it parses a path as a bucket and
 key and after it checks the signature. Each entry names its method, path and what it
-needs of its caller (`Needs`: an action on a resource, or `PerCall` for the Query APIs,
-where IAM decides the action each call names), with no default, and the table refuses
+needs of its caller (`Needs`: an action on a resource, an action on the bucket the path
+names (`OnBucket`, decided with the bucket's rules and what the call asks for, read
+first), or `PerCall` for the Query APIs, where IAM decides the action each call names),
+with no default; a path ending in `{label}` matches anything in its place, and the table refuses
 unsigned requests and unknown keys and decides the action before any handler runs. A
 test walks `teifs_s3::endpoints()` with an anonymous caller and a user without
 permissions, and another writes the table into `docs/ADMIN_API.md` (each entry's
@@ -219,7 +229,12 @@ permissions, and another writes the table into `docs/ADMIN_API.md` (each entry's
 its `x-amz-account-id` header, answers errors in its own `ErrorResponse` format, and
 serves the account's Block Public Access, kept in `system.db`'s `settings` table: every
 bucket's rules combine it with the bucket's own (`PublicAccessBlock::or`), and changing
-it forgets every bucket's cached rules. The admin API (`admin.rs`) is JSON under
+it forgets every bucket's cached rules. It also serves buckets' tags
+(`/v20180820/tags/{resourceArn}`), whose ARN is encoded in the path: botocore signs the
+path as sent, and AWS's other SDKs encode it again first, which s3s doesn't check, so
+`cors::Service` hands such a request to `control::call_encoded`, which buffers its small
+body and, when the signature doesn't match, tries it once more with the path encoded
+again, marking it so the route decodes it twice. The admin API (`admin.rs`) is JSON under
 `/.teifs/admin/v1/`, which no path-style bucket request can reach (a bucket name can't
 start with a dot); a virtual-hosted-style request (`bucket.domain/.teifs/…`) is that
 bucket's key, so the route compares the `Host` header with the served domains, which

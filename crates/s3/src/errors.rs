@@ -38,6 +38,9 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::EntityTooLarge => crate::caps::too_large(),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
+        StoreError::TooManyTags(max) => {
+            s3_error!(InvalidTag, "The tag set can't have more than {max} tags")
+        }
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
         StoreError::AclsDisabled => crate::acl::not_supported(),
         StoreError::AclGrantsOthers => crate::acl::invalid_with_ownership(),

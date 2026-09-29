@@ -827,6 +827,85 @@ async fn bucket_tags_are_kept_in_its_settings() {
 }
 
 #[tokio::test]
+async fn abac_buckets_change_tags_only_one_by_one() {
+    let (_dir, store) = drive();
+    let tags = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    };
+    let options = NewBucket {
+        tags: Some(tags(&[("team", "a")])),
+        ..NewBucket::default()
+    };
+    for (name, layout) in [("objects", Layout::Object), ("folder", Layout::Folder)] {
+        store
+            .create_bucket_with(name, layout, options.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.bucket_tags(name).await.unwrap(),
+            Some(tags(&[("team", "a")]))
+        );
+        // Off, the tags decide nothing, and are replaced as a whole.
+        assert!(!store.bucket_abac(name).await.unwrap());
+        assert_eq!(store.bucket_access(name).await.unwrap().abac_tags, None);
+        store
+            .set_bucket_tags(name, Some(tags(&[("team", "b")])))
+            .await
+            .unwrap();
+
+        store.set_bucket_abac(name, true).await.unwrap();
+        assert!(store.bucket_abac(name).await.unwrap());
+        assert_eq!(
+            store.bucket_access(name).await.unwrap().abac_tags,
+            Some(tags(&[("team", "b")]))
+        );
+        for replace in [Some(tags(&[("team", "c")])), None] {
+            assert!(matches!(
+                store.set_bucket_tags(name, replace).await,
+                Err(StoreError::InvalidRequest(_))
+            ));
+        }
+        // One by one: added, replaced, removed, within the limit.
+        store
+            .tag_bucket(name, tags(&[("team", "c"), ("env", "prod")]), 2)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.tag_bucket(name, tags(&[("cost", "x")]), 2).await,
+            Err(StoreError::TooManyTags(2))
+        ));
+        assert_eq!(
+            store.bucket_tags(name).await.unwrap(),
+            Some(tags(&[("env", "prod"), ("team", "c")]))
+        );
+        store
+            .untag_bucket(name, vec!["team".into(), "missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.bucket_access(name).await.unwrap().abac_tags,
+            Some(tags(&[("env", "prod")]))
+        );
+        store.untag_bucket(name, vec!["env".into()]).await.unwrap();
+        assert_eq!(store.bucket_tags(name).await.unwrap(), None);
+        // With no tags, ABAC still decides: with none.
+        assert_eq!(
+            store.bucket_access(name).await.unwrap().abac_tags,
+            Some(BTreeMap::new())
+        );
+        store.set_bucket_abac(name, false).await.unwrap();
+        store.set_bucket_tags(name, None).await.unwrap();
+    }
+    assert!(matches!(
+        store.set_bucket_abac("nope", true).await,
+        Err(StoreError::NoSuchBucket)
+    ));
+}
+
+#[tokio::test]
 async fn new_buckets_block_public_access() {
     let (dir, store) = drive();
     let blocked = BucketAccess {
@@ -973,6 +1052,7 @@ async fn ownership_and_bucket_acls_guard_each_other() {
         ownership: None,
         block_public_access: false,
         acl: Some(public),
+        tags: None,
     };
     store
         .create_bucket_with("writer", Layout::Folder, options)

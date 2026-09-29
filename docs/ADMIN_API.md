@@ -25,8 +25,13 @@ printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
 
 Unsigned requests and keys IAM doesn't know are refused before any endpoint runs. The
 root user may call everything; an IAM user or role session needs the endpoint's action
-in its policies (the resource is `*`), and endpoints marked *root user* are the root
-user's alone, whatever policies say. Credentials from `GetSessionToken` and federated
+in its policies (the resource is `*` for the admin API, the account for Block Public
+Access), and endpoints marked *root user* are the root user's alone, whatever policies
+say. S3 Control's calls on a bucket's tags are decided on the bucket
+(`arn:aws:s3:::bucket`), with its bucket policy and, while its ABAC is on, its tags
+(`aws:ResourceTag`); the tags a call adds are `aws:RequestTag` and `aws:TagKeys`, and
+the keys it removes are `aws:TagKeys`. A bucket policy's Deny binds the root user here
+too. Credentials from `GetSessionToken` and federated
 users' sessions can't call the admin API, as they can't call IAM on AWS.
 
 ## Endpoints
@@ -55,6 +60,9 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/v20180820/configuration/publicAccessBlock` | The account's Block Public Access settings | `s3:GetAccountPublicAccessBlock` |
 | `PUT` | `/v20180820/configuration/publicAccessBlock` | Sets the account's Block Public Access, combined with every bucket's own | `s3:PutAccountPublicAccessBlock` |
 | `DELETE` | `/v20180820/configuration/publicAccessBlock` | Removes the account's Block Public Access, leaving each bucket's own | `s3:PutAccountPublicAccessBlock` |
+| `GET` | `/v20180820/tags/{resourceArn}` | A bucket's tags (`ListTagsForResource`) | `s3:ListTagsForResource` |
+| `POST` | `/v20180820/tags/{resourceArn}` | Adds tags to a bucket, or changes their values (`TagResource`), with ABAC too | `s3:TagResource` |
+| `DELETE` | `/v20180820/tags/{resourceArn}` | Removes a bucket's tags by key (`UntagResource`), with ABAC too | `s3:UntagResource` |
 
 ### IAM and STS
 

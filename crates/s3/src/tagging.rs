@@ -48,6 +48,26 @@ pub(crate) fn from_dto(tagging: dto::Tagging) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The tags a new bucket is created with (its configuration's `Tags`), checked as a
+/// bucket's; none when it has none.
+pub(crate) fn of_new_bucket(
+    configuration: Option<&dto::CreateBucketConfiguration>,
+) -> S3Result<Option<Tags>> {
+    let Some(tags) = configuration.and_then(|c| c.tags.as_ref()) else {
+        return Ok(None);
+    };
+    let pairs = tags
+        .iter()
+        .map(|tag| {
+            (
+                tag.key.clone().unwrap_or_default(),
+                tag.value.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    Ok(Some(check(pairs, MAX_BUCKET_TAGS)?).filter(|tags| !tags.is_empty()))
+}
+
 /// A tag set for a response.
 pub(crate) fn to_dto(tags: &Tags) -> dto::TagSet {
     tags.iter()

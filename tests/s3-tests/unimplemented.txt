@@ -7,7 +7,6 @@ test_bucket_create_bad_authorization_none
 test_bucket_create_bad_date_after_today_aws2
 test_bucket_create_bad_date_before_today_aws2
 test_bucket_create_exists_nonowner
-test_bucket_get_location
 test_bucket_list_return_data_versioning
 test_bucket_logging_owner
 test_copy_part_enc[sse-c-sse-c-STANDARD-STANDARD-8388608]

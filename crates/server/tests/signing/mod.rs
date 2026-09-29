@@ -1,5 +1,9 @@
 //! Requests signed the way any Signature V4 tool signs them, for endpoints the SDKs don't call.
 
+#![allow(dead_code, reason = "each test binary uses a different part")]
+
+use aws_sigv4::http_request::PercentEncodingMode;
+
 /// A request signed with Signature V4 for service `s3`, as any tool can make one: the status and
 /// body of the answer. A `host` among `headers` is sent (and signed) instead of the server's, as
 /// a virtual-hosted-style request would be, without needing the name to resolve.
@@ -19,11 +23,53 @@ pub async fn signed(
 /// [`signed`], answering the whole response.
 pub async fn signed_response(
     server: &crate::common::Server,
-    (access_key, secret): (&str, &str),
+    key: (&str, &str),
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
     body: &[u8],
+) -> reqwest::Response {
+    send(
+        server,
+        key,
+        (method, path),
+        headers,
+        body,
+        PercentEncodingMode::Double,
+    )
+    .await
+}
+
+/// [`signed`], with the path signed as sent, as botocore signs S3's (AWS's other SDKs
+/// encode it again first).
+pub async fn signed_as_sent(
+    server: &crate::common::Server,
+    key: (&str, &str),
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> (u16, String) {
+    let response = send(
+        server,
+        key,
+        (method, path),
+        headers,
+        body,
+        PercentEncodingMode::Single,
+    )
+    .await;
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+async fn send(
+    server: &crate::common::Server,
+    (access_key, secret): (&str, &str),
+    (method, path): (&str, &str),
+    headers: &[(&str, &str)],
+    body: &[u8],
+    encoding: PercentEncodingMode,
 ) -> reqwest::Response {
     use aws_sigv4::{
         http_request::{PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign},
@@ -42,6 +88,7 @@ pub async fn signed_response(
         aws_credential_types::Credentials::new(access_key, secret, None, None, "tests").into();
     let mut settings = SigningSettings::default();
     settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+    settings.percent_encoding_mode = encoding;
     let params = v4::SigningParams::builder()
         .identity(&identity)
         .region("us-east-1")

@@ -27,6 +27,11 @@ const DOCUMENTED: &[(&str, &str)] = &[
     ("HeadObject", "s3:GetObjectVersion"),
     // x-amz-tagging-count: "when you have the relevant permission to read object tags".
     ("HeadObject", "s3:GetObjectTagging"),
+    // "You must have s3:PutBucketABAC permission to perform this action."
+    ("PutBucketAbac", "s3:PutBucketAbac"),
+    ("GetBucketAbac", "s3:GetBucketAbac"),
+    // CreateBucketConfiguration's Tags: "You must have the s3:TagResource permission".
+    ("CreateBucket", "s3:TagResource"),
 ];
 
 #[test]
@@ -68,7 +73,7 @@ fn actions_are_exactly_the_references() {
 
 /// Every combination of the facts that change what an operation needs.
 fn every_facts() -> impl Iterator<Item = Facts> {
-    (0..1_u32 << 9).map(|bits| {
+    (0..1_u32 << 10).map(|bits| {
         let bit = |n: u32| bits & (1 << n) != 0;
         Facts {
             version_id: bit(0),
@@ -80,6 +85,7 @@ fn every_facts() -> impl Iterator<Item = Facts> {
             bypass_governance: bit(6),
             object_lock: bit(7),
             ownership: bit(8),
+            bucket_tags: bit(9),
         }
     })
 }

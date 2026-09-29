@@ -284,6 +284,27 @@ fn initiator() -> dto::Initiator {
     }
 }
 
+/// A new bucket's `LocationConstraint`, when it names one, must be the server's region:
+/// AWS refuses another region's at a region's endpoint. (AWS also refuses `us-east-1`
+/// named outright; TeiFS takes it, as MinIO does, since some clients send it.)
+fn check_location(configuration: Option<&dto::CreateBucketConfiguration>) -> S3Result<()> {
+    match configuration.and_then(|c| c.location_constraint.as_ref()) {
+        Some(location) if location.as_str() != REGION && !location.as_str().is_empty() => {
+            let mut err = s3s::S3Error::with_message(
+                s3s::S3ErrorCode::Custom("IllegalLocationConstraintException".into()),
+                format!(
+                    "The {} location constraint is incompatible for the region specific \
+                     endpoint this request was sent to.",
+                    location.as_str()
+                ),
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            Err(err)
+        }
+        _ => Ok(()),
+    }
+}
+
 fn check_version(version_id: Option<&str>) -> S3Result<()> {
     match version_id {
         None | Some(NULL_VERSION) => Ok(()),
@@ -843,6 +864,7 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::CreateBucketInput>,
     ) -> S3Result<S3Response<dto::CreateBucketOutput>> {
+        access::ensure_decided(&req)?;
         let layout = match req.headers.get(LAYOUT_HEADER).map(|v| v.to_str()) {
             None => self.default_layout,
             Some(Ok("object")) => Layout::Object,
@@ -870,11 +892,15 @@ impl S3 for Drive {
             ownership,
             block_public_access: !self.legacy_bucket_defaults,
             acl: None,
+            tags: None,
         };
         let requested = acl::requested(&acl_headers!(input, bucket), true)?;
         let acl = acl::for_new_bucket(requested, &new)?;
+        let configuration = input.create_bucket_configuration.as_ref();
+        check_location(configuration)?;
+        let tags = tagging::of_new_bucket(configuration)?;
         self.store
-            .create_bucket_with(&input.bucket, layout, NewBucket { acl, ..new })
+            .create_bucket_with(&input.bucket, layout, NewBucket { acl, tags, ..new })
             .await
             .s3()?;
         self.rules.forget(&input.bucket);
@@ -1746,6 +1772,7 @@ impl S3 for Drive {
             .set_bucket_tags(&input.bucket, Some(tags))
             .await
             .s3()?;
+        self.rules.forget(&input.bucket);
         Ok(S3Response::new(dto::PutBucketTaggingOutput::default()))
     }
 
@@ -1757,7 +1784,53 @@ impl S3 for Drive {
             .set_bucket_tags(&req.input.bucket, None)
             .await
             .s3()?;
+        self.rules.forget(&req.input.bucket);
         Ok(S3Response::new(dto::DeleteBucketTaggingOutput::default()))
+    }
+
+    async fn get_bucket_abac(
+        &self,
+        req: S3Request<dto::GetBucketAbacInput>,
+    ) -> S3Result<S3Response<dto::GetBucketAbacOutput>> {
+        let enabled = self.store.bucket_abac(&req.input.bucket).await.s3()?;
+        let status = if enabled {
+            dto::BucketAbacStatus::ENABLED
+        } else {
+            dto::BucketAbacStatus::DISABLED
+        };
+        Ok(S3Response::new(dto::GetBucketAbacOutput {
+            abac_status: Some(dto::AbacStatus {
+                status: Some(dto::BucketAbacStatus::from_static(status)),
+            }),
+        }))
+    }
+
+    async fn put_bucket_abac(
+        &self,
+        req: S3Request<dto::PutBucketAbacInput>,
+    ) -> S3Result<S3Response<dto::PutBucketAbacOutput>> {
+        let input = req.input;
+        let enabled = match input
+            .abac_status
+            .status
+            .as_ref()
+            .map(dto::BucketAbacStatus::as_str)
+        {
+            Some(dto::BucketAbacStatus::ENABLED) => true,
+            Some(dto::BucketAbacStatus::DISABLED) => false,
+            _ => {
+                return Err(s3_error!(
+                    MalformedXML,
+                    "The ABAC status must be Enabled or Disabled"
+                ));
+            }
+        };
+        self.store
+            .set_bucket_abac(&input.bucket, enabled)
+            .await
+            .s3()?;
+        self.rules.forget(&input.bucket);
+        Ok(S3Response::new(dto::PutBucketAbacOutput::default()))
     }
 
     async fn delete_object(

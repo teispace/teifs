@@ -291,7 +291,7 @@ fn bucket_acl_allows(
 }
 
 /// [`decide`], then the bucket's ACL: for what needs no object read.
-fn allows(
+pub(crate) fn allows(
     identity: &Identity,
     context: &Context,
     action: &str,
@@ -414,68 +414,45 @@ impl S3Access for Access {
             Some((bucket, ..)) => Some(self.rules.of(bucket).await?),
             None => None,
         };
-        let mut withheld = Vec::new();
         // The root user is restricted only by a bucket policy, so without one needs no
         // context to decide with.
         let unrestricted = identity.is_root()
             && [&rules, &source_rules]
                 .iter()
                 .all(|r| r.as_ref().is_none_or(|r| r.policy.is_none()));
-        let context = if unrestricted {
-            Context::new(identity.principal().clone(), Date::now())
-        } else {
-            let context = context(&identity, cx, form.as_ref(), client, &self.account, signed)?;
-            let facts = facts(cx, form.as_ref(), source.as_ref());
-            // An operation with no action is one only the root user may make.
-            let needs = teifs_policy::authorizations(operation, &facts);
-            if needs.is_none() && !identity.is_root() {
-                return Err(denied());
-            }
-            let tests_tags =
-                tests_existing_tags(&identity, [rules.as_deref(), source_rules.as_deref()]);
-            for need in needs.iter().flat_map(|needs| needs.iter()) {
-                let bucket = match need.target {
-                    Target::Source => source_rules.as_deref(),
-                    Target::Account | Target::Other => None,
-                    Target::Bucket | Target::Object => rules.as_deref(),
-                };
-                match resource(need, path, operation, source.as_ref()) {
-                    Resource::Arn(arn) => {
-                        let object = object_of(need.target, path, source.as_ref());
-                        let creating =
-                            need.target == Target::Object && CREATING.contains(&operation);
-                        let tagged = match object {
-                            Some(object) if tests_tags && !creating => {
-                                self.with_existing_tags(&context, need.action, object)
-                                    .await?
-                            }
-                            _ => None,
-                        };
-                        let allowed = self
-                            .permits(
-                                &identity,
-                                tagged.as_ref().unwrap_or(&context),
-                                (need.action, &arn),
-                                bucket,
-                                object,
-                                creating,
-                            )
-                            .await?;
-                        if !allowed {
-                            if need.required {
-                                return Err(denied());
-                            }
-                            withheld.push(need.action);
-                        }
-                    }
-                    // Decided per object by the operation.
-                    Resource::PerObject => {}
-                    Resource::Unknown if need.required => return Err(denied()),
-                    Resource::Unknown => withheld.push(need.action),
-                }
-            }
-            context
+        if unrestricted {
+            let context = Context::new(identity.principal().clone(), Date::now());
+            cx.extensions_mut().insert(Caller {
+                identity,
+                context: Arc::new(context),
+                rules,
+                withheld: Vec::new(),
+            });
+            return Ok(());
+        }
+        let context = context(&identity, cx, form.as_ref(), client, &self.account, signed)?;
+        let facts = facts(cx, form.as_ref(), source.as_ref());
+        if operation == "CreateBucket" {
+            // Its tags and region are in its body, which conditions may test: decided
+            // once that's read.
+            cx.extensions_mut().insert(Deferred {
+                identity,
+                context,
+                facts,
+                rules,
+            });
+            return Ok(());
+        }
+        let asked = Asked {
+            operation,
+            path,
+            source: source.as_ref(),
+            rules: rules.as_deref(),
+            source_rules: source_rules.as_deref(),
         };
+        let withheld = self
+            .decide_needs(&identity, &context, &facts, &asked)
+            .await?;
         cx.extensions_mut().insert(Caller {
             identity,
             context: Arc::new(context),
@@ -484,6 +461,166 @@ impl S3Access for Access {
         });
         Ok(())
     }
+
+    async fn create_bucket(
+        &self,
+        req: &mut S3Request<s3s::dto::CreateBucketInput>,
+    ) -> S3Result<()> {
+        let Some(Deferred {
+            identity,
+            mut context,
+            mut facts,
+            rules,
+        }) = req.extensions.remove::<Deferred>()
+        else {
+            return Ok(());
+        };
+        let configuration = req.input.create_bucket_configuration.as_ref();
+        let tags = tagging::of_new_bucket(configuration)?;
+        for (key, value) in tags.iter().flatten() {
+            context = context.with_tag(TagKind::Request, key, value);
+        }
+        if let Some(location) = configuration.and_then(|c| c.location_constraint.as_ref()) {
+            context = context.with(S3Key::LocationConstraint, location.as_str().to_owned());
+        }
+        facts.bucket_tags = tags.is_some();
+        let path = S3Path::bucket(&req.input.bucket);
+        let asked = Asked {
+            operation: "CreateBucket",
+            path: &path,
+            source: None,
+            rules: rules.as_deref(),
+            source_rules: None,
+        };
+        let withheld = self
+            .decide_needs(&identity, &context, &facts, &asked)
+            .await?;
+        req.extensions.insert(Caller {
+            identity,
+            context: Arc::new(context),
+            rules,
+            withheld,
+        });
+        Ok(())
+    }
+}
+
+/// Refuses a request whose decision waits on its body and was never made (the
+/// operation's own check didn't run): nothing goes ahead undecided.
+pub(crate) fn ensure_decided<T>(req: &S3Request<T>) -> S3Result<()> {
+    if req.extensions.get::<Deferred>().is_some() {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+/// A request decided once its body is read (`CreateBucket`), with what `check` found.
+#[derive(Clone)]
+struct Deferred {
+    identity: Arc<Identity>,
+    context: Context,
+    facts: Facts,
+    rules: Option<Arc<BucketRules>>,
+}
+
+/// What a request asks for, to decide it.
+struct Asked<'a> {
+    operation: &'a str,
+    path: &'a S3Path,
+    source: Option<&'a Source>,
+    rules: Option<&'a BucketRules>,
+    source_rules: Option<&'a BucketRules>,
+}
+
+impl Access {
+    /// Decides every permission the request needs: an error for a required one it
+    /// doesn't have, else the optional ones it goes without.
+    async fn decide_needs(
+        &self,
+        identity: &Identity,
+        context: &Context,
+        facts: &Facts,
+        asked: &Asked<'_>,
+    ) -> S3Result<Vec<&'static str>> {
+        let Asked {
+            operation,
+            path,
+            source,
+            rules,
+            source_rules,
+        } = *asked;
+        // An operation with no action is one only the root user may make.
+        let needs = teifs_policy::authorizations(operation, facts);
+        if needs.is_none() && !identity.is_root() {
+            return Err(denied());
+        }
+        let tests_tags = tests_existing_tags(identity, [rules, source_rules]);
+        // A bucket whose tags decide access puts them in the context of what's in it.
+        let in_bucket = with_resource_tags(context, rules);
+        let in_source = with_resource_tags(context, source_rules);
+        let mut withheld = Vec::new();
+        for need in needs.iter().flat_map(|needs| needs.iter()) {
+            let (bucket, context) = match need.target {
+                Target::Source => (source_rules, in_source.as_ref().unwrap_or(context)),
+                Target::Account | Target::Other => (None, context),
+                Target::Bucket | Target::Object => (rules, in_bucket.as_ref().unwrap_or(context)),
+            };
+            match resource(need, path, operation, source) {
+                Resource::Arn(arn) => {
+                    let object = object_of(need.target, path, source);
+                    let creating = need.target == Target::Object && CREATING.contains(&operation);
+                    let tagged = match object {
+                        Some(object) if tests_tags && !creating => {
+                            self.with_existing_tags(context, need.action, object)
+                                .await?
+                        }
+                        _ => None,
+                    };
+                    let allowed = self
+                        .permits(
+                            identity,
+                            tagged.as_ref().unwrap_or(context),
+                            (need.action, &arn),
+                            bucket,
+                            object,
+                            creating,
+                        )
+                        .await?;
+                    if !allowed {
+                        if need.required {
+                            return Err(denied());
+                        }
+                        withheld.push(need.action);
+                    }
+                }
+                // Decided per object by the operation.
+                Resource::PerObject => {}
+                Resource::Unknown if need.required => return Err(denied()),
+                Resource::Unknown => withheld.push(need.action),
+            }
+        }
+        Ok(withheld)
+    }
+}
+
+/// `context` with a bucket's tags as `aws:ResourceTag` and `s3:BucketTag`, when they
+/// decide access (ABAC is on and it has some); `None` otherwise.
+pub(crate) fn with_resource_tags(
+    context: &Context,
+    rules: Option<&BucketRules>,
+) -> Option<Context> {
+    let tags = rules?
+        .resource_tags
+        .as_ref()
+        .filter(|tags| !tags.is_empty())?;
+    let mut context = context.clone();
+    for (key, value) in tags {
+        context =
+            context
+                .with_tag(TagKind::Resource, key, value)
+                .with_tag(TagKind::Bucket, key, value);
+    }
+    Some(context)
 }
 
 /// Checks the upload size caps a request carries ([`Caps`]) and hands them to the
@@ -635,6 +772,8 @@ fn facts(cx: &S3AccessContext<'_>, form: Option<&Form>, source: Option<&Source>)
         bypass_governance: is_true("x-amz-bypass-governance-retention"),
         object_lock: is_true("x-amz-bucket-object-lock-enabled"),
         ownership: has("x-amz-object-ownership"),
+        // In the body: set once it's read (`S3Access::create_bucket`).
+        bucket_tags: false,
     }
 }
 

@@ -79,7 +79,12 @@ either has it, so one setting closes every bucket at once.
 Everything served besides S3's operations is one table (`crates/s3/src/routes.rs`) in
 which each endpoint states what it needs: an action on a resource, the root user only,
 or, for the IAM and STS Query APIs, the action each call names, which IAM decides. The
-field has no default, so an endpoint can't be added without it. The admin API's actions
+field has no default, so an endpoint can't be added without it. S3 Control's calls on a
+bucket's tags are decided on the bucket, with its policy and ABAC tags and the tags or
+keys the call names, read (at most 64 KiB, and only as signed) before the decision.
+Their paths carry an ARN, which botocore signs as sent and AWS's other SDKs encode
+again first; s3s checks only the first, so a failed signature is checked once more
+with the path encoded again, before anything runs. The admin API's actions
 are `teifs:*`, which only a policy naming them grants (`s3:*` doesn't); it never
 returns secrets unless an endpoint says so and only the root user may call it: the IAM
 export with secrets (sent `Cache-Control: no-store`) and the import, which sets secrets
@@ -111,7 +116,13 @@ source as well as write on the target. An object's own tags (`s3:ExistingObjectT
 decide the actions AWS lists for them (reads, copies from it, its ACL and tags): they
 are read when a policy that decides the request tests them, and a failure to read them
 refuses the request rather than deciding without them, so a Deny on a tag can't be
-dodged, nor a denied object retagged into an allowed one. The suite
+dodged, nor a denied object retagged into an allowed one. A bucket's tags decide
+access only while its ABAC is on (`aws:ResourceTag`, `s3:BucketTag`, for the bucket,
+its objects and a copy's source with its own bucket's), and then change only through
+S3 Control's calls, decided with the tags or keys they name, so a tag can't be removed
+by replacing the whole set; tags given to CreateBucket need `s3:TagResource`, decided
+once its body is read, and a CreateBucket that wasn't decided never runs
+(`crates/server/tests/security/abac.rs`). The suite
 (`crates/server/tests/security/policy.rs`) proves this, headers that name condition keys
 changing nothing, negated set operators with partly overlapping sets, and versions
 needing the `…Version` actions.

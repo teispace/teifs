@@ -34,3 +34,4 @@ test_bucket_policy_deny_self_denied_policy_confirm_header  # expects a bucket po
 test_bucket_policy_set_condition_operator_end_with_IfExists  # expects the bucket owner refused where a policy allows only others; AWS lets the owner in by its own permissions
 test_bucket_policy_put_obj_request_obj_tag  # adds the tag header to the main client, not alt's, so alt's upload has no tag and is refused (the suite's own TODO)
 test_bucket_policy_put_obj_grant  # PutObject with x-amz-grant-* headers also needs s3:PutObjectAcl on AWS, which the test's policy doesn't grant; and needs alt to be another account
+test_bucket_get_location  # creates a bucket in Ceph's placement named by api_name ("default"); on AWS a location constraint names a region, another region's is IllegalLocationConstraintException, and GetBucketLocation answers none for us-east-1

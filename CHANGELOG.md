@@ -7,6 +7,15 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Attribute-based access control for buckets (ABAC), as AWS added it in November 2025:
+  `PutBucketAbac` and `GetBucketAbac`; while it's on, a bucket's tags are
+  `aws:ResourceTag` and `s3:BucketTag` in policies on the bucket and its objects, and
+  change only one by one through S3 Control's `TagResource` and `UntagResource`
+  (`ListTagsForResource` lists them), decided with `aws:RequestTag` and `aws:TagKeys`.
+- `CreateBucket` takes tags, which need `s3:TagResource`, and policies see its
+  `s3:locationconstraint`. A location constraint other than the drive's region is
+  refused with `IllegalLocationConstraintException`; it was ignored.
+
 - Policies can test `s3:TlsVersion` (the HTTPS connection's TLS version) and
   `s3:signatureAge` (how long ago a presigned link or form was signed, in
   milliseconds), as on AWS.

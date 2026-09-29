@@ -269,6 +269,9 @@ impl Service {
                     crate::sse::CUSTOMER_KEY_NEEDS_TLS,
                 ))
             }
+            Ok(req) if crate::control::has_encoded_path(&req) => {
+                crate::control::call_encoded(&self.s3, req).await
+            }
             Ok(req) => self.s3.call(req).await,
             Err(refused) => Ok(*refused),
         }

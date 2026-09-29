@@ -58,6 +58,8 @@ pub struct Facts {
     pub object_lock: bool,
     /// A new bucket with an ownership setting (`x-amz-object-ownership`).
     pub ownership: bool,
+    /// A new bucket with tags (its configuration's `Tags`).
+    pub bucket_tags: bool,
 }
 
 /// The permissions one request needs (at most six).
@@ -193,6 +195,9 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
             needs.need_if(facts.object_lock, "s3:PutBucketVersioning");
             needs.need_if(facts.ownership, "s3:PutBucketOwnershipControls");
             needs.need_if(facts.acl, "s3:PutBucketAcl");
+            // "You must have the s3:TagResource permission to create a general purpose
+            // bucket with tags" (CreateBucketConfiguration); not in the reference.
+            needs.need_if(facts.bucket_tags, "s3:TagResource");
         }
         "ListObjects" | "ListObjectsV2" => {
             needs.need("s3:ListBucket");
@@ -270,6 +275,7 @@ const SIMPLE: &[(&str, &str)] = &[
         "GetBucketAccelerateConfiguration",
         "s3:GetAccelerateConfiguration",
     ),
+    ("GetBucketAbac", "s3:GetBucketAbac"),
     ("GetBucketAcl", "s3:GetBucketAcl"),
     (
         "GetBucketAnalyticsConfiguration",
@@ -353,6 +359,7 @@ const SIMPLE: &[(&str, &str)] = &[
         "PutBucketAccelerateConfiguration",
         "s3:PutAccelerateConfiguration",
     ),
+    ("PutBucketAbac", "s3:PutBucketAbac"),
     ("PutBucketAcl", "s3:PutBucketAcl"),
     (
         "PutBucketAnalyticsConfiguration",

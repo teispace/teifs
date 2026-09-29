@@ -23,7 +23,7 @@ use teifs_types::admin::{
 };
 
 use crate::{
-    access::{Client, base_context},
+    access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
     control, iam_api,
@@ -47,6 +47,9 @@ pub enum Api {
 pub(crate) enum Needs {
     /// This action on this resource, decided with the caller's policies.
     Action(&'static str, &'static str),
+    /// This action on the bucket the path names, decided with the caller's policies and
+    /// the bucket's own, and its tags while they decide access.
+    OnBucket(&'static str),
     /// The Query APIs name an action in each call's body, and IAM decides it.
     PerCall,
     /// Only the account's root user, whatever policies say.
@@ -79,6 +82,7 @@ enum Handler {
     GetAccountBlock,
     PutAccountBlock,
     DeleteAccountBlock,
+    Tags(control::TagCallKind),
     Info,
     Config,
     ExportIam,
@@ -139,6 +143,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("s3:PutAccountPublicAccessBlock", ACCOUNT),
         handler: Handler::DeleteAccountBlock,
         about: "Removes the account's Block Public Access, leaving each bucket's own",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Get,
+        path: control::TAGS,
+        needs: Needs::OnBucket("s3:ListTagsForResource"),
+        handler: Handler::Tags(control::TagCallKind::List),
+        about: "A bucket's tags (`ListTagsForResource`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Post,
+        path: control::TAGS,
+        needs: Needs::OnBucket("s3:TagResource"),
+        handler: Handler::Tags(control::TagCallKind::Tag),
+        about: "Adds tags to a bucket, or changes their values (`TagResource`), with ABAC too",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Delete,
+        path: control::TAGS,
+        needs: Needs::OnBucket("s3:UntagResource"),
+        handler: Handler::Tags(control::TagCallKind::Untag),
+        about: "Removes a bucket's tags by key (`UntagResource`), with ABAC too",
     },
     Endpoint {
         api: Api::Admin,
@@ -221,7 +249,7 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         },
         path: e.path,
         action: match e.needs {
-            Needs::Action(action, _) => Some(action),
+            Needs::Action(action, _) | Needs::OnBucket(action) => Some(action),
             Needs::PerCall | Needs::Root => None,
         },
         root_only: e.needs == Needs::Root,
@@ -250,7 +278,16 @@ fn endpoint(api: Api, method: &Method, path: &str) -> Option<&'static Endpoint> 
     let verb = Verb::of(method)?;
     ENDPOINTS
         .iter()
-        .find(|e| e.api == api && e.verb == verb && e.path == path)
+        .find(|e| e.api == api && e.verb == verb && matches(e.path, path))
+}
+
+/// Whether `path` is an endpoint's: the same, or, for a path ending in a `{label}`, one
+/// with something in its place.
+fn matches(pattern: &str, path: &str) -> bool {
+    match pattern.strip_suffix('}').and_then(|p| p.rsplit_once('{')) {
+        Some((prefix, _)) => path.len() > prefix.len() && path.starts_with(prefix),
+        None => pattern == path,
+    }
 }
 
 /// The route s3s hands everything but S3's operations to.
@@ -306,7 +343,7 @@ impl S3Route for Routes {
 impl Routes {
     /// Authenticates, finds the endpoint, decides whether the caller may call it, and
     /// calls it.
-    async fn serve(&self, api: Api, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
+    async fn serve(&self, api: Api, mut req: S3Request<Body>) -> S3Result<S3Response<Body>> {
         let identity = self.authenticate(&req)?;
         // Temporary credentials that may not use IAM (`GetSessionToken`'s, federated
         // users') may not manage the drive either.
@@ -317,17 +354,36 @@ impl Routes {
             Api::Admin => admin::not_found(),
             Api::Control | Api::Query => S3Error::with_message(
                 S3ErrorCode::NotImplemented,
-                "TeiFS serves the account's Block Public Access from S3 Control, and nothing \
-                 else yet.",
+                "TeiFS serves the account's Block Public Access and buckets' tags from S3 \
+                 Control, and nothing else yet.",
             ),
         })?;
+        let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+        let context = || base_context(&identity, &req.headers, client, &self.iam.account());
+        // A call on a bucket's tags is decided with what it asks for, read first.
+        let mut on_bucket = None;
         let allowed = match endpoint.needs {
-            Needs::Action(action, resource) => {
-                let client = req.extensions.get::<Client>().copied().unwrap_or_default();
-                let context = base_context(&identity, &req.headers, client, &self.iam.account());
-                identity
-                    .decide(&context, action, resource, None)
-                    .is_allowed()
+            Needs::Action(action, resource) => identity
+                .decide(&context(), action, resource, None)
+                .is_allowed(),
+            Needs::OnBucket(action) => {
+                let Handler::Tags(kind) = endpoint.handler else {
+                    unreachable!("only calls on tags are on a bucket")
+                };
+                let bucket = control::tagged_bucket(&req)?;
+                let context = context();
+                let call = control::TagCall::read(kind, &mut req).await?;
+                let rules = self.rules.of(&bucket).await?;
+                let context = with_resource_tags(&context, Some(&rules)).unwrap_or(context);
+                let allowed = allows(
+                    &identity,
+                    &call.in_context(context),
+                    action,
+                    &teifs_policy::bucket_arn(&bucket),
+                    Some(&rules),
+                );
+                on_bucket = Some((bucket, call));
+                allowed
             }
             Needs::Root => identity.is_root(),
             Needs::PerCall => false,
@@ -345,6 +401,10 @@ impl Routes {
             }
             Handler::DeleteAccountBlock => {
                 control::delete_public_access_block(&self.store, &self.rules).await
+            }
+            Handler::Tags(_) => {
+                let (bucket, call) = on_bucket.expect("decided as a call on a bucket");
+                call.call(&self.store, &self.rules, &bucket).await
             }
             Handler::Info => Ok(admin::info(&self.store, &self.iam, self.started)),
             Handler::Config => admin::config(self.config.as_deref()),
@@ -580,9 +640,22 @@ mod tests {
                     let service = if e.api == Api::Admin { "teifs:" } else { "s3:" };
                     assert!(action.starts_with(service), "{e:?}");
                 }
+                Needs::OnBucket(action) => {
+                    assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
+                    assert!(matches!(e.handler, Handler::Tags(_)), "{e:?}");
+                }
             }
         }
         assert!(endpoint(Api::Control, &Method::PATCH, control::PUBLIC_ACCESS_BLOCK).is_none());
         assert!(endpoint(Api::Control, &Method::GET, "/v20180820/other").is_none());
+        let tags = endpoint(
+            Api::Control,
+            &Method::GET,
+            "/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Ab",
+        );
+        assert_eq!(tags.unwrap().path, control::TAGS);
+        assert!(endpoint(Api::Control, &Method::GET, "/v20180820/tags/").is_none());
+        assert!(endpoint(Api::Control, &Method::PUT, "/v20180820/tags/x").is_none());
+        assert!(endpoint(Api::Control, &Method::GET, "/v20180820/tag/x").is_none());
     }
 }

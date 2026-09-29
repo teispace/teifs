@@ -44,6 +44,9 @@ pub enum StoreError {
     /// The request can't be done as asked.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    /// Adding tags would leave more than this many.
+    #[error("more than {0} tags")]
+    TooManyTags(usize),
     /// The bucket's Object Ownership (`BucketOwnerEnforced`) disables ACLs.
     #[error("the bucket's Object Ownership disables ACLs")]
     AclsDisabled,

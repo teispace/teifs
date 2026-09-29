@@ -3125,6 +3125,7 @@ dependencies = [
  "ipnet",
  "md-5",
  "mime",
+ "percent-encoding",
  "s3s",
  "s3s-multipart",
  "serde",

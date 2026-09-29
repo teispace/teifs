@@ -23,6 +23,7 @@
 mod common;
 mod sign;
 
+mod abac;
 mod cors;
 mod disclosure;
 mod logs;

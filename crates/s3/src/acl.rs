@@ -670,7 +670,7 @@ mod tests {
         let new = |ownership, block_public_access| NewBucket {
             ownership,
             block_public_access,
-            acl: None,
+            ..NewBucket::default()
         };
         let aws = NewBucket::default();
         assert_eq!(for_new_bucket(canned("private"), &aws).unwrap(), None);

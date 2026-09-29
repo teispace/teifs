@@ -35,6 +35,9 @@ pub(crate) struct BucketRules {
     pub(crate) ownership: ObjectOwnership,
     /// Its ACL, kept while ACLs are disabled so enabling them brings it back.
     pub(crate) acl: Option<Acl>,
+    /// Its tags, while they decide access (ABAC is on): `aws:ResourceTag` and
+    /// `s3:BucketTag` for everything in it. None while ABAC is off.
+    pub(crate) resource_tags: Option<crate::tagging::Tags>,
 }
 
 impl BucketRules {
@@ -56,6 +59,7 @@ impl BucketRules {
                 .or(access.account_public_access_block.unwrap_or_default()),
             ownership: access.ownership.unwrap_or(ObjectOwnership::ObjectWriter),
             acl: access.acl,
+            resource_tags: access.abac_tags,
         }
     }
 

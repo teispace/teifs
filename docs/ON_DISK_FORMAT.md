@@ -140,7 +140,7 @@ What can't be rebuilt from the files.
 
 | Table | Holds |
 |---|---|
-| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL) |
+| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL; `abac`, `true` when its tags decide access) |
 | `settings` | The drive's own settings, by `name`, each a JSON `value`: `accountPublicAccessBlock`, the account's Block Public Access settings |
 | `iam_*` | IAM's users, access keys (secrets sealed by the drive's KMS), groups, roles (trust policy, longest session, boundary), OpenID Connect providers (URL, audiences, thumbprints), policies and their versions, attachments and tags |
 

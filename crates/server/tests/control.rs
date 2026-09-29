@@ -22,8 +22,11 @@ mod common;
 mod signing;
 
 use common::{ACCESS_KEY, SECRET_KEY, Server, anonymous, client, code, start, user};
-use signing::signed;
+use signing::{signed, signed_as_sent};
 use teifs_s3::Api;
+
+/// A `TagResource` body: `team=blue`.
+const TAG_BLUE: &str = r#"<TagResourceRequest xmlns="http://awss3control.amazonaws.com/doc/2018-08-20/"><Tags><Tag><Key>team</Key><Value>blue</Value></Tag></Tags></TagResourceRequest>"#;
 
 /// Sends every request to the server, where AWS's SDKs would put the account in the
 /// host name.
@@ -216,6 +219,8 @@ async fn users_need_the_permission() {
 async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission() {
     let server = start().await;
     let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("photos").send().await.unwrap();
     user(&server, "nobody", None);
     let key = server.iam.create_access_key("nobody").unwrap();
     let mut walked = 0;
@@ -225,12 +230,25 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
                 vec![("content-type", "application/x-www-form-urlencoded")],
                 b"Action=ListUsers&Version=2010-05-08",
             ),
+            Api::Control if endpoint.method == "POST" => (
+                vec![("x-amz-account-id", account.as_str())],
+                TAG_BLUE.as_bytes(),
+            ),
             Api::Control => (vec![("x-amz-account-id", account.as_str())], b""),
             Api::Admin => (Vec::new(), b""),
         };
         let method = Method::from_bytes(endpoint.method.as_bytes()).unwrap();
+        // A bucket's tags: a real bucket, and a key to remove.
+        let path = endpoint
+            .path
+            .replace("{resourceArn}", "arn:aws:s3:::photos");
+        let path = if endpoint.method == "DELETE" && path.contains("/tags/") {
+            format!("{path}?tagKeys=team")
+        } else {
+            path
+        };
         let mut unsigned = reqwest::Client::new()
-            .request(method, format!("{}{}", server.endpoint, endpoint.path))
+            .request(method, format!("{}{path}", server.endpoint))
             .body(body.to_vec());
         for (name, value) in &headers {
             unsigned = unsigned.header(*name, *value);
@@ -241,7 +259,7 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
             &server,
             (&key.info.id, &key.secret),
             endpoint.method,
-            endpoint.path,
+            &path,
             &headers,
             body,
         )
@@ -255,7 +273,7 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
         }
         walked += 1;
     }
-    assert!(walked >= 6);
+    assert!(walked >= 9);
 }
 
 #[tokio::test]
@@ -304,4 +322,156 @@ async fn s3_control_is_told_apart_from_a_bucket() {
     .await;
     assert_eq!(status, 400, "{answer}");
     assert!(answer.contains("MalformedXML"), "{answer}");
+}
+
+/// A bucket's tags through S3 Control, which changes them one by one whether or not they
+/// decide access (ABAC), and decides each call on the bucket: the tags a call adds, the
+/// keys it removes, the bucket's own tags while ABAC is on, and its bucket policy.
+#[tokio::test]
+async fn bucket_tags_change_one_by_one_through_s3_control() {
+    use aws_sdk_s3::types::{AbacStatus, BucketAbacStatus};
+    use aws_sdk_s3control::types::Tag;
+
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("photos").send().await.unwrap();
+    let s3control = control(&server, ACCESS_KEY, SECRET_KEY);
+    let arn = "arn:aws:s3:::photos";
+    let tag = |key: &str, value: &str| Tag::builder().key(key).value(value).build().unwrap();
+    let tags_of = |s3control: &aws_sdk_s3control::Client, arn: &str| {
+        let list = s3control.list_tags_for_resource().account_id(&account);
+        list.resource_arn(arn).send()
+    };
+    let tag_with = |s3control: &aws_sdk_s3control::Client, tags: Vec<Tag>| {
+        let call = s3control
+            .tag_resource()
+            .account_id(&account)
+            .resource_arn(arn);
+        call.set_tags(Some(tags)).send()
+    };
+    let untag = |s3control: &aws_sdk_s3control::Client, key: &str| {
+        let call = s3control
+            .untag_resource()
+            .account_id(&account)
+            .resource_arn(arn);
+        call.tag_keys(key).send()
+    };
+    let listed = async |s3control: &aws_sdk_s3control::Client| {
+        let tags = tags_of(s3control, arn).await.unwrap();
+        let tags = tags
+            .tags()
+            .iter()
+            .map(|t| format!("{}={}", t.key(), t.value()));
+        tags.collect::<Vec<_>>()
+    };
+    let abac = async |status: BucketAbacStatus| {
+        let status = AbacStatus::builder().status(status).build();
+        let put = root.put_bucket_abac().bucket("photos").abac_status(status);
+        put.send().await.unwrap();
+    };
+
+    assert!(listed(&s3control).await.is_empty());
+    abac(BucketAbacStatus::Enabled).await;
+    let two = vec![tag("team", "blue"), tag("cost", "low")];
+    tag_with(&s3control, two).await.unwrap();
+    assert_eq!(listed(&s3control).await, ["cost=low", "team=blue"]);
+    tag_with(&s3control, vec![tag("cost", "high")])
+        .await
+        .unwrap();
+    untag(&s3control, "team").await.unwrap();
+    untag(&s3control, "absent").await.unwrap();
+    assert_eq!(listed(&s3control).await, ["cost=high"]);
+    let s3 = root.get_bucket_tagging().bucket("photos").send().await;
+    assert_eq!(s3.unwrap().tag_set().len(), 1);
+
+    // Checked as a bucket's tags, on a bucket that exists.
+    let reserved = tag_with(&s3control, vec![tag("aws:team", "x")]).await;
+    assert_eq!(code(reserved), "InvalidTag");
+    let fifty = (0..50).map(|i| tag(&format!("k{i}"), "v")).collect();
+    assert_eq!(code(tag_with(&s3control, fifty).await), "InvalidTag");
+    assert_eq!(
+        code(tags_of(&s3control, "arn:aws:s3:::missing").await),
+        "NoSuchBucket"
+    );
+    let object = tags_of(&s3control, "arn:aws:s3:::photos/a.txt").await;
+    assert_eq!(code(object), "InvalidRequest");
+
+    // Policies decide on what a call asks for, and on the bucket's own tags.
+    let policy = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":"s3:TagResource","Resource":"arn:aws:s3:::photos","Condition":{"StringEquals":{"aws:RequestTag/team":["blue","red"]},"ForAllValues:StringEquals":{"aws:TagKeys":["team"]}}},
+        {"Effect":"Allow","Action":"s3:UntagResource","Resource":"arn:aws:s3:::photos","Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["cost"]}}},
+        {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/team":"blue"}}}]}"#;
+    user(&server, "tagger", Some(policy));
+    let key = server.iam.create_access_key("tagger").unwrap();
+    let tagger = control(&server, &key.info.id, &key.secret);
+    assert_eq!(code(tags_of(&tagger, arn).await), "AccessDenied");
+    tag_with(&tagger, vec![tag("team", "red")]).await.unwrap();
+    for refused in [
+        vec![tag("team", "green")],
+        vec![tag("team", "blue"), tag("cost", "x")],
+    ] {
+        assert_eq!(code(tag_with(&tagger, refused).await), "AccessDenied");
+    }
+    assert_eq!(code(untag(&tagger, "team").await), "AccessDenied");
+    untag(&tagger, "cost").await.unwrap();
+    assert_eq!(code(tags_of(&tagger, arn).await), "AccessDenied");
+    tag_with(&tagger, vec![tag("team", "blue")]).await.unwrap();
+    assert_eq!(listed(&tagger).await, ["team=blue"]);
+    abac(BucketAbacStatus::Disabled).await;
+    assert_eq!(code(tags_of(&tagger, arn).await), "AccessDenied");
+
+    // A bucket policy's Deny binds the root user too.
+    let frozen = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":["s3:TagResource","s3:UntagResource"],"Resource":"arn:aws:s3:::photos"}]}"#;
+    let put = root.put_bucket_policy().bucket("photos").policy(frozen);
+    put.send().await.unwrap();
+    let denied = tag_with(&s3control, vec![tag("team", "red")]).await;
+    assert_eq!(code(denied), "AccessDenied");
+    assert_eq!(code(untag(&s3control, "team").await), "AccessDenied");
+    assert_eq!(listed(&s3control).await, ["team=blue"]);
+}
+
+/// S3 Control's paths carry an ARN, which botocore (the AWS CLI) signs as sent and AWS's
+/// other SDKs encode again first: both are checked, and a signature that matches
+/// neither way is refused.
+#[tokio::test]
+async fn an_arn_in_the_path_is_signed_as_every_sdk_signs_it() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("photos").send().await.unwrap();
+    let tagging = aws_sdk_s3::types::Tagging::builder()
+        .tag_set(
+            aws_sdk_s3::types::Tag::builder()
+                .key("team")
+                .value("blue")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let put = root.put_bucket_tagging().bucket("photos").tagging(tagging);
+    put.send().await.unwrap();
+
+    let path = "/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Aphotos";
+    let headers = [("x-amz-account-id", account.as_str())];
+    let root_key = (ACCESS_KEY, SECRET_KEY);
+    for (status, answer) in [
+        signed_as_sent(&server, root_key, "GET", path, &headers, b"").await,
+        signed(&server, root_key, "GET", path, &headers, b"").await,
+    ] {
+        assert_eq!(status, 200, "{answer}");
+        assert!(
+            answer.contains("<Key>team</Key><Value>blue</Value>"),
+            "{answer}"
+        );
+    }
+    let wrong = (ACCESS_KEY, "not-the-secret-key-at-all-just-wrong");
+    for (status, answer) in [
+        signed_as_sent(&server, wrong, "GET", path, &headers, b"").await,
+        signed(&server, wrong, "GET", path, &headers, b"").await,
+    ] {
+        assert_eq!(status, 403, "{answer}");
+        assert!(answer.contains("SignatureDoesNotMatch"), "{answer}");
+    }
 }
