@@ -17,6 +17,7 @@ mod folders;
 mod format;
 mod jobs;
 mod list;
+mod lock;
 mod multipart;
 mod objects;
 mod reconcile;
@@ -41,6 +42,9 @@ pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
 pub use jobs::{JobOptions, JobStatus, Jobs};
 pub use list::{After, ListQuery, Listing, ObjectVersion, VersionListing, VersionsQuery};
+pub use lock::{
+    DefaultRetention, MAX_RETENTION_DAYS, MAX_RETENTION_YEARS, ObjectLock, RetentionPeriod,
+};
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{
     BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
@@ -54,8 +58,8 @@ pub use teifs_crypto::{
 pub use teifs_meta::{Layout, Part, Upload, Versioning};
 use teifs_types::check_folder_bucket;
 pub use teifs_types::{
-    Acl, AclGrant, ChecksumType, Grantee, OWNER_ID, PartInfo, Permission, SseInfo, SseMode,
-    UploadChecksum,
+    Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,
+    SseInfo, SseMode, UploadChecksum,
 };
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
 
@@ -424,6 +428,12 @@ impl Store {
             }
         }
         let name = name.to_owned();
+        // Object Lock needs versioning, which it turns on for good.
+        let versioning = if options.object_lock {
+            Versioning::Enabled
+        } else {
+            Versioning::Unversioned
+        };
         self.blocking(move |inner| {
             let _lock = inner.lock();
             let taken = inner.system().bucket(&name)?.is_some()
@@ -454,7 +464,7 @@ impl Store {
                     name,
                     layout,
                     created_ms: now_ms(),
-                    versioning: Versioning::Unversioned,
+                    versioning,
                 },
                 &settings::new_bucket_config(options),
             )?;
@@ -728,8 +738,11 @@ impl Store {
         version_id: Option<&str>,
         tags: std::collections::BTreeMap<String, String>,
     ) -> Result<ObjectInfo> {
-        self.change_attrs(bucket, key, version_id, move |attrs| attrs.tags = tags)
-            .await
+        self.change_attrs(bucket, key, version_id, move |attrs| {
+            attrs.tags = tags;
+            Ok(())
+        })
+        .await
     }
 
     /// Replaces the ACL of a version of an object (`None`: the current one; an ACL of
@@ -741,17 +754,20 @@ impl Store {
         version_id: Option<&str>,
         acl: Option<Acl>,
     ) -> Result<ObjectInfo> {
-        self.change_attrs(bucket, key, version_id, move |attrs| attrs.acl = acl)
-            .await
+        self.change_attrs(bucket, key, version_id, move |attrs| {
+            attrs.acl = acl;
+            Ok(())
+        })
+        .await
     }
 
-    /// Changes the attributes of a version of an object in place.
+    /// Changes the attributes of a version of an object in place, if `change` allows.
     async fn change_attrs(
         &self,
         bucket: &str,
         key: &str,
         version_id: Option<&str>,
-        change: impl FnOnce(&mut ObjectAttrs) + Send + 'static,
+        change: impl FnOnce(&mut ObjectAttrs) -> Result<()> + Send + 'static,
     ) -> Result<ObjectInfo> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
@@ -763,7 +779,7 @@ impl Store {
             Bucket::Object(bucket) => {
                 let conn = inner.lock();
                 let mut row = Inner::version_row(&conn, &bucket, &key, version_id.as_deref())?;
-                change(&mut row.attrs);
+                change(&mut row.attrs)?;
                 conn.set_version_attrs(&bucket.id, &key, &row.version_id, &row.attrs, None)?;
                 Ok(bucket.info(&row))
             }
@@ -789,6 +805,21 @@ impl Store {
         version_id: Option<&str>,
         precondition: Precondition,
     ) -> Result<Deleted> {
+        self.delete_with(bucket, key, version_id, precondition, false)
+            .await
+    }
+
+    /// Like [`Store::delete_if`]; removing a version that a governance-mode retention
+    /// protects needs `bypass` (the caller may `s3:BypassGovernanceRetention` and asked).
+    /// Nothing removes a version under a legal hold or a compliance-mode retention.
+    pub async fn delete_with(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        precondition: Precondition,
+        bypass: bool,
+    ) -> Result<Deleted> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| {
@@ -799,9 +830,14 @@ impl Store {
                         return Ok(Deleted::default());
                     };
                     match (version_id, bucket.versioned()) {
-                        (Some(id), _) => {
-                            inner.delete_folder_version(&conn, &bucket, &key, &id, &precondition)
-                        }
+                        (Some(id), _) => inner.delete_folder_version(
+                            &conn,
+                            &bucket,
+                            &key,
+                            &id,
+                            &precondition,
+                            bypass,
+                        ),
                         (None, Some(versions)) => inner.delete_folder_versioned(
                             &conn,
                             &bucket,
@@ -830,9 +866,14 @@ impl Store {
                 }
                 Bucket::Object(bucket) => match version_id {
                     None => Inner::delete_object(&conn, &bucket, &key, &precondition),
-                    Some(id) => {
-                        Inner::delete_object_version(&conn, &bucket, &key, &id, &precondition)
-                    }
+                    Some(id) => Inner::delete_object_version(
+                        &conn,
+                        &bucket,
+                        &key,
+                        &id,
+                        &precondition,
+                        bypass,
+                    ),
                 },
             }
         })
@@ -1039,8 +1080,9 @@ impl Store {
 
 /// The attributes a copy gets: `replacement`, or the source's. The source's checksums
 /// carry over when they describe its bytes, which the copy shares; a composite checksum
-/// describes its parts, which a copy doesn't have. As on S3, an ACL is never copied: the
-/// copy has the replacement's, or none.
+/// describes its parts, which a copy doesn't have. As on S3, an ACL and an Object Lock
+/// are never copied: the copy has the replacement's, or none (and the bucket's default
+/// retention).
 pub(crate) fn copied_attrs(source: ObjectAttrs, replacement: Option<ObjectAttrs>) -> ObjectAttrs {
     let (checksums, checksum_type) = match source.checksum_type {
         Some(teifs_types::ChecksumType::Composite) => (std::collections::BTreeMap::new(), None),
@@ -1048,6 +1090,8 @@ pub(crate) fn copied_attrs(source: ObjectAttrs, replacement: Option<ObjectAttrs>
     };
     let attrs = replacement.unwrap_or(ObjectAttrs {
         acl: None,
+        retention: None,
+        legal_hold: None,
         ..source
     });
     ObjectAttrs {
@@ -1058,7 +1102,8 @@ pub(crate) fn copied_attrs(source: ObjectAttrs, replacement: Option<ObjectAttrs>
 }
 
 /// The attributes an object gets when its metadata is replaced in place: its bytes and
-/// parts don't change, so its checksums stay.
+/// parts don't change, so its checksums stay. (Only without versioning, so never under
+/// Object Lock.)
 pub(crate) fn replaced_attrs(current: &ObjectAttrs, replacement: ObjectAttrs) -> ObjectAttrs {
     ObjectAttrs {
         checksums: current.checksums.clone(),
@@ -1352,6 +1397,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod layout_tests;
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod sse_tests;
 #[cfg(test)]

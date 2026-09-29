@@ -20,6 +20,7 @@ use crate::{
     error::Result,
     folder::{FolderBucket, Found},
     list::{After, Cursor, ListQuery, ObjectVersion, VersionListing, VersionsQuery, common_prefix},
+    lock::check_removal,
     md5_file, now_ms,
     objects::ObjectBucket,
     staged::{Publish, TmpFile, publish},
@@ -297,6 +298,7 @@ impl Inner {
         key: &ObjectKey,
         version_id: &str,
         precondition: &Precondition,
+        bypass: bool,
     ) -> Result<Deleted> {
         let named = |delete_marker| Deleted {
             version_id: bucket.named(Some(version_id)),
@@ -306,6 +308,7 @@ impl Inner {
             let current = Inner::info(conn, &bucket.name, key.as_str(), &meta)?;
             if current_id(&current) == version_id {
                 precondition.check_delete(Some(&current))?;
+                check_removal(&current.attrs, bypass, now_ms())?;
                 Inner::delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
                 if let Some(versions) = &bucket.versions {
                     self.restore_newest(conn, bucket, versions, key)?;
@@ -322,6 +325,7 @@ impl Inner {
         if !row.delete_marker {
             precondition.check_delete(Some(&versions.info(&row)))?;
         }
+        check_removal(&row.attrs, bypass, now_ms())?;
         let Some((removed, files)) =
             conn.delete_version(&versions.id, key.as_str(), version_id, now_ms())?
         else {

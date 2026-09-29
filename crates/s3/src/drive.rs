@@ -26,6 +26,7 @@ use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
+    object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     post_form::{self, Form},
     sse::{self, set_sse},
     tagging,
@@ -247,6 +248,23 @@ impl Drive {
 
     /// Streams a request body into `staged`, hashing it for the checksums asked for. A
     /// body longer than `limit` is cut off with `EntityTooLarge`, whatever it declared.
+    /// A version whose lock is asked about, in a bucket that must have Object Lock.
+    async fn locked_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> S3Result<ObjectInfo> {
+        let version_id = check_version(version_id)?;
+        if self.store.bucket_object_lock(bucket).await.s3()?.is_none() {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Bucket is missing Object Lock Configuration"
+            ));
+        }
+        self.store.head_version(bucket, key, version_id).await.s3()
+    }
+
     async fn stage(
         &self,
         mut staged: Staged,
@@ -376,6 +394,14 @@ fn check_copy_onto_itself(
         ));
     }
     Ok(())
+}
+
+/// What S3 answers about a version that has no retention or legal hold to show.
+fn no_lock_of_object() -> s3s::S3Error {
+    s3_error!(
+        NoSuchObjectLockConfiguration,
+        "The specified object does not have a ObjectLock configuration"
+    )
 }
 
 /// A `DeleteObjects` answer's entry: the version asked for, and when a delete marker was
@@ -566,6 +592,8 @@ impl NewAttrs {
             checksum_type: None,
             tags: BTreeMap::new(),
             acl: None,
+            retention: None,
+            legal_hold: None,
         }
     }
 }
@@ -637,7 +665,7 @@ fn http_date(timestamp: &Timestamp) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
-fn millis(ms: i64) -> Timestamp {
+pub(crate) fn millis(ms: i64) -> Timestamp {
     Timestamp::from(
         SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
     )
@@ -763,18 +791,20 @@ fn object_parts(
 }
 
 /// The attributes a copy gets when the request replaces its metadata or its tags (each
-/// has its own directive) or gives it an ACL; `None` keeps the source's, without its ACL.
+/// has its own directive) or gives it an ACL or a lock; `None` keeps the source's,
+/// without its ACL and lock.
 fn copy_attrs(
     input: &mut dto::CopyObjectInput,
     source: &ObjectAttrs,
     replace_metadata: bool,
     acl: Option<Acl>,
+    lock: WriteLock,
 ) -> S3Result<Option<ObjectAttrs>> {
     let replace_tags = input
         .tagging_directive
         .as_ref()
         .is_some_and(|d| d.as_str() == dto::TaggingDirective::REPLACE);
-    if !replace_metadata && !replace_tags && acl.is_none() {
+    if !replace_metadata && !replace_tags && acl.is_none() && !lock.is_some() {
         return Ok(None);
     }
     let mut attrs = if replace_metadata {
@@ -788,6 +818,7 @@ fn copy_attrs(
         source.tags.clone()
     };
     attrs.acl = acl;
+    lock.apply(&mut attrs);
     Ok(Some(attrs))
 }
 
@@ -803,6 +834,18 @@ fn header_tags(value: Option<&str>) -> S3Result<tagging::Tags> {
 const TAGGING: &str = "s3:GetObjectTagging";
 /// The permission that shows owners in listings.
 const READ_ACL: &str = "s3:GetObjectAcl";
+/// The permission that shows a version's retention.
+const READ_RETENTION: &str = "s3:GetObjectRetention";
+/// The permission that shows a version's legal hold.
+const READ_LEGAL_HOLD: &str = "s3:GetObjectLegalHold";
+/// The permission to remove or shorten what governance-mode retention protects.
+const BYPASS_GOVERNANCE: &str = "s3:BypassGovernanceRetention";
+
+/// What a read shows of a version's lock, given what the caller may read.
+fn read_lock(caller: Option<&access::Caller>, attrs: &ObjectAttrs) -> ReadLock {
+    let may = |action| caller.is_none_or(|c| c.may(action));
+    ReadLock::of(attrs, may(READ_RETENTION), may(READ_LEGAL_HOLD))
+}
 
 /// `x-amz-tagging-count`, when the object has tags.
 fn tag_count(attrs: &ObjectAttrs) -> Option<i32> {
@@ -986,6 +1029,7 @@ impl S3 for Drive {
             block_public_access: !self.legacy_bucket_defaults,
             acl: None,
             tags: None,
+            object_lock: input.object_lock_enabled_for_bucket == Some(true),
         };
         let requested = acl::requested(&acl_headers!(input, bucket), true)?;
         let acl = acl::for_new_bucket(requested, &new)?;
@@ -1231,7 +1275,20 @@ impl S3 for Drive {
             caps::admit(input.content_length, cap)?;
         }
         let tags = header_tags(input.tagging.as_deref())?;
+        let lock = write_lock!(input)?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
+        // S3 wants a locked object's bytes checked on the way in (a browser form has no
+        // way to send a checksum header).
+        let checked = input.content_md5.is_some()
+            || input.checksum_algorithm.is_some()
+            || !sent.is_empty()
+            || has_trailer(&req.headers);
+        if lock.is_some() && !checked && req.extensions.get::<Form>().is_none() {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters"
+            ));
+        }
         // Like S3, an object sent without a checksum gets CRC64NVME.
         let algorithm = input
             .checksum_algorithm
@@ -1285,6 +1342,7 @@ impl S3 for Drive {
         let mut attrs = new_attrs!(input).into_attrs(computed.clone());
         attrs.tags = tags;
         attrs.acl = acl;
+        lock.apply(&mut attrs);
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
             .store
@@ -1459,6 +1517,7 @@ impl S3 for Drive {
             out.checksum_type.clone_from(&slice.checksum_type);
         }
         set_sse!(out, info.sse.as_ref());
+        set_lock!(out, read_lock(caller.as_ref(), &info.attrs));
         Ok(S3Response::new(out))
     }
 
@@ -1517,6 +1576,7 @@ impl S3 for Drive {
             out.checksum_type.clone_from(&slice.checksum_type);
         }
         set_sse!(out, info.sse.as_ref());
+        set_lock!(out, read_lock(caller.as_ref(), &info.attrs));
         let mut response = S3Response::new(out);
         if slice.content_range.is_some() {
             // s3s answers every HEAD with 200; a partial one is 206, as for GET.
@@ -1626,6 +1686,99 @@ impl S3 for Drive {
         Ok(S3Response::new(dto::DeleteObjectTaggingOutput {
             version_id: info.version_id,
         }))
+    }
+
+    async fn get_object_lock_configuration(
+        &self,
+        req: S3Request<dto::GetObjectLockConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetObjectLockConfigurationOutput>> {
+        let lock = self
+            .store
+            .bucket_object_lock(&req.input.bucket)
+            .await
+            .s3()?
+            .ok_or_else(|| {
+                s3_error!(
+                    ObjectLockConfigurationNotFoundError,
+                    "Object Lock configuration does not exist for this bucket"
+                )
+            })?;
+        Ok(S3Response::new(dto::GetObjectLockConfigurationOutput {
+            object_lock_configuration: Some(object_lock::config_to_dto(&lock)),
+        }))
+    }
+
+    async fn put_object_lock_configuration(
+        &self,
+        req: S3Request<dto::PutObjectLockConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutObjectLockConfigurationOutput>> {
+        let input = req.input;
+        let lock = object_lock::config_from_dto(input.object_lock_configuration)?;
+        self.store
+            .set_bucket_object_lock(&input.bucket, lock)
+            .await
+            .s3()?;
+        Ok(S3Response::new(
+            dto::PutObjectLockConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_object_retention(
+        &self,
+        req: S3Request<dto::GetObjectRetentionInput>,
+    ) -> S3Result<S3Response<dto::GetObjectRetentionOutput>> {
+        let input = req.input;
+        let info = self
+            .locked_version(&input.bucket, &input.key, input.version_id.as_deref())
+            .await?;
+        let retention = info.attrs.retention.ok_or_else(no_lock_of_object)?;
+        Ok(S3Response::new(dto::GetObjectRetentionOutput {
+            retention: Some(object_lock::retention_to_dto(&retention)),
+        }))
+    }
+
+    async fn put_object_retention(
+        &self,
+        req: S3Request<dto::PutObjectRetentionInput>,
+    ) -> S3Result<S3Response<dto::PutObjectRetentionOutput>> {
+        let input = req.input;
+        let version_id = check_version(input.version_id.as_deref())?;
+        let retention = object_lock::retention_from_dto(input.retention)?;
+        // The access check made sure the caller may bypass governance when it asks.
+        let bypass = input.bypass_governance_retention == Some(true);
+        self.store
+            .set_retention(&input.bucket, &input.key, version_id, retention, bypass)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutObjectRetentionOutput::default()))
+    }
+
+    async fn get_object_legal_hold(
+        &self,
+        req: S3Request<dto::GetObjectLegalHoldInput>,
+    ) -> S3Result<S3Response<dto::GetObjectLegalHoldOutput>> {
+        let input = req.input;
+        let info = self
+            .locked_version(&input.bucket, &input.key, input.version_id.as_deref())
+            .await?;
+        let on = info.attrs.legal_hold.ok_or_else(no_lock_of_object)?;
+        Ok(S3Response::new(dto::GetObjectLegalHoldOutput {
+            legal_hold: Some(object_lock::legal_hold_to_dto(on)),
+        }))
+    }
+
+    async fn put_object_legal_hold(
+        &self,
+        req: S3Request<dto::PutObjectLegalHoldInput>,
+    ) -> S3Result<S3Response<dto::PutObjectLegalHoldOutput>> {
+        let input = req.input;
+        let version_id = check_version(input.version_id.as_deref())?;
+        let on = object_lock::legal_hold_from_dto(input.legal_hold)?;
+        self.store
+            .set_legal_hold(&input.bucket, &input.key, version_id, on)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutObjectLegalHoldOutput::default()))
     }
 
     async fn get_bucket_cors(
@@ -2009,9 +2162,11 @@ impl S3 for Drive {
                 .map(to_system_time),
             ..precondition(input.if_match.as_ref(), None)
         };
+        // The access check made sure the caller may bypass governance when it asks.
+        let bypass = input.bypass_governance_retention == Some(true);
         let deleted = self
             .store
-            .delete_if(&input.bucket, &input.key, version_id, precondition)
+            .delete_with(&input.bucket, &input.key, version_id, precondition, bypass)
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteObjectOutput {
@@ -2056,17 +2211,17 @@ impl S3 for Drive {
             } else {
                 "s3:DeleteObject"
             };
-            let allowed = caller.as_ref().is_none_or(|c| {
-                c.allows(
-                    action,
-                    &teifs_policy::object_arn(&input.bucket, &object.key),
-                )
-            });
+            let arn = teifs_policy::object_arn(&input.bucket, &object.key);
+            let allowed = caller.as_ref().is_none_or(|c| c.allows(action, &arn));
+            let bypass = input.bypass_governance_retention == Some(true)
+                && caller
+                    .as_ref()
+                    .is_none_or(|c| c.allows(BYPASS_GOVERNANCE, &arn));
             let result = match check_version(object.version_id.as_deref()) {
                 Ok(_) if !allowed => Err(s3_error!(AccessDenied, "Access Denied")),
                 Ok(version_id) => self
                     .store
-                    .delete_if(&input.bucket, &object.key, version_id, precondition)
+                    .delete_with(&input.bucket, &object.key, version_id, precondition, bypass)
                     .await
                     .s3(),
                 Err(err) => Err(err),
@@ -2151,7 +2306,8 @@ impl S3 for Drive {
         let acl = self
             .object_write_acl(&input.bucket, acl_headers!(input))
             .await?;
-        let attrs = copy_attrs(&mut input, &source.attrs, replace, acl)?;
+        let lock = write_lock!(input)?;
+        let attrs = copy_attrs(&mut input, &source.attrs, replace, acl, lock)?;
         self.check_write(
             &input.bucket,
             Some(&input.key),
@@ -2424,6 +2580,7 @@ impl S3 for Drive {
         attrs.acl = self
             .object_write_acl(&input.bucket, acl_headers!(input))
             .await?;
+        write_lock!(input)?.apply(&mut attrs);
         let checksum = checksums::for_upload(
             input
                 .checksum_algorithm

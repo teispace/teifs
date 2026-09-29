@@ -13,6 +13,6 @@ pub use names::{
     check_folder_bucket, check_object_key,
 };
 pub use object::{
-    ChecksumType, ObjectAttrs, ObjectInfo, PartInfo, SseInfo, SseMode, Stamp, UploadChecksum,
-    empty_etag, hex, md5_of_etag, multipart_etag, provisional_etag,
+    ChecksumType, LockMode, ObjectAttrs, ObjectInfo, PartInfo, Retention, SseInfo, SseMode, Stamp,
+    UploadChecksum, empty_etag, hex, md5_of_etag, multipart_etag, provisional_etag,
 };

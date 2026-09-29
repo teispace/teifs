@@ -99,7 +99,11 @@ impl Store {
             max_size,
         };
         self.blocking(move |inner| {
-            match inner.bucket(&upload.bucket)? {
+            let bucket = inner.bucket(&upload.bucket)?;
+            // A lock the bucket can't give is refused now, not when the upload completes
+            // (which applies the bucket's default retention then).
+            inner.lock_new_version(bucket.versions(), &mut upload.attrs.clone())?;
+            match bucket {
                 crate::Bucket::Folder(..) => {
                     if inner.new_key(&upload.key)?.is_folder() {
                         return Err(StoreError::InvalidRequest(

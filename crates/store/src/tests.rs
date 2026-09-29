@@ -1053,6 +1053,7 @@ async fn ownership_and_bucket_acls_guard_each_other() {
         block_public_access: false,
         acl: Some(public),
         tags: None,
+        object_lock: false,
     };
     store
         .create_bucket_with("writer", Layout::Folder, options)

@@ -21,6 +21,15 @@ behaviour; the on-disk format is always upgraded automatically.
   (one version for good) or `rm --versions` (all of a key's, asking first).
   `stat` shows a bucket's versioning, and `rb --force` removes a bucket's older
   versions and delete markers too.
+- Object Lock, with AWS's rules, in both layouts: buckets created with it
+  (`x-amz-bucket-object-lock-enabled`) or given it once versioning is on
+  (`PutObjectLockConfiguration`), default retention in days or years, and per version
+  governance or compliance retention and legal holds (`x-amz-object-lock-*` on writes,
+  copies and uploads in parts, `Put/GetObjectRetention`, `Put/GetObjectLegalHold`). A
+  locked version can't be removed for good until its retention ends or its legal hold
+  is lifted; governance gives way only to a caller allowed
+  `s3:BypassGovernanceRetention` who asks. Versioning can't be suspended under Object
+  Lock. All 39 Object Lock tests of the s3-tests suite pass.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

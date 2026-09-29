@@ -14,28 +14,11 @@ use aws_sdk_s3::{
     types::{BucketVersioningStatus, Delete, MfaDelete, ObjectIdentifier, VersioningConfiguration},
 };
 
+#[macro_use]
 mod common;
 
 use common::{SECRET_KEY, client, code, start_with};
 use teifs_store::Layout;
-
-/// Runs each test (an `async fn(Layout)`) on a drive whose new buckets are object
-/// buckets, and on one whose new buckets are folder buckets.
-macro_rules! in_both_layouts {
-    ($($name:ident),* $(,)?) => {$(
-        mod $name {
-            #[tokio::test]
-            async fn object_bucket() {
-                super::$name(teifs_store::Layout::Object).await;
-            }
-
-            #[tokio::test]
-            async fn folder_bucket() {
-                super::$name(teifs_store::Layout::Folder).await;
-            }
-        }
-    )*};
-}
 
 in_both_layouts!(
     versions_stack_and_each_stays_readable,

@@ -304,10 +304,11 @@ impl Inner {
             size,
             stored_len,
             etag,
-            attrs,
+            mut attrs,
             sealed,
             parts,
         } = finished;
+        self.lock_new_version(Some(bucket), &mut attrs)?;
         let (object_id, crypt) = match sealed {
             Some((object_id, crypt)) => (object_id, Some(crypt)),
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
@@ -434,6 +435,7 @@ impl Inner {
         key: &str,
         version_id: &str,
         precondition: &Precondition,
+        bypass: bool,
     ) -> Result<Deleted> {
         let Some(row) = conn.version(&bucket.id, key, version_id)? else {
             return Ok(Deleted {
@@ -444,6 +446,7 @@ impl Inner {
         if !row.delete_marker {
             precondition.check_delete(Some(&to_info(&row)))?;
         }
+        crate::lock::check_removal(&row.attrs, bypass, now_ms())?;
         if let Some((removed, files)) =
             conn.delete_version(&bucket.id, key, version_id, now_ms())?
         {

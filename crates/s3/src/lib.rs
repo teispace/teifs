@@ -16,6 +16,7 @@ mod errors;
 mod health;
 mod iam_api;
 mod limits;
+mod object_lock;
 mod post_form;
 mod proxy;
 mod routes;

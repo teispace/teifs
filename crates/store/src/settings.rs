@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
 use teifs_types::{Acl, SseMode};
 
-use crate::{Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, now_ms};
+use crate::{
+    Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lock::ObjectLock, now_ms,
+};
 
 /// Why a bucket's tags can't be replaced or deleted as a whole.
 const ABAC_TAGS: &str = "The bucket's tags decide access (ABAC is enabled): change them with \
@@ -15,7 +17,7 @@ const ABAC_TAGS: &str = "The bucket's tags decide access (ABAC is enabled): chan
 /// A bucket's settings. Unknown fields from a newer TeiFS are kept.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BucketConfig {
+pub(crate) struct BucketConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<BucketEncryption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +36,9 @@ struct BucketConfig {
     /// `TagResource` and `UntagResource` change them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     abac: bool,
+    /// Its Object Lock, once turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) object_lock: Option<ObjectLock>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -207,6 +212,9 @@ pub struct NewBucket {
     pub acl: Option<Acl>,
     /// Its tags (checked by the caller); none has none.
     pub tags: Option<BTreeMap<String, String>>,
+    /// Whether it starts with Object Lock on (and so versioning enabled), with no
+    /// default retention.
+    pub object_lock: bool,
 }
 
 impl Default for NewBucket {
@@ -216,6 +224,7 @@ impl Default for NewBucket {
             block_public_access: true,
             acl: None,
             tags: None,
+            object_lock: false,
         }
     }
 }
@@ -228,6 +237,7 @@ fn new_bucket(options: NewBucket) -> BucketConfig {
         ownership: options.ownership,
         acl: options.acl,
         tags: options.tags,
+        object_lock: options.object_lock.then(ObjectLock::default),
         ..BucketConfig::default()
     }
 }
@@ -487,7 +497,14 @@ impl Store {
         self.blocking(move |inner| {
             // Under the commit lock, so no write sees the bucket half-changed.
             let _lock = inner.lock();
-            if let Bucket::Folder(FolderBucket { versions: None, .. }) = inner.bucket(&name)? {
+            let bucket = inner.bucket(&name)?;
+            if versioning == Versioning::Suspended && inner.object_lock(bucket.versions())?.is_some()
+            {
+                return Err(StoreError::InvalidBucketState(
+                    "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.",
+                ));
+            }
+            if let Bucket::Folder(FolderBucket { versions: None, .. }) = bucket {
                 // A folder made outside TeiFS gets its record, which names its versions.
                 inner.update_config(&name, |_| Ok(()))?;
             }
@@ -528,7 +545,7 @@ impl Store {
 
 impl Inner {
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.
-    fn update_config(
+    pub(crate) fn update_config(
         &self,
         name: &str,
         change: impl FnOnce(&mut BucketConfig) -> Result<()>,
@@ -563,7 +580,7 @@ fn account_block(system: &teifs_meta::System) -> Result<Option<PublicAccessBlock
         .transpose()
 }
 
-fn read_config(json: Option<&str>) -> Result<BucketConfig> {
+pub(crate) fn read_config(json: Option<&str>) -> Result<BucketConfig> {
     match json {
         None => Ok(new_bucket(NewBucket::default())),
         Some(json) => serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata),

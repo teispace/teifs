@@ -45,6 +45,63 @@ pub struct ObjectAttrs {
     /// The object's ACL; none is private (only the owner).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acl: Option<crate::Acl>,
+    /// The version's Object Lock retention: kept from removal until its date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+    /// The version's Object Lock legal hold, once one was placed or lifted: while on, it's
+    /// kept from removal whatever its retention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legal_hold: Option<bool>,
+}
+
+/// How an Object Lock retention protects a version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LockMode {
+    /// Only someone allowed `s3:BypassGovernanceRetention` who asks to bypass it may
+    /// remove the version, shorten its retention or change its mode.
+    Governance,
+    /// Nobody may remove the version, shorten its retention or change its mode.
+    Compliance,
+}
+
+impl LockMode {
+    /// S3's name for it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Governance => "GOVERNANCE",
+            Self::Compliance => "COMPLIANCE",
+        }
+    }
+
+    /// The mode S3 names exactly so (upper case, as S3 requires).
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "GOVERNANCE" => Some(Self::Governance),
+            "COMPLIANCE" => Some(Self::Compliance),
+            _ => None,
+        }
+    }
+}
+
+/// A version's Object Lock retention: protected in `mode` until `until_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Retention {
+    /// How it's protected.
+    pub mode: LockMode,
+    /// Until when, in milliseconds since the Unix epoch.
+    pub until_ms: i64,
+}
+
+impl Retention {
+    /// Whether it still protects the version at `now_ms`.
+    #[must_use]
+    pub fn active(&self, now_ms: i64) -> bool {
+        self.until_ms > now_ms
+    }
 }
 
 /// What an object's checksum covers.

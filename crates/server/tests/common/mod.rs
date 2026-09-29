@@ -124,3 +124,22 @@ pub async fn anonymous(server: &Server, method: reqwest::Method, path: &str) -> 
         .status()
         .as_u16()
 }
+
+/// Runs each test (an `async fn(Layout)`) on a drive whose new buckets are object
+/// buckets, and on one whose new buckets are folder buckets.
+#[allow(unused_macros, reason = "only some tests run in both layouts")]
+macro_rules! in_both_layouts {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[tokio::test]
+            async fn object_bucket() {
+                super::$name(teifs_store::Layout::Object).await;
+            }
+
+            #[tokio::test]
+            async fn folder_bucket() {
+                super::$name(teifs_store::Layout::Folder).await;
+            }
+        }
+    )*};
+}

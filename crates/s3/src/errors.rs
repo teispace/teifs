@@ -50,6 +50,11 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::TooManyTags(max) => {
             s3_error!(InvalidTag, "The tag set can't have more than {max} tags")
         }
+        StoreError::InvalidBucketState(why) => s3_error!(InvalidBucketState, "{why}"),
+        StoreError::ObjectLocked => s3_error!(
+            AccessDenied,
+            "Access Denied because object protected by object lock."
+        ),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
         StoreError::AclsDisabled => crate::acl::not_supported(),
         StoreError::AclGrantsOthers => crate::acl::invalid_with_ownership(),

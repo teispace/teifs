@@ -6,23 +6,7 @@ use teifs_meta::NULL_VERSION;
 use tempfile::TempDir;
 
 use super::*;
-
-/// Runs each test (an `async fn(Layout)`) on an object bucket and on a folder bucket.
-macro_rules! in_both_layouts {
-    ($($name:ident),* $(,)?) => {$(
-        mod $name {
-            #[tokio::test]
-            async fn object_bucket() {
-                super::$name(super::Layout::Object).await;
-            }
-
-            #[tokio::test]
-            async fn folder_bucket() {
-                super::$name(super::Layout::Folder).await;
-            }
-        }
-    )*};
-}
+use crate::test_util::in_both_layouts;
 
 in_both_layouts!(
     versions_stack_and_each_stays_readable,

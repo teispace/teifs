@@ -71,6 +71,14 @@ pub enum StoreError {
     /// the owner.
     #[error("the bucket's ACL grants others, so ACLs can't be disabled")]
     AclGrantsOthers,
+    /// The bucket's state doesn't allow the change (Object Lock without versioning
+    /// enabled, or suspending versioning under Object Lock).
+    #[error("the bucket's state doesn't allow this: {0}")]
+    InvalidBucketState(&'static str),
+    /// Object Lock protects the version: a legal hold, or a retention that isn't
+    /// bypassed.
+    #[error("the object version is protected by Object Lock")]
+    ObjectLocked,
     /// An `If-Match` / `If-None-Match` condition wasn't met.
     #[error("the precondition wasn't met")]
     PreconditionFailed,

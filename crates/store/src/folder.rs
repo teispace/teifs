@@ -332,13 +332,14 @@ impl Inner {
         key: &ObjectKey,
         tmp: &Path,
         etag: String,
-        attrs: ObjectAttrs,
+        mut attrs: ObjectAttrs,
         parts: Option<String>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         let dir = &bucket.dir;
         let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
+        self.lock_new_version(bucket.versions.as_ref(), &mut attrs)?;
         // Flushing needs write access on Windows.
         self.sync_file(tmp)?;
         let parent = self.make_parents(dir, key)?;
@@ -421,6 +422,7 @@ impl Inner {
         let dir = &bucket.dir;
         let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
+        crate::lock::check_folder(key, &attrs)?;
         let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
         match fs::create_dir(&path) {
@@ -553,7 +555,7 @@ impl Inner {
         bucket: &FolderBucket,
         key: &ObjectKey,
         version_id: Option<&str>,
-        change: impl FnOnce(&mut ObjectAttrs),
+        change: impl FnOnce(&mut ObjectAttrs) -> Result<()>,
     ) -> Result<ObjectInfo> {
         let conn = self.lock();
         if let Found::File(path, meta) | Found::Folder(path, meta) = Inner::find(&bucket.dir, key)?
@@ -565,7 +567,8 @@ impl Inner {
                 .unwrap_or(teifs_meta::NULL_VERSION);
             if version_id.is_none_or(|id| id == current) {
                 let mut row = row;
-                change(&mut row.attrs);
+                change(&mut row.attrs)?;
+                crate::lock::check_folder(key, &row.attrs)?;
                 conn.put(&bucket.name, key.as_str(), &row)?;
                 return Ok(bucket.describe(Inner::info(&conn, &bucket.name, key.as_str(), &meta)?));
             }
@@ -578,7 +581,7 @@ impl Inner {
             });
         };
         let mut row = Inner::version_row(&conn, versions, key.as_str(), version_id)?;
-        change(&mut row.attrs);
+        change(&mut row.attrs)?;
         conn.set_version_attrs(
             &versions.id,
             key.as_str(),

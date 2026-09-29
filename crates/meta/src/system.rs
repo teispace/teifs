@@ -192,6 +192,15 @@ impl System {
             .optional()?)
     }
 
+    /// The settings of the bucket recorded with this id (its permanent id), if any.
+    pub fn bucket_config_by_id(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT config FROM buckets WHERE id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Replaces a recorded bucket's settings; false when the bucket isn't recorded.
     pub fn set_bucket_config(&self, name: &str, config: &str) -> Result<bool> {
         Ok(self
@@ -279,6 +288,11 @@ mod tests {
             system.bucket_config("photos").unwrap().as_deref(),
             Some(r#"{"a":1}"#)
         );
+        assert_eq!(
+            system.bucket_config_by_id("id1").unwrap().as_deref(),
+            Some(r#"{"a":1}"#)
+        );
+        assert_eq!(system.bucket_config_by_id("photos").unwrap(), None);
         assert!(!system.set_bucket_config("missing", "{}").unwrap());
         for versioning in [Versioning::Enabled, Versioning::Suspended] {
             assert!(system.set_bucket_versioning("photos", versioning).unwrap());

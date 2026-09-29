@@ -299,7 +299,14 @@ id) as an older version; removing the current version by id puts the newest olde
 back at the key's path (`Inner::restore_newest`); reads, tags and copies that name an
 older version go to the version store; `Store::list_folder_versions` merges the files
 with the version rows, key by key. `Index::batch` nests (savepoints), so these steps
-join the batch that records the file. Reads return an `ObjectBody`, which only ever yields the
+join the batch that records the file. Object Lock (`crates/store/src/lock.rs`) rides on
+the same paths: a version's retention and legal hold are part of its `ObjectAttrs`, so
+archiving and restoring carry them; `Inner::lock_new_version` gives each new version
+(in `commit_object` and `commit_file`, so every write, copy and completed upload) the
+bucket's default retention or refuses a lock the bucket can't give; and
+`lock::check_removal` runs in both permanent-delete paths (`delete_object_version`,
+`delete_folder_version`). The bucket's configuration is its record's `objectLock`
+setting, looked up by record id. Reads return an `ObjectBody`, which only ever yields the
 object's own bytes (whole or a range). Copies between layouts clone the bytes where
 the disk can. The tests in `crates/store/src/layout_tests.rs` run the same S3 behaviour
 against both layouts.

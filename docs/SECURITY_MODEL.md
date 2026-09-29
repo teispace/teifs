@@ -277,9 +277,16 @@ at most 4096 connections are served at once, the rest wait in the system's queue
 refused before anything else looks at them. Over HTTPS the TLS handshake must finish
 within the header timeout too. *Planned:* fuzzing of every parser.
 
-### 12. Retention fails closed (*planned*)
-When Object Lock arrives, any error reading an object's retention denies the delete or
-overwrite.
+### 12. Retention fails closed
+A version's retention and legal hold are part of its own record, checked by the store
+itself before anything removes the version, so no request path can skip them and no
+bucket setting has to be read to enforce them: a record that can't be read refuses the
+delete. A bucket setting that can't be read refuses the write instead of writing without
+its default retention. Governance is bypassed only when the request asks
+(`x-amz-bypass-governance-retention`) and the caller is allowed
+`s3:BypassGovernanceRetention` on that object; a legal hold or compliance retention
+holds whoever asks. In a folder bucket this binds S3 requests only: another program
+with access to the folder can still change its files.
 
 ### 13. Authorization before existence
 A caller without access learns nothing about whether an object exists: requests are

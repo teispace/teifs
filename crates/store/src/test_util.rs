@@ -2,6 +2,25 @@
 
 use std::{fs, path::Path, time::SystemTime};
 
+/// Runs each test (an `async fn(Layout)`, with `Layout` in scope) on an object bucket
+/// and on a folder bucket.
+macro_rules! in_both_layouts {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[tokio::test]
+            async fn object_bucket() {
+                super::$name(super::Layout::Object).await;
+            }
+
+            #[tokio::test]
+            async fn folder_bucket() {
+                super::$name(super::Layout::Folder).await;
+            }
+        }
+    )*};
+}
+pub(crate) use in_both_layouts;
+
 /// Sets a folder's modification time (to make it look settled, say).
 pub(crate) fn set_folder_modified(path: &Path, time: SystemTime) {
     folder_handle(path).set_modified(time).unwrap();
