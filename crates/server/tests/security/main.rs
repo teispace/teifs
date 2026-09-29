@@ -12,5 +12,8 @@
 mod common;
 mod sign;
 
+mod cors;
+mod disclosure;
+mod paths;
 mod policy;
 mod signatures;

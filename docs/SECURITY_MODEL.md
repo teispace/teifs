@@ -218,7 +218,10 @@ spaces). Paths are built only
 from checked parts, and the store compares the canonical path with the expected one
 before using it, so symbolic links inside a bucket and names that differ only in case or
 Unicode form (or an NTFS short name) are never followed or overwritten (`Inner::find` and `Inner::make_parents` in
-`crates/store/src/folder.rs`). *Planned:* fuzzing of the parser and the path mapping.
+`crates/store/src/folder.rs`). Raw requests in a bucket anyone may read, with `..`,
+encoded slashes and dots, backslashes and a link to another bucket, reach nothing outside
+it (`crates/server/tests/security/paths.rs`). *Planned:* fuzzing of the parser and the
+path mapping.
 
 ### 8. Only trusted proxies can set the client's address
 Forwarding headers are read only when the connection's peer is a configured proxy
@@ -236,9 +239,11 @@ plain HTTP as secure, since the proxy may be passing on plain HTTP from anywhere
 ### 9. Untrusted content is never rendered in a privileged page (*planned*)
 Any web interface that previews files renders them from a separate, sandboxed origin.
 
-### 10. CORS never reflects arbitrary origins (*planned*)
+### 10. CORS never reflects arbitrary origins
 CORS headers come only from a bucket's CORS rules; an origin is echoed with credentials
-only when a rule names it.
+only when a rule names it. Nothing else answers a browser's `Origin`: not the bucket
+list, a bucket without rules, the admin, IAM or STS APIs, nor their preflights
+(`crates/server/tests/security/cors.rs`).
 
 ### 11. Input is bounded
 Request bodies stream to disk instead of memory; listings are paged (1000 keys at most);
@@ -262,7 +267,10 @@ overwrite.
 A caller without access learns nothing about whether an object exists: requests are
 authorized before they touch the drive, so conditional requests reveal nothing either,
 and reading a missing key answers `403 AccessDenied` instead of `404 NoSuchKey` to a
-caller who may not list the bucket, as AWS does.
+caller who may not list the bucket, as AWS does. A refused read gets the same `403`
+whatever it asks (`If-None-Match`, `If-Modified-Since`, a range, a part, its tags or
+attributes), with no ETag, date, size or metadata in it
+(`crates/server/tests/security/disclosure.rs`).
 
 ### 14. Encryption at rest keeps its keys away from the data
 Objects in object buckets are encrypted by default (SSE-S3), as specified in

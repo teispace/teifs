@@ -284,21 +284,28 @@ fn stamp(time: SystemTime) -> (String, String) {
     )
 }
 
-/// A response's status, S3 error code (if any) and body.
+/// A response's status, headers, S3 error code (if any) and body.
 pub struct Answer {
     pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
     pub code: String,
     pub body: String,
 }
 
 impl Answer {
-    async fn from(response: reqwest::Response) -> Self {
+    pub async fn from(response: reqwest::Response) -> Self {
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let body = response.text().await.unwrap();
         let code = body
             .split_once("<Code>")
             .and_then(|(_, rest)| rest.split_once("</Code>"))
             .map_or_else(String::new, |(code, _)| code.to_owned());
-        Self { status, code, body }
+        Self {
+            status,
+            headers,
+            code,
+            body,
+        }
     }
 }
