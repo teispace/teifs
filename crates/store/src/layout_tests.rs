@@ -518,7 +518,10 @@ async fn tags_change_without_touching_the_object() {
             .await
             .unwrap();
         let tags: BTreeMap<String, String> = [("k".to_owned(), "v".to_owned())].into();
-        let tagged = store.set_tags("bkt", "t.txt", tags.clone()).await.unwrap();
+        let tagged = store
+            .set_tags("bkt", "t.txt", None, tags.clone())
+            .await
+            .unwrap();
         let head = store.head("bkt", "t.txt").await.unwrap();
         assert_eq!(head.attrs.tags, tags, "{layout:?}");
         assert_eq!(head.etag, put.etag);
@@ -526,7 +529,7 @@ async fn tags_change_without_touching_the_object() {
         assert_eq!(tagged.etag, put.etag);
         assert_eq!(head.attrs.content_type.as_deref(), Some("text/plain"));
         store
-            .set_tags("bkt", "t.txt", BTreeMap::new())
+            .set_tags("bkt", "t.txt", None, BTreeMap::new())
             .await
             .unwrap();
         assert!(
@@ -539,7 +542,7 @@ async fn tags_change_without_touching_the_object() {
                 .is_empty()
         );
         assert!(matches!(
-            store.set_tags("bkt", "missing", tags).await,
+            store.set_tags("bkt", "missing", None, tags).await,
             Err(StoreError::NoSuchKey)
         ));
     }
@@ -551,7 +554,7 @@ async fn files_changed_outside_can_be_tagged() {
     fs::write(dir.path().join("bkt/by-hand.txt"), b"hello").unwrap();
     let tags: BTreeMap<String, String> = [("k".to_owned(), "v".to_owned())].into();
     store
-        .set_tags("bkt", "by-hand.txt", tags.clone())
+        .set_tags("bkt", "by-hand.txt", None, tags.clone())
         .await
         .unwrap();
     let head = store.head("bkt", "by-hand.txt").await.unwrap();
@@ -638,7 +641,7 @@ async fn conditional_writes_and_deletes_follow_aws() {
 
         // Deletes: a mismatch fails; a match deletes; a missing object always succeeds.
         assert!(matches!(
-            store.delete_if("bkt", "k", if_match("nope")).await,
+            store.delete_if("bkt", "k", None, if_match("nope")).await,
             Err(StoreError::PreconditionFailed)
         ));
         let size_mismatch = Precondition {
@@ -646,12 +649,18 @@ async fn conditional_writes_and_deletes_follow_aws() {
             ..Precondition::default()
         };
         assert!(matches!(
-            store.delete_if("bkt", "k", size_mismatch).await,
+            store.delete_if("bkt", "k", None, size_mismatch).await,
             Err(StoreError::PreconditionFailed)
         ));
-        store.delete_if("bkt", "k", if_match(&etag)).await.unwrap();
+        store
+            .delete_if("bkt", "k", None, if_match(&etag))
+            .await
+            .unwrap();
         assert!(store.head("bkt", "k").await.is_err());
-        store.delete_if("bkt", "k", if_match("nope")).await.unwrap();
+        store
+            .delete_if("bkt", "k", None, if_match("nope"))
+            .await
+            .unwrap();
     }
 }
 

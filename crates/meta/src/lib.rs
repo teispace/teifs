@@ -24,8 +24,8 @@ pub use iam::{
     PolicyVersionRow, RoleRow, UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
-pub use system::{BucketRecord, Layout, System};
-pub use versions::{ListFrom, NULL_VERSION, VersionRow};
+pub use system::{BucketRecord, Layout, System, Versioning};
+pub use versions::{NULL_VERSION, VersionRow, VersionsFrom};
 
 /// Why a metadata database failed.
 #[derive(Debug, thiserror::Error)]

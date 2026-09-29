@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teifs_meta::{BucketRecord, Layout};
+use teifs_meta::{BucketRecord, Layout, Versioning};
 use teifs_types::{Acl, SseMode};
 
 use crate::{Bucket, Inner, Store, StoreError, error::Result, now_ms};
@@ -464,6 +464,41 @@ impl Store {
             .await
     }
 
+    /// A bucket's versioning. Folder buckets don't have it.
+    pub async fn bucket_versioning(&self, bucket: &str) -> Result<Versioning> {
+        let name = bucket.to_owned();
+        self.blocking(move |inner| match inner.bucket(&name)? {
+            Bucket::Object(bucket) => Ok(bucket.versioning),
+            Bucket::Folder(..) => Ok(Versioning::Unversioned),
+        })
+        .await
+    }
+
+    /// Turns a bucket's versioning on, or suspends it. As on S3, a bucket that has had
+    /// versioning never goes back to having none. Only object buckets have versioning.
+    pub async fn set_bucket_versioning(&self, bucket: &str, versioning: Versioning) -> Result<()> {
+        if versioning == Versioning::Unversioned {
+            return Err(StoreError::InvalidRequest(
+                "versioning can only be enabled or suspended",
+            ));
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            // Under the commit lock, so no write sees the bucket half-changed.
+            let _lock = inner.lock();
+            match inner.bucket(&name)? {
+                Bucket::Object(_) => {
+                    inner.system().set_bucket_versioning(&name, versioning)?;
+                    Ok(())
+                }
+                Bucket::Folder(..) => Err(StoreError::NotImplemented(
+                    "versioning in folder buckets isn't supported yet; use an object bucket",
+                )),
+            }
+        })
+        .await
+    }
+
     /// Changes an existing bucket's settings.
     async fn change_config(
         &self,
@@ -508,6 +543,7 @@ impl Inner {
                     name: name.to_owned(),
                     layout: Layout::Folder,
                     created_ms: now_ms(),
+                    versioning: Versioning::Unversioned,
                 },
                 &new_bucket_config(NewBucket::default()),
             )?;

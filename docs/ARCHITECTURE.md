@@ -286,7 +286,12 @@ store's lock, which also covers copied parts, before the part replaces any other
 `Bucket::Object` (a record in `system.db`), and every operation dispatches on it. The
 shared step is `Inner::commit_to`: a finished temporary file becomes the object `key`,
 either renamed to its path (folder) or given a footer and stored by id with a row in
-`object_versions` (object). Reads return an `ObjectBody`, which only ever yields the
+`object_versions` (object). An object bucket's versioning decides the version id a
+write gets (`ObjectBucket::new_version_id`: a new one while enabled, else `null`) and
+what a delete does (`Inner::delete_object`: remove the `null` version, add a delete
+marker, or replace the `null` version with one); `Inner::version_row` finds the version
+a read names and turns a delete marker into `StoreError::DeleteMarker`, which the S3
+layer answers as AWS does. Folder buckets have only `null` versions. Reads return an `ObjectBody`, which only ever yields the
 object's own bytes (whole or a range). Copies between layouts clone the bytes where
 the disk can. The tests in `crates/store/src/layout_tests.rs` run the same S3 behaviour
 against both layouts.

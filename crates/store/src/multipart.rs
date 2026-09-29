@@ -49,6 +49,8 @@ struct CompletedResult {
     checksum_type: Option<ChecksumType>,
     #[serde(default)]
     crypt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_id: Option<String>,
 }
 
 impl Store {
@@ -349,6 +351,7 @@ impl Store {
                 },
                 sse,
                 parts: Vec::new(),
+                version_id: result.version_id,
             }))
         })
         .await
@@ -429,6 +432,7 @@ impl Store {
                 checksums: info.attrs.checksums.clone(),
                 checksum_type: info.attrs.checksum_type,
                 crypt: upload.crypt.clone(),
+                version_id: info.version_id.clone(),
             };
             let now = now_ms();
             conn.record_completed(

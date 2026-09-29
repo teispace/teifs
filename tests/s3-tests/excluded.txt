@@ -35,3 +35,8 @@ test_bucket_policy_set_condition_operator_end_with_IfExists  # expects the bucke
 test_bucket_policy_put_obj_request_obj_tag  # adds the tag header to the main client, not alt's, so alt's upload has no tag and is refused (the suite's own TODO)
 test_bucket_policy_put_obj_grant  # PutObject with x-amz-grant-* headers also needs s3:PutObjectAcl on AWS, which the test's policy doesn't grant; and needs alt to be another account
 test_bucket_get_location  # creates a bucket in Ceph's placement named by api_name ("default"); on AWS a location constraint names a region, another region's is IllegalLocationConstraintException, and GetBucketLocation answers none for us-east-1
+test_bucket_list_return_data_versioning  # passes only when re-creating an owned bucket returns 200 (AWS us-east-1's legacy behaviour); TeiFS answers 409 BucketAlreadyOwnedByYou like every other AWS region
+test_versioning_concurrent_multi_object_delete  # passes only when re-creating an owned bucket returns 200 (AWS us-east-1's legacy behaviour); TeiFS answers 409 BucketAlreadyOwnedByYou like every other AWS region
+test_versioned_object_acl  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_versioned_object_acl_no_version_specified  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
+test_delete_marker_nonversioned  # expects x-amz-delete-marker: false after deleting in an unversioned bucket (Ceph RGW); AWS never sends the header as false, and sends none there

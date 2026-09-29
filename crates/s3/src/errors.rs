@@ -17,6 +17,14 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
     match err {
         StoreError::NoSuchBucket => s3_error!(NoSuchBucket),
         StoreError::NoSuchKey => s3_error!(NoSuchKey),
+        StoreError::NoSuchVersion => {
+            s3_error!(NoSuchVersion, "The specified version does not exist.")
+        }
+        StoreError::DeleteMarker {
+            version_id,
+            modified,
+            named,
+        } => delete_marker(version_id.as_deref(), modified, named),
         StoreError::BucketExists => s3_error!(BucketAlreadyOwnedByYou),
         StoreError::BucketNotEmpty => s3_error!(BucketNotEmpty),
         StoreError::InvalidName(NameError::InvalidBucketName(why)) => {
@@ -38,6 +46,7 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         StoreError::EntityTooSmall => s3_error!(EntityTooSmall),
         StoreError::EntityTooLarge => crate::caps::too_large(),
         StoreError::InvalidRequest(why) => s3_error!(InvalidRequest, "{why}"),
+        StoreError::NotImplemented(why) => s3_error!(NotImplemented, "{why}"),
         StoreError::TooManyTags(max) => {
             s3_error!(InvalidTag, "The tag set can't have more than {max} tags")
         }
@@ -88,6 +97,43 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
             S3Error::with_source(S3ErrorCode::InternalError, Box::new(err))
         }
     }
+}
+
+/// A read of a delete marker, as AWS answers it: `404 NoSuchKey` when the marker is the
+/// current version, `405 MethodNotAllowed` when the request named it; either way with
+/// `x-amz-delete-marker: true` and the marker's version id, and when named, its
+/// `Last-Modified`.
+fn delete_marker(
+    version_id: Option<&str>,
+    modified: std::time::SystemTime,
+    named: bool,
+) -> S3Error {
+    let mut err = if named {
+        s3_error!(
+            MethodNotAllowed,
+            "The specified method is not allowed against this resource."
+        )
+    } else {
+        s3_error!(NoSuchKey)
+    };
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "x-amz-delete-marker",
+        http::HeaderValue::from_static("true"),
+    );
+    if let Some(id) = version_id.and_then(|id| http::HeaderValue::from_str(id).ok()) {
+        headers.insert("x-amz-version-id", id);
+    }
+    if named {
+        let mut date = Vec::new();
+        let _ = s3s::dto::Timestamp::from(modified)
+            .format(s3s::dto::TimestampFormat::HttpDate, &mut date);
+        if let Ok(date) = http::HeaderValue::from_bytes(&date) {
+            headers.insert(http::header::LAST_MODIFIED, date);
+        }
+    }
+    err.set_headers(headers);
+    err
 }
 
 /// Maps an error reading a request body: a checksum or signature that didn't match, a

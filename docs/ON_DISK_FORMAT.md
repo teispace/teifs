@@ -94,13 +94,18 @@ size before encryption), then a footer:
 | Part | Bytes |
 |---|---|
 | The object's bytes | `size` |
-| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS and SSE-C) | variable |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS and SSE-C), for a version other than `null` `version` (its id) | variable |
 | Footer JSON length | 4, big-endian |
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
 
+Each version has a data file of its own; a delete marker is a row without one, so
+markers are the one thing the files can't rebuild. Version ids are `null` or 32 hex
+digits (a UUIDv7); a key's versions are ordered by `seq`, not by id, and exactly one
+of them is `latest` while the key has any.
+
 A write puts the data file in place (staged, synced, renamed, folder synced), then
-replaces the row in one transaction that also queues the replaced file in `garbage`,
+adds the row (or replaces the `null` version's) in one transaction that also queues the replaced file in `garbage`,
 then removes that file. A crash leaves at most a data file no row refers to; queued
 garbage is removed at the next start.
 
@@ -109,7 +114,7 @@ garbage is removed at the next start.
 | Table | Holds |
 |---|---|
 | `objects` | Folder buckets, per object: `bucket`, `key`, the file's `size`, `mtime_ns` and `ino` when it was recorded, its `etag`, `attrs` (JSON: content headers, user metadata, checksums and `checksumType`, absent for a whole-object checksum, `tags`, and `acl` when the object has one), and for multipart objects `parts` (JSON: each part's size and checksums). Rebuildable from the files, except the parts |
-| `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq`, `version_id` (`null` without versioning), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
+| `object_versions` | Object buckets, per version: `bucket_id`, `key` (bytes, so it sorts in S3's byte order), `seq` (higher is newer), `version_id` (`null` for one written without versioning on), `latest`, `delete_marker`, `object_id`, `size`, `etag`, `modified_ms`, `attrs`, and columns for encryption, parts and small objects kept in the row. Authoritative |
 | `garbage` | Data files waiting to be removed |
 | `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt`, and every upload the checksum its object gets in `uploads.checksum` (JSON: `algorithm`, `type` `FULL_OBJECT` or `COMPOSITE`, `requested`); an upload created with a size cap keeps it in `uploads.max_size` (bytes, all parts together; `NULL` without one) |
 | `completed_uploads` | What each completed upload answered (ETag, size, checksums), kept 24 hours so a retried Complete gets the same answer |
@@ -140,7 +145,7 @@ What can't be rebuilt from the files.
 
 | Table | Holds |
 |---|---|
-| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL; `abac`, `true` when its tags decide access) |
+| `buckets` | Buckets TeiFS created or configured (a folder made by hand gets a record when a setting is saved): `id` (permanent), `name`, `layout` (`plain` for folder buckets, `object`), creation time, `versioning` (`enabled`, `suspended`, or `NULL` while it was never set), settings (JSON: `encryption` with the default mode, KMS key and whether SSE-C is blocked; `tags`; `cors`, the CORS rules; `policy`, the bucket policy as sent; `publicAccessBlock`; `ownership`, the Object Ownership setting; `acl`, the bucket's ACL; `abac`, `true` when its tags decide access) |
 | `settings` | The drive's own settings, by `name`, each a JSON `value`: `accountPublicAccessBlock`, the account's Block Public Access settings |
 | `iam_*` | IAM's users, access keys (secrets sealed by the drive's KMS), groups, roles (trust policy, longest session, boundary), OpenID Connect providers (URL, audiences, thumbprints), policies and their versions, attachments and tags |
 

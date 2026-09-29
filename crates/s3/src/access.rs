@@ -123,7 +123,7 @@ impl Access {
     }
 
     /// Whether `identity` may do `action` on `arn`: [`allows`], then the ACL of the
-    /// object `(bucket, key)` the request is on, if any. `creating`: the request makes the
+    /// object (the version) the request is on, if any. `creating`: the request makes the
     /// object (see [`acl_for`]).
     async fn permits(
         &self,
@@ -131,7 +131,7 @@ impl Access {
         context: &Context,
         (action, arn): (&str, &str),
         rules: Option<&BucketRules>,
-        object: Option<(&str, &str)>,
+        object: Option<ObjectRef<'_>>,
         creating: bool,
     ) -> S3Result<bool> {
         let decision = decide(identity, context, action, arn, rules);
@@ -142,46 +142,59 @@ impl Access {
             return Ok(true);
         }
         // The object's ACL, read only when the bucket's ACLs apply.
-        let (Some((AclOf::Object, permission)), Some((bucket, key))) =
+        let (Some((AclOf::Object, permission)), Some(object)) =
             (acl_for(action, rules, creating), object)
         else {
             return Ok(false);
         };
-        let acl = match self.store.head(bucket, key).await {
-            Ok(info) => info.attrs.acl,
-            Err(StoreError::NoSuchKey | StoreError::NoSuchBucket) => None,
-            Err(err) => return Err(from_store(err)),
-        };
+        let acl = self.existing(object).await?.and_then(|info| info.attrs.acl);
         Ok(
             acl.is_some_and(|acl| acl.grants(permission, is_signed(identity)))
                 && identity.within_boundary(context, action, arn),
         )
     }
 
+    /// The object (the version) a request is on, `None` when there's none to read: no
+    /// such bucket, key or version, or a delete marker. Any other error refuses the
+    /// request rather than letting it be decided without what the object says.
+    async fn existing(
+        &self,
+        (bucket, key, version): ObjectRef<'_>,
+    ) -> S3Result<Option<teifs_store::ObjectInfo>> {
+        match self.store.head_version(bucket, key, version).await {
+            Ok(info) => Ok(Some(info)),
+            Err(
+                StoreError::NoSuchKey
+                | StoreError::NoSuchBucket
+                | StoreError::NoSuchVersion
+                | StoreError::DeleteMarker { .. },
+            ) => Ok(None),
+            Err(err) => Err(from_store(err)),
+        }
+    }
+
     /// For an action AWS decides with an object's own tags, `context` with the tags of the
-    /// object `(bucket, key)` as `s3:ExistingObjectTag`s (none when there's no such
-    /// object); `None` for other actions. Any other error refuses the request rather than
-    /// letting it be decided without them.
+    /// object (the version) as `s3:ExistingObjectTag`s (none when there's no such
+    /// object); `None` for other actions.
     async fn with_existing_tags(
         &self,
         context: &Context,
         action: &str,
-        (bucket, key): (&str, &str),
+        object: ObjectRef<'_>,
     ) -> S3Result<Option<Context>> {
         if !EXISTING_OBJECT_TAGS.contains(&action) {
             return Ok(None);
         }
         let mut context = context.clone();
-        match self.store.head(bucket, key).await {
-            Ok(info) => {
-                for (name, value) in &info.attrs.tags {
-                    context = context.with_tag(TagKind::ExistingObject, name, value);
-                }
-                Ok(Some(context))
-            }
-            Err(StoreError::NoSuchKey | StoreError::NoSuchBucket) => Ok(Some(context)),
-            Err(err) => Err(from_store(err)),
+        for (name, value) in self
+            .existing(object)
+            .await?
+            .iter()
+            .flat_map(|i| &i.attrs.tags)
+        {
+            context = context.with_tag(TagKind::ExistingObject, name, value);
         }
+        Ok(Some(context))
     }
 }
 
@@ -453,9 +466,11 @@ impl S3Access for Access {
             });
             return Ok(());
         }
+        let version = query(cx, "versionId");
         let asked = Asked {
             operation,
             path,
+            version: version.as_deref(),
             source: source.as_ref(),
             rules: rules.as_deref(),
             source_rules: source_rules.as_deref(),
@@ -498,6 +513,7 @@ impl S3Access for Access {
         let asked = Asked {
             operation: "CreateBucket",
             path: &path,
+            version: None,
             source: None,
             rules: rules.as_deref(),
             source_rules: None,
@@ -537,6 +553,8 @@ struct Deferred {
 struct Asked<'a> {
     operation: &'a str,
     path: &'a S3Path,
+    /// The version the request names (`versionId`).
+    version: Option<&'a str>,
     source: Option<&'a Source>,
     rules: Option<&'a BucketRules>,
     source_rules: Option<&'a BucketRules>,
@@ -555,6 +573,7 @@ impl Access {
         let Asked {
             operation,
             path,
+            version,
             source,
             rules,
             source_rules,
@@ -577,7 +596,7 @@ impl Access {
             };
             match resource(need, path, operation, source) {
                 Resource::Arn(arn) => {
-                    let object = object_of(need.target, path, source);
+                    let object = object_of(need.target, path, version, source);
                     let creating = need.target == Target::Object && CREATING.contains(&operation);
                     let tagged = match object {
                         Some(object) if tests_tags && !creating => {
@@ -676,21 +695,30 @@ fn tests_existing_tags<'a>(
         })
 }
 
-/// The object `(bucket, key)` a need's action is on, if it's one.
+/// An object a request is on: bucket, key, and the version it names (`None`: the
+/// current one).
+type ObjectRef<'a> = (&'a str, &'a str, Option<&'a str>);
+
+/// The object a need's action is on, if it's one.
 fn object_of<'a>(
     target: Target,
     path: &'a S3Path,
+    version: Option<&'a str>,
     source: Option<&'a Source>,
-) -> Option<(&'a str, &'a str)> {
+) -> Option<ObjectRef<'a>> {
     match (target, path) {
-        (Target::Source, _) => source.map(|(bucket, key, _)| (bucket.as_str(), key.as_str())),
-        (Target::Object, S3Path::Object { bucket, key }) => Some((bucket.as_ref(), key.as_ref())),
+        (Target::Source, _) => {
+            source.map(|(bucket, key, version)| (bucket.as_str(), key.as_str(), version.as_deref()))
+        }
+        (Target::Object, S3Path::Object { bucket, key }) => {
+            Some((bucket.as_ref(), key.as_ref(), version))
+        }
         _ => None,
     }
 }
 
-/// The object a copy or rename reads from: (bucket, key, whether a version is named).
-type Source = (String, String, bool);
+/// The object a copy or rename reads from: bucket, key, and the version it names.
+type Source = (String, String, Option<String>);
 
 fn source(operation: &str, cx: &S3AccessContext<'_>) -> S3Result<Option<Source>> {
     let header = |name: &str| cx.headers().get(name).and_then(|v| v.to_str().ok());
@@ -704,7 +732,11 @@ fn source(operation: &str, cx: &S3AccessContext<'_>) -> S3Result<Option<Source>>
                     bucket,
                     key,
                     version_id,
-                }) => Ok(Some((bucket.into(), key.into(), version_id.is_some()))),
+                }) => Ok(Some((
+                    bucket.into(),
+                    key.into(),
+                    version_id.map(Into::into),
+                ))),
                 // Access points and outposts aren't TeiFS's; the operation refuses them.
                 _ => Ok(None),
             }
@@ -716,7 +748,7 @@ fn source(operation: &str, cx: &S3AccessContext<'_>) -> S3Result<Option<Source>>
                 return Ok(None);
             };
             let key = crate::drive::rename_source(value, bucket)?;
-            Ok(Some((bucket.to_string(), key, false)))
+            Ok(Some((bucket.to_string(), key, None)))
         }
         _ => Ok(None),
     }
@@ -771,7 +803,7 @@ fn facts(cx: &S3AccessContext<'_>, form: Option<&Form>, source: Option<&Source>)
     };
     Facts {
         version_id: query(cx, "versionId").is_some(),
-        source_version_id: source.is_some_and(|(_, _, version)| *version),
+        source_version_id: source.is_some_and(|(_, _, version)| version.is_some()),
         tagging: match form {
             Some(form) => form.field("tagging").is_some() || has("x-amz-tagging"),
             None => has("x-amz-tagging"),

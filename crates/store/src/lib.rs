@@ -33,13 +33,13 @@ use std::{
     time::SystemTime,
 };
 
-use teifs_meta::{BucketRecord, Index, System};
+use teifs_meta::{BucketRecord, Index, NULL_VERSION, System};
 
 pub use body::{BodyReader, ObjectBody};
 pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
 pub use jobs::{JobOptions, JobStatus, Jobs};
-pub use list::{After, ListQuery, Listing};
+pub use list::{After, ListQuery, Listing, ObjectVersion, VersionListing, VersionsQuery};
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use settings::{
     BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
@@ -50,7 +50,7 @@ pub use staged::Staged;
 pub use teifs_crypto::{
     CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
 };
-pub use teifs_meta::{Layout, Part, Upload};
+pub use teifs_meta::{Layout, Part, Upload, Versioning};
 use teifs_types::check_folder_bucket;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, OWNER_ID, PartInfo, Permission, SseInfo, SseMode,
@@ -60,6 +60,7 @@ pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey
 
 use error::not_found_as;
 use folder::Found;
+pub use objects::Deleted;
 use objects::{BUCKETS_DIR, Finished, ObjectBucket};
 use staged::{TmpFile, sync_dir};
 
@@ -131,6 +132,11 @@ impl Match {
 }
 
 impl Precondition {
+    /// Whether it has any condition.
+    fn is_conditional(&self) -> bool {
+        *self != Self::default()
+    }
+
     /// Whether the write may only create the object (`If-None-Match: *`).
     fn creates_only(&self) -> bool {
         self.if_none_match == Some(Match::Any)
@@ -447,6 +453,7 @@ impl Store {
                     name,
                     layout,
                     created_ms: now_ms(),
+                    versioning: Versioning::Unversioned,
                 },
                 &settings::new_bucket_config(options),
             )?;
@@ -609,7 +616,17 @@ impl Store {
     /// What's known about an object without opening its encryption: no key is needed,
     /// and checksums sealed under SSE-KMS or SSE-C are left out.
     pub async fn head(&self, bucket: &str, key: &str) -> Result<ObjectInfo> {
-        let (mut info, _, sealed) = self.locate(bucket, key).await?;
+        self.head_version(bucket, key, None).await
+    }
+
+    /// Like [`Store::head`], for a version of the object (`None`: the current one).
+    pub async fn head_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<ObjectInfo> {
+        let (mut info, _, sealed) = self.locate(bucket, key, version_id).await?;
         if let Some((crypt, ..)) = sealed {
             info.sse = Some(crypt.info(None));
             for part in &mut info.parts {
@@ -619,22 +636,25 @@ impl Store {
         Ok(info)
     }
 
-    /// Finds an object for reading.
-    async fn locate(&self, bucket: &str, key: &str) -> Result<Located> {
+    /// Finds a version of an object for reading (`None`: the current one).
+    async fn locate(&self, bucket: &str, key: &str, version_id: Option<&str>) -> Result<Located> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| match inner.bucket(&bucket)? {
             Bucket::Folder(name, dir) => {
+                only_null(version_id.as_deref())?;
                 let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
                 let (info, file) = inner.open_folder_object(&name, &dir, &key)?;
                 Ok((info, file, None))
             }
             Bucket::Object(bucket) => {
-                let (row, file) = Inner::open_object(&inner.lock(), &bucket, &key)?;
+                let (row, file) =
+                    Inner::open_object(&inner.lock(), &bucket, &key, version_id.as_deref())?;
                 let sealed = match objects::crypt_of(&row)? {
-                    Some(crypt) => Some((crypt, bucket.id, objects::part_sizes(&row)?)),
+                    Some(crypt) => Some((crypt, bucket.id.clone(), objects::part_sizes(&row)?)),
                     None => None,
                 };
-                Ok((objects::to_info(&row), file, sealed))
+                Ok((bucket.info(&row), file, sealed))
             }
         })
         .await
@@ -643,17 +663,19 @@ impl Store {
     /// An object and its bytes (`None` for a folder). The bytes are the ones `ObjectInfo`
     /// describes, even if the object is replaced while they're being read.
     pub async fn read(&self, bucket: &str, key: &str) -> Result<(ObjectInfo, Option<ObjectBody>)> {
-        self.read_with(bucket, key, None).await
+        self.read_with(bucket, key, None, None).await
     }
 
-    /// Like [`Store::read`], with the customer key an SSE-C object needs.
+    /// Like [`Store::read`], for a version of the object (`None`: the current one), with
+    /// the customer key an SSE-C object needs.
     pub async fn read_with(
         &self,
         bucket: &str,
         key: &str,
+        version_id: Option<&str>,
         customer: Option<&CustomerKey>,
     ) -> Result<(ObjectInfo, Option<ObjectBody>)> {
-        let (mut info, file, sealed) = self.locate(bucket, key).await?;
+        let (mut info, file, sealed) = self.locate(bucket, key, version_id).await?;
         let Some((crypt, bucket_id, parts)) = sealed else {
             if customer.is_some() {
                 return Err(StoreError::CustomerKeyNotApplicable);
@@ -690,44 +712,54 @@ impl Store {
         Ok((info, body))
     }
 
-    /// Replaces an object's tags. Its bytes, ETag and modification time don't change.
+    /// Replaces the tags of a version of an object (`None`: the current one). Its bytes,
+    /// ETag and modification time don't change.
     pub async fn set_tags(
         &self,
         bucket: &str,
         key: &str,
+        version_id: Option<&str>,
         tags: std::collections::BTreeMap<String, String>,
     ) -> Result<ObjectInfo> {
-        self.change_attrs(bucket, key, move |attrs| attrs.tags = tags)
+        self.change_attrs(bucket, key, version_id, move |attrs| attrs.tags = tags)
             .await
     }
 
-    /// Replaces an object's ACL (`None`: private). Its bytes, ETag and modification time
-    /// don't change.
-    pub async fn set_acl(&self, bucket: &str, key: &str, acl: Option<Acl>) -> Result<ObjectInfo> {
-        self.change_attrs(bucket, key, move |attrs| attrs.acl = acl)
+    /// Replaces the ACL of a version of an object (`None`: the current one; an ACL of
+    /// `None`: private). Its bytes, ETag and modification time don't change.
+    pub async fn set_acl(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        acl: Option<Acl>,
+    ) -> Result<ObjectInfo> {
+        self.change_attrs(bucket, key, version_id, move |attrs| attrs.acl = acl)
             .await
     }
 
-    /// Changes an object's attributes in place.
+    /// Changes the attributes of a version of an object in place.
     async fn change_attrs(
         &self,
         bucket: &str,
         key: &str,
+        version_id: Option<&str>,
         change: impl FnOnce(&mut ObjectAttrs) + Send + 'static,
     ) -> Result<ObjectInfo> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| match inner.bucket(&bucket)? {
             Bucket::Folder(name, dir) => {
+                only_null(version_id.as_deref())?;
                 let key = ObjectKey::parse(&key).map_err(|_| StoreError::NoSuchKey)?;
                 inner.change_folder_attrs(&name, &dir, &key, change)
             }
             Bucket::Object(bucket) => {
                 let conn = inner.lock();
-                let mut row =
-                    Inner::object_row(&conn, &bucket, &key)?.ok_or(StoreError::NoSuchKey)?;
+                let mut row = Inner::version_row(&conn, &bucket, &key, version_id.as_deref())?;
                 change(&mut row.attrs);
-                conn.set_version_attrs(&bucket.id, &key, &row.attrs, None)?;
-                Ok(objects::to_info(&row))
+                conn.set_version_attrs(&bucket.id, &key, &row.version_id, &row.attrs, None)?;
+                Ok(bucket.info(&row))
             }
         })
         .await
@@ -735,24 +767,34 @@ impl Store {
 
     /// Deletes an object. Deleting one that doesn't exist succeeds, as in S3.
     pub async fn delete(&self, bucket: &str, key: &str) -> Result<()> {
-        self.delete_if(bucket, key, Precondition::default()).await
+        self.delete_if(bucket, key, None, Precondition::default())
+            .await
+            .map(drop)
     }
 
     /// Deletes an object if it meets `precondition` (`If-Match`, size, modification
-    /// time); one that doesn't exist is gone already, which succeeds.
+    /// time), as the bucket's versioning says ([`Inner::delete_object`]); with a
+    /// version id, removes that version for good. One that doesn't exist is gone
+    /// already, which succeeds.
     pub async fn delete_if(
         &self,
         bucket: &str,
         key: &str,
+        version_id: Option<&str>,
         precondition: Precondition,
-    ) -> Result<()> {
+    ) -> Result<Deleted> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| {
             let conn = inner.lock();
             match inner.bucket(&bucket)? {
                 Bucket::Folder(name, dir) => {
+                    // A folder bucket has only `null` versions: another id names nothing.
+                    if version_id.as_deref().is_some_and(|v| v != NULL_VERSION) {
+                        return Ok(Deleted::default());
+                    }
                     let Ok(key) = ObjectKey::parse(&key) else {
-                        return Ok(());
+                        return Ok(Deleted::default());
                     };
                     let current = match Inner::find(&dir, &key)? {
                         Found::File(_, meta) | Found::Folder(_, meta) => {
@@ -763,16 +805,14 @@ impl Store {
                     if precondition.check_delete(current.as_ref())? {
                         Inner::delete_folder_object(&conn, &name, &dir, &key)?;
                     }
-                    Ok(())
+                    Ok(Deleted::default())
                 }
-                Bucket::Object(bucket) => {
-                    let current =
-                        Inner::object_row(&conn, &bucket, &key)?.map(|row| objects::to_info(&row));
-                    if precondition.check_delete(current.as_ref())? {
-                        Inner::delete_object(&conn, &bucket, &key)?;
+                Bucket::Object(bucket) => match version_id {
+                    None => Inner::delete_object(&conn, &bucket, &key, &precondition),
+                    Some(id) => {
+                        Inner::delete_object_version(&conn, &bucket, &key, &id, &precondition)
                     }
-                    Ok(())
-                }
+                },
             }
         })
         .await
@@ -818,12 +858,18 @@ impl Store {
                     )?;
                 }
                 Bucket::Object(bucket) => {
+                    if bucket.versioning != Versioning::Unversioned {
+                        return Err(StoreError::InvalidRequest(
+                            "objects can't be renamed in a bucket with versioning",
+                        ));
+                    }
                     teifs_types::check_object_key(&to)?;
                     let current =
                         Inner::object_row(&conn, &bucket, &from)?.ok_or(StoreError::NoSuchKey)?;
                     let target = Inner::object_row(&conn, &bucket, &to)?;
-                    if !source.holds(Some(&objects::to_info(&current)))
-                        || !destination.holds(target.as_ref().map(objects::to_info).as_ref())
+                    let info = |row: &teifs_meta::VersionRow| bucket.info(row);
+                    if !source.holds(Some(&info(&current)))
+                        || !destination.holds(target.as_ref().map(info).as_ref())
                     {
                         return Err(StoreError::PreconditionFailed);
                     }
@@ -851,17 +897,19 @@ impl Store {
         attrs: Option<ObjectAttrs>,
         precondition: Precondition,
     ) -> Result<ObjectInfo> {
+        let from = (from.0, from.1, None);
         self.copy_with(from, to, attrs, precondition, None, &Encryption::None)
             .await
     }
 
-    /// Copies an object, reading an SSE-C source with `source_key` and encrypting the
-    /// copy as `encryption` asks (as S3 does, the copy doesn't inherit the source's
-    /// encryption). Unencrypted copies clone the bytes where the disk can; anything
-    /// encrypted is decrypted and encrypted again under the copy's own key.
+    /// Copies a version of an object (`from`'s third part; `None`: the current one),
+    /// reading an SSE-C source with `source_key` and encrypting the copy as `encryption`
+    /// asks (as S3 does, the copy doesn't inherit the source's encryption). Unencrypted
+    /// copies clone the bytes where the disk can; anything encrypted is decrypted and
+    /// encrypted again under the copy's own key.
     pub async fn copy_with(
         &self,
-        from: (&str, &str),
+        from: (&str, &str, Option<&str>),
         to: (&str, &str),
         attrs: Option<ObjectAttrs>,
         precondition: Precondition,
@@ -869,23 +917,36 @@ impl Store {
         encryption: &Encryption,
     ) -> Result<ObjectInfo> {
         let (src_bucket, src_key) = (from.0.to_owned(), from.1.to_owned());
+        let src_version = from.2.map(str::to_owned);
+        let from = (from.0, from.1, src_version.as_deref());
         let (dst_bucket, dst_key) = (to.0.to_owned(), to.1.to_owned());
-        let source_encrypted = {
-            let (bucket, key) = (src_bucket.clone(), src_key.clone());
+        let (source_encrypted, versioned) = {
+            let (bucket, key, version) = (src_bucket.clone(), src_key.clone(), src_version.clone());
             self.blocking(move |inner| match inner.bucket(&bucket)? {
-                Bucket::Object(b) => Ok(Inner::object_row(&inner.lock(), &b, &key)?
-                    .is_some_and(|row| row.crypt.is_some())),
-                Bucket::Folder(..) => Ok(false),
+                Bucket::Object(b) => {
+                    let row = Inner::version_row(&inner.lock(), &b, &key, version.as_deref())?;
+                    Ok((row.crypt.is_some(), b.versioning != Versioning::Unversioned))
+                }
+                Bucket::Folder(..) => {
+                    only_null(version.as_deref())?;
+                    Ok((false, false))
+                }
             })
             .await?
         };
         let same = src_bucket == dst_bucket && src_key == dst_key;
+        // With versioning, a copy onto itself is a new version; copying a version named by
+        // its id onto its key (restoring it) needs nothing new.
+        if same
+            && attrs.is_none()
+            && src_version.is_none()
+            && matches!(encryption, Encryption::None)
+        {
+            return Err(StoreError::InvalidRequest(
+                "copying an object onto itself needs new metadata or encryption",
+            ));
+        }
         if source_encrypted || source_key.is_some() || !matches!(encryption, Encryption::None) {
-            if same && attrs.is_none() && matches!(encryption, Encryption::None) {
-                return Err(StoreError::InvalidRequest(
-                    "copying an object onto itself needs new metadata or encryption",
-                ));
-            }
             return self
                 .copy_through(from, to, attrs, precondition, source_key, encryption)
                 .await;
@@ -898,13 +959,16 @@ impl Store {
                     let dst_key = inner.new_key(&dst_key)?;
                     inner.copy_folder(src_name, &src_key, dst_name, &dst_key, attrs, &precondition)
                 }
-                (Bucket::Object(a), Bucket::Object(b)) if a.id == b.id && same => {
+                (Bucket::Object(a), Bucket::Object(b)) if a.id == b.id && same && !versioned => {
                     let attrs = attrs.ok_or(StoreError::InvalidRequest(
                         "copying an object onto itself needs new metadata",
                     ))?;
                     Inner::replace_object_attrs(&inner.lock(), a, &src_key, &attrs, &precondition)
                 }
-                _ => inner.copy_across(&src, &src_key, &dst, &dst_key, attrs, &precondition),
+                _ => {
+                    let source = (&src, src_key.as_str(), src_version.as_deref());
+                    inner.copy_across(source, &dst, &dst_key, attrs, &precondition)
+                }
             }
         })
         .await
@@ -913,7 +977,7 @@ impl Store {
     /// Copies by reading (decrypting) the source and writing (encrypting) the copy.
     async fn copy_through(
         &self,
-        from: (&str, &str),
+        from: (&str, &str, Option<&str>),
         to: (&str, &str),
         attrs: Option<ObjectAttrs>,
         precondition: Precondition,
@@ -921,7 +985,7 @@ impl Store {
         encryption: &Encryption,
     ) -> Result<ObjectInfo> {
         use tokio::io::AsyncReadExt;
-        let (source, body) = self.read_with(from.0, from.1, source_key).await?;
+        let (source, body) = self.read_with(from.0, from.1, from.2, source_key).await?;
         let mut staged = self.stage_for(to.0, encryption).await?;
         if let Some(body) = body {
             let mut reader = body.all().await?;
@@ -1064,6 +1128,7 @@ impl Inner {
             return Ok(Bucket::Object(ObjectBucket {
                 dir: self.system_dir.join(BUCKETS_DIR).join(&record.id),
                 id: record.id,
+                versioning: record.versioning,
             }));
         }
         Ok(Bucket::Folder(name.to_owned(), self.bucket_dir(name)?))
@@ -1135,8 +1200,7 @@ impl Inner {
     /// are cloned where the disk can (APFS, Btrfs, XFS), else copied.
     fn copy_across(
         &self,
-        src: &Bucket,
-        src_key: &str,
+        (src, src_key, src_version): (&Bucket, &str, Option<&str>),
         dst: &Bucket,
         dst_key: &str,
         attrs: Option<ObjectAttrs>,
@@ -1145,6 +1209,7 @@ impl Inner {
         let tmp = TmpFile::new(&self.tmp);
         let source = match src {
             Bucket::Folder(name, dir) => {
+                only_null(src_version)?;
                 let key = ObjectKey::parse(src_key).map_err(|_| StoreError::NoSuchKey)?;
                 match Inner::find(dir, &key)? {
                     Found::File(path, meta) => {
@@ -1161,13 +1226,12 @@ impl Inner {
             Bucket::Object(bucket) => {
                 // Under the commit lock, so the file can't be replaced and removed mid-copy.
                 let conn = self.lock();
-                let row =
-                    Inner::object_row(&conn, bucket, src_key)?.ok_or(StoreError::NoSuchKey)?;
+                let row = Inner::version_row(&conn, bucket, src_key, src_version)?;
                 match &row.object_id {
                     Some(id) => fs::copy(bucket.data_path(id), &tmp.path).map(drop)?,
                     None => fs::File::create(&tmp.path).map(drop)?,
                 }
-                objects::to_info(&row)
+                bucket.info(&row)
             }
         };
         // A copy's ETag is its MD5; a known one carries over, else it's worked out now.
@@ -1181,6 +1245,15 @@ impl Inner {
         let info = self.commit_to(&conn, dst, dst_key, finished, precondition)?;
         tmp.keep();
         Ok(info)
+    }
+}
+
+/// Checks a version id named in a folder bucket, whose objects have only the `null`
+/// version.
+fn only_null(version_id: Option<&str>) -> Result<()> {
+    match version_id {
+        Some(id) if id != NULL_VERSION => Err(StoreError::NoSuchVersion),
+        _ => Ok(()),
     }
 }
 
@@ -1244,3 +1317,5 @@ mod layout_tests;
 mod sse_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod versioning_tests;

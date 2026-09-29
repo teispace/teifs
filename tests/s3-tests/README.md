@@ -8,7 +8,7 @@ conformance suite, against a fresh server. Every test it runs is in exactly one 
 | `implemented.txt` | Must pass. A failure here is a regression and fails the run |
 | `unimplemented.txt` | Standard S3 behaviour TeiFS doesn't support yet |
 | `excluded.txt` | Not a goal, each with the reason after `#` (another server's own behaviour) |
-| `folder-excluded.txt` | Tests folder buckets can't pass by design (keys a folder can't hold); they must pass on object buckets |
+| `folder-excluded.txt` | Tests folder buckets can't pass: by design (keys a folder can't hold), or not yet (versioning); they must pass on object buckets |
 
 [docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md) claims only what these lists prove.
 

@@ -12,6 +12,20 @@ pub enum StoreError {
     /// The object doesn't exist.
     #[error("the object doesn't exist")]
     NoSuchKey,
+    /// The version doesn't exist.
+    #[error("the version doesn't exist")]
+    NoSuchVersion,
+    /// The version asked for, or the current one, is a delete marker, which has no
+    /// content.
+    #[error("the object's version is a delete marker")]
+    DeleteMarker {
+        /// The marker's version id (`None` where versions aren't named).
+        version_id: Option<String>,
+        /// When the marker was added.
+        modified: std::time::SystemTime,
+        /// Whether the request named the marker's version (else it's the current one).
+        named: bool,
+    },
     /// A bucket with that name already exists.
     #[error("a bucket with that name already exists")]
     BucketExists,
@@ -44,6 +58,9 @@ pub enum StoreError {
     /// The request can't be done as asked.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    /// TeiFS doesn't do this (yet).
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
     /// Adding tags would leave more than this many.
     #[error("more than {0} tags")]
     TooManyTags(usize),

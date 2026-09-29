@@ -32,6 +32,9 @@ const MIGRATIONS: &[&str] = &[
     crate::iam::ROLES_MIGRATION,
     // 6: IAM OpenID Connect providers.
     crate::iam::OIDC_MIGRATION,
+    // 7: a bucket's versioning (`enabled`, `suspended`; NULL until first configured),
+    //    read with its record on every request.
+    "ALTER TABLE buckets ADD COLUMN versioning TEXT;",
 ];
 
 /// How a bucket stores its objects.
@@ -61,6 +64,46 @@ impl Layout {
     }
 }
 
+/// A bucket's versioning, as S3 has it: once configured, it's enabled or suspended,
+/// never again unversioned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Versioning {
+    /// Never configured: every object has one version, `null`, and answers don't name it.
+    #[default]
+    Unversioned,
+    /// Every write makes a new version; a delete adds a delete marker.
+    Enabled,
+    /// Writes replace the `null` version; a delete makes the `null` version a delete
+    /// marker. Other versions are kept.
+    Suspended,
+}
+
+impl Versioning {
+    fn as_db(self) -> Option<&'static str> {
+        match self {
+            Versioning::Unversioned => None,
+            Versioning::Enabled => Some("enabled"),
+            Versioning::Suspended => Some("suspended"),
+        }
+    }
+
+    fn from_db(value: Option<&str>) -> Self {
+        match value {
+            Some("enabled") => Versioning::Enabled,
+            Some("suspended") => Versioning::Suspended,
+            // Anything else can only come from a newer TeiFS, whose schema this build
+            // refuses to open.
+            _ => Versioning::Unversioned,
+        }
+    }
+
+    /// Whether answers name versions: once versioning was ever configured.
+    #[must_use]
+    pub fn names_versions(self) -> bool {
+        self != Versioning::Unversioned
+    }
+}
+
 /// What's recorded about a bucket. A folder in the drive without a record is a plain
 /// bucket with default settings (made outside TeiFS, or before records existed).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +116,8 @@ pub struct BucketRecord {
     pub layout: Layout,
     /// When TeiFS created it, in milliseconds since the Unix epoch.
     pub created_ms: i64,
+    /// Its versioning.
+    pub versioning: Versioning,
 }
 
 /// A drive's system database. Not `Sync`: the store keeps it behind a lock.
@@ -94,26 +139,37 @@ impl System {
     pub fn record_bucket(&self, record: &BucketRecord, config: &str) -> Result<()> {
         self.conn
             .prepare_cached(
-                "INSERT INTO buckets (id, name, layout, created_ms, config)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO buckets (id, name, layout, created_ms, config, versioning)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT (name) DO UPDATE SET id = excluded.id, layout = excluded.layout,
-                   created_ms = excluded.created_ms, config = excluded.config",
+                   created_ms = excluded.created_ms, config = excluded.config,
+                   versioning = excluded.versioning",
             )?
             .execute(params![
                 record.id,
                 record.name,
                 record.layout.as_str(),
                 record.created_ms,
-                config
+                config,
+                record.versioning.as_db(),
             ])?;
         Ok(())
+    }
+
+    /// Sets a recorded bucket's versioning; false when the bucket isn't recorded.
+    pub fn set_bucket_versioning(&self, name: &str, versioning: Versioning) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("UPDATE buckets SET versioning = ?2 WHERE name = ?1")?
+            .execute(params![name, versioning.as_db()])?
+            > 0)
     }
 
     /// The record of a bucket, if TeiFS created it.
     pub fn bucket(&self, name: &str) -> Result<Option<BucketRecord>> {
         Ok(self
             .conn
-            .prepare_cached("SELECT id, name, layout, created_ms FROM buckets WHERE name = ?1")?
+            .prepare_cached(&format!("SELECT {RECORD} FROM buckets WHERE name = ?1"))?
             .query_row([name], record_from_row)
             .optional()?)
     }
@@ -122,7 +178,7 @@ impl System {
     pub fn buckets(&self) -> Result<Vec<BucketRecord>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT id, name, layout, created_ms FROM buckets ORDER BY name")?;
+            .prepare_cached(&format!("SELECT {RECORD} FROM buckets ORDER BY name"))?;
         let rows = stmt.query_map([], record_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -181,6 +237,9 @@ impl System {
     }
 }
 
+/// The columns [`record_from_row`] reads.
+const RECORD: &str = "id, name, layout, created_ms, versioning";
+
 fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BucketRecord> {
     Ok(BucketRecord {
         id: r.get(0)?,
@@ -189,6 +248,7 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BucketRecord> {
         // refuses to open; folder is the safe reading.
         layout: Layout::parse(&r.get::<_, String>(2)?).unwrap_or_default(),
         created_ms: r.get(3)?,
+        versioning: Versioning::from_db(r.get::<_, Option<String>>(4)?.as_deref()),
     })
 }
 
@@ -205,6 +265,7 @@ mod tests {
             name: "photos".into(),
             layout: Layout::Object,
             created_ms: 42,
+            versioning: Versioning::Unversioned,
         };
         system.record_bucket(&record, r#"{"b":2}"#).unwrap();
         assert_eq!(system.bucket("photos").unwrap(), Some(record.clone()));
@@ -219,6 +280,18 @@ mod tests {
             Some(r#"{"a":1}"#)
         );
         assert!(!system.set_bucket_config("missing", "{}").unwrap());
+        for versioning in [Versioning::Enabled, Versioning::Suspended] {
+            assert!(system.set_bucket_versioning("photos", versioning).unwrap());
+            assert_eq!(
+                system.bucket("photos").unwrap().unwrap().versioning,
+                versioning
+            );
+        }
+        assert!(
+            !system
+                .set_bucket_versioning("missing", Versioning::Enabled)
+                .unwrap()
+        );
         system.forget_bucket("photos").unwrap();
         assert_eq!(system.bucket("photos").unwrap(), None);
     }

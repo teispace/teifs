@@ -132,6 +132,9 @@ pub struct ObjectInfo {
     pub sse: Option<SseInfo>,
     /// Its parts, when it was uploaded in parts (empty otherwise).
     pub parts: Vec<PartInfo>,
+    /// Its version id, in a bucket that has had versioning (`null` for a version written
+    /// without it); `None` in a bucket that never had it.
+    pub version_id: Option<String>,
 }
 
 impl ObjectInfo {
@@ -365,6 +368,7 @@ mod tests {
             attrs: ObjectAttrs::default(),
             sse: None,
             parts: Vec::new(),
+            version_id: None,
         };
         assert_eq!(info.content_type(), "image/jpeg");
         info.attrs.content_type = Some("text/plain".into());

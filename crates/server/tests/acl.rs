@@ -607,3 +607,55 @@ async fn legacy_defaults_make_buckets_as_s3_did_before_2023() {
     let refused = put_with(&root, "private", "k", public).await;
     assert_eq!(refused, "AccessControlListNotSupported");
 }
+
+/// Each version has its own ACL, and a request naming a version is decided on that one.
+#[tokio::test]
+async fn each_version_has_its_own_acl() {
+    let server = start_with(|config| config.default_layout = Layout::Object).await;
+    let root = client(&server, SECRET_KEY);
+    open_bucket(&root, "photos").await;
+    let enabled = aws_sdk_s3::types::VersioningConfiguration::builder()
+        .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+        .build();
+    root.put_bucket_versioning()
+        .bucket("photos")
+        .versioning_configuration(enabled)
+        .send()
+        .await
+        .unwrap();
+    let put = |acl: Option<ObjectCannedAcl>| {
+        root.put_object()
+            .bucket("photos")
+            .key("a.jpg")
+            .set_acl(acl)
+            .body(ByteStream::from_static(b"data"))
+            .send()
+    };
+    let public = put(Some(ObjectCannedAcl::PublicRead)).await.unwrap();
+    let public = public.version_id().unwrap().to_owned();
+    let private = put(None).await.unwrap();
+    let private = private.version_id().unwrap().to_owned();
+    let get = |version: &str| format!("/photos/a.jpg?versionId={version}");
+    assert_eq!(anonymous(&server, Method::GET, "/photos/a.jpg").await, 403);
+    assert_eq!(anonymous(&server, Method::GET, &get(&public)).await, 200);
+    assert_eq!(anonymous(&server, Method::GET, &get(&private)).await, 403);
+
+    root.put_object_acl()
+        .bucket("photos")
+        .key("a.jpg")
+        .version_id(&private)
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous(&server, Method::GET, "/photos/a.jpg").await, 200);
+    let acl = root
+        .get_object_acl()
+        .bucket("photos")
+        .key("a.jpg")
+        .version_id(&public)
+        .send()
+        .await
+        .unwrap();
+    assert!(acl.grants().len() > 1);
+}

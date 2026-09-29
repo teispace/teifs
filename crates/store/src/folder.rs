@@ -192,6 +192,7 @@ impl Inner {
                 attrs,
                 sse: None,
                 parts: Vec::new(),
+                version_id: None,
             });
         }
         let stamp = Stamp::of(meta);
@@ -212,6 +213,7 @@ impl Inner {
             attrs,
             sse: None,
             parts,
+            version_id: None,
         })
     }
 
@@ -347,6 +349,7 @@ impl Inner {
             attrs,
             sse: None,
             parts: part_infos,
+            version_id: None,
         })
     }
 

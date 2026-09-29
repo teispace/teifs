@@ -7,6 +7,16 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Versioning in object buckets, with AWS's semantics: `PutBucketVersioning`
+  (enabled or suspended), versions stacking under each key, delete markers,
+  permanent deletes by version id, `versionId` on reads, tags, ACLs, deletes and a
+  copy's source, and `ListObjectVersions` with delete markers and version markers.
+  Reads of a delete marker answer as AWS's do (`404` or `405` with
+  `x-amz-delete-marker`), and version ids AWS would refuse are refused. Folder buckets
+  refuse versioning for now (`NotImplemented`).
+- A listing of an object bucket stopped early when a stretch of keys held only delete
+  markers; it now carries on past them.
+
 - `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are checked,
   as on AWS: a request that expects another account to own the bucket (or a copy's
   source) is refused with `AccessDenied`. They were ignored.

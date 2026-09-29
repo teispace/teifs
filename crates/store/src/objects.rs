@@ -16,7 +16,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use teifs_meta::{Index, NULL_VERSION, VersionRow};
+use teifs_meta::{Index, NULL_VERSION, VersionRow, Versioning};
 
 use crate::{
     Durability, Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
@@ -40,6 +40,18 @@ pub(crate) struct ObjectBucket {
     pub id: String,
     /// Where its data files are.
     pub dir: PathBuf,
+    /// Its versioning.
+    pub versioning: Versioning,
+}
+
+/// What a delete did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Deleted {
+    /// The version it removed, or the delete marker it added; `None` in a bucket that
+    /// never had versioning (nothing to name).
+    pub version_id: Option<String>,
+    /// Whether that version is a delete marker.
+    pub delete_marker: bool,
 }
 
 /// What a data file's footer records, so the index can be rebuilt from files alone.
@@ -57,6 +69,9 @@ struct Footer<'a> {
     crypt: Option<&'a Crypt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parts: Option<&'a PartsRecord>,
+    /// Its version id, unless it's `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<&'a str>,
 }
 
 /// A multipart object's parts (the row's `parts` column, JSON), in both layouts.
@@ -145,9 +160,36 @@ impl ObjectBucket {
         let (aa, bb) = tail.split_at(tail.len().min(2));
         self.dir.join(aa).join(bb).join(object_id)
     }
+
+    /// The id a new version gets: its own while versioning is on, else `null`.
+    fn new_version_id(&self) -> String {
+        match self.versioning {
+            Versioning::Enabled => uuid::Uuid::now_v7().simple().to_string(),
+            Versioning::Unversioned | Versioning::Suspended => NULL_VERSION.to_owned(),
+        }
+    }
+
+    /// What's known about a version, named when the bucket names versions.
+    pub(crate) fn info(&self, row: &VersionRow) -> ObjectInfo {
+        ObjectInfo {
+            version_id: self
+                .versioning
+                .names_versions()
+                .then(|| row.version_id.clone()),
+            ..to_info(row)
+        }
+    }
+
+    /// The version id a delete names: `None` in a bucket that never had versioning.
+    fn named(&self, version_id: &str) -> Option<String> {
+        self.versioning
+            .names_versions()
+            .then(|| version_id.to_owned())
+    }
 }
 
-pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
+/// What's known about a version, without its version id.
+fn to_info(row: &VersionRow) -> ObjectInfo {
     let sse = row
         .crypt
         .as_deref()
@@ -162,13 +204,18 @@ pub(crate) fn to_info(row: &VersionRow) -> ObjectInfo {
     ObjectInfo {
         key: row.key.clone(),
         size: row.size,
-        modified: SystemTime::UNIX_EPOCH
-            + Duration::from_millis(u64::try_from(row.modified_ms).unwrap_or(0)),
+        modified: time_of(row.modified_ms),
         etag: row.etag.clone(),
         attrs: row.attrs.clone(),
         sse,
         parts,
+        version_id: None,
     }
+}
+
+/// A time in milliseconds since the Unix epoch.
+fn time_of(ms: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
 
 /// What's recorded about an object's encryption, if it's encrypted.
@@ -212,6 +259,32 @@ impl Inner {
             .filter(|row| !row.delete_marker))
     }
 
+    /// The version of `key` a read names (`None`: the current one). A delete marker
+    /// can't be read: [`StoreError::DeleteMarker`] says which it is.
+    pub(crate) fn version_row(
+        conn: &Index,
+        bucket: &ObjectBucket,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<VersionRow> {
+        let row = match version_id {
+            None => conn
+                .latest_version(&bucket.id, key)?
+                .ok_or(StoreError::NoSuchKey)?,
+            Some(id) => conn
+                .version(&bucket.id, key, id)?
+                .ok_or(StoreError::NoSuchVersion)?,
+        };
+        if row.delete_marker {
+            return Err(StoreError::DeleteMarker {
+                version_id: bucket.named(&row.version_id),
+                modified: time_of(row.modified_ms),
+                named: version_id.is_some(),
+            });
+        }
+        Ok(row)
+    }
+
     /// Makes the finished bytes the object `key`. Holds the commit lock (`conn`).
     pub(crate) fn commit_object(
         &self,
@@ -224,6 +297,7 @@ impl Inner {
         teifs_types::check_object_key(key)?;
         let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
         precondition.check(current.as_ref())?;
+        let version_id = bucket.new_version_id();
 
         let Finished {
             tmp,
@@ -257,6 +331,7 @@ impl Inner {
                 attrs: &attrs,
                 crypt: crypt.as_ref(),
                 parts: parts.as_ref(),
+                version: (version_id != NULL_VERSION).then_some(version_id.as_str()),
             },
             self.durability != Durability::None,
         )?;
@@ -269,7 +344,7 @@ impl Inner {
         let row = VersionRow {
             bucket_id: bucket.id.clone(),
             key: key.to_owned(),
-            version_id: NULL_VERSION.to_owned(),
+            version_id,
             delete_marker: false,
             object_id: Some(object_id),
             size,
@@ -279,21 +354,24 @@ impl Inner {
             crypt: crypt.map(|c| serde_json::to_string(&c).expect("crypt serializes")),
             parts: parts.map(|p| p.to_json()),
             inline: None,
+            seq: 0,
+            latest: true,
         };
-        let replaced = conn.put_null_version(&row, created_ms)?;
+        let replaced = conn.put_version(&row, created_ms)?;
         Inner::remove_data_files(conn, bucket, &replaced);
-        Ok(to_info(&row))
+        Ok(bucket.info(&row))
     }
 
-    /// Opens the current version of `key`: its description and data file. Holding the
-    /// commit lock while opening means the file can't be replaced and removed between
-    /// reading the row and opening it.
+    /// Opens a version of `key` (`None`: the current one): its description and data
+    /// file. Holding the commit lock while opening means the file can't be replaced and
+    /// removed between reading the row and opening it.
     pub(crate) fn open_object(
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
+        version_id: Option<&str>,
     ) -> Result<(VersionRow, Option<fs::File>)> {
-        let row = Inner::object_row(conn, bucket, key)?.ok_or(StoreError::NoSuchKey)?;
+        let row = Inner::version_row(conn, bucket, key, version_id)?;
         let file = match &row.object_id {
             Some(id) => Some(fs::File::open(bucket.data_path(id))?),
             None => None,
@@ -301,11 +379,81 @@ impl Inner {
         Ok((row, file))
     }
 
-    /// Deletes the `null` version of `key`; deleting one that doesn't exist succeeds.
-    pub(crate) fn delete_object(conn: &Index, bucket: &ObjectBucket, key: &str) -> Result<()> {
-        let removed = conn.delete_null_version(&bucket.id, key, now_ms())?;
-        Inner::remove_data_files(conn, bucket, &removed);
-        Ok(())
+    /// Deletes `key` if it meets `precondition`, as S3 does for the bucket's versioning:
+    /// without versioning its `null` version goes; with versioning on a delete marker
+    /// becomes current; suspended, a `null` delete marker replaces the `null` version.
+    /// Deleting what doesn't exist succeeds (and still adds a marker with versioning).
+    pub(crate) fn delete_object(
+        conn: &Index,
+        bucket: &ObjectBucket,
+        key: &str,
+        precondition: &Precondition,
+    ) -> Result<Deleted> {
+        let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
+        let exists = precondition.check_delete(current.as_ref())?;
+        if bucket.versioning == Versioning::Unversioned {
+            if exists {
+                let removed = conn.delete_null_version(&bucket.id, key, now_ms())?;
+                Inner::remove_data_files(conn, bucket, &removed);
+            }
+            return Ok(Deleted::default());
+        }
+        if !exists && precondition.is_conditional() {
+            return Ok(Deleted::default());
+        }
+        let now = now_ms();
+        let marker = VersionRow {
+            bucket_id: bucket.id.clone(),
+            key: key.to_owned(),
+            version_id: bucket.new_version_id(),
+            delete_marker: true,
+            object_id: None,
+            size: 0,
+            etag: String::new(),
+            modified_ms: now,
+            attrs: ObjectAttrs::default(),
+            crypt: None,
+            parts: None,
+            inline: None,
+            seq: 0,
+            latest: true,
+        };
+        let replaced = conn.put_version(&marker, now)?;
+        Inner::remove_data_files(conn, bucket, &replaced);
+        Ok(Deleted {
+            version_id: Some(marker.version_id),
+            delete_marker: true,
+        })
+    }
+
+    /// Removes one version of `key` for good, if it meets `precondition` (a delete
+    /// marker has nothing to meet). Removing one that doesn't exist succeeds.
+    pub(crate) fn delete_object_version(
+        conn: &Index,
+        bucket: &ObjectBucket,
+        key: &str,
+        version_id: &str,
+        precondition: &Precondition,
+    ) -> Result<Deleted> {
+        let Some(row) = conn.version(&bucket.id, key, version_id)? else {
+            return Ok(Deleted {
+                version_id: bucket.named(version_id),
+                delete_marker: false,
+            });
+        };
+        if !row.delete_marker {
+            precondition.check_delete(Some(&to_info(&row)))?;
+        }
+        if let Some((removed, files)) =
+            conn.delete_version(&bucket.id, key, version_id, now_ms())?
+        {
+            Inner::remove_data_files(conn, bucket, &files);
+            return Ok(Deleted {
+                version_id: bucket.named(&removed.version_id),
+                delete_marker: removed.delete_marker,
+            });
+        }
+        Ok(Deleted::default())
     }
 
     /// Replaces the attributes of `key` in place (a copy onto itself with new metadata).
@@ -320,12 +468,11 @@ impl Inner {
         precondition.check(Some(&to_info(&row)))?;
         let attrs = crate::replaced_attrs(&row.attrs, attrs.clone());
         let now = now_ms();
-        conn.set_version_attrs(&bucket.id, key, &attrs, Some(now))?;
+        conn.set_version_attrs(&bucket.id, key, &row.version_id, &attrs, Some(now))?;
         Ok(ObjectInfo {
             attrs,
-            modified: SystemTime::UNIX_EPOCH
-                + Duration::from_millis(u64::try_from(now).unwrap_or(0)),
-            ..to_info(&row)
+            modified: time_of(now),
+            ..bucket.info(&row)
         })
     }
 
@@ -363,6 +510,7 @@ impl Inner {
             let bucket = ObjectBucket {
                 dir: self.system_dir().join(BUCKETS_DIR).join(&bucket_id),
                 id: bucket_id,
+                versioning: Versioning::Unversioned,
             };
             done += Inner::remove_data_files(conn, &bucket, std::slice::from_ref(&object_id));
         }

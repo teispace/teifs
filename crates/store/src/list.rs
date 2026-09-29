@@ -13,13 +13,13 @@ use std::{
 
 use teifs_types::MAX_SEGMENT_LEN;
 
-use teifs_meta::{Index, ListFrom};
+use teifs_meta::{Index, NULL_VERSION, VersionsFrom};
 
 use crate::{
-    Bucket, Inner, ObjectInfo, Store,
+    Bucket, Inner, ObjectInfo, Store, StoreError,
     error::Result,
     folders::{Children, FolderCache, start_at},
-    objects::to_info,
+    objects::ObjectBucket,
 };
 
 /// Where a page starts: after this key, or after every key under this common prefix.
@@ -63,6 +63,47 @@ pub struct Listing {
     pub truncated: bool,
     /// Where the next page starts, when truncated.
     pub next: Option<After>,
+}
+
+/// What to list of a bucket's versions.
+#[derive(Debug, Clone, Default)]
+pub struct VersionsQuery {
+    /// Only keys starting with this.
+    pub prefix: String,
+    /// Roll keys up to the first occurrence of this after the prefix (usually `/`).
+    pub delimiter: Option<String>,
+    /// Start after this key (`KeyMarker`): after all its versions, or with
+    /// `version_marker` after that one.
+    pub key_marker: Option<String>,
+    /// Start after this version of `key_marker` (`VersionIdMarker`).
+    pub version_marker: Option<String>,
+    /// The most versions, delete markers and common prefixes to return.
+    pub max_keys: usize,
+}
+
+/// One version in a versions listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectVersion {
+    /// What's known about it; its `version_id` is always set.
+    pub info: ObjectInfo,
+    /// Whether it's the key's current version.
+    pub latest: bool,
+    /// Whether it's a delete marker (no content: its size is 0 and its ETag empty).
+    pub delete_marker: bool,
+}
+
+/// One page of a versions listing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VersionListing {
+    /// Versions and delete markers: keys in order, each key's newest first.
+    pub versions: Vec<ObjectVersion>,
+    /// Common prefixes, in order.
+    pub prefixes: Vec<String>,
+    /// Whether more follow.
+    pub truncated: bool,
+    /// Where the next page starts, when truncated: `NextKeyMarker`, and
+    /// `NextVersionIdMarker` unless the page ended in a common prefix.
+    pub next: Option<(String, Option<String>)>,
 }
 
 enum Item {
@@ -141,7 +182,7 @@ impl Store {
                 Bucket::Folder(_, dir) => dir,
                 Bucket::Object(object_bucket) => {
                     if query.max_keys > 0 {
-                        list_index(&inner.lock(), &object_bucket.id, &query, &mut listing)?;
+                        list_index(&inner.lock(), &object_bucket, &query, &mut listing)?;
                     }
                     return Ok(listing);
                 }
@@ -315,15 +356,108 @@ impl FolderWalk {
     }
 }
 
+impl Store {
+    /// Lists a bucket's versions and delete markers. A folder bucket's objects each have
+    /// one version, `null`.
+    pub async fn list_versions(
+        &self,
+        bucket: &str,
+        query: VersionsQuery,
+    ) -> Result<VersionListing> {
+        let bucket = bucket.to_owned();
+        let object_bucket = self
+            .blocking(move |inner| match inner.bucket(&bucket)? {
+                Bucket::Object(object_bucket) => Ok(Ok(object_bucket)),
+                Bucket::Folder(..) => Ok(Err(bucket)),
+            })
+            .await?;
+        match object_bucket {
+            Ok(bucket) => {
+                self.blocking(move |inner| {
+                    let mut listing = VersionListing::default();
+                    if query.max_keys > 0 {
+                        list_versions_index(&inner.lock(), &bucket, &query, &mut listing)?;
+                    }
+                    Ok(listing)
+                })
+                .await
+            }
+            Err(bucket) => self.list_folder_versions(&bucket, query).await,
+        }
+    }
+
+    /// A folder bucket's objects as `null` versions, from a plain listing.
+    async fn list_folder_versions(
+        &self,
+        bucket: &str,
+        query: VersionsQuery,
+    ) -> Result<VersionListing> {
+        if query
+            .version_marker
+            .as_deref()
+            .is_some_and(|v| v != NULL_VERSION)
+        {
+            return Err(StoreError::NoSuchVersion);
+        }
+        let after = query.key_marker.clone().map(|key| {
+            match common_prefix(&key, &query.prefix, query.delimiter.as_deref()) {
+                Some(common) => After::Prefix(common),
+                None => After::Key(key),
+            }
+        });
+        let listing = self
+            .list(
+                bucket,
+                ListQuery {
+                    prefix: query.prefix,
+                    delimiter: query.delimiter,
+                    after,
+                    max_keys: query.max_keys,
+                },
+            )
+            .await?;
+        let next = listing.next.map(|after| match after {
+            After::Key(key) => (key, Some(NULL_VERSION.to_owned())),
+            After::Prefix(prefix) => (prefix, None),
+        });
+        let versions = listing
+            .objects
+            .into_iter()
+            .map(|info| ObjectVersion {
+                info: ObjectInfo {
+                    version_id: Some(NULL_VERSION.to_owned()),
+                    ..info
+                },
+                latest: true,
+                delete_marker: false,
+            })
+            .collect();
+        Ok(VersionListing {
+            versions,
+            prefixes: listing.prefixes,
+            truncated: listing.truncated,
+            next,
+        })
+    }
+}
+
+/// The common prefix `key` rolls up into: up to the first `delimiter` after `prefix`.
+fn common_prefix(key: &str, prefix: &str, delimiter: Option<&str>) -> Option<String> {
+    let delimiter = delimiter.filter(|d| !d.is_empty())?;
+    let rest = key.strip_prefix(prefix)?;
+    let at = rest.find(delimiter)?;
+    Some(key[..prefix.len() + at + delimiter.len()].to_owned())
+}
+
 /// Lists an object bucket from the index: rows in key order, rolled up into common
 /// prefixes at the delimiter; a prefix already listed is skipped in one jump.
 fn list_index(
     conn: &Index,
-    bucket_id: &str,
+    bucket: &ObjectBucket,
     query: &ListQuery,
     listing: &mut Listing,
 ) -> Result<()> {
-    let delimiter = query.delimiter.as_deref().filter(|d| !d.is_empty());
+    let delimiter = query.delimiter.as_deref();
     let mut from = match &query.after {
         None => Cursor::Start,
         Some(After::Key(key)) => Cursor::AfterKey(key.clone()),
@@ -332,22 +466,15 @@ fn list_index(
     let mut count = 0;
     'pages: loop {
         let batch = (query.max_keys - count + 1).clamp(1, 1000);
-        let rows = conn.list_latest(bucket_id, &query.prefix, from.as_list_from(), batch)?;
-        let Some(last) = rows.last().map(|r| r.key.clone()) else {
-            break;
-        };
+        let (rows, last) =
+            conn.list_latest(&bucket.id, &query.prefix, from.as_versions_from(), batch)?;
         for row in rows {
-            let common = delimiter.and_then(|d| {
-                let rest = &row.key[query.prefix.len()..];
-                rest.find(d)
-                    .map(|at| row.key[..query.prefix.len() + at + d.len()].to_owned())
-            });
             if count == query.max_keys {
                 listing.truncated = true;
                 break 'pages;
             }
             count += 1;
-            if let Some(prefix) = common {
+            if let Some(prefix) = common_prefix(&row.key, &query.prefix, delimiter) {
                 listing.next = Some(After::Prefix(prefix.clone()));
                 from = Cursor::AfterAll(prefix.clone());
                 listing.prefixes.push(prefix);
@@ -355,9 +482,13 @@ fn list_index(
                 continue 'pages;
             }
             listing.next = Some(After::Key(row.key.clone()));
-            listing.objects.push(to_info(&row));
+            listing.objects.push(bucket.info(&row));
         }
-        from = Cursor::AfterKey(last);
+        // A page can hold only delete markers: carry on after the last key scanned.
+        match last {
+            Some(last) => from = Cursor::AfterKey(last),
+            None => break,
+        }
     }
     if !listing.truncated {
         listing.next = None;
@@ -365,19 +496,81 @@ fn list_index(
     Ok(())
 }
 
-/// An owned [`ListFrom`].
+/// Lists an object bucket's versions from the index, rolled up like [`list_index`].
+fn list_versions_index(
+    conn: &Index,
+    bucket: &ObjectBucket,
+    query: &VersionsQuery,
+    listing: &mut VersionListing,
+) -> Result<()> {
+    let delimiter = query.delimiter.as_deref();
+    let mut from = match (&query.key_marker, &query.version_marker) {
+        (None, _) => Cursor::Start,
+        // A marker under a common prefix: the prefix was listed, and all it holds.
+        (Some(key), _) if let Some(common) = common_prefix(key, &query.prefix, delimiter) => {
+            Cursor::AfterAll(common)
+        }
+        (Some(key), None) => Cursor::AfterKey(key.clone()),
+        (Some(key), Some(version)) => match conn.version(&bucket.id, key, version)? {
+            Some(row) => Cursor::AfterVersion(row.key, row.seq),
+            // A version gone since: its older versions would have followed it, so carry
+            // on after the key rather than list them twice or fail the listing.
+            None => Cursor::AfterKey(key.clone()),
+        },
+    };
+    let mut count = 0;
+    'pages: loop {
+        let batch = (query.max_keys - count + 1).clamp(1, 1000);
+        let rows = conn.list_versions(&bucket.id, &query.prefix, from.as_versions_from(), batch)?;
+        let full = rows.len() == batch;
+        for row in rows {
+            if count == query.max_keys {
+                listing.truncated = true;
+                break 'pages;
+            }
+            count += 1;
+            if let Some(prefix) = common_prefix(&row.key, &query.prefix, delimiter) {
+                listing.next = Some((prefix.clone(), None));
+                from = Cursor::AfterAll(prefix.clone());
+                listing.prefixes.push(prefix);
+                continue 'pages;
+            }
+            listing.next = Some((row.key.clone(), Some(row.version_id.clone())));
+            from = Cursor::AfterVersion(row.key.clone(), row.seq);
+            listing.versions.push(ObjectVersion {
+                info: ObjectInfo {
+                    version_id: Some(row.version_id.clone()),
+                    ..bucket.info(&row)
+                },
+                latest: row.latest,
+                delete_marker: row.delete_marker,
+            });
+        }
+        if !full {
+            break;
+        }
+    }
+    if !listing.truncated {
+        listing.next = None;
+    }
+    Ok(())
+}
+
+/// An owned [`VersionsFrom`].
 enum Cursor {
     Start,
     AfterKey(String),
+    AfterVersion(String, i64),
     AfterAll(String),
 }
 
 impl Cursor {
-    fn as_list_from(&self) -> ListFrom<'_> {
+    fn as_versions_from(&self) -> VersionsFrom<'_> {
         match self {
-            Cursor::Start => ListFrom::Start,
-            Cursor::AfterKey(key) => ListFrom::AfterKey(key),
-            Cursor::AfterAll(prefix) => ListFrom::AfterAll(prefix),
+            Cursor::Start => VersionsFrom::Start,
+            Cursor::AfterKey(key) => VersionsFrom::AfterKey(key),
+            Cursor::AfterVersion(key, seq) => VersionsFrom::AfterVersion(key, *seq),
+            Cursor::AfterAll(prefix) => VersionsFrom::AfterAll(prefix),
         }
     }
 }

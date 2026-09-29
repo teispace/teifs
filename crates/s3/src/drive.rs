@@ -14,7 +14,7 @@ use s3s::{
 use teifs_store::{
     Acl, After, BucketEncryption, CustomerKey, DefaultEncryption, Encryption, Layout, ListQuery,
     Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
-    SseMode, Staged, Store, Upload,
+    SseMode, Staged, Store, Upload, Versioning, VersionsQuery,
 };
 use tokio_util::io::ReaderStream;
 
@@ -97,14 +97,17 @@ impl Drive {
     /// before a missing SSE-C key.
     async fn read(
         &self,
-        bucket: &str,
-        key: &str,
+        (bucket, key, version_id): (&str, &str, Option<&str>),
         customer: Option<&CustomerKey>,
         part_number: Option<i32>,
     ) -> S3Result<(ObjectInfo, Option<teifs_store::ObjectBody>)> {
-        match self.store.read_with(bucket, key, customer).await {
+        match self
+            .store
+            .read_with(bucket, key, version_id, customer)
+            .await
+        {
             Err(err @ teifs_store::StoreError::CustomerKeyRequired) if part_number.is_some() => {
-                if let Ok(info) = self.store.head(bucket, key).await {
+                if let Ok(info) = self.store.head_version(bucket, key, version_id).await {
                     Slice::of(&info, None, part_number)?;
                 }
                 Err(err).s3()
@@ -305,11 +308,100 @@ fn check_location(configuration: Option<&dto::CreateBucketConfiguration>) -> S3R
     }
 }
 
-fn check_version(version_id: Option<&str>) -> S3Result<()> {
+/// Checks a version id a request names: `null`, or one TeiFS makes (32 hex digits).
+/// Anything else can't name a version, which AWS refuses before looking.
+fn check_version(version_id: Option<&str>) -> S3Result<Option<&str>> {
     match version_id {
-        None | Some(NULL_VERSION) => Ok(()),
+        None => Ok(None),
+        Some(id) if is_version_id(id) => Ok(Some(id)),
         Some(_) => Err(s3_error!(InvalidArgument, "Invalid version id specified")),
     }
+}
+
+/// A versions listing's entries, as S3 answers them: versions and delete markers apart.
+fn version_entries(
+    listed: Vec<teifs_store::ObjectVersion>,
+    enc: &impl Fn(String) -> String,
+) -> (Vec<dto::ObjectVersion>, Vec<dto::DeleteMarkerEntry>) {
+    let (mut versions, mut markers) = (Vec::new(), Vec::new());
+    for version in listed {
+        let info = version.info;
+        if version.delete_marker {
+            markers.push(dto::DeleteMarkerEntry {
+                key: Some(enc(info.key)),
+                version_id: info.version_id,
+                is_latest: Some(version.latest),
+                last_modified: Some(info.modified.into()),
+                owner: Some(acl::owner()),
+            });
+            continue;
+        }
+        versions.push(dto::ObjectVersion {
+            key: Some(enc(info.key)),
+            version_id: info.version_id,
+            is_latest: Some(version.latest),
+            size: Some(i64::try_from(info.size).unwrap_or(i64::MAX)),
+            e_tag: Some(etag(&info.etag)),
+            last_modified: Some(info.modified.into()),
+            storage_class: Some(dto::ObjectVersionStorageClass::from_static(
+                dto::ObjectVersionStorageClass::STANDARD,
+            )),
+            owner: Some(acl::owner()),
+            ..Default::default()
+        });
+    }
+    (versions, markers)
+}
+
+/// A copy onto itself must change something the request names: metadata or encryption
+/// (the bucket's default encryption doesn't count), unless it copies a version named by
+/// its id (restoring it).
+fn check_copy_onto_itself(
+    input: &dto::CopyObjectInput,
+    (src_bucket, src_key, src_version): (&str, &str, Option<&str>),
+    replace: bool,
+) -> S3Result<()> {
+    let asks_encryption = input.server_side_encryption.is_some()
+        || input.sse_customer_algorithm.is_some()
+        || input.ssekms_key_id.is_some();
+    if src_bucket == input.bucket
+        && src_key == input.key
+        && !replace
+        && !asks_encryption
+        && src_version.is_none()
+    {
+        return Err(s3_error!(
+            InvalidRequest,
+            "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes."
+        ));
+    }
+    Ok(())
+}
+
+/// A `DeleteObjects` answer's entry: the version asked for, and when a delete marker was
+/// added or removed, that marker.
+fn deleted_object(
+    key: String,
+    asked: Option<String>,
+    done: teifs_store::Deleted,
+) -> dto::DeletedObject {
+    let marker = done.delete_marker;
+    dto::DeletedObject {
+        key: Some(key),
+        delete_marker: marker.then_some(true),
+        delete_marker_version_id: done.version_id.clone().filter(|_| marker),
+        version_id: asked.or_else(|| done.version_id.filter(|_| !marker)),
+    }
+}
+
+/// The version id a write answers with: the new version's, none when it's `null` (a
+/// bucket without versioning, or suspended), as s3-tests expect and MinIO answers.
+fn written_version(info: &ObjectInfo) -> Option<String> {
+    info.version_id.clone().filter(|id| id != NULL_VERSION)
+}
+
+fn is_version_id(id: &str) -> bool {
+    id == NULL_VERSION || (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Where a V1 listing (or a versions listing) resumes after `marker`. A marker ending in
@@ -731,6 +823,7 @@ fn complete_output(
         location: Some(format!("/{bucket}/{key}")),
         e_tag: Some(etag(&info.etag)),
         checksum_type: checksum_type(sums, kind),
+        version_id: written_version(info),
         ..Default::default()
     };
     set_checksums!(out, sums);
@@ -939,9 +1032,55 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::GetBucketVersioningInput>,
     ) -> S3Result<S3Response<dto::GetBucketVersioningOutput>> {
-        // Versioning was never enabled: an empty answer, as S3 gives.
-        self.store.head_bucket(&req.input.bucket).await.s3()?;
-        Ok(S3Response::new(dto::GetBucketVersioningOutput::default()))
+        // A bucket that never had versioning answers with no status, as S3's does.
+        let status = match self.store.bucket_versioning(&req.input.bucket).await.s3()? {
+            Versioning::Unversioned => None,
+            Versioning::Enabled => Some(dto::BucketVersioningStatus::ENABLED),
+            Versioning::Suspended => Some(dto::BucketVersioningStatus::SUSPENDED),
+        };
+        Ok(S3Response::new(dto::GetBucketVersioningOutput {
+            status: status.map(dto::BucketVersioningStatus::from_static),
+            ..Default::default()
+        }))
+    }
+
+    async fn put_bucket_versioning(
+        &self,
+        req: S3Request<dto::PutBucketVersioningInput>,
+    ) -> S3Result<S3Response<dto::PutBucketVersioningOutput>> {
+        let input = req.input;
+        let config = input.versioning_configuration;
+        // MFA delete needs a hardware token TeiFS has no way to check.
+        if config
+            .mfa_delete
+            .as_ref()
+            .is_some_and(|m| m.as_str() == dto::MFADelete::ENABLED)
+            || input.mfa.is_some()
+        {
+            return Err(s3_error!(
+                NotImplemented,
+                "MFA delete isn't supported: TeiFS has no MFA devices"
+            ));
+        }
+        let versioning = match config
+            .status
+            .as_ref()
+            .map(dto::BucketVersioningStatus::as_str)
+        {
+            Some(dto::BucketVersioningStatus::ENABLED) => Versioning::Enabled,
+            Some(dto::BucketVersioningStatus::SUSPENDED) => Versioning::Suspended,
+            // No status changes nothing, as on S3.
+            None => {
+                self.store.head_bucket(&input.bucket).await.s3()?;
+                return Ok(S3Response::new(dto::PutBucketVersioningOutput::default()));
+            }
+            Some(_) => return Err(s3_error!(MalformedXML)),
+        };
+        self.store
+            .set_bucket_versioning(&input.bucket, versioning)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketVersioningOutput::default()))
     }
 
     async fn get_bucket_encryption(
@@ -1155,6 +1294,7 @@ impl S3 for Drive {
         let mut out = dto::PutObjectOutput {
             e_tag: Some(etag(&info.etag)),
             checksum_type: checksum_type(&computed, None),
+            version_id: written_version(&info),
             ..Default::default()
         };
         set_checksums!(out, &computed);
@@ -1246,7 +1386,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::GetObjectOutput>> {
         let caller = access::caller(&req).cloned();
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -1254,8 +1394,7 @@ impl S3 for Drive {
         )?;
         let (info, file) = self
             .read(
-                &input.bucket,
-                &input.key,
+                (&input.bucket, &input.key, version_id),
                 customer.as_ref(),
                 input.part_number,
             )
@@ -1277,6 +1416,7 @@ impl S3 for Drive {
             None => StreamingBlob::from(s3s::Body::empty()),
         };
         let mut out = dto::GetObjectOutput {
+            version_id: info.version_id.clone(),
             body: Some(body),
             content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
             content_range: slice.content_range.clone(),
@@ -1328,7 +1468,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::HeadObjectOutput>> {
         let caller = access::caller(&req).cloned();
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -1336,8 +1476,7 @@ impl S3 for Drive {
         )?;
         let (info, _) = self
             .read(
-                &input.bucket,
-                &input.key,
+                (&input.bucket, &input.key, version_id),
                 customer.as_ref(),
                 input.part_number,
             )
@@ -1352,6 +1491,7 @@ impl S3 for Drive {
         )?;
         let slice = Slice::of(&info, input.range.as_ref(), input.part_number)?;
         let mut out = dto::HeadObjectOutput {
+            version_id: info.version_id.clone(),
             content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
             content_range: slice.content_range.clone(),
             parts_count: slice.parts_count,
@@ -1390,7 +1530,7 @@ impl S3 for Drive {
         req: S3Request<dto::GetObjectAttributesInput>,
     ) -> S3Result<S3Response<dto::GetObjectAttributesOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?;
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -1398,7 +1538,7 @@ impl S3 for Drive {
         )?;
         let (info, _) = self
             .store
-            .read_with(&input.bucket, &input.key, customer.as_ref())
+            .read_with(&input.bucket, &input.key, version_id, customer.as_ref())
             .await
             .s3()?;
         // SDKs send the list as one comma-separated header.
@@ -1411,6 +1551,7 @@ impl S3 for Drive {
         };
         let mut out = dto::GetObjectAttributesOutput {
             last_modified: Some(info.modified.into()),
+            version_id: info.version_id.clone(),
             ..Default::default()
         };
         if wants(dto::ObjectAttributes::ETAG) {
@@ -1442,11 +1583,15 @@ impl S3 for Drive {
         req: S3Request<dto::GetObjectTaggingInput>,
     ) -> S3Result<S3Response<dto::GetObjectTaggingOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
-        let info = self.store.head(&input.bucket, &input.key).await.s3()?;
+        let version_id = check_version(input.version_id.as_deref())?;
+        let info = self
+            .store
+            .head_version(&input.bucket, &input.key, version_id)
+            .await
+            .s3()?;
         Ok(S3Response::new(dto::GetObjectTaggingOutput {
             tag_set: tagging::to_dto(&info.attrs.tags),
-            version_id: None,
+            version_id: info.version_id,
         }))
     }
 
@@ -1455,13 +1600,16 @@ impl S3 for Drive {
         req: S3Request<dto::PutObjectTaggingInput>,
     ) -> S3Result<S3Response<dto::PutObjectTaggingOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?;
         let tags = tagging::check(tagging::from_dto(input.tagging), tagging::MAX_OBJECT_TAGS)?;
-        self.store
-            .set_tags(&input.bucket, &input.key, tags)
+        let info = self
+            .store
+            .set_tags(&input.bucket, &input.key, version_id, tags)
             .await
             .s3()?;
-        Ok(S3Response::new(dto::PutObjectTaggingOutput::default()))
+        Ok(S3Response::new(dto::PutObjectTaggingOutput {
+            version_id: info.version_id,
+        }))
     }
 
     async fn delete_object_tagging(
@@ -1469,12 +1617,15 @@ impl S3 for Drive {
         req: S3Request<dto::DeleteObjectTaggingInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectTaggingOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
-        self.store
-            .set_tags(&input.bucket, &input.key, tagging::Tags::new())
+        let version_id = check_version(input.version_id.as_deref())?;
+        let info = self
+            .store
+            .set_tags(&input.bucket, &input.key, version_id, tagging::Tags::new())
             .await
             .s3()?;
-        Ok(S3Response::new(dto::DeleteObjectTaggingOutput::default()))
+        Ok(S3Response::new(dto::DeleteObjectTaggingOutput {
+            version_id: info.version_id,
+        }))
     }
 
     async fn get_bucket_cors(
@@ -1715,8 +1866,12 @@ impl S3 for Drive {
         req: S3Request<dto::GetObjectAclInput>,
     ) -> S3Result<S3Response<dto::GetObjectAclOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
-        let info = self.store.head(&input.bucket, &input.key).await.s3()?;
+        let version_id = check_version(input.version_id.as_deref())?;
+        let info = self
+            .store
+            .head_version(&input.bucket, &input.key, version_id)
+            .await
+            .s3()?;
         let rules = self.rules.of(&input.bucket).await?;
         let acl = acl::effective(rules.ownership, info.attrs.acl);
         Ok(S3Response::new(dto::GetObjectAclOutput {
@@ -1731,17 +1886,21 @@ impl S3 for Drive {
         req: S3Request<dto::PutObjectAclInput>,
     ) -> S3Result<S3Response<dto::PutObjectAclOutput>> {
         let mut input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?.map(str::to_owned);
+        let version_id = version_id.as_deref();
         let headers = AclHeaders {
             write: input.grant_write.as_deref(),
             ..acl_headers!(input)
         };
         let requested = acl::put_request(&headers, input.access_control_policy.take(), false)?;
-        self.store.head(&input.bucket, &input.key).await.s3()?;
+        self.store
+            .head_version(&input.bucket, &input.key, version_id)
+            .await
+            .s3()?;
         let rules = self.rules.of(&input.bucket).await?;
         let acl = acl::for_acl_write(requested, rules.ownership, rules.block)?;
         self.store
-            .set_acl(&input.bucket, &input.key, Some(acl))
+            .set_acl(&input.bucket, &input.key, version_id, Some(acl))
             .await
             .s3()?;
         Ok(S3Response::new(dto::PutObjectAclOutput::default()))
@@ -1838,7 +1997,7 @@ impl S3 for Drive {
         req: S3Request<dto::DeleteObjectInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectOutput>> {
         let input = req.input;
-        check_version(input.version_id.as_deref())?;
+        let version_id = check_version(input.version_id.as_deref())?;
         self.store.head_bucket(&input.bucket).await.s3()?;
         let precondition = Precondition {
             if_size: input
@@ -1850,12 +2009,15 @@ impl S3 for Drive {
                 .map(to_system_time),
             ..precondition(input.if_match.as_ref(), None)
         };
-        self.store
-            .delete_if(&input.bucket, &input.key, precondition)
+        let deleted = self
+            .store
+            .delete_if(&input.bucket, &input.key, version_id, precondition)
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteObjectOutput {
-            version_id: input.version_id,
+            version_id: deleted.version_id,
+            // AWS says so only when it's true.
+            delete_marker: deleted.delete_marker.then_some(true),
             ..Default::default()
         }))
     }
@@ -1901,21 +2063,17 @@ impl S3 for Drive {
                 )
             });
             let result = match check_version(object.version_id.as_deref()) {
-                Ok(()) if !allowed => Err(s3_error!(AccessDenied, "Access Denied")),
-                Ok(()) => self
+                Ok(_) if !allowed => Err(s3_error!(AccessDenied, "Access Denied")),
+                Ok(version_id) => self
                     .store
-                    .delete_if(&input.bucket, &object.key, precondition)
+                    .delete_if(&input.bucket, &object.key, version_id, precondition)
                     .await
                     .s3(),
                 Err(err) => Err(err),
             };
             match result {
-                Ok(()) if quiet => {}
-                Ok(()) => deleted.push(dto::DeletedObject {
-                    key: Some(object.key),
-                    version_id: object.version_id,
-                    ..Default::default()
-                }),
+                Ok(_) if quiet => {}
+                Ok(done) => deleted.push(deleted_object(object.key, object.version_id, done)),
                 Err(err) => errors.push(dto::Error {
                     code: Some(err.code().as_str().to_owned()),
                     message: err.message().map(str::to_owned),
@@ -1947,7 +2105,8 @@ impl S3 for Drive {
                 "copying from an access point isn't supported"
             ));
         };
-        check_version(src_version.as_deref())?;
+        let src_version = check_version(src_version.as_deref())?.map(str::to_owned);
+        let src_version = src_version.as_deref();
         let (src_bucket, src_key) = (src_bucket.to_string(), src_key.to_string());
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),
@@ -1956,7 +2115,7 @@ impl S3 for Drive {
         )?;
         let (source, _) = self
             .store
-            .read_with(&src_bucket, &src_key, source_key.as_ref())
+            .read_with(&src_bucket, &src_key, src_version, source_key.as_ref())
             .await
             .s3()?;
         check_read(
@@ -1988,17 +2147,7 @@ impl S3 for Drive {
             .metadata_directive
             .as_ref()
             .is_some_and(|d| d.as_str() == MetadataDirective::REPLACE);
-        // A copy onto itself must change something the request names: metadata or
-        // encryption (the bucket's default encryption doesn't count).
-        let asks_encryption = input.server_side_encryption.is_some()
-            || input.sse_customer_algorithm.is_some()
-            || input.ssekms_key_id.is_some();
-        if *src_bucket == *input.bucket && *src_key == *input.key && !replace && !asks_encryption {
-            return Err(s3_error!(
-                InvalidRequest,
-                "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes."
-            ));
-        }
+        check_copy_onto_itself(&input, (&src_bucket, &src_key, src_version), replace)?;
         let acl = self
             .object_write_acl(&input.bucket, acl_headers!(input))
             .await?;
@@ -2013,7 +2162,7 @@ impl S3 for Drive {
         let info = self
             .store
             .copy_with(
-                (&src_bucket, &src_key),
+                (&src_bucket, &src_key, src_version),
                 (&input.bucket, &input.key),
                 attrs,
                 pre,
@@ -2028,6 +2177,8 @@ impl S3 for Drive {
                 last_modified: Some(info.modified.into()),
                 ..Default::default()
             }),
+            version_id: written_version(&info),
+            copy_source_version_id: source.version_id.clone(),
             ..Default::default()
         };
         set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
@@ -2195,37 +2346,29 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::ListObjectVersionsInput>,
     ) -> S3Result<S3Response<dto::ListObjectVersionsOutput>> {
-        // Without versioning each object has exactly one version, `null`, so this is the
-        // V1 listing with version fields: a page resumes after its key marker.
         let mut input = req.input;
-        // An empty delimiter is no delimiter, and S3 leaves it out of the answer.
+        // An empty delimiter is no delimiter, and S3 leaves it out of the answer; empty
+        // markers are no markers.
         input.delimiter = input.delimiter.filter(|d| !d.is_empty());
-        let prefix = input.prefix.clone().unwrap_or_default();
-        if input
-            .version_id_marker
-            .as_deref()
-            .is_some_and(|m| !m.is_empty())
-            && input.key_marker.as_deref().is_none_or(str::is_empty)
-        {
+        let key_marker = input.key_marker.clone().filter(|m| !m.is_empty());
+        let version_marker = input.version_id_marker.clone().filter(|m| !m.is_empty());
+        if version_marker.is_some() && key_marker.is_none() {
             return Err(s3_error!(
                 InvalidArgument,
                 "A version-id marker cannot be specified without a key marker."
             ));
         }
-        let after = after_marker(
-            input.key_marker.clone(),
-            input.delimiter.as_deref(),
-            &prefix,
-        );
+        check_version(version_marker.as_deref())?;
         let max_keys = input.max_keys.unwrap_or(MAX_KEYS).clamp(0, MAX_KEYS);
         let listing = self
             .store
-            .list(
+            .list_versions(
                 &input.bucket,
-                ListQuery {
-                    prefix,
+                VersionsQuery {
+                    prefix: input.prefix.clone().unwrap_or_default(),
                     delimiter: input.delimiter.clone(),
-                    after,
+                    key_marker,
+                    version_marker,
                     max_keys: usize::try_from(max_keys).unwrap_or(0),
                 },
             )
@@ -2236,29 +2379,11 @@ impl S3 for Drive {
             .as_ref()
             .is_some_and(|e| e.as_str() == dto::EncodingType::URL);
         let enc = |s: String| if url { encode::url(&s) } else { s };
-        let (next_key_marker, next_version_id_marker) = match &listing.next {
-            Some(After::Key(k) | After::Prefix(k)) => {
-                (Some(enc(k.clone())), Some(NULL_VERSION.to_owned()))
-            }
+        let (next_key_marker, next_version_id_marker) = match listing.next {
+            Some((key, version)) => (Some(enc(key)), version),
             None => (None, None),
         };
-        let versions: Vec<dto::ObjectVersion> = listing
-            .objects
-            .into_iter()
-            .map(|o| dto::ObjectVersion {
-                key: Some(enc(o.key)),
-                version_id: Some(NULL_VERSION.to_owned()),
-                is_latest: Some(true),
-                size: Some(i64::try_from(o.size).unwrap_or(i64::MAX)),
-                e_tag: Some(etag(&o.etag)),
-                last_modified: Some(o.modified.into()),
-                storage_class: Some(dto::ObjectVersionStorageClass::from_static(
-                    dto::ObjectVersionStorageClass::STANDARD,
-                )),
-                owner: Some(acl::owner()),
-                ..Default::default()
-            })
-            .collect();
+        let (versions, markers) = version_entries(listing.versions, &enc);
         let prefixes: Vec<dto::CommonPrefix> = listing
             .prefixes
             .into_iter()
@@ -2278,6 +2403,7 @@ impl S3 for Drive {
             next_key_marker,
             next_version_id_marker,
             versions: (!versions.is_empty()).then_some(versions),
+            delete_markers: (!markers.is_empty()).then_some(markers),
             common_prefixes: (!prefixes.is_empty()).then_some(prefixes),
             ..Default::default()
         }))
@@ -2439,7 +2565,7 @@ impl S3 for Drive {
                 "copying from an access point isn't supported"
             ));
         };
-        check_version(src_version.as_deref())?;
+        let src_version = check_version(src_version.as_deref())?;
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),
             input.copy_source_sse_customer_key.as_deref(),
@@ -2452,7 +2578,7 @@ impl S3 for Drive {
         )?;
         let (source, file) = self
             .store
-            .read_with(src_bucket, src_key, source_key.as_ref())
+            .read_with(src_bucket, src_key, src_version, source_key.as_ref())
             .await
             .s3()?;
         check_read(
@@ -2508,6 +2634,7 @@ impl S3 for Drive {
         set_checksums!(result, &computed);
         Ok(S3Response::new(dto::UploadPartCopyOutput {
             copy_part_result: Some(result),
+            copy_source_version_id: source.version_id,
             ..Default::default()
         }))
     }

@@ -24,18 +24,30 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    with `XTeiFS`.
 4. **The S3 method** in `impl S3 for Drive` (`crates/s3/src/drive.rs`), in the order the
    file already uses (buckets, objects, listings, multipart). Keep it thin: read the
-   input, call the store with `.s3()?`, build the output. The smallest example:
+   input, call the store with `.s3()?`, build the output. A small example:
 
    ```rust
    async fn get_bucket_versioning(
        &self,
        req: S3Request<dto::GetBucketVersioningInput>,
    ) -> S3Result<S3Response<dto::GetBucketVersioningOutput>> {
-       // Versioning was never enabled: an empty answer, as S3 gives.
-       self.store.head_bucket(&req.input.bucket).await.s3()?;
-       Ok(S3Response::new(dto::GetBucketVersioningOutput::default()))
+       // A bucket that never had versioning answers with no status, as S3's does.
+       let status = match self.store.bucket_versioning(&req.input.bucket).await.s3()? {
+           Versioning::Unversioned => None,
+           Versioning::Enabled => Some(dto::BucketVersioningStatus::ENABLED),
+           Versioning::Suspended => Some(dto::BucketVersioningStatus::SUSPENDED),
+       };
+       Ok(S3Response::new(dto::GetBucketVersioningOutput {
+           status: status.map(dto::BucketVersioningStatus::from_static),
+           ..Default::default()
+       }))
    }
    ```
+
+   An operation on an object that takes `versionId` validates it with `check_version`
+   and passes it to the store (`head_version`, `read_with`, `set_tags`, `delete_if`),
+   and answers the version id the store's `ObjectInfo` carries; a write answers it
+   through `written_version`, which leaves `null` out.
 
    **Authorization**: every operation needs its entry in `crates/policy/src/actions.rs`
    (the actions and resources `Access::check` in `crates/s3/src/access.rs` asks for), and a
@@ -44,7 +56,8 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    before s3s runs, pass it as a request extension (as `post_form::Form`), and refuse the
    operation in `Access` when the extension is missing.
 5. **Tests**:
-   - store behaviour in `crates/store/src/tests.rs`;
+   - store behaviour in `crates/store/src/tests.rs`, or for a larger feature a module of
+     its own beside it (as `versioning_tests.rs`);
    - the operation end to end with the official AWS SDK in `crates/server/tests/sdk.rs`
      (use `start()` and `client(&server, SECRET_KEY)`; check the error code with
      `err.code()`, and check the file on disk through `server.dir` when it matters).

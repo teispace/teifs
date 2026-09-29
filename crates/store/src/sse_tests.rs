@@ -72,7 +72,7 @@ async fn put(store: &Store, key: &str, bytes: &[u8], encryption: &Encryption) ->
 }
 
 async fn get(store: &Store, key: &str, customer: Option<&CustomerKey>) -> Result<Vec<u8>> {
-    let (_, body) = store.read_with("vault", key, customer).await?;
+    let (_, body) = store.read_with("vault", key, None, customer).await?;
     let mut out = Vec::new();
     body.unwrap().all().await?.read_to_end(&mut out).await?;
     Ok(out)
@@ -209,7 +209,7 @@ async fn sse_c_needs_the_right_key() {
     );
     let (info, _) = drive
         .store
-        .read_with("vault", "c", Some(&key))
+        .read_with("vault", "c", None, Some(&key))
         .await
         .unwrap();
     assert_eq!(info.sse.unwrap().customer_key_md5, Some(key.md5_base64()));
@@ -316,7 +316,7 @@ async fn copies_re_encrypt_under_their_own_key() {
     drive
         .store
         .copy_with(
-            ("vault", "src"),
+            ("vault", "src", None),
             ("vault", "s3copy"),
             None,
             Precondition::default(),
@@ -354,7 +354,7 @@ async fn copies_re_encrypt_under_their_own_key() {
     let info = drive
         .store
         .copy_with(
-            ("vault", "later"),
+            ("vault", "later", None),
             ("vault", "later"),
             None,
             Precondition::default(),
@@ -549,7 +549,7 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
         // Reading with the key shows them; describing without it doesn't.
         let (info, _) = drive
             .store
-            .read_with("vault", name, key.as_ref())
+            .read_with("vault", name, None, key.as_ref())
             .await
             .unwrap();
         assert_eq!(info.attrs.checksums, object_sums, "{name}");

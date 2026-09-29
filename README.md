@@ -11,7 +11,7 @@ that is also a bucket for the AWS CLI, rclone, restic, boto3 and every other S3 
 > **Early development.** The S3 core, encryption and both bucket kinds work and are
 > tested with the official AWS SDK, the AWS CLI and the ceph/s3-tests suite. IAM users,
 > groups, policies and bucket policies work, managed with `aws iam` and `aws s3api`.
-> Versioning, Object Lock and lifecycle rules are next. Don't store data you can't afford to lose with it
+> Object Lock and lifecycle rules are next. Don't store data you can't afford to lose with it
 > yet.
 
 ## Why
@@ -224,8 +224,9 @@ location / {
 
 | Area | Supported |
 |---|---|
-| Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning status (always off) |
+| Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning (object buckets) |
 | Objects | put, browser uploads (`POST` with a signed form and policy), get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
+| Versions | versioning enabled or suspended, every version readable, taggable and deletable by id, delete markers, ListObjectVersions, restoring a version by copying it |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
@@ -253,7 +254,7 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** SAML federation (`AssumeRoleWithSAML`), versioning, Object Lock, lifecycle rules, website
+**Not yet:** SAML federation (`AssumeRoleWithSAML`), versioning in folder buckets, Object Lock, lifecycle rules, website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

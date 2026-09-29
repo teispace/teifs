@@ -1004,7 +1004,7 @@ async fn ownership_and_acls_are_kept() {
             .unwrap();
         let before = store.head(name, "a.txt").await.unwrap();
         let after = store
-            .set_acl(name, "a.txt", Some(public.clone()))
+            .set_acl(name, "a.txt", None, Some(public.clone()))
             .await
             .unwrap();
         assert_eq!(after.attrs.acl.as_ref(), Some(&public));
@@ -1014,7 +1014,7 @@ async fn ownership_and_acls_are_kept() {
             Some(public.clone())
         );
         assert!(matches!(
-            store.set_acl(name, "missing", None).await,
+            store.set_acl(name, "missing", None, None).await,
             Err(StoreError::NoSuchKey)
         ));
     }
@@ -1136,7 +1136,7 @@ async fn copies_never_take_the_source_acl() {
             .put_bytes(name, "src", b"hello", ObjectAttrs::default())
             .await
             .unwrap();
-        store.set_acl(name, "src", acl.clone()).await.unwrap();
+        store.set_acl(name, "src", None, acl.clone()).await.unwrap();
     }
     for (from, to) in [
         ("objects", "objects"),
