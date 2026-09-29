@@ -58,8 +58,9 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                cp/mirror with parallel, resumable transfers) on the AWS
                                SDK, for TeiFS or any S3 service. `src/ui.rs` does all its
                                output: styles, tables, progress bars, prompts, `--json`.
-                               `src/init.rs` is `teifs init`; `src/admin.rs` is
-                               `teifs admin`, on `teifs-client`.
+                               `src/init.rs` is `teifs init`; `src/admin/` is
+                               `teifs admin`, on `teifs-client`, and its `users.rs`
+                               `teifs admin user`, on the AWS SDK's IAM client.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

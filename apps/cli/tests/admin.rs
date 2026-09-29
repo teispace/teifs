@@ -171,3 +171,238 @@ async fn a_generated_root_key_is_replaced_and_the_alias_follows() {
         "{ACCESS_KEY} still works"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn a_user_with_a_policy_and_a_key_in_one_step() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    for bucket in ["photos", "other"] {
+        cli.ok(&["mb", &format!("t/{bucket}")]).await;
+    }
+    fs::write(cli.path("note.txt"), "hello").unwrap();
+    // Read and write in one bucket, the key saved as an alias.
+    let added = records(
+        &cli.ok(&[
+            "--json",
+            "admin",
+            "user",
+            "add",
+            "t",
+            "alice",
+            "--policy",
+            "readwrite",
+            "--bucket",
+            "photos",
+            "--save-alias",
+            "alice",
+        ])
+        .await,
+    );
+    assert_eq!(added[0]["type"], "accessKey");
+    assert!(added[0].get("secretKey").is_none(), "{}", added[0]);
+    cli.ok(&["cp", "note.txt", "alice/photos/note.txt"]).await;
+    cli.ok(&["ls", "alice"]).await;
+    cli.fails(&["cp", "note.txt", "alice/other/note.txt"], 4)
+        .await;
+    // Read only, the key in a file only its owner reads.
+    let file = cli.path("bob.json");
+    let path = file.to_str().unwrap();
+    cli.ok(&[
+        "admin", "user", "add", "t", "bob", "--policy", "readonly", "-o", path,
+    ])
+    .await;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let bob: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        (bob["user"].as_str(), bob["endpoint"].as_str()),
+        (Some("bob"), Some(server.endpoint.as_str()))
+    );
+    let address = server.endpoint.trim_start_matches("http://");
+    let mut as_bob = Client::new(&server);
+    as_bob.env.push((
+        "TEIFS_ALIAS_B".to_owned(),
+        format!(
+            "http://{}:{}@{address}",
+            bob["accessKey"].as_str().unwrap(),
+            bob["secretKey"].as_str().unwrap()
+        ),
+    ));
+    fs::write(as_bob.path("note.txt"), "hello").unwrap();
+    as_bob.ok(&["cat", "b/photos/note.txt"]).await;
+    as_bob
+        .fails(&["cp", "note.txt", "b/photos/bob.txt"], 4)
+        .await;
+    // A new policy takes effect at once.
+    cli.ok(&[
+        "admin",
+        "user",
+        "policy",
+        "t",
+        "bob",
+        "--policy",
+        "readwrite",
+    ])
+    .await;
+    as_bob.ok(&["cp", "note.txt", "b/other/bob.txt"]).await;
+    // Standard output, when asked for.
+    let out = cli
+        .ok(&["admin", "user", "key", "add", "t", "bob", "--output", "-"])
+        .await;
+    let printed = records(&out);
+    assert!(printed[0]["secretKey"].is_string());
+    let keys = records(
+        &cli.ok(&["--json", "admin", "user", "key", "ls", "t", "bob"])
+            .await,
+    );
+    assert_eq!(keys.len(), 2);
+    assert!(
+        keys.iter()
+            .all(|k| k["status"] == "Active" && k.get("secretKey").is_none())
+    );
+    let listed = records(&cli.ok(&["--json", "admin", "user", "ls", "t"]).await);
+    let names: Vec<_> = listed.iter().map(|u| u["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["alice", "bob"]);
+    assert_eq!(listed[1]["policies"], serde_json::json!(["teifs-access"]));
+    let table = cli.ok(&["admin", "user", "ls", "t"]).await;
+    assert!(
+        table.contains("teifs-access") && table.contains("bob"),
+        "{table}"
+    );
+    // Deleting a key, then the user with everything it has.
+    let second = printed[0]["accessKey"].as_str().unwrap();
+    cli.ok(&["admin", "user", "key", "rm", "t", "bob", second])
+        .await;
+    assert!(server.iam.credential(second).is_none());
+    cli.fails(&["admin", "user", "key", "rm", "t", "bob", second], 5)
+        .await;
+    server.iam.create_group("team", None).unwrap();
+    server.iam.add_user_to_group("team", "bob").unwrap();
+    let err = cli.fails(&["admin", "user", "rm", "t", "bob"], 2).await;
+    assert!(err.contains("--yes"), "{err}");
+    let removed = records(
+        &cli.ok(&["--json", "-y", "admin", "user", "rm", "t", "bob"])
+            .await,
+    );
+    assert_eq!(removed[0]["type"], "userDeleted");
+    assert!(server.iam.user("bob").is_err());
+    as_bob.fails(&["ls", "b"], 4).await;
+    cli.fails(&["-y", "admin", "user", "rm", "t", "bob"], 5)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn a_user_is_added_whole_or_not_at_all() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let add = |extra: &'static [&'static str]| {
+        let mut args = vec!["admin", "user", "add", "t", "carol"];
+        args.extend_from_slice(extra);
+        args
+    };
+    // Refused before anything changes.
+    for (args, code, says) in [
+        (
+            &["--policy", "admin", "--bucket", "b", "-o", "k.json"][..],
+            2,
+            "an admin",
+        ),
+        (
+            &["--policy", "mine.json", "--bucket", "b", "-o", "k.json"][..],
+            2,
+            "--bucket is for",
+        ),
+        (
+            &["--policy", "missing.json", "-o", "k.json"][..],
+            5,
+            "missing.json",
+        ),
+        (&["--policy", "readonly"][..], 2, "--output"),
+        (
+            &["--policy", "readonly", "-o", "k.json", "--save-alias", "c"][..],
+            2,
+            "cannot be used with",
+        ),
+        (
+            &["--policy", "readonly", "--save-alias", "t"][..],
+            6,
+            "alias `t`",
+        ),
+        (
+            &["--policy", "readonly", "--save-alias", "no/good"][..],
+            2,
+            "no/good",
+        ),
+    ] {
+        let mut full = add(&[]);
+        full.extend_from_slice(args);
+        let err = cli.fails(&full, code).await;
+        assert!(err.contains(says), "{args:?}: {err}");
+    }
+    assert!(server.iam.user("carol").is_err());
+    fs::write(cli.path("taken.json"), "").unwrap();
+    cli.fails(&add(&["--policy", "readonly", "-o", "taken.json"]), 6)
+        .await;
+    fs::write(cli.path("mine.json"), "{").unwrap();
+    // A policy the server refuses, after the user was made: the user goes again.
+    let err = cli
+        .fails(&add(&["--policy", "mine.json", "-o", "k.json"]), 2)
+        .await;
+    assert!(err.contains("MalformedPolicyDocument"), "{err}");
+    assert!(server.iam.user("carol").is_err());
+    assert!(!cli.path("k.json").exists());
+    // A user that's there already.
+    user(&server, "carol", None);
+    cli.fails(&add(&["--policy", "readonly", "-o", "k.json"]), 6)
+        .await;
+    assert!(server.iam.user("carol").is_ok());
+    // A key that can't be written isn't kept: nobody would have its secret.
+    cli.fails(
+        &[
+            "admin",
+            "user",
+            "key",
+            "add",
+            "t",
+            "carol",
+            "-o",
+            "no/such/dir/k.json",
+        ],
+        1,
+    )
+    .await;
+    let keys = records(
+        &cli.ok(&["--json", "admin", "user", "key", "ls", "t", "carol"])
+            .await,
+    );
+    assert_eq!(keys.len(), 1, "only the one it had: {keys:?}");
+    // A policy from a file.
+    fs::write(
+        cli.path("mine.json"),
+        r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}}"#,
+    )
+    .unwrap();
+    cli.ok(&[
+        "admin",
+        "user",
+        "policy",
+        "t",
+        "carol",
+        "--policy",
+        "mine.json",
+    ])
+    .await;
+    cli.fails(
+        &[
+            "admin", "user", "policy", "t", "nobody", "--policy", "readonly",
+        ],
+        5,
+    )
+    .await;
+}

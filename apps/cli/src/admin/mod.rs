@@ -1,6 +1,8 @@
 //! `teifs admin`: a TeiFS server's admin API through an alias — what the server is and
-//! how it was started, moving its IAM, and replacing its root key. Users, keys, groups
-//! and policies are AWS's IAM API (`aws iam --endpoint-url …`).
+//! how it was started, moving its IAM, replacing its root key, and users with their keys
+//! and policies (over AWS's IAM API, which `aws iam --endpoint-url …` speaks too).
+
+mod users;
 
 use std::{
     fs,
@@ -42,6 +44,11 @@ pub enum AdminAction {
     RootKey {
         #[command(subcommand)]
         action: RootKeyAction,
+    },
+    /// Add, list and delete users, their access keys and policies.
+    User {
+        #[command(subcommand)]
+        action: users::UserAction,
     },
 }
 
@@ -118,6 +125,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         AdminAction::RootKey {
             action: RootKeyAction::Rotate { alias },
         } => rotate(aliases, &alias).await,
+        AdminAction::User { action } => users::run(aliases, action).await,
     }
 }
 

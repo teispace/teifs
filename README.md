@@ -157,6 +157,8 @@ each comes from. The secret key never goes in the file, and is never printed.
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
+| `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |
+| `teifs admin user ls\|rm\|policy ALIAS …` \| `user key add\|ls\|rm ALIAS NAME …` | List, delete or re-permission users; add, list and delete their keys |
 | `teifs health [ADDRESS] [--timeout 5s]` | Check that a server answers its health check |
 | `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |

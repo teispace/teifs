@@ -191,9 +191,8 @@ impl fmt::Display for Error {
 
 fn kind_of(status: u16, code: &str) -> Kind {
     match (status, code) {
-        (_, "NoSuchBucket" | "NoSuchKey" | "NoSuchUpload" | "NotFound") | (404, _) => {
-            Kind::NotFound
-        }
+        (_, "NoSuchBucket" | "NoSuchKey" | "NoSuchUpload" | "NotFound" | "NoSuchEntity")
+        | (404, _) => Kind::NotFound,
         (
             _,
             "AccessDenied"
@@ -207,9 +206,13 @@ fn kind_of(status: u16, code: &str) -> Kind {
             "BucketAlreadyExists"
             | "BucketAlreadyOwnedByYou"
             | "BucketNotEmpty"
-            | "PreconditionFailed",
+            | "PreconditionFailed"
+            | "EntityAlreadyExists"
+            | "DeleteConflict"
+            | "LimitExceeded",
         )
         | (409 | 412, _) => Kind::Conflict,
+        (_, "MalformedPolicyDocument") => Kind::Usage,
         (500.., _) | (_, "SlowDown" | "RequestTimeout") => Kind::Network,
         _ => Kind::General,
     }
@@ -221,6 +224,9 @@ fn hint_for(code: &str) -> Option<&'static str> {
         "InvalidAccessKeyId" => Some("check the alias's access key: `teifs alias set`"),
         "SignatureDoesNotMatch" => Some("check the alias's secret key: `teifs alias set`"),
         "RequestTimeTooSkewed" => Some("this computer's clock is off: set it right"),
+        "MalformedPolicyDocument" => {
+            Some("check the policy file: it's an IAM policy document, as JSON")
+        }
         "RootKeyManagedElsewhere" => Some(
             "the server was given its root key (TEIFS_ACCESS_KEY / TEIFS_SECRET_KEY, flags or \
              a secret key file): change it there and restart the server",

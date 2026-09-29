@@ -22,6 +22,7 @@ clap.workspace = true
 clap_complete.workspace = true
 toml.workspace = true
 aws-sdk-s3.workspace = true
+aws-sdk-iam.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
 indicatif.workspace = true

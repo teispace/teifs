@@ -39,6 +39,11 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs admin`: `info`, `config`, `iam export|import` and `root-key rotate` through an
   alias, with `--json`; an export with secrets goes only to an owner-only file, and a
   rotation updates the alias. `teifs-client` is the admin API as a Rust library.
+- `teifs admin user`: a user with a policy (`readonly`, `readwrite`, `admin` or a policy
+  file, optionally limited to buckets) and an access key in one step, saved as an alias
+  or to an owner-only file, never printed unless asked for with `--output -`. Also
+  `ls`, `rm` (keys, policies and groups first), `policy`, and `key add|ls|rm`. It
+  speaks AWS's IAM API, and a user that can't be finished isn't left behind.
 - Rotate the root key without a restart: `POST /.teifs/admin/v1/root-key` replaces a
   drive-generated root key, saves it in `.teifs/credentials.json` and answers it; the
   old key stops working at once.
