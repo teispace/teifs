@@ -8,7 +8,9 @@ don't exist yet; they're written down now so those features are built to them.
 Many of these rules come from studying the published security advisories of other S3
 servers: most were authorization gaps on secondary endpoints, policy logic errors, default
 secrets, secrets in logs and path traversal. Each class has a rule here and, as the
-feature lands, a regression test named after what it prevents.
+feature lands, a regression test named after what it prevents. The security suite
+(`crates/server/tests/security/`, a module per class) holds those tests, naming the
+advisories each one answers, and points to the other tests that prove a rule.
 
 ## Threats
 
@@ -29,7 +31,15 @@ before any operation runs; chunked uploads verify each chunk's signature as it s
 Signature V2 (HMAC-SHA1) is refused unless the operator turns it on with
 `serve --allow-sigv2` for clients too old for V4.
 Every `x-amz-*` header of a signed request must be signed, presigned links included:
-whoever holds a link can't add an ACL, tags, metadata or encryption to it.
+whoever holds a link can't add an ACL, tags, metadata or encryption to it, nor turn an
+upload into a copy of another object (`x-amz-copy-source`), and nobody on the way can add
+one to a signed request. Only `x-amz-content-sha256` may be added unsigned, as the AWS
+SDKs do. A body that isn't what that header signed is refused
+(`XAmzContentSHA256Mismatch`), each chunk's signature chains to the one before (so none
+can be changed, repeated, reordered or left out), a trailer is signed and its checksum
+checked, and a presigned link can't carry a streamed body at all. A copy needs read on
+its source and write on its destination, as `CopyObject` or `UploadPartCopy`
+(`crates/server/tests/security/signatures.rs`).
 An upload link can carry a size cap in its query, which its Signature V4 signature
 covers (`x-teifs-max-content-length`, and `x-teifs-max-total-object-size` for multipart
 uploads): the declared length is checked before the body is read, the body is cut off if
