@@ -181,9 +181,10 @@ async fn assume(args: AssumeArgs, aliases: &mut Aliases) -> Result<(), Error> {
 
 async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
     // Only the server: an alias's keys have no part.
-    let server = match aliases.get(&args.server) {
-        Some((found, _)) => found.clone(),
-        None => Alias {
+    let server = if let Some((found, _)) = aliases.get(&args.server) {
+        found.clone()
+    } else {
+        let mut server = Alias {
             url: alias::check_url(&args.server).map_err(Error::usage)?,
             access_key: String::new(),
             secret_key: String::new(),
@@ -191,8 +192,16 @@ async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
             path_style: true,
             session_token: None,
             expires: None,
-        },
+            ca_cert: None,
+            trust: crate::client::trust::Trust::default(),
+        };
+        server.load_trust();
+        server
     };
+    server
+        .trust
+        .check()
+        .map_err(|e| Error::usage(e).with_hint("fix the file TEIFS_CA_CERT or the alias names"))?;
     args.session.output.check(aliases)?;
     let policy = args.session.policy()?;
     let path = &args.token_file;
@@ -229,7 +238,7 @@ fn signing(aliases: &Aliases, name: &str) -> Result<Alias, Error> {
         Error::new(Kind::NotFound, format!("there's no alias `{name}`"))
             .with_hint("see `teifs alias ls`, or add one with `teifs alias set`")
     })?;
-    found.check_fresh(name)?;
+    found.check_usable(name)?;
     Ok(found.clone())
 }
 
@@ -239,6 +248,7 @@ pub(crate) fn client(alias: &Alias, signed: bool) -> Client {
         .behavior_version_latest()
         .region(Region::new(alias.region.clone()))
         .endpoint_url(&alias.url);
+    config.set_http_client(alias.trust.sdk_client());
     if signed {
         config = config.credentials_provider(alias.credentials());
     }

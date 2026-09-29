@@ -122,10 +122,18 @@ async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
         drive,
         region,
         virtual_hosted,
+        ca_cert,
         no_check,
     } = set;
     alias::check_name(&name).map_err(Error::usage)?;
     let url = alias::check_url(&url).map_err(Error::usage)?;
+    // Checked now, and saved as an absolute path so it works from anywhere.
+    let ca_cert = ca_cert
+        .map(|path| {
+            super::trust::read(&path).map_err(Error::usage)?;
+            std::path::absolute(&path).map_err(|e| Error::usage(e.to_string()))
+        })
+        .transpose()?;
     let (access_key, secret_key) = match drive {
         Some(dir) => drive_keys(&dir)?,
         None => (
@@ -133,7 +141,7 @@ async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
             secret_key(secret_key_stdin)?,
         ),
     };
-    let alias = Alias {
+    let mut alias = Alias {
         url,
         access_key,
         secret_key,
@@ -141,7 +149,10 @@ async fn set_alias(set: SetAlias, aliases: &mut Aliases) -> Result<(), Error> {
         path_style: !virtual_hosted,
         session_token: None,
         expires: None,
+        ca_cert,
+        trust: super::trust::Trust::default(),
     };
+    alias.load_trust();
     if !no_check {
         alias.client().list_buckets().send().await.map_err(|e| {
             let err = Error::s3(format!("{} doesn't work with these keys", alias.url), &e);
@@ -200,6 +211,7 @@ fn list_aliases(aliases: &Aliases) {
             "pathStyle": alias.path_style,
             "temporary": alias.session_token.is_some(),
             "expiresMs": alias.expires_ms(),
+            "caCert": alias.ca_cert,
             "from": from,
         }));
     }

@@ -16,13 +16,17 @@
 //! # }
 //! ```
 
-use std::{fmt, time::SystemTime};
+use std::{fmt, sync::Arc, time::SystemTime};
 
 use aws_sigv4::{
     http_request::{PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign},
     sign::v4,
 };
 use reqwest::{Method, Url, header::CONTENT_TYPE};
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
 
@@ -59,6 +63,9 @@ pub enum ClientError {
     /// The answer isn't what the admin API answers.
     #[error("the server's answer isn't what TeiFS answers: {0}")]
     Answer(String),
+    /// A certificate authority to trust isn't PEM certificates.
+    #[error("the CA certificate isn't usable: {0}")]
+    Certificate(String),
 }
 
 impl ClientError {
@@ -121,6 +128,36 @@ impl Client {
             session_token: None,
             region: DEFAULT_REGION.to_owned(),
         })
+    }
+
+    /// Trusts the certificate authorities in `pem` (PEM certificates) for the server,
+    /// besides the system's: for a server whose certificate a private CA signed.
+    pub fn with_root_certificates(mut self, pem: &[u8]) -> Result<Self, ClientError> {
+        let invalid = |e: &dyn std::fmt::Display| ClientError::Certificate(e.to_string());
+        let certificates = CertificateDer::pem_slice_iter(pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| invalid(&e))?;
+        if certificates.is_empty() {
+            return Err(ClientError::Certificate("no certificate in it".into()));
+        }
+        // Checked as the AWS SDKs' clients check it (webpki, the system's authorities as
+        // rustls-native-certs finds them), so an alias's servers pass or fail alike.
+        let mut roots = RootCertStore::empty();
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        for certificate in certificates {
+            roots.add(certificate).map_err(|e| invalid(&e))?;
+        }
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let tls = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| invalid(&e))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        self.http = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
+            .build()
+            .map_err(|e| invalid(&e))?;
+        Ok(self)
     }
 
     /// Signs with temporary credentials: the key is theirs, and this their session
@@ -322,6 +359,21 @@ mod tests {
         ] {
             let err = Client::new(bad, "a", secret()).unwrap_err();
             assert!(matches!(err, ClientError::Endpoint(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn root_certificates_must_be_pem_certificates() {
+        let client = || {
+            Client::new(
+                "https://s3.example.com",
+                "a",
+                Zeroizing::new("s".to_owned()),
+            )
+        };
+        for pem in [&b""[..], b"nonsense"] {
+            let err = client().unwrap().with_root_certificates(pem).err();
+            assert!(matches!(err, Some(ClientError::Certificate(_))), "{err:?}");
         }
     }
 

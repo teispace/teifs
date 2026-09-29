@@ -29,6 +29,7 @@ rustls-webpki.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
+time.workspace = true
 aws-sdk-s3.workspace = true
 teifs-client.workspace = true
 aws-sdk-iam.workspace = true

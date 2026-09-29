@@ -293,6 +293,13 @@ flag (`aws:SecureTransport`, SSE-C) comes from the listener, never from a header
 (it sends nothing secret and reads only a status), so it works with private CAs and
 certificates for public names while it asks `127.0.0.1`.
 
+The `teifs` client checks every server fully: chain, dates and host name. An alias's
+`ca-cert` (or `TEIFS_CA_CERT`) adds one authority to the system's, never replaces them
+and never turns checking off (`apps/cli/src/client/trust.rs`); the S3, IAM, STS and
+admin clients all use it, and check with it the same way (webpki, the system's
+authorities as `rustls-native-certs` finds them), so a server passes or fails alike. A CA file that is missing or isn't PEM stops the command
+before anything is sent, rather than falling back to the system's authorities alone.
+
 ## Data safety
 
 - Writes are atomic (stage, sync, rename, sync the folder), so a crash never leaves a

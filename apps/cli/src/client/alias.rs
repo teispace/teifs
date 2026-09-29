@@ -8,7 +8,8 @@
 //! one with temporary credentials, as MinIO's `mc` takes them.
 //!
 //! An alias with temporary credentials (`teifs sts assume`) keeps their session token
-//! and when they expire.
+//! and when they expire. One for a server whose certificate a private CA signed names
+//! that CA (`ca-cert`), or `TEIFS_CA_CERT` does for all.
 
 use std::{
     collections::BTreeMap,
@@ -22,7 +23,10 @@ use aws_sdk_s3::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::Error;
+use super::{
+    Error,
+    trust::{CA_ENV, Trust},
+};
 
 /// The environment variable that points at another aliases file.
 pub const CONFIG_ENV: &str = "TEIFS_CLIENT_CONFIG";
@@ -52,6 +56,12 @@ pub struct Alias {
     /// When temporary credentials expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires: Option<toml::value::Datetime>,
+    /// A certificate authority (PEM) to trust for this server besides the system's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<PathBuf>,
+    /// The authorities trusted, as loaded: `ca_cert`'s, or `TEIFS_CA_CERT`'s.
+    #[serde(skip)]
+    pub trust: Trust,
 }
 
 fn default_region() -> String {
@@ -71,6 +81,7 @@ impl fmt::Debug for Alias {
             .field("path_style", &self.path_style)
             .field("temporary", &self.session_token.is_some())
             .field("expires", &self.expires)
+            .field("ca_cert", &self.ca_cert)
             .finish_non_exhaustive()
     }
 }
@@ -89,14 +100,22 @@ impl Alias {
 
     /// An S3 client for this alias.
     pub fn client(&self) -> Client {
-        let config = aws_sdk_s3::Config::builder()
+        let mut config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()
             .region(Region::new(self.region.clone()))
             .endpoint_url(&self.url)
             .credentials_provider(self.credentials())
-            .force_path_style(self.path_style)
-            .build();
-        Client::from_conf(config)
+            .force_path_style(self.path_style);
+        config.set_http_client(self.trust.sdk_client());
+        Client::from_conf(config.build())
+    }
+
+    /// Reads the certificate authority it trusts: its `ca-cert`, else `TEIFS_CA_CERT`'s.
+    pub fn load_trust(&mut self) {
+        let from_env = std::env::var_os(CA_ENV)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
+        self.trust = Trust::load(self.ca_cert.as_deref().or(from_env.as_deref()));
     }
 
     /// When its temporary credentials expire, in milliseconds since the Unix epoch.
@@ -110,9 +129,13 @@ impl Alias {
             .is_some_and(|ms| ms <= crate::units::now_ms())
     }
 
-    /// Refuses the alias `name` when its temporary credentials have expired, before a
-    /// request fails with them.
-    pub fn check_fresh(&self, name: &str) -> Result<(), Error> {
+    /// Refuses the alias `name` when it can't be used: its temporary credentials have
+    /// expired, or its certificate authority can't be read. Before a request fails.
+    pub fn check_usable(&self, name: &str) -> Result<(), Error> {
+        self.trust.check().map_err(|e| {
+            Error::usage(format!("alias `{name}`: {e}"))
+                .with_hint("fix the file, or `teifs alias set` it with another --ca-cert")
+        })?;
         match self.expires_ms() {
             Some(ms) if self.expired() => Err(Error::new(
                 super::Kind::Auth,
@@ -182,6 +205,10 @@ impl Aliases {
             let alias =
                 from_env(value).map_err(|e| Error::usage(format!("{ENV_PREFIX}{name}: {e}")))?;
             env.insert(name, alias);
+        }
+        let mut file: File = file;
+        for alias in file.aliases.values_mut().chain(env.values_mut()) {
+            alias.load_trust();
         }
         Ok(Self { path, file, env })
     }
@@ -317,6 +344,8 @@ fn from_env(value: &str) -> Result<Alias, String> {
         path_style: true,
         session_token: token,
         expires: None,
+        ca_cert: None,
+        trust: Trust::default(),
     })
 }
 

@@ -331,6 +331,8 @@ fn add_alias(
         path_style: true,
         session_token: None,
         expires: None,
+        ca_cert: None,
+        trust: crate::client::trust::Trust::default(),
     };
     if let Some((existing, _)) = aliases.get(&name)
         && *existing != alias

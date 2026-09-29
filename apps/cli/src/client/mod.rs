@@ -7,6 +7,7 @@ mod copy;
 mod listing;
 mod target;
 mod transfer;
+pub(crate) mod trust;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -153,6 +154,10 @@ pub struct SetAlias {
     /// as the first part of the path.
     #[arg(long)]
     virtual_hosted: bool,
+    /// Trust this certificate authority (PEM) for the server besides the system's: for
+    /// a certificate a private CA signed, or a self-signed one.
+    #[arg(long, value_name = "FILE")]
+    ca_cert: Option<PathBuf>,
     /// Save it without checking that the endpoint and keys work.
     #[arg(long)]
     no_check: bool,

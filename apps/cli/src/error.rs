@@ -91,17 +91,17 @@ impl Error {
         E: ProvideErrorMetadata + std::error::Error + 'static,
     {
         let (kind, why, hint) = match err {
-            SdkError::DispatchFailure(e) => (
-                Kind::Network,
-                format!(
-                    "the endpoint can't be reached ({})",
-                    source_chain(
-                        e.as_connector_error()
-                            .map(|e| e as &(dyn std::error::Error + 'static)),
-                    )
-                ),
-                Some("check the address, and that the server is running".to_owned()),
-            ),
+            SdkError::DispatchFailure(e) => {
+                let chain = source_chain(
+                    e.as_connector_error()
+                        .map(|e| e as &(dyn std::error::Error + 'static)),
+                );
+                (
+                    Kind::Network,
+                    format!("the endpoint can't be reached ({chain})"),
+                    Some(unreachable_hint(&chain)),
+                )
+            }
             SdkError::TimeoutError(_) => (
                 Kind::Network,
                 "the endpoint didn't answer in time".into(),
@@ -144,12 +144,17 @@ impl Error {
                 describe(*status, code, message),
                 hint_for(code).map(str::to_owned),
             ),
-            ClientError::Transport(e) => (
-                Kind::Network,
-                format!("the endpoint can't be reached ({})", source_chain(Some(e))),
-                Some("check the address, and that the server is running".to_owned()),
-            ),
-            ClientError::Endpoint(_) => (Kind::Usage, err.to_string(), None),
+            ClientError::Transport(e) => {
+                let chain = source_chain(Some(e));
+                (
+                    Kind::Network,
+                    format!("the endpoint can't be reached ({chain})"),
+                    Some(unreachable_hint(&chain)),
+                )
+            }
+            ClientError::Endpoint(_) | ClientError::Certificate(_) => {
+                (Kind::Usage, err.to_string(), None)
+            }
             ClientError::Answer(_) => (
                 Kind::General,
                 err.to_string(),
@@ -270,6 +275,17 @@ fn source_chain(err: Option<&(dyn std::error::Error + 'static)>) -> String {
     }
 }
 
+/// What to do when a server can't be reached, from why: a certificate nobody vouches for
+/// needs its CA named.
+fn unreachable_hint(why: &str) -> String {
+    let lower = why.to_ascii_lowercase();
+    if lower.contains("certificate") || lower.contains("unknownissuer") {
+        "if a private CA signed the server's certificate, trust it: `teifs alias set NAME URL --ca-cert FILE`, or TEIFS_CA_CERT".to_owned()
+    } else {
+        "check the address, and that the server is running".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +315,11 @@ mod tests {
         );
         assert_eq!(hint_for("NoSuchKey"), None);
         assert_eq!(describe(400, "Bad", ""), "Bad");
+    }
+
+    #[test]
+    fn unreachable_servers_get_a_hint_that_fits() {
+        assert!(unreachable_hint("invalid peer certificate: UnknownIssuer").contains("--ca-cert"));
+        assert!(unreachable_hint("connection refused").contains("that the server is running"));
     }
 }

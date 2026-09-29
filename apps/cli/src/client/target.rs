@@ -19,7 +19,7 @@ pub enum Target {
 #[derive(Debug, Clone)]
 pub struct Remote {
     pub alias_name: String,
-    pub alias: Alias,
+    pub alias: Box<Alias>,
     /// `None` for the alias itself.
     pub bucket: Option<String>,
     /// The key or key prefix; empty for the whole bucket.
@@ -79,11 +79,11 @@ impl Target {
             }
             return Ok(Self::Local(PathBuf::from(text)));
         };
-        alias.check_fresh(first)?;
+        alias.check_usable(first)?;
         let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
         Ok(Self::Remote(Remote {
             alias_name: first.to_owned(),
-            alias: alias.clone(),
+            alias: Box::new(alias.clone()),
             bucket: (!bucket.is_empty()).then(|| bucket.to_owned()),
             key: key.to_owned(),
         }))

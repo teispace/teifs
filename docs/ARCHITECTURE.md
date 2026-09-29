@@ -68,7 +68,8 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                IAM client, with `policy.rs` their policy presets;
                                `src/sts.rs` is `teifs sts`, on its STS client.
                                `Alias::credentials` gives every client the alias's
-                               keys and session token.
+                               keys and session token, and `client/trust.rs` the CA
+                               it trusts besides the system's.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

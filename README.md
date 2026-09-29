@@ -154,6 +154,10 @@ use stay. TLS 1.3 and 1.2 only, HTTP/2 when the client offers it; plain HTTP on 
 port gets `400 Client sent an HTTP request to an HTTPS server.` `teifs health` finds
 out on its own that a server speaks HTTPS.
 
+For a certificate your own CA signed (or a self-signed one), tell clients to trust it:
+`teifs alias set NAME https://host:9000 --ca-cert ca.pem`, or `TEIFS_CA_CERT=ca.pem` for
+every alias that doesn't name one. The system's authorities are still trusted too.
+
 Over HTTPS, `aws:SecureTransport` is true, and SSE-C keys are accepted. On plain HTTP
 they're refused for every request (as on AWS), except on a server listening only on
 this machine (with no proxies trusted), or with `--sse-c-over-http`.
@@ -192,7 +196,7 @@ location / {
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
-| `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys (`TEIFS_ALIAS_NAME=https://KEY:SECRET[:TOKEN]@host` for one run) |
+| `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys, and a CA to trust with `--ca-cert` (`TEIFS_ALIAS_NAME=https://KEY:SECRET[:TOKEN]@host` for one run) |
 | `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r]` | List buckets or objects |
 | `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `rb --force`) |
 | `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output |

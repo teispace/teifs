@@ -150,7 +150,7 @@ fn alias<'a>(aliases: &'a Aliases, name: &str) -> Result<(&'a Alias, Origin), Er
         Error::new(Kind::NotFound, format!("there's no alias `{name}`"))
             .with_hint("see `teifs alias ls`, or add one with `teifs alias set`")
     })?;
-    found.0.check_fresh(name)?;
+    found.0.check_usable(name)?;
     Ok(found)
 }
 
@@ -160,6 +160,10 @@ fn client_for(alias: &Alias) -> Result<Client, Error> {
         &alias.access_key,
         Zeroizing::new(alias.secret_key.clone()),
     )
+    .and_then(|client| match alias.trust.pem() {
+        Some(pem) => client.with_root_certificates(pem),
+        None => Ok(client),
+    })
     .map(|client| {
         let client = client.with_region(&alias.region);
         match &alias.session_token {
@@ -172,13 +176,13 @@ fn client_for(alias: &Alias) -> Result<Client, Error> {
 
 /// An IAM client for the alias's server, signing with its keys.
 fn iam(alias: &Alias) -> aws_sdk_iam::Client {
-    let config = aws_sdk_iam::Config::builder()
+    let mut config = aws_sdk_iam::Config::builder()
         .behavior_version_latest()
         .region(aws_sdk_iam::config::Region::new(alias.region.clone()))
         .endpoint_url(&alias.url)
-        .credentials_provider(alias.credentials())
-        .build();
-    aws_sdk_iam::Client::from_conf(config)
+        .credentials_provider(alias.credentials());
+    config.set_http_client(alias.trust.sdk_client());
+    aws_sdk_iam::Client::from_conf(config.build())
 }
 
 fn client(aliases: &Aliases, name: &str) -> Result<Client, Error> {

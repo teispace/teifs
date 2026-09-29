@@ -14,6 +14,9 @@ behaviour; the on-disk format is always upgraded automatically.
   ones don't load; TLS 1.3 and 1.2, HTTP/2; a handshake must finish within the header
   timeout; plain HTTP on the port is told to use HTTPS. `aws:SecureTransport` is true
   over it. `teifs health` asks over HTTPS when the server speaks it.
+- `teifs alias set … --ca-cert FILE` (or `TEIFS_CA_CERT` for every alias) trusts a
+  private or self-signed certificate authority besides the system's, for every command
+  that uses the alias: S3, `teifs admin`, IAM and STS. A certificate error suggests it.
 - SSE-C keys are refused on plain HTTP for every request, as on AWS: reads, `HEAD` and
   copy sources too, not only writes.
 - Reverse proxies: `teifs serve --trusted-proxy CIDR` (repeatable) lets the proxies there
