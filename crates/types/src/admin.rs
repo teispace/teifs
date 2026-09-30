@@ -358,6 +358,25 @@ pub struct ServerInfo {
     /// What the drive's scrubs (integrity passes) have found.
     #[serde(default)]
     pub scrub: crate::verify::ScrubReport,
+    /// What the drive holds; none from a server that doesn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+}
+
+/// What a drive holds, in all its buckets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageInfo {
+    /// Buckets.
+    pub buckets: u64,
+    /// Objects: keys whose current version isn't a delete marker.
+    pub objects: u64,
+    /// Object versions, current ones included, delete markers not.
+    pub versions: u64,
+    /// Delete markers.
+    pub delete_markers: u64,
+    /// The size of every version.
+    pub bytes: u64,
 }
 
 /// What a background job has done.
@@ -539,13 +558,19 @@ mod tests {
                 }),
                 last: None,
             },
+            usage: Some(UsageInfo {
+                delete_markers: 4,
+                ..UsageInfo::default()
+            }),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["startedMs"], 1);
+        assert_eq!(json["usage"]["deleteMarkers"], 4);
         assert_eq!(json["scrub"]["current"]["startedMs"], 3);
         // A server from before scrubs is still understood.
         let mut older = json.clone();
         older.as_object_mut().unwrap().remove("scrub");
+        older.as_object_mut().unwrap().remove("usage");
         assert_eq!(
             serde_json::from_value::<ServerInfo>(older).unwrap().scrub,
             crate::verify::ScrubReport::default()

@@ -22,10 +22,15 @@ async fn info_and_configuration_for_people_and_programs() {
     let cli = Client::new(&server);
     let out = cli.ok(&["admin", "info", "t"]).await;
     assert!(out.contains(&server.iam.account()), "{out}");
+    assert!(
+        out.contains("0 B in 0 buckets: 0 objects, 0 versions, 0 delete markers"),
+        "{out}"
+    );
     assert!(out.contains("housekeeping") || out.contains("JOB"), "{out}");
     let info = records(&cli.ok(&["--json", "admin", "info", "t"]).await);
     assert_eq!(info[0]["type"], "server");
     assert_eq!(info[0]["account"], server.iam.account());
+    assert_eq!(info[0]["usage"]["buckets"], 0);
     let out = cli.ok(&["admin", "config", "t"]).await;
     assert!(
         out.contains("given by environment") && out.contains("folder"),
@@ -589,6 +594,13 @@ async fn prometheus_scrapes_with_a_generated_configuration() {
         "{config}"
     );
     assert_eq!(scrape(&server, &token_in(&config)).await, 200);
+    let config = cli
+        .ok(&["admin", "prometheus", "generate", "t", "--buckets"])
+        .await;
+    assert!(
+        config.contains("    metrics_path: /.teifs/metrics\n    params:\n      buckets: [\"1\"]\n    scheme: http\n"),
+        "{config}"
+    );
 
     // In a file of its own, which the configuration names; one that expires.
     let file = cli.path("token");

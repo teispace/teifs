@@ -399,10 +399,12 @@ impl Service {
                 let response = metrics::scrape(
                     &self.watch.metrics,
                     &self.watch.scrapers,
+                    req.uri().query(),
                     req.headers(),
                     client,
                     &seen.id,
-                );
+                )
+                .await;
                 return Ok(response);
             }
         }

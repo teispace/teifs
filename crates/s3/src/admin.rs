@@ -13,7 +13,7 @@ use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
 use teifs_iam::{Iam, IamError, RootKey};
 use teifs_store::{JobStatus, Store};
 use teifs_types::admin::{
-    AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo,
+    AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo,
 };
 
 use crate::routes::{s3_refusal, signed_body};
@@ -145,7 +145,27 @@ pub(crate) async fn info(
             .map(|(name, status)| ((*name).to_owned(), job_info(status)))
             .collect(),
         scrub,
+        usage: usage_info(store).await,
     }))
+}
+
+/// What the drive holds, or none (logged) when it can't be read.
+async fn usage_info(store: &Store) -> Option<UsageInfo> {
+    let buckets = store
+        .usage()
+        .await
+        .inspect_err(|err| tracing::error!(error = %err, "can't read what the drive holds"))
+        .ok()?;
+    let total = buckets
+        .iter()
+        .fold(teifs_store::Usage::default(), |total, b| total + b.usage);
+    Some(UsageInfo {
+        buckets: u64::try_from(buckets.len()).unwrap_or(u64::MAX),
+        objects: total.objects,
+        versions: total.versions,
+        delete_markers: total.delete_markers,
+        bytes: total.bytes,
+    })
 }
 
 /// `GET config`.

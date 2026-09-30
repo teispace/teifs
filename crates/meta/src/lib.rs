@@ -16,6 +16,7 @@ mod db;
 mod iam;
 mod index;
 mod system;
+mod usage;
 mod versions;
 
 pub use db::{backup, intact};
@@ -25,6 +26,7 @@ pub use iam::{
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System, Versioning};
+pub use usage::{Usage, Usages};
 pub use versions::{NULL_VERSION, VersionRow, VersionsFrom};
 
 /// Why a metadata database failed.

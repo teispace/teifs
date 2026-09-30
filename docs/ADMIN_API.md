@@ -46,7 +46,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 
 | Method | Path | What it does | Who may |
 |---|---|---|---|
-| `GET` | `/.teifs/admin/v1/info` | Version, drive, account, uptime, background jobs and what scrubs found: `ServerInfo` | `teifs:GetServerInfo` |
+| `GET` | `/.teifs/admin/v1/info` | Version, drive, account, uptime, what the drive holds, background jobs and what scrubs found: `ServerInfo` | `teifs:GetServerInfo` |
 | `GET` | `/.teifs/admin/v1/config` | How the server was started, without secrets: `ServerConfig` | `teifs:GetServerConfig` |
 | `GET` | `/.teifs/admin/v1/snapshots` | The drive's metadata snapshots, oldest first: `Snapshot`s | `teifs:ListSnapshots` |
 | `POST` | `/.teifs/admin/v1/snapshots` | Snapshots the drive's metadata now (both databases, kept with the daily ones): `Snapshot` | `teifs:TakeSnapshot` |

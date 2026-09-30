@@ -36,6 +36,10 @@ pub enum PrometheusAction {
         /// Replace the token file if it exists.
         #[arg(long, requires = "token_file")]
         force: bool,
+        /// Scrape what each bucket holds too (`?buckets=1`): a series per bucket for each
+        /// figure.
+        #[arg(long)]
+        buckets: bool,
     },
 }
 
@@ -45,6 +49,7 @@ pub fn run(aliases: &Aliases, action: PrometheusAction) -> Result<(), Error> {
         expires,
         token_file,
         force,
+        buckets,
     } = action;
     let (alias, _) = alias(aliases, &name)?;
     if alias.session_token.is_some() {
@@ -75,10 +80,16 @@ pub fn run(aliases: &Aliases, action: PrometheusAction) -> Result<(), Error> {
         }
         None => format!("credentials: {}", yaml_string(&token)),
     };
+    let params = if buckets {
+        "\x20   params:\n\x20     buckets: [\"1\"]\n"
+    } else {
+        ""
+    };
     let config = format!(
         "scrape_configs:\n\
          \x20 - job_name: teifs\n\
          \x20   metrics_path: {}\n\
+         {params}\
          \x20   scheme: {scheme}\n\
          \x20   authorization:\n\
          \x20     {credentials}\n\

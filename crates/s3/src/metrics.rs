@@ -1,6 +1,7 @@
 //! Prometheus metrics at `GET /.teifs/metrics`, in the `OpenMetrics` text format: every
 //! request by operation and status, errors by S3 error code, latency, bytes moved, the
-//! drive's space and the background jobs' progress.
+//! drive's space and what it holds, the background jobs' progress and what the scrub
+//! found. `?buckets=1` adds what each bucket holds, labeled by bucket.
 //!
 //! Metrics name buckets, users' operations and the drive's size, so a scrape needs a
 //! bearer token (`teifs admin prometheus generate`) whose key may `teifs:GetMetrics`,
@@ -29,8 +30,11 @@ use prometheus_client::{
 };
 use s3s::{HttpResponse, S3Error, S3ErrorCode};
 use teifs_iam::{AuthError, Iam};
-use teifs_store::Store;
-use teifs_types::admin::METRICS_PATH;
+use teifs_store::{BucketUsage, Store, Usage};
+use teifs_types::{
+    admin::METRICS_PATH,
+    verify::{ScrubPass, ScrubReport},
+};
 
 use crate::{access::Client, observe::Answer};
 
@@ -74,6 +78,7 @@ pub struct Metrics {
     received: Family<Api, Counter>,
     sent: Family<Api, Counter>,
     audit_dropped: Counter,
+    store: Store,
 }
 
 impl Metrics {
@@ -152,6 +157,7 @@ impl Metrics {
             received,
             sent,
             audit_dropped,
+            store: store.clone(),
         }
     }
 
@@ -198,13 +204,188 @@ impl Metrics {
         self.audit_dropped.inc();
     }
 
-    /// Everything, in the `OpenMetrics` text format.
+    /// The requests' metrics and the server's, in the `OpenMetrics` text format.
+    #[cfg(test)]
     pub(crate) fn text(&self) -> String {
+        self.encode(None)
+    }
+
+    /// Everything, with what the drive holds and what its scrub found, read now; each
+    /// bucket's usage too when `per_bucket`.
+    async fn scraped(&self, per_bucket: bool) -> String {
+        let usage = self.store.usage().await;
+        let scrub = self.store.scrub_report().await;
+        if let Err(err) = usage.as_ref().map(drop).and(scrub.as_ref().map(drop)) {
+            tracing::warn!(error = %err, "a scrape left out what the drive holds");
+        }
+        self.encode(Some(Drive {
+            usage: usage.ok(),
+            per_bucket,
+            scrub: scrub.ok(),
+        }))
+    }
+
+    fn encode(&self, drive: Option<Drive>) -> String {
+        use prometheus_client::encoding::text::{encode_eof, encode_registry};
         let mut text = String::new();
-        prometheus_client::encoding::text::encode(&mut text, &self.registry)
-            .expect("writing to a String can't fail");
+        encode_registry(&mut text, &self.registry).expect("writing to a String can't fail");
+        if let Some(drive) = drive {
+            let mut read = Registry::with_prefix("teifs");
+            read.register_collector(Box::new(drive));
+            encode_registry(&mut text, &read).expect("writing to a String can't fail");
+        }
+        encode_eof(&mut text).expect("writing to a String can't fail");
         text
     }
+}
+
+/// What a scrape read of the drive: what it holds and what its scrub found (`None`
+/// when it couldn't be read).
+#[derive(Debug)]
+struct Drive {
+    usage: Option<Vec<BucketUsage>>,
+    per_bucket: bool,
+    scrub: Option<ScrubReport>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct BucketLabel {
+    bucket: String,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PassLabel {
+    pass: &'static str,
+}
+
+/// A usage figure: its name, help and unit, and how to read it.
+type Figure = (&'static str, &'static str, Option<Unit>, fn(&Usage) -> u64);
+
+const FIGURES: [Figure; 4] = [
+    (
+        "objects",
+        "Objects: keys whose current version isn't a delete marker",
+        None,
+        |u| u.objects,
+    ),
+    (
+        "versions",
+        "Object versions kept, current ones included, delete markers not",
+        None,
+        |u| u.versions,
+    ),
+    ("delete_markers", "Delete markers", None, |u| {
+        u.delete_markers
+    }),
+    (
+        "stored",
+        "The size of every version kept",
+        Some(Unit::Bytes),
+        |u| u.bytes,
+    ),
+];
+
+/// A scrub figure: its name, help and unit, and how to read it.
+type ScrubFigure = (
+    &'static str,
+    &'static str,
+    Option<Unit>,
+    fn(&ScrubPass) -> u64,
+);
+
+const SCRUB_FIGURES: [ScrubFigure; 4] = [
+    (
+        "scrub_checked_versions",
+        "Versions the scrub read and checked, in the pass under way and the last finished",
+        None,
+        |p| p.versions,
+    ),
+    (
+        "scrub_checked",
+        "Bytes the scrub read, in the pass under way and the last finished",
+        Some(Unit::Bytes),
+        |p| p.bytes,
+    ),
+    (
+        "scrub_damaged_versions",
+        "Versions the scrub found damaged, in the pass under way and the last finished",
+        None,
+        |p| p.damaged,
+    ),
+    (
+        "scrub_unverifiable_versions",
+        "Versions the scrub couldn't check (an SSE-C key it doesn't have), by pass",
+        None,
+        |p| p.unverifiable,
+    ),
+];
+
+impl Collector for Drive {
+    fn encode(&self, mut encoder: DescriptorEncoder) -> std::fmt::Result {
+        if let Some(buckets) = &self.usage {
+            let total = buckets
+                .iter()
+                .fold(Usage::default(), |total, b| total + b.usage);
+            ConstGauge::new(i64::try_from(buckets.len()).unwrap_or(i64::MAX)).encode(
+                encoder.encode_descriptor("buckets", "Buckets", None, MetricType::Gauge)?,
+            )?;
+            for (name, help, unit, read) in FIGURES {
+                ConstGauge::new(gauge(read(&total))).encode(encoder.encode_descriptor(
+                    &format!("usage_{name}"),
+                    help,
+                    unit.as_ref(),
+                    MetricType::Gauge,
+                )?)?;
+            }
+            if self.per_bucket {
+                for (name, help, unit, read) in FIGURES {
+                    let (name, help) = (format!("bucket_{name}"), format!("{help}, by bucket"));
+                    let mut family = encoder.encode_descriptor(
+                        &name,
+                        &help,
+                        unit.as_ref(),
+                        MetricType::Gauge,
+                    )?;
+                    for bucket in buckets {
+                        let label = BucketLabel {
+                            bucket: bucket.name.clone(),
+                        };
+                        ConstGauge::new(gauge(read(&bucket.usage)))
+                            .encode(family.encode_family(&label)?)?;
+                    }
+                }
+            }
+        }
+        if let Some(scrub) = &self.scrub {
+            let passes = [("current", &scrub.current), ("last", &scrub.last)];
+            for (name, help, unit, read) in SCRUB_FIGURES {
+                let mut family =
+                    encoder.encode_descriptor(name, help, unit.as_ref(), MetricType::Gauge)?;
+                for (pass, found) in passes {
+                    if let Some(found) = found {
+                        ConstGauge::new(gauge(read(found)))
+                            .encode(family.encode_family(&PassLabel { pass })?)?;
+                    }
+                }
+            }
+            if let Some(finished) = scrub.last.as_ref().and_then(|p| p.finished_ms) {
+                #[expect(clippy::cast_precision_loss, reason = "a timestamp fits a gauge")]
+                let seconds = finished as f64 / 1000.0;
+                ConstGauge::new(seconds).encode(encoder.encode_descriptor(
+                    "scrub_last_finished",
+                    "When the last scrub pass finished, in seconds since the Unix epoch",
+                    Some(&Unit::Seconds),
+                    MetricType::Gauge,
+                )?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A count as a gauge's value.
+fn gauge(count: u64) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// What's read at each scrape: the version, when the server started, the drive's
@@ -323,9 +504,10 @@ pub(crate) enum Scrapers {
 }
 
 /// Answers a scrape.
-pub(crate) fn scrape(
+pub(crate) async fn scrape(
     metrics: &Metrics,
     scrapers: &Scrapers,
+    query: Option<&str>,
     headers: &HeaderMap,
     client: Client,
     request_id: &str,
@@ -344,7 +526,11 @@ pub(crate) fn scrape(
         *http.headers_mut() = response.headers;
         return http;
     }
-    let mut response = HttpResponse::new(s3s::Body::from(metrics.text()));
+    let per_bucket = query.is_some_and(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .any(|(name, value)| name == "buckets" && matches!(&*value, "1" | "true"))
+    });
+    let mut response = HttpResponse::new(s3s::Body::from(metrics.scraped(per_bucket).await));
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -381,5 +567,50 @@ fn check(iam: &Iam, headers: &HeaderMap, client: Client) -> Result<(), S3Error> 
         Ok(())
     } else {
         Err(s3s::s3_error!(AccessDenied, "Access Denied"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_passes_are_labeled_and_the_last_ones_end_is_a_time() {
+        let pass = |versions, damaged, finished_ms| ScrubPass {
+            started_ms: 1_000,
+            finished_ms,
+            versions,
+            bytes: versions * 10,
+            damaged,
+            unverifiable: 1,
+            findings: Vec::new(),
+        };
+        let drive = Drive {
+            usage: None,
+            per_bucket: false,
+            scrub: Some(ScrubReport {
+                current: Some(pass(4, 0, None)),
+                last: Some(pass(9, 2, Some(1_790_000_000_500))),
+            }),
+        };
+        let mut registry = Registry::with_prefix("teifs");
+        registry.register_collector(Box::new(drive));
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &registry).unwrap();
+        for line in [
+            "teifs_scrub_checked_versions{pass=\"current\"} 4",
+            "teifs_scrub_checked_versions{pass=\"last\"} 9",
+            "teifs_scrub_checked_bytes{pass=\"last\"} 90",
+            "teifs_scrub_damaged_versions{pass=\"last\"} 2",
+            "teifs_scrub_damaged_versions{pass=\"current\"} 0",
+            "teifs_scrub_unverifiable_versions{pass=\"last\"} 1",
+            "teifs_scrub_last_finished_seconds 1790000000.5",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
+        assert!(
+            !text.contains("teifs_usage_"),
+            "no usage when it wasn't read"
+        );
     }
 }

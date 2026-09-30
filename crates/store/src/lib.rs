@@ -32,6 +32,7 @@ mod sse;
 mod staged;
 #[cfg(test)]
 mod test_util;
+mod usage;
 mod verify;
 
 use std::{
@@ -68,7 +69,7 @@ pub use staged::Staged;
 pub use teifs_crypto::{
     CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
 };
-pub use teifs_meta::{Layout, Part, Upload, Versioning};
+pub use teifs_meta::{Layout, Part, Upload, Usage, Versioning};
 pub use teifs_types::admin::Snapshot;
 use teifs_types::check_folder_bucket;
 pub use teifs_types::{
@@ -76,6 +77,7 @@ pub use teifs_types::{
     SseInfo, SseMode, UploadChecksum,
 };
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
+pub use usage::BucketUsage;
 pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 
 use error::not_found_as;

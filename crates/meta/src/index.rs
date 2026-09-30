@@ -124,6 +124,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE objects ADD COLUMN version_id TEXT;",
     // 9: the salt in an encrypted part's key (hex; NULL for plain parts and older ones).
     "ALTER TABLE parts ADD COLUMN salt TEXT;",
+    // 10: what each bucket holds, kept by triggers.
+    crate::usage::MIGRATION,
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.

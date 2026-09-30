@@ -275,3 +275,51 @@ async fn a_client_that_leaves_early_is_counted_as_canceled() {
     )
     .await;
 }
+
+/// What the drive holds, in total and (asked for) by bucket, and what the scrub found.
+#[tokio::test]
+async fn usage_is_in_the_metrics_and_by_bucket_when_asked() {
+    let server = start_with(|config| config.public_metrics = true).await;
+    let s3 = client(&server, SECRET_KEY);
+    for bucket in ["one", "two"] {
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    for (bucket, key, body) in [("one", "a", "hello"), ("one", "b", "hi"), ("two", "c", "x")] {
+        s3.put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::from_static(body.as_bytes()))
+            .send()
+            .await
+            .unwrap();
+    }
+    let (_, _, text) = scrape(&server, None).await;
+    assert_eq!(value(&text, "teifs_buckets"), Some(2.0), "{text}");
+    assert_eq!(value(&text, "teifs_usage_objects"), Some(3.0));
+    assert_eq!(value(&text, "teifs_usage_versions"), Some(3.0));
+    assert_eq!(value(&text, "teifs_usage_delete_markers"), Some(0.0));
+    assert_eq!(value(&text, "teifs_usage_stored_bytes"), Some(8.0));
+    assert!(!text.contains("teifs_bucket_"), "by bucket only when asked");
+    assert!(text.trim_end().ends_with("# EOF"));
+
+    let by_bucket = reqwest::get(format!("{}{METRICS_PATH}?buckets=1", server.endpoint))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        value(&by_bucket, "teifs_bucket_objects{bucket=\"one\"}"),
+        Some(2.0),
+        "{by_bucket}"
+    );
+    assert_eq!(
+        value(&by_bucket, "teifs_bucket_stored_bytes{bucket=\"one\"}"),
+        Some(7.0)
+    );
+    assert_eq!(
+        value(&by_bucket, "teifs_bucket_stored_bytes{bucket=\"two\"}"),
+        Some(1.0)
+    );
+    assert_eq!(by_bucket.matches("# EOF").count(), 1);
+}

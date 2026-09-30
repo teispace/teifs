@@ -288,7 +288,8 @@ and the bucket and key it's on; the entry goes to an `AuditSink` when the metric
 record the request, and to the sink even when the client left before an answer (`499`).
 The server's sink (`crates/server/src/audit.rs`) gives each target (a file, standard
 output, a webhook) a bounded queue and a writer task of its own: a file's reopens on
-`SIGHUP`, a webhook's sends batches of JSON lines and retries each until it's taken. `GET /.teifs/metrics` is answered before s3s, like the health check, because a
+`SIGHUP`, a webhook's sends batches of JSON lines and retries each until it's taken.
+`GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.
 
@@ -387,6 +388,13 @@ metadata returned belong together even if the object is replaced during the read
 `.teifs/tmp/`, reads or creates `format.json` and upgrades older formats
 (`crates/store/src/format.rs`), then opens `index.db` and `system.db`. A drive from a
 newer release is refused.
+
+What each bucket holds (objects, versions, delete markers, bytes) is counted by SQLite
+triggers on `object_versions` (by bucket id) and `objects` (a folder bucket's current
+files, by name), in the same transactions as the rows (`crates/meta/src/usage.rs`, with
+a test that checks the counters against a recount after thousands of random writes).
+`Store::usage` (`crates/store/src/usage.rs`) joins them to the buckets; a scrape and
+`GET info` read them without scanning anything.
 
 ## Background jobs
 

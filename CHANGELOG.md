@@ -128,6 +128,12 @@ behaviour; the on-disk format is always upgraded automatically.
   [--token-file F]` makes one, signed with the alias's key as `mc admin prometheus
   generate` does, and prints the scrape configuration. `teifs serve --public-metrics`
   serves them to anyone instead.
+- What the drive holds, in the metrics and in `teifs admin info`: buckets, objects,
+  versions, delete markers and bytes stored, in total, and by bucket for a scrape with
+  `?buckets=1` (`teifs admin prometheus generate --buckets`). The index keeps the counts
+  as it changes, so reading them costs nothing however many objects there are. What the
+  scrub found is in the metrics too: versions and bytes checked, damaged and
+  unverifiable, for the pass under way and the last one.
 - An audit log: `teifs serve --audit-log FILE` (or `-` for standard output) writes one
   JSON line per request with MinIO's audit fields: the operation, bucket and key, access
   key, client address, status and error code, bytes, time to first byte and to the last,

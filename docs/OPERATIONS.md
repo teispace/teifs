@@ -85,8 +85,25 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_job_steps_total` | counter | `job` | Steps each background job has run since the server started |
 | `teifs_job_items_total` | counter | `job` | Items each has handled (uploads expired, files swept…) |
 | `teifs_job_failing` | gauge | `job` | 1 when a job's last step failed |
+| `teifs_buckets` | gauge | | Buckets |
+| `teifs_usage_objects` | gauge | | Objects: keys whose current version isn't a delete marker |
+| `teifs_usage_versions` | gauge | | Versions kept, current ones included, delete markers not |
+| `teifs_usage_delete_markers` | gauge | | Delete markers |
+| `teifs_usage_stored_bytes` | gauge | | The size of every version kept |
+| `teifs_bucket_objects`, `_versions`, `_delete_markers`, `_stored_bytes` | gauge | `bucket` | The same by bucket, with `?buckets=1` |
+| `teifs_scrub_checked_versions`, `teifs_scrub_checked_bytes` | gauge | `pass` | What the scrub read, in the pass under way (`current`) and the last finished (`last`) |
+| `teifs_scrub_damaged_versions` | gauge | `pass` | Versions it found damaged |
+| `teifs_scrub_unverifiable_versions` | gauge | `pass` | Versions it couldn't check (SSE-C, whose keys it doesn't have) |
+| `teifs_scrub_last_finished_seconds` | gauge | | When the last pass finished (Unix time) |
 | `teifs_start_time_seconds` | gauge | | When the server started (Unix time) |
 | `teifs_build_info` | info | `version` | The TeiFS version |
+
+Usage is counted by the index as it changes, so a scrape reads a row per bucket however
+many objects there are, and it's exact the moment a write is. A folder bucket's files
+added outside TeiFS count once the `index-folders` job has found them. What each bucket
+holds is left out unless the scrape asks, as a drive can have many buckets:
+`teifs admin prometheus generate ALIAS --buckets` adds `params: {buckets: ["1"]}`.
+`teifs admin info` shows the totals.
 
 Histograms' buckets double from 1 ms to about a minute. Some queries to start with:
 
@@ -96,6 +113,8 @@ sum(rate(teifs_s3_requests_total{code=~"5.."}[5m]))                 # server err
 histogram_quantile(0.99, sum by (le, api) (rate(teifs_s3_ttfb_seconds_bucket[5m])))
 teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearly full
 max(teifs_job_failing) > 0                                          # a job keeps failing
+max(teifs_scrub_damaged_versions) > 0                               # damage on the disk
+topk(5, teifs_bucket_stored_bytes)                                  # the largest buckets
 ```
 
 ## Audit log

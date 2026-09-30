@@ -277,6 +277,19 @@ async fn info(client: &Client) -> Result<(), Error> {
         ("Started", rfc3339(from_ms(info.started_ms))),
         ("Uptime", uptime(Duration::from_secs(info.uptime_seconds))),
     ];
+    if let Some(usage) = &info.usage {
+        fields.push((
+            "Stored",
+            format!(
+                "{} in {} buckets: {} objects, {} versions, {} delete markers",
+                crate::units::size(usage.bytes),
+                usage.buckets,
+                usage.objects,
+                usage.versions,
+                usage.delete_markers,
+            ),
+        ));
+    }
     fields.extend(scrub_details(&info.scrub));
     ui::details(&fields, || Value::Null);
     let mut table = ui::Table::new(&["JOB", "STEPS", "ITEMS", "LAST PROGRESS", "LAST ERROR"]);
