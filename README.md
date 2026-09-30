@@ -211,6 +211,8 @@ location / {
 | `teifs encrypt update --kms-key KEY ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Move objects to a KMS key in place, without rewriting them (`--bucket-key`) |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME\|rewrap NAME` | Manage the KMS keys that encrypt objects; `rewrap` seals objects' keys again under a key's newest version (`--dry-run` counts) |
+| `teifs backup [DIR] --to FOLDER` | Copy a drive's metadata (buckets, settings, IAM, object index) into a folder, while no server uses it; objects' bytes stay on the drive |
+| `teifs restore [DIR] --from FOLDER\|SNAPSHOT` | Put a backup or one of the drive's daily snapshots back (asks first; what it replaces is kept) |
 | `teifs verify [--bucket B] [--dir DRIVE] [--kms-keyring PATH]` | Read every stored version back and check it against its checksums and ETag (encrypted ones as they decrypt); exit code 1 when something is damaged |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, jobs and what its scrubs found; how it was started |
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |

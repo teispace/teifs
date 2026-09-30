@@ -10,6 +10,7 @@ use std::{
 };
 
 mod admin;
+mod backup;
 mod client;
 mod config;
 mod error;
@@ -79,6 +80,12 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Copy the drive's metadata (buckets, settings, IAM and the object index) into a
+    /// folder, while `teifs serve` isn't using the drive. Objects' bytes stay where they are.
+    Backup(backup::BackupArgs),
+    /// Put a backup or one of the drive's daily snapshots back as its metadata, while
+    /// `teifs serve` isn't using the drive; what it replaces is kept.
+    Restore(backup::RestoreArgs),
     /// Check that the drive's objects are still the bytes written: every version against
     /// its checksums and ETag, encrypted ones as they decrypt (the drive, while
     /// `teifs serve` isn't using it). Exit code 1 when something is damaged.
@@ -471,6 +478,8 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Bucket { action } => Ok(bucket(action).await?),
         Command::Key { action } => Ok(key(action).await?),
         Command::Verify(args) => verify::verify(args).await,
+        Command::Backup(args) => backup::backup(args).await,
+        Command::Restore(args) => backup::restore(&args),
         Command::Client(command) => client::run(command).await,
         Command::Admin { action } => admin::run(action).await,
         Command::Sts { action } => sts::run(action).await,

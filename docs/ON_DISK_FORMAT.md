@@ -16,7 +16,8 @@ it against a drive written by each released format.
 │   ├── system.db             bucket settings (SQLite, WAL mode)
 │   ├── backups/              copies of the databases
 │   │   ├── pre-format-<n>/   made before an upgrade
-│   │   └── auto/<UTC time>/  daily snapshots (`serve --snapshots`): index.db, system.db, snapshot.json
+│   │   ├── auto/<UTC time>/  daily snapshots (`serve --snapshots`): index.db, system.db, snapshot.json
+│   │   └── pre-restore-<UTC time>/  the databases a `teifs restore` replaced
 │   ├── buckets/<bucket id>/  object buckets' data files
 │   │   └── <aa>/<bb>/<object id>
 │   ├── tmp/                  bytes being written (emptied at every start)
@@ -225,11 +226,15 @@ so a listed snapshot is complete; leftovers of an interrupted one are removed. I
 `--snapshots` (3 by default) are kept. A snapshot that would eat into the room kept free
 is skipped and retried an hour later.
 
-To put a snapshot back, stop TeiFS and copy its `index.db` and `system.db` into
-`.teifs/`, removing `index.db-wal`, `index.db-shm`, `system.db-wal` and `system.db-shm`
-first. Objects written after the snapshot keep their bytes but not rows: folder
-buckets' files are indexed again, while object buckets' data files are only adopted
-back by a repair.
+`teifs backup --to FOLDER` writes the same, into a folder of its own in `FOLDER`, from a
+drive no server has open. `teifs restore --from` puts either back, on a drive no server
+has open: it must be of the same drive (`drive`) and format, and both databases must
+pass the quick check. The copies are staged beside the databases as
+`<db>.restoring`, the current databases (with their `-wal` and `-shm` files) are moved
+to `.teifs/backups/pre-restore-<UTC time>/`, and the copies renamed into place. Objects
+written after the snapshot keep their bytes but not rows: folder buckets' files are
+indexed again, while object buckets' data files stay on the disk, unlisted, until a
+repair adopts them.
 
 To go back to an older release after an upgrade, restore the matching backup: stop
 TeiFS, copy the databases from `.teifs/backups/pre-format-<n>/` back into `.teifs/`, and

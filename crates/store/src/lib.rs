@@ -60,6 +60,7 @@ pub use settings::{
     BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
     PublicAccessBlock,
 };
+pub use snapshots::{Restored, restore};
 pub use sse::Encryption;
 pub use staged::Staged;
 pub use teifs_crypto::{
@@ -261,6 +262,9 @@ struct Inner {
     default_encryption: BucketEncryption,
     /// What each background job has done since the drive opened.
     jobs: jobs::StatusMap,
+    /// Held while a snapshot is written or old ones are removed, so a prune never
+    /// takes a snapshot being written for one in progress.
+    snapshots: Mutex<()>,
     /// Buckets' lifecycle configurations, read once.
     lifecycles: lifecycle::LifecycleCache,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
@@ -364,6 +368,7 @@ impl Store {
             format,
             kms: std::sync::OnceLock::new(),
             jobs: jobs::StatusMap::default(),
+            snapshots: Mutex::new(()),
             lifecycles: lifecycle::LifecycleCache::default(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)
@@ -1377,7 +1382,7 @@ fn from_ms(ms: i64) -> SystemTime {
 }
 
 /// Takes the drive's lock, held until the store is dropped (or the process ends).
-fn lock_drive(system_dir: &Path) -> Result<fs::File> {
+pub(crate) fn lock_drive(system_dir: &Path) -> Result<fs::File> {
     let file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)

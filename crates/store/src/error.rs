@@ -96,6 +96,9 @@ pub enum StoreError {
     /// `.teifs/format.json` can't be read.
     #[error("the drive's format file (.teifs/format.json) is damaged: {0}")]
     CorruptFormat(String),
+    /// A snapshot can't be restored onto this drive.
+    #[error("that snapshot can't be restored here: {0}")]
+    BadSnapshot(String),
     /// The object is encrypted with a customer key (SSE-C) and the request has none.
     #[error("the object is encrypted with a customer-provided key; send that key")]
     CustomerKeyRequired,

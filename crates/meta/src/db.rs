@@ -47,11 +47,13 @@ pub fn backup(path: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whether the database at `path` passes SQLite's quick check.
+/// Whether the database at `path` passes SQLite's quick check (a file SQLite can't
+/// read as a database doesn't).
 pub fn intact(path: &Path) -> Result<bool> {
     let conn = Connection::open(path)?;
-    let answer: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-    Ok(answer == "ok")
+    Ok(conn
+        .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+        .is_ok_and(|answer| answer == "ok"))
 }
 
 #[cfg(test)]
@@ -72,6 +74,17 @@ mod tests {
             Err(MetaError::NewerSchema { found: 2, known: 1 }) => {}
             other => panic!("expected NewerSchema, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_readable_databases_are_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        drop(open(&path, V2).unwrap());
+        assert!(intact(&path).unwrap());
+        let garbage = dir.path().join("g.db");
+        std::fs::write(&garbage, vec![7u8; 8192]).unwrap();
+        assert!(!intact(&garbage).unwrap());
     }
 
     #[test]

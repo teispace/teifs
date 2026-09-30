@@ -35,8 +35,13 @@ impl Inner {
 
     /// Takes a snapshot, named for `at_ms`.
     pub(crate) fn take_snapshot(&self, at_ms: i64) -> Result<Snapshot> {
-        let dir = self.snapshots_dir();
-        fs::create_dir_all(&dir)?;
+        self.snapshot_into(&self.snapshots_dir(), at_ms)
+    }
+
+    /// Writes a snapshot, named for `at_ms`, into a folder of its own in `dir`.
+    fn snapshot_into(&self, dir: &Path, at_ms: i64) -> Result<Snapshot> {
+        let _one_at_a_time = self.snapshot_lock();
+        fs::create_dir_all(dir)?;
         let name = snapshot_name(at_ms);
         let partial = dir.join(format!(".{name}.partial"));
         let _ = fs::remove_dir_all(&partial);
@@ -50,7 +55,7 @@ impl Inner {
             fs::remove_dir_all(&done)?;
         }
         fs::rename(&partial, &done)?;
-        sync_dir(&dir)?;
+        sync_dir(dir)?;
         snapshot.bytes = folder_size(&done);
         Ok(snapshot)
     }
@@ -63,8 +68,8 @@ impl Inner {
             .filter_map(|path| fs::metadata(path).ok())
             .map(|meta| meta.len())
             .sum();
-        crate::space::fits(&self.system_dir, needed)?;
         fs::create_dir(to)?;
+        crate::space::fits(to, needed)?;
         for db in [INDEX_DB, SYSTEM_DB] {
             let copy = to.join(db);
             teifs_meta::backup(&self.system_dir.join(db), &copy)?;
@@ -86,6 +91,12 @@ impl Inner {
         file.sync_all()?;
         sync_dir(to)?;
         Ok(snapshot)
+    }
+
+    fn snapshot_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The snapshots kept, oldest first.
@@ -112,6 +123,7 @@ impl Inner {
     /// Removes all but the newest `keep` snapshots, and any left half-written; how many
     /// it removed.
     pub(crate) fn prune_snapshots(&self, keep: usize) -> Result<usize> {
+        let _one_at_a_time = self.snapshot_lock();
         let dir = self.snapshots_dir();
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
@@ -140,6 +152,81 @@ impl Store {
     pub async fn snapshots(&self) -> Result<Vec<Snapshot>> {
         self.blocking(Inner::list_snapshots).await
     }
+
+    /// Writes a snapshot of the drive's metadata into a folder of its own in `dir` (made
+    /// if missing): a backup that [`restore`] can put back.
+    pub async fn back_up_to(&self, dir: &Path) -> Result<Snapshot> {
+        let now = millis(std::time::SystemTime::now());
+        let dir = dir.to_owned();
+        self.blocking(move |inner| inner.snapshot_into(&dir, now))
+            .await
+    }
+}
+
+/// What [`restore`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    /// The snapshot now in use.
+    pub snapshot: Snapshot,
+    /// Where the metadata it replaced was moved.
+    pub previous: PathBuf,
+}
+
+/// Puts the snapshot (or backup) in the folder `from` back as the metadata of the drive
+/// at `root`, which no process may have open. It must be of this drive, in its format,
+/// and intact. The metadata it replaces is moved to `.teifs/backups/pre-restore-<time>/`,
+/// never removed. Objects written since keep their bytes: folder buckets' files are
+/// indexed again when the drive is next served.
+pub fn restore(root: &Path, from: &Path) -> Result<Restored> {
+    let system = root.join(crate::SYSTEM_DIR);
+    let format = crate::format::read(&system)?;
+    let _lock = crate::lock_drive(&system)?;
+    let bad = |why: String| StoreError::BadSnapshot(why);
+    let about = fs::read(from.join(ABOUT))
+        .map_err(|_| bad(format!("{} has no {ABOUT}", from.display())))?;
+    let snapshot: Snapshot =
+        serde_json::from_slice(&about).map_err(|e| bad(format!("its {ABOUT} is damaged: {e}")))?;
+    if snapshot.drive != format.drive {
+        return Err(bad(format!(
+            "it's of another drive ({}, this one is {})",
+            snapshot.drive, format.drive
+        )));
+    }
+    if snapshot.format != format.format {
+        return Err(bad(format!(
+            "it's in format {}, the drive in format {}",
+            snapshot.format, format.format
+        )));
+    }
+    for db in [INDEX_DB, SYSTEM_DB] {
+        if !from.join(db).is_file() || !teifs_meta::intact(&from.join(db))? {
+            return Err(bad(format!("its {db} is missing or damaged")));
+        }
+    }
+    // Copies first, beside the databases they replace; then the swap, a few renames.
+    for db in [INDEX_DB, SYSTEM_DB] {
+        let staged = system.join(format!("{db}.restoring"));
+        fs::copy(from.join(db), &staged)?;
+        fs::File::open(&staged)?.sync_all()?;
+    }
+    let now = millis(std::time::SystemTime::now());
+    let previous = system
+        .join(BACKUPS)
+        .join(format!("pre-restore-{}", snapshot_name(now)));
+    fs::create_dir_all(&previous)?;
+    for db in [INDEX_DB, SYSTEM_DB] {
+        for suffix in ["", "-wal", "-shm"] {
+            let name = format!("{db}{suffix}");
+            match fs::rename(system.join(&name), previous.join(&name)) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+        }
+        fs::rename(system.join(format!("{db}.restoring")), system.join(db))?;
+    }
+    sync_dir(&previous)?;
+    sync_dir(&system)?;
+    Ok(Restored { snapshot, previous })
 }
 
 /// `20260930T045501.123Z`: sorts by time, and every file system can hold it.
@@ -171,6 +258,123 @@ fn folder_size(dir: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Layout, ObjectAttrs};
+
+    /// Every data file of the drive's object buckets.
+    fn data_files(root: &Path) -> usize {
+        fn count(dir: &Path) -> usize {
+            fs::read_dir(dir).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .map(|e| {
+                        if e.path().is_dir() {
+                            count(&e.path())
+                        } else {
+                            1
+                        }
+                    })
+                    .sum()
+            })
+        }
+        count(
+            &root
+                .join(crate::SYSTEM_DIR)
+                .join(crate::objects::BUCKETS_DIR),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_backup_is_restored_and_what_it_replaced_is_kept() {
+        let drive = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let store = Store::open(drive.path()).unwrap();
+        store.create_bucket("obj", Layout::Object).await.unwrap();
+        store
+            .put_bytes("obj", "a", b"one", ObjectAttrs::default())
+            .await
+            .unwrap();
+        let backup = store.back_up_to(backups.path()).await.unwrap();
+        let from = backups.path().join(&backup.name);
+        assert!(from.join(ABOUT).is_file());
+        store
+            .put_bytes("obj", "b", b"two", ObjectAttrs::default())
+            .await
+            .unwrap();
+        store.create_bucket("later", Layout::Object).await.unwrap();
+        // Not while the drive is open.
+        assert!(matches!(
+            restore(drive.path(), &from),
+            Err(StoreError::DriveInUse)
+        ));
+        drop(store);
+
+        let restored = restore(drive.path(), &from).unwrap();
+        assert_eq!(restored.snapshot, Snapshot { bytes: 0, ..backup });
+        assert!(restored.previous.join(SYSTEM_DB).is_file());
+        assert!(restored.previous.join(INDEX_DB).is_file());
+        let store = Store::open(drive.path()).unwrap();
+        assert!(store.head("obj", "a").await.is_ok());
+        assert!(matches!(
+            store.head("obj", "b").await,
+            Err(StoreError::NoSuchKey)
+        ));
+        assert!(matches!(
+            store.head_bucket("later").await,
+            Err(StoreError::NoSuchBucket)
+        ));
+        // The newer object's bytes stay on the disk.
+        assert_eq!(data_files(drive.path()), 2);
+    }
+
+    #[tokio::test]
+    async fn a_prune_waits_for_a_snapshot_being_written() {
+        let drive = tempfile::tempdir().unwrap();
+        let store = Store::open(drive.path()).unwrap();
+        // As a snapshot does while it writes its hidden folder.
+        let writing = store.inner.snapshot_lock();
+        let inner = std::sync::Arc::clone(&store.inner);
+        let (done, pruned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            inner.prune_snapshots(0).unwrap();
+            done.send(()).unwrap();
+        });
+        let wait = std::time::Duration::from_millis(200);
+        assert!(pruned.recv_timeout(wait).is_err(), "pruned meanwhile");
+        drop(writing);
+        pruned.recv_timeout(20 * wait).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_an_intact_snapshot_of_the_same_drive_is_restored() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let backups = tempfile::tempdir().unwrap();
+        let other = Store::open(two.path()).unwrap();
+        let theirs = other.back_up_to(backups.path()).await.unwrap();
+        drop(other);
+        let store = Store::open(one.path()).unwrap();
+        let ours = store.back_up_to(backups.path()).await.unwrap();
+        drop(store);
+        let bad = |from: &Path| match restore(one.path(), from) {
+            Err(StoreError::BadSnapshot(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(bad(&backups.path().join(&theirs.name)).starts_with("it's of another drive"));
+        assert!(bad(backups.path()).ends_with("has no snapshot.json"));
+        let ours = backups.path().join(&ours.name);
+        let about = fs::read_to_string(ours.join(ABOUT)).unwrap();
+        let older = about.replace("\"format\": 2", "\"format\": 1");
+        assert_ne!(older, about);
+        fs::write(ours.join(ABOUT), older).unwrap();
+        assert_eq!(bad(&ours), "it's in format 1, the drive in format 2");
+        fs::write(ours.join(ABOUT), about).unwrap();
+        let index = ours.join(INDEX_DB);
+        let bytes = fs::read(&index).unwrap();
+        fs::write(&index, &bytes[..bytes.len() / 2]).unwrap();
+        assert_eq!(bad(&ours), "its index.db is missing or damaged");
+        // Nothing was touched.
+        assert!(!one.path().join(".teifs/backups").exists());
+        assert!(Store::open(one.path()).is_ok());
+    }
 
     #[test]
     fn names_sort_by_time() {

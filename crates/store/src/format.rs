@@ -43,6 +43,12 @@ pub struct DriveFormat {
     pub created: String,
 }
 
+/// Reads the drive's format as recorded, without changing anything.
+pub(crate) fn read(system: &Path) -> Result<DriveFormat> {
+    let bytes = fs::read(system.join(FORMAT_FILE))?;
+    serde_json::from_slice(&bytes).map_err(|e| StoreError::CorruptFormat(e.to_string()))
+}
+
 /// Reads the drive's format, creating it for a new drive and upgrading an older one.
 pub(crate) fn prepare(system: &Path) -> Result<DriveFormat> {
     let path = system.join(FORMAT_FILE);
