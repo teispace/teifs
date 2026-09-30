@@ -41,16 +41,20 @@ async fn events_are_sent_in_order_after_failures() {
             .iter()
             .all(|p| p.authorization == "Bearer t0ken" && p.content_type == "application/json")
     );
-    let stats = &notifier.stats()[0];
-    assert_eq!((stats.sent, stats.failed, stats.dropped), (8, 3, 0));
-    for _ in 0..100 {
-        if notifier.stats()[0].queued == 0 {
+    // The receiver has the last event before the sender reads its answer and counts it.
+    for _ in 0..500 {
+        let stats = &notifier.stats()[0];
+        if stats.sent == 8 && stats.queued == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(notifier.stats()[0].queued, 0);
-    assert!(notifier.stats()[0].online);
+    let stats = &notifier.stats()[0];
+    assert_eq!(
+        (stats.sent, stats.failed, stats.dropped, stats.queued),
+        (8, 3, 0, 0)
+    );
+    assert!(stats.online);
     notifier.stop().await;
 }
 
