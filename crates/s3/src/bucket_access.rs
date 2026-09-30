@@ -154,6 +154,15 @@ pub(crate) fn parse_policy(bucket: &str, text: &str) -> S3Result<Policy> {
     Ok(policy)
 }
 
+/// Block Public Access (`BlockPublicPolicy`) refusing a public policy.
+pub(crate) fn public_policy_blocked() -> S3Error {
+    s3_error!(
+        AccessDenied,
+        "Access Denied: the bucket's Block Public Access settings (BlockPublicPolicy) \
+         refuse a public policy"
+    )
+}
+
 pub(crate) fn no_policy() -> S3Error {
     s3_error!(NoSuchBucketPolicy, "The bucket policy does not exist")
 }

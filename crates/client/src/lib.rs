@@ -31,12 +31,13 @@ use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
 
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY,
+    ADMIN_SNAPSHOTS,
 };
 pub use teifs_types::admin::{
-    AdminError, ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion,
-    IamExport, ImportReport, JobInfo, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
-    Snapshot, Tag,
+    AdminError, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
+    ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion, IamExport,
+    ImportReport, JobInfo, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
 };
 
 /// The region requests are signed for when none is given (TeiFS accepts any).
@@ -232,6 +233,24 @@ impl Client {
     pub async fn take_snapshot(&self) -> Result<Snapshot, ClientError> {
         self.call(Method::POST, ADMIN_SNAPSHOTS, None, Vec::new())
             .await
+    }
+
+    /// The buckets and their settings, or only `bucket`'s (`teifs:ExportBucketMetadata`).
+    /// Bucket names need no escaping: S3's rules allow only letters, digits, `.` and `-`.
+    pub async fn export_buckets(&self, bucket: Option<&str>) -> Result<BucketsExport, ClientError> {
+        let query = bucket.map(|name| format!("bucket={name}"));
+        self.call(Method::GET, ADMIN_BUCKETS, query.as_deref(), Vec::new())
+            .await
+    }
+
+    /// Imports `export`: missing buckets are created and the settings given applied,
+    /// each reported (`teifs:ImportBucketMetadata`).
+    pub async fn import_buckets(
+        &self,
+        export: &BucketsExport,
+    ) -> Result<BucketsImportReport, ClientError> {
+        let body = serde_json::to_vec(export).map_err(|e| ClientError::Answer(e.to_string()))?;
+        self.call(Method::PUT, ADMIN_BUCKETS, None, body).await
     }
 
     /// Sends a signed request and reads its JSON answer.

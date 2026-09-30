@@ -217,6 +217,7 @@ location / {
 | `teifs verify [--bucket B] [--dir DRIVE] [--kms-keyring PATH]` | Read every stored version back and check it against its checksums and ETag (encrypted ones as they decrypt); exit code 1 when something is damaged |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, jobs and what its scrubs found; how it was started |
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |
+| `teifs admin bucket export ALIAS[/BUCKET] [-o FILE [--force]]` \| `bucket import ALIAS FILE` | Move buckets with their settings (policy, lifecycle, Object Lock, encryption, CORS, tags, ACL, Block Public Access, versioning) to another server, as `mc admin cluster bucket export\|import`; each setting is checked and reported |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |

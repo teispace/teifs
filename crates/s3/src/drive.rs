@@ -1955,11 +1955,7 @@ impl S3 for Drive {
         let policy = bucket_access::parse_policy(&input.bucket, &input.policy)?;
         let rules = self.rules.of(&input.bucket).await?;
         if rules.block.block_public_policy && policy.is_public() {
-            return Err(s3_error!(
-                AccessDenied,
-                "Access Denied: the bucket's Block Public Access settings (BlockPublicPolicy) \
-                 refuse a public policy"
-            ));
+            return Err(bucket_access::public_policy_blocked());
         }
         self.store
             .set_bucket_policy(&input.bucket, Some(input.policy))

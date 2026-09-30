@@ -239,7 +239,10 @@ again, marking it so the route decodes it twice. The admin API (`admin.rs`) is J
 start with a dot); a virtual-hosted-style request (`bucket.domain/.teifs/…`) is that
 bucket's key, so the route compares the `Host` header with the served domains, which
 s3s doesn't pass to it. Its actions are `teifs:*`, or `Needs::Root` for what only the
-root user may do. Requests s3s refuses before the route (a signature that doesn't match,
+root user may do. Bucket import (`bucket_export.rs`) applies each setting with the
+checks S3's calls make (the same `from_dto` conversions, policy parsing and Block Public
+Access checks), and forgets the bucket's cached access rules after each change that
+feeds them. Requests s3s refuses before the route (a signature that doesn't match,
 an unknown key) get S3's XML errors, everything after the admin API's JSON;
 `teifs-client` reads both. Its messages are in `teifs_types::admin`, for the server and
 clients alike; the server hands the service its settings (`Options::config`), and the drive

@@ -47,6 +47,43 @@ pub(crate) struct BucketConfig {
     other: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A bucket's settings, all together, under the names an export gives them. `None`
+/// (or `false`) is a setting the bucket doesn't have.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketSettings {
+    /// Its own encryption settings (without, an object bucket has the store's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<BucketEncryption>,
+    /// Its tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<BTreeMap<String, String>>,
+    /// Its CORS rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<Vec<CorsRule>>,
+    /// Its policy, as it was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    /// Its Block Public Access settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_access_block: Option<PublicAccessBlock>,
+    /// Its Object Ownership setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<ObjectOwnership>,
+    /// Its ACL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Acl>,
+    /// Whether its tags decide access (S3's ABAC).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub abac: bool,
+    /// Its Object Lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_lock: Option<ObjectLock>,
+    /// Its lifecycle rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Lifecycle>,
+}
+
 /// How a bucket encrypts objects written without asking, and which encryption it
 /// refuses (S3's bucket encryption configuration).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +342,23 @@ impl Store {
         .await
     }
 
+    /// All of a bucket's settings.
+    pub async fn bucket_settings(&self, bucket: &str) -> Result<BucketSettings> {
+        let config = self.config(bucket).await?;
+        Ok(BucketSettings {
+            encryption: config.encryption,
+            tags: config.tags,
+            cors: config.cors,
+            policy: config.policy,
+            public_access_block: config.public_access_block,
+            ownership: config.ownership,
+            acl: config.acl,
+            abac: config.abac,
+            object_lock: config.object_lock,
+            lifecycle: config.lifecycle,
+        })
+    }
+
     /// A bucket's tags, if it has any.
     pub async fn bucket_tags(&self, bucket: &str) -> Result<Option<BTreeMap<String, String>>> {
         Ok(self.config(bucket).await?.tags)
@@ -392,6 +446,27 @@ impl Store {
             if !config.ownership.is_none_or(ObjectOwnership::acls_enabled) {
                 return Err(StoreError::AclsDisabled);
             }
+            config.acl = acl;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces a bucket's Object Ownership setting and ACL together, so one can change
+    /// what the other allows: refused when the ownership disables ACLs and the ACL
+    /// grants others ([`StoreError::AclGrantsOthers`]).
+    pub async fn set_bucket_ownership_and_acl(
+        &self,
+        bucket: &str,
+        ownership: Option<ObjectOwnership>,
+        acl: Option<Acl>,
+    ) -> Result<()> {
+        self.try_change_config(bucket, move |config| {
+            let disables = ownership.is_some_and(|o| !o.acls_enabled());
+            if disables && !acl.as_ref().is_none_or(Acl::owner_only) {
+                return Err(StoreError::AclGrantsOthers);
+            }
+            config.ownership = ownership;
             config.acl = acl;
             Ok(())
         })

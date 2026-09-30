@@ -18,15 +18,15 @@ use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3
 use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX, ADMIN_ROOT_KEY,
-    ADMIN_SNAPSHOTS, ServerConfig,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX,
+    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ServerConfig,
 };
 
 use crate::{
     access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
-    control, iam_api,
+    bucket_export, control, iam_api,
 };
 
 /// Which API a request is for, told apart before anything else is read.
@@ -91,6 +91,8 @@ enum Handler {
     RotateRootKey,
     Snapshots,
     TakeSnapshot,
+    ExportBuckets,
+    ImportBuckets,
 }
 
 /// One endpoint.
@@ -201,6 +203,22 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("teifs:TakeSnapshot", ANY),
         handler: Handler::TakeSnapshot,
         about: "Snapshots the drive's metadata now (both databases, kept with the daily ones): `Snapshot`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_BUCKETS,
+        needs: Needs::Action("teifs:ExportBucketMetadata", ANY),
+        handler: Handler::ExportBuckets,
+        about: "Every bucket (`?bucket=NAME`: one) with its layout, versioning and settings: `BucketsExport`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Put,
+        path: ADMIN_BUCKETS,
+        needs: Needs::Action("teifs:ImportBucketMetadata", ANY),
+        handler: Handler::ImportBuckets,
+        about: "Imports a `BucketsExport`: creates missing buckets and applies the settings given, checked as S3's calls check them: `BucketsImportReport`",
     },
     Endpoint {
         api: Api::Admin,
@@ -434,6 +452,8 @@ impl Routes {
             }
             Handler::Snapshots => admin::snapshots(&self.store).await,
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
+            Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
+            Handler::ImportBuckets => bucket_export::import(&self.store, &self.rules, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

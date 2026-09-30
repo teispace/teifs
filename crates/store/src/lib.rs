@@ -59,8 +59,8 @@ pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
 pub use rewrap::Rewrapped;
 pub use settings::{
-    BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
-    PublicAccessBlock,
+    BucketAccess, BucketEncryption, BucketSettings, CorsRule, DefaultEncryption, NewBucket,
+    ObjectOwnership, PublicAccessBlock,
 };
 pub use snapshots::{Restored, restore};
 pub use sse::Encryption;

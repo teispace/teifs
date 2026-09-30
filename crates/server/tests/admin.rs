@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use aws_sdk_s3::primitives::ByteStream;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
-    AdminError, IamExport, ImportReport, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY,
+    ADMIN_SNAPSHOTS, AdminError, BUCKETS_EXPORT_FORMAT, BucketsExport, BucketsImportReport,
+    ExportedBucket, IamExport, ImportReport, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
     Snapshot,
 };
 
@@ -502,4 +503,470 @@ async fn snapshots_are_taken_on_request_and_listed() {
         (status, error(&answer).code.as_str()),
         (403, "AccessDenied")
     );
+}
+
+/// Sets `bucket` up through S3 with a setting of every kind.
+async fn configured(server: &Server, bucket: &str) {
+    use aws_sdk_s3::types::{
+        BucketLifecycleConfiguration, CorsConfiguration, CorsRule, DefaultRetention,
+        ExpirationStatus, LifecycleExpiration, LifecycleRule, LifecycleRuleFilter,
+        ObjectLockConfiguration, ObjectLockEnabled, ObjectLockRetentionMode, ObjectLockRule, Tag,
+        Tagging,
+    };
+    let s3 = client(server, SECRET_KEY);
+    s3.create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+    s3.put_object_lock_configuration()
+        .bucket(bucket)
+        .object_lock_configuration(
+            ObjectLockConfiguration::builder()
+                .object_lock_enabled(ObjectLockEnabled::Enabled)
+                .rule(
+                    ObjectLockRule::builder()
+                        .default_retention(
+                            DefaultRetention::builder()
+                                .mode(ObjectLockRetentionMode::Governance)
+                                .days(3)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_tagging()
+        .bucket(bucket)
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("team").value("ops").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_cors()
+        .bucket(bucket)
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_methods("GET")
+                        .allowed_origins("https://example.com")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .lifecycle_configuration(
+            BucketLifecycleConfiguration::builder()
+                .rules(
+                    LifecycleRule::builder()
+                        .id("old-logs")
+                        .status(ExpirationStatus::Enabled)
+                        .filter(LifecycleRuleFilter::builder().prefix("logs/").build())
+                        .expiration(LifecycleExpiration::builder().days(30).build())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Deny","Principal":"*","Action":"s3:DeleteBucket","Resource":"arn:aws:s3:::{bucket}"}}]}}"#
+    );
+    s3.put_bucket_policy()
+        .bucket(bucket)
+        .policy(policy)
+        .send()
+        .await
+        .unwrap();
+}
+
+fn items(report: &BucketsImportReport) -> Vec<(&str, &str)> {
+    report
+        .items
+        .iter()
+        .map(|i| (i.item.as_str(), i.outcome.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn buckets_move_to_another_drive_with_their_settings() {
+    let from = start().await;
+    configured(&from, "logs").await;
+    client(&from, SECRET_KEY)
+        .create_bucket()
+        .bucket("plain")
+        .send()
+        .await
+        .unwrap();
+    let (status, answer) = get(&from, ROOT, ADMIN_BUCKETS).await;
+    assert_eq!(status, 200, "{answer}");
+    let export: BucketsExport = serde_json::from_str(&answer).unwrap();
+    assert_eq!(export.format, BUCKETS_EXPORT_FORMAT);
+    let names: Vec<&str> = export.buckets.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["logs", "plain"]);
+    let logs = &export.buckets[0];
+    // The test server's default layout.
+    assert_eq!(
+        (logs.versioning.as_str(), logs.layout.as_str()),
+        ("enabled", "folder")
+    );
+    // One bucket alone.
+    let (status, one) = get(&from, ROOT, &format!("{ADMIN_BUCKETS}?bucket=plain")).await;
+    assert_eq!(status, 200, "{one}");
+    let one: BucketsExport = serde_json::from_str(&one).unwrap();
+    assert_eq!(one.buckets, export.buckets[1..]);
+    let (status, missing) = get(&from, ROOT, &format!("{ADMIN_BUCKETS}?bucket=nope")).await;
+    assert_eq!(
+        (status, error(&missing).code.as_str()),
+        (404, "NoSuchBucket")
+    );
+
+    let to = start().await;
+    let body = serde_json::to_vec(&export).unwrap();
+    let (status, answer) = signed(&to, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+    assert_eq!(status, 200, "{answer}");
+    let report: BucketsImportReport = serde_json::from_str(&answer).unwrap();
+    assert!(
+        report.items.iter().all(|i| i.outcome != "failed"),
+        "{answer}"
+    );
+    assert!(items(&report).contains(&("bucket", "created")));
+    assert!(items(&report).contains(&("lifecycle", "applied")));
+    // The other drive now exports the same.
+    let (_, again) = get(&to, ROOT, ADMIN_BUCKETS).await;
+    let again: BucketsExport = serde_json::from_str(&again).unwrap();
+    assert_eq!(again.buckets, export.buckets);
+    // And S3 answers with it.
+    let s3 = client(&to, SECRET_KEY);
+    let lock = s3
+        .get_object_lock_configuration()
+        .bucket("logs")
+        .send()
+        .await
+        .unwrap();
+    let retention = lock.object_lock_configuration().unwrap().rule().unwrap();
+    assert_eq!(retention.default_retention().unwrap().days(), Some(3));
+    let tags = s3.get_bucket_tagging().bucket("logs").send().await.unwrap();
+    assert_eq!(tags.tag_set()[0].value(), "ops");
+
+    // Again onto the same drive: nothing to create, everything applied.
+    let (status, answer) = signed(&to, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+    assert_eq!(status, 200, "{answer}");
+    let report: BucketsImportReport = serde_json::from_str(&answer).unwrap();
+    assert!(!items(&report).contains(&("bucket", "created")), "{answer}");
+    assert!(
+        report.items.iter().all(|i| i.outcome == "applied"),
+        "{answer}"
+    );
+}
+
+#[tokio::test]
+async fn an_import_checks_each_setting_as_s3_does() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    for bucket in ["here", "versioned"] {
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    s3.put_bucket_versioning()
+        .bucket("versioned")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let export = serde_json::json!({
+        "format": BUCKETS_EXPORT_FORMAT,
+        "exportedMs": 0,
+        "buckets": [
+            {
+                "name": "here",
+                "layout": "object",
+                "versioning": "unversioned",
+                "settings": {
+                    // Names another bucket.
+                    "policy": r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":"arn:aws:s3:::elsewhere"}]}"#,
+                    "tags": {"": "no key"},
+                    "shinyNewThing": true,
+                }
+            },
+            {
+                "name": "versioned",
+                "layout": "folder",
+                "versioning": "unversioned",
+                "settings": {"objectLock": {"defaultRetention": {"mode": "GOVERNANCE", "period": {"days": 0}}}}
+            },
+            {"name": "Bad_Name", "layout": "object", "versioning": "unversioned"},
+            {"name": "sideways", "layout": "diagonal", "versioning": "unversioned"},
+            {
+                "name": "fresh",
+                "layout": "object",
+                "versioning": "enabled",
+                "settings": {"cors": [{"allowedMethods": ["FETCH"], "allowedOrigins": ["*"]}]}
+            },
+        ]
+    });
+    let body = serde_json::to_vec(&export).unwrap();
+    let (status, answer) = signed(&server, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+    assert_eq!(status, 200, "{answer}");
+    let report: BucketsImportReport = serde_json::from_str(&answer).unwrap();
+    let outcomes: Vec<(&str, &str, &str)> = report
+        .items
+        .iter()
+        .map(|i| (i.bucket.as_str(), i.item.as_str(), i.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("here", "layout", "failed"),
+            ("here", "versioning", "applied"),
+            ("here", "tags", "failed"),
+            ("here", "policy", "failed"),
+            ("here", "shinyNewThing", "failed"),
+            ("versioned", "versioning", "failed"),
+            ("versioned", "objectLock", "failed"),
+            ("Bad_Name", "bucket", "failed"),
+            ("sideways", "bucket", "failed"),
+            ("fresh", "bucket", "created"),
+            ("fresh", "versioning", "applied"),
+            ("fresh", "cors", "failed"),
+        ],
+        "{answer}"
+    );
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|i| (i.outcome == "failed") == i.error.is_some())
+    );
+    assert!(s3.get_bucket_policy().bucket("here").send().await.is_err());
+}
+
+#[tokio::test]
+async fn an_import_is_refused_whole_or_not_allowed() {
+    let server = start().await;
+    // Another format, or not an export at all, is refused whole.
+    let later = serde_json::json!({"format": 2, "exportedMs": 0, "buckets": []});
+    let body = serde_json::to_vec(&later).unwrap();
+    let (status, answer) = signed(&server, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "UnsupportedFormat")
+    );
+    let (status, answer) = signed(&server, ROOT, "PUT", ADMIN_BUCKETS, &[], b"[]").await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (400, "MalformedJSON")
+    );
+
+    // Exporting and importing are separate permissions.
+    let export_only = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"teifs:ExportBucketMetadata","Resource":"*"}}"#;
+    user(&server, "archivist", Some(export_only));
+    let archivist = server.iam.create_access_key("archivist").unwrap();
+    let archivist = (archivist.info.id.as_str(), archivist.secret.as_str());
+    assert_eq!(get(&server, archivist, ADMIN_BUCKETS).await.0, 200);
+    let (status, answer) = signed(&server, archivist, "PUT", ADMIN_BUCKETS, &[], &body).await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
+}
+
+#[tokio::test]
+async fn access_settings_and_encryption_move_too() {
+    use aws_sdk_s3::types::{
+        BucketCannedAcl, ServerSideEncryption, ServerSideEncryptionByDefault,
+        ServerSideEncryptionConfiguration, ServerSideEncryptionRule,
+    };
+    let object = |config: &mut teifs_server::Config| {
+        config.default_layout = teifs_store::Layout::Object;
+    };
+    let from = start_with(object).await;
+    let s3 = client(&from, SECRET_KEY);
+    s3.create_bucket()
+        .bucket("shared")
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    s3.delete_public_access_block()
+        .bucket("shared")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_acl()
+        .bucket("shared")
+        .acl(BucketCannedAcl::PublicRead)
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_encryption()
+        .bucket("shared")
+        .server_side_encryption_configuration(
+            ServerSideEncryptionConfiguration::builder()
+                .rules(
+                    ServerSideEncryptionRule::builder()
+                        .apply_server_side_encryption_by_default(
+                            ServerSideEncryptionByDefault::builder()
+                                .sse_algorithm(ServerSideEncryption::AwsKms)
+                                .build()
+                                .unwrap(),
+                        )
+                        .bucket_key_enabled(true)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let (_, answer) = get(&from, ROOT, ADMIN_BUCKETS).await;
+    let mut export: BucketsExport = serde_json::from_str(&answer).unwrap();
+    // With tags that decide access (ABAC), which only TagResource changes.
+    let settings = &mut export.buckets[0].settings;
+    settings.insert("tags".into(), serde_json::json!({"team": "a"}));
+    settings.insert("abac".into(), true.into());
+
+    let to = start_with(object).await;
+    let import = |export: &BucketsExport| {
+        let body = serde_json::to_vec(export).unwrap();
+        let to = &to;
+        async move {
+            let (status, answer) = signed(to, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+            assert_eq!(status, 200, "{answer}");
+            serde_json::from_str::<BucketsImportReport>(&answer).unwrap()
+        }
+    };
+    let report = import(&export).await;
+    assert!(
+        report.items.iter().all(|i| i.outcome != "failed"),
+        "{report:?}"
+    );
+    let exported = |server| async move {
+        let (_, answer) = get(server, ROOT, ADMIN_BUCKETS).await;
+        serde_json::from_str::<BucketsExport>(&answer)
+            .unwrap()
+            .buckets
+    };
+    assert_eq!(exported(&to).await, export.buckets);
+    // Tags are replaced even while ABAC is on, which stays on.
+    export.buckets[0]
+        .settings
+        .insert("tags".into(), serde_json::json!({"team": "b"}));
+    let report = import(&export).await;
+    assert!(
+        report.items.iter().all(|i| i.outcome != "failed"),
+        "{report:?}"
+    );
+    assert_eq!(exported(&to).await, export.buckets);
+    // Without ABAC in the export, the bucket keeps it on.
+    let settings = &mut export.buckets[0].settings;
+    settings.remove("abac");
+    settings.insert("tags".into(), serde_json::json!({"team": "c"}));
+    import(&export).await;
+    export.buckets[0]
+        .settings
+        .insert("abac".into(), true.into());
+    assert_eq!(exported(&to).await, export.buckets);
+}
+
+#[tokio::test]
+async fn an_import_keeps_to_block_public_access_and_object_ownership() {
+    let to = start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
+    let import = |export: &BucketsExport| {
+        let body = serde_json::to_vec(export).unwrap();
+        let to = &to;
+        async move {
+            let (status, answer) = signed(to, ROOT, "PUT", ADMIN_BUCKETS, &[], &body).await;
+            assert_eq!(status, 200, "{answer}");
+            serde_json::from_str::<BucketsImportReport>(&answer).unwrap()
+        }
+    };
+    // A public ACL where Block Public Access refuses it.
+    client(&to, SECRET_KEY)
+        .create_bucket()
+        .bucket("guarded")
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    // public-read.
+    let acl = serde_json::json!({"grants": [
+        {"grantee": "owner", "permission": "FULL_CONTROL"},
+        {"grantee": "allUsers", "permission": "READ"},
+    ]});
+    let mut guarded = ExportedBucket {
+        name: "guarded".into(),
+        layout: "object".into(),
+        versioning: "unversioned".into(),
+        settings: serde_json::Map::new(),
+    };
+    guarded.settings.insert("acl".into(), acl);
+    let mut export = BucketsExport {
+        format: BUCKETS_EXPORT_FORMAT,
+        exported_ms: 0,
+        buckets: Vec::new(),
+    };
+    // And a public policy.
+    let public = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::guarded/*"}]}"#;
+    guarded.settings.insert("policy".into(), public.into());
+    export.buckets = vec![guarded.clone()];
+    let report = import(&export).await;
+    let failed = |item: &str| {
+        let found = report.items.iter().find(|i| i.item == item).unwrap();
+        assert_eq!(found.outcome, "failed", "{found:?}");
+        found.error.clone().unwrap()
+    };
+    assert!(failed("acl").contains("BlockPublicAcls"));
+    assert!(failed("policy").contains("BlockPublicPolicy"));
+    // Read (and so cached) by S3 first, then opened up by the import: the ACL follows
+    // the Block Public Access it imported, not the one read before.
+    let s3 = client(&to, SECRET_KEY);
+    s3.get_bucket_acl().bucket("guarded").send().await.unwrap();
+    let mut open = export.clone();
+    open.buckets[0].settings.remove("policy");
+    open.buckets[0].settings.insert(
+        "publicAccessBlock".into(),
+        serde_json::json!({"blockPublicAcls": false, "blockPublicPolicy": false, "ignorePublicAcls": false, "restrictPublicBuckets": false}),
+    );
+    let report = import(&open).await;
+    assert!(
+        report.items.iter().all(|i| i.outcome == "applied"),
+        "{report:?}"
+    );
+    let mut guarded = open.buckets[0].clone();
+    // ACLs that grant others where Object Ownership disables them.
+    guarded
+        .settings
+        .insert("ownership".into(), "BucketOwnerEnforced".into());
+    export.buckets = vec![guarded];
+    let report = import(&export).await;
+    let refused: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|i| i.outcome == "failed")
+        .map(|i| i.item.as_str())
+        .collect();
+    assert_eq!(refused, ["ownership", "acl"], "{report:?}");
 }

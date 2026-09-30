@@ -51,7 +51,7 @@ pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
 }
 
 /// An answer with `value` as its JSON body.
-fn json(value: &impl serde::Serialize) -> S3Response<Body> {
+pub(crate) fn json(value: &impl serde::Serialize) -> S3Response<Body> {
     let bytes = serde_json::to_vec(value).expect("the admin API's messages serialize");
     let mut response = S3Response::new(crate::routes::unlogged(bytes));
     response.headers.insert(
@@ -62,7 +62,7 @@ fn json(value: &impl serde::Serialize) -> S3Response<Body> {
 }
 
 /// An error with its own code and status.
-fn error(status: StatusCode, code: &str, message: impl Into<String>) -> S3Error {
+pub(crate) fn error(status: StatusCode, code: &str, message: impl Into<String>) -> S3Error {
     let mut err =
         S3Error::with_message(S3ErrorCode::Custom(code.to_owned().into()), message.into());
     err.set_status_code(status);
@@ -110,7 +110,7 @@ pub(crate) fn is_virtual_hosted(headers: &HeaderMap, domains: &[String]) -> bool
     })
 }
 
-fn millis(time: SystemTime) -> i64 {
+pub(crate) fn millis(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }

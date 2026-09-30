@@ -480,3 +480,74 @@ async fn snapshots_from_the_command_line() {
         "{out}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buckets_move_between_servers_through_a_file() {
+    let (from, to) = (start().await, start().await);
+    let cli = Client::new(&from);
+    cli.ok(&["mb", "t/logs"]).await;
+    cli.ok(&["mb", "t/other"]).await;
+    cli.ok(&["version", "enable", "t/logs"]).await;
+    // To standard output, all of them or one.
+    let all: serde_json::Value =
+        serde_json::from_str(&cli.ok(&["admin", "bucket", "export", "t"]).await).unwrap();
+    assert_eq!(all["buckets"].as_array().unwrap().len(), 2);
+    let one: serde_json::Value =
+        serde_json::from_str(&cli.ok(&["admin", "bucket", "export", "t/logs"]).await).unwrap();
+    assert_eq!(one["buckets"][0]["versioning"], "enabled");
+    assert_eq!(one["buckets"].as_array().unwrap().len(), 1);
+    cli.fails(&["admin", "bucket", "export", "t/nope"], 5).await;
+    cli.fails(&["admin", "bucket", "export", "t/Bad_Name"], 2)
+        .await;
+    // To a file.
+    let file = cli.path("buckets.json");
+    let path = file.to_str().unwrap();
+    let out = cli
+        .ok(&["admin", "bucket", "export", "t", "-o", path])
+        .await;
+    assert!(out.contains("Exported 2 buckets to"), "{out}");
+    cli.fails(&["admin", "bucket", "export", "t", "-o", path], 6)
+        .await;
+
+    let target = Client::new(&to);
+    let out = target.ok(&["admin", "bucket", "import", "t", path]).await;
+    assert!(
+        out.contains("Imported 2 buckets: 2 created,") && out.contains("0 failed"),
+        "{out}"
+    );
+    let again: serde_json::Value =
+        serde_json::from_str(&target.ok(&["admin", "bucket", "export", "t"]).await).unwrap();
+    assert_eq!(again["buckets"], all["buckets"]);
+    let items = records(
+        &target
+            .ok(&["--json", "admin", "bucket", "import", "t", path])
+            .await,
+    );
+    assert!(
+        items[..items.len() - 1]
+            .iter()
+            .all(|r| r["type"] == "bucketImport" && r["outcome"] == "applied")
+    );
+    assert_eq!(items.last().unwrap()["type"], "bucketsImported");
+
+    // An item that can't be applied is named, and the exit code says so.
+    let mut broken = all.clone();
+    broken["buckets"][0]["settings"]["policy"] = "not a policy".into();
+    fs::write(cli.path("broken.json"), broken.to_string()).unwrap();
+    let broken = cli.path("broken.json");
+    let err = target
+        .fails(
+            &["admin", "bucket", "import", "t", broken.to_str().unwrap()],
+            1,
+        )
+        .await;
+    assert!(err.contains("logs: policy: "), "{err}");
+    fs::write(cli.path("junk.json"), "{}").unwrap();
+    let junk = cli.path("junk.json");
+    target
+        .fails(
+            &["admin", "bucket", "import", "t", junk.to_str().unwrap()],
+            2,
+        )
+        .await;
+}

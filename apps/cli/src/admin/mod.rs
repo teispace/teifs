@@ -3,6 +3,7 @@
 //! and policies, roles and OpenID Connect providers (over AWS's IAM API, which `aws iam
 //! --endpoint-url …` speaks too).
 
+mod buckets;
 mod oidc;
 mod policy;
 mod roles;
@@ -43,6 +44,12 @@ pub enum AdminAction {
     Iam {
         #[command(subcommand)]
         action: IamAction,
+    },
+    /// Export buckets with their settings, or import them onto another server (as
+    /// `mc admin cluster bucket export|import`); objects aren't moved.
+    Bucket {
+        #[command(subcommand)]
+        action: buckets::BucketAction,
     },
     /// List a TeiFS server's snapshots of its drive's metadata, or take one now.
     Snapshot {
@@ -155,6 +162,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
                     adopt_account,
                 },
         } => import(&client(&aliases, &alias)?, &file, adopt_account).await,
+        AdminAction::Bucket { action } => buckets::run(&aliases, action).await,
         AdminAction::Snapshot {
             action: SnapshotAction::Ls { alias },
         } => snapshots(&client(&aliases, &alias)?).await,
@@ -455,23 +463,7 @@ async fn export(
     let text = Zeroizing::new(
         serde_json::to_vec_pretty(&export).map_err(|e| Error::general(e.to_string()))?,
     );
-    let written = if force {
-        teifs_store::replace_private(path, &text)
-    } else {
-        teifs_store::create_private(path, &text)
-    };
-    written.map_err(|e| {
-        let err = Error::general(format!("can't write {}: {e}", path.display()));
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            Error {
-                kind: Kind::Conflict,
-                ..err
-            }
-            .with_hint("choose another file, or add --force to replace it")
-        } else {
-            err
-        }
-    })?;
+    write_file(path, &text, force)?;
     ui::done(
         format!("Exported {} to {}", summary(&export), path.display()),
         || {
@@ -488,7 +480,29 @@ async fn export(
     Ok(())
 }
 
-fn read_export(file: &Path) -> Result<IamExport, Error> {
+/// Writes an export readable only by its owner: a new file, or with `force` any.
+fn write_file(path: &Path, bytes: &[u8], force: bool) -> Result<(), Error> {
+    let written = if force {
+        teifs_store::replace_private(path, bytes)
+    } else {
+        teifs_store::create_private(path, bytes)
+    };
+    written.map_err(|e| {
+        let err = Error::general(format!("can't write {}: {e}", path.display()));
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            Error {
+                kind: Kind::Conflict,
+                ..err
+            }
+            .with_hint("choose another file, or add --force to replace it")
+        } else {
+            err
+        }
+    })
+}
+
+/// A file's bytes, or standard input's for `-`.
+fn read_file(file: &Path) -> Result<Zeroizing<Vec<u8>>, Error> {
     let bytes = if file == Path::new("-") {
         let mut bytes = Vec::new();
         io::stdin()
@@ -505,7 +519,11 @@ fn read_export(file: &Path) -> Result<IamExport, Error> {
             Error::new(kind, format!("can't read {}: {e}", file.display()))
         })?
     };
-    let bytes = Zeroizing::new(bytes);
+    Ok(Zeroizing::new(bytes))
+}
+
+fn read_export(file: &Path) -> Result<IamExport, Error> {
+    let bytes = read_file(file)?;
     serde_json::from_slice(&bytes).map_err(|e| {
         Error::usage(format!("{} isn't an IAM export: {e}", file.display()))
             .with_hint("make one with `teifs admin iam export`")

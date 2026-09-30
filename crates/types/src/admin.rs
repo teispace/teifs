@@ -34,6 +34,65 @@ pub const ADMIN_ROOT_KEY: &str = "/.teifs/admin/v1/root-key";
 /// one now and answers it.
 pub const ADMIN_SNAPSHOTS: &str = "/.teifs/admin/v1/snapshots";
 
+/// `GET`: the buckets' settings as a [`BucketsExport`] (`?bucket=NAME` for one);
+/// `PUT`: imports one, creating missing buckets, answering a [`BucketsImportReport`].
+pub const ADMIN_BUCKETS: &str = "/.teifs/admin/v1/buckets";
+
+/// The format of a [`BucketsExport`]; a server refuses any other.
+pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
+
+/// Buckets and their settings, to recreate them on another drive (MinIO's
+/// `mc admin cluster bucket export`). Objects aren't in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketsExport {
+    /// [`BUCKETS_EXPORT_FORMAT`].
+    pub format: u32,
+    /// When it was made, in milliseconds since the Unix epoch.
+    pub exported_ms: i64,
+    /// The buckets, by name.
+    pub buckets: Vec<ExportedBucket>,
+}
+
+/// One bucket in a [`BucketsExport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedBucket {
+    /// Its name.
+    pub name: String,
+    /// `object` or `folder`.
+    pub layout: String,
+    /// `unversioned`, `enabled` or `suspended`.
+    pub versioning: String,
+    /// Its settings, each under its name (`policy`, `lifecycle`, `objectLock`, …), as
+    /// the drive keeps them. An import applies those given and leaves the others.
+    #[serde(default)]
+    pub settings: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What a bucket import did, item by item.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketsImportReport {
+    /// Each bucket's items, in the order they were applied.
+    pub items: Vec<BucketImportItem>,
+}
+
+/// One item of a bucket import: the bucket itself, its versioning, or a setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketImportItem {
+    /// The bucket.
+    pub bucket: String,
+    /// `bucket`, `layout`, `versioning`, or a setting's name.
+    pub item: String,
+    /// `created`, `applied` or `failed`.
+    pub outcome: String,
+    /// Why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// A snapshot of the drive's metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -411,6 +470,8 @@ mod tests {
             ADMIN_IAM,
             ADMIN_IAM_SECRETS,
             ADMIN_ROOT_KEY,
+            ADMIN_SNAPSHOTS,
+            ADMIN_BUCKETS,
         ] {
             assert!(path.starts_with(ADMIN_PREFIX), "{path}");
         }

@@ -338,7 +338,7 @@ pub(crate) fn not_supported() -> S3Error {
     err
 }
 
-fn public_blocked() -> S3Error {
+pub(crate) fn public_blocked() -> S3Error {
     s3_error!(
         AccessDenied,
         "Access Denied: the bucket's Block Public Access settings (BlockPublicAcls) refuse a \

@@ -103,6 +103,14 @@ behaviour; the on-disk format is always upgraded automatically.
   `teifs restore [DIR] --from FOLDER|SNAPSHOT` puts a backup or snapshot back on a drive
   no server has open, after checking it's of that drive and intact, keeping what it
   replaces.
+- Bucket metadata export and import, as MinIO's `mc admin cluster bucket
+  export|import`: `teifs admin bucket export ALIAS[/BUCKET]` writes every bucket's
+  layout, versioning and settings (policy, lifecycle, Object Lock, encryption, CORS,
+  tags, ABAC, ACL, Object Ownership, Block Public Access) as JSON, and
+  `teifs admin bucket import ALIAS FILE` creates the missing buckets and applies each
+  setting, checked as S3's own calls check it, with a report item by item (admin API
+  `GET|PUT buckets`, `teifs:ExportBucketMetadata` and `teifs:ImportBucketMetadata`).
+  Objects aren't moved.
 - `teifs repair [DIR] [--apply] [--forget-missing]` finds where a drive's metadata
   and its files disagree, on a drive no server has open, and reports it; with
   `--apply` it sets right what's safe to. Objects written after a restored snapshot
