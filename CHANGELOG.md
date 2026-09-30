@@ -156,6 +156,9 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- NSQ targets over TLS (`tls=true` or `ca=PATH`, as nsqd negotiates it after
+  `IDENTIFY`) and with `AUTH`, its secret from `TEIFS_NOTIFY_NSQ_SECRET_ID`, sent only
+  over TLS.
 - MySQL and MariaDB notification targets, as MinIO's: `teifs serve --notify-mysql
   ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=namespace|access]`, with MinIO's
   tables (made when missing) and statements, prepared once per connection with their

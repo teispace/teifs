@@ -278,6 +278,11 @@ shows it (NATS targets take them too).
 `--notify-nsq queue=nsqd.internal:4150,topic=s3-events` publishes each event to an NSQ
 topic, as a webhook is sent it, over nsqd's TCP protocol; rules name it
 `arn:teifs:sqs::ID:nsq`, and starting to name it checks that the nsqd answers.
+`tls=true` or `ca=PATH` (with `client_cert` and `client_key` for an nsqd that asks) upgrades
+the connection to TLS as nsqd negotiates it after `IDENTIFY`, verified with the system's
+certificates or the CA; an nsqd without TLS is refused. An nsqd that wants `AUTH`
+(`--auth-http-address`) is sent the secret in `TEIFS_NOTIFY_NSQ_SECRET_ID`, only over
+TLS.
 
 ```sh
 teifs serve --notify-nats bus=nats.internal:4222,subject=s3.events,user=teifs \
@@ -605,6 +610,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: database targets (PostgreSQL, MySQL), Kafka's snappy, lz4 and zstd
-compression, MQTT over WebSockets, NSQ over TLS, and client certificates for webhooks and
-Elasticsearch.
+Not yet: Kafka's snappy, lz4 and zstd compression, MQTT over WebSockets, and client
+certificates for webhooks and Elasticsearch.

@@ -277,9 +277,12 @@ pub(crate) struct ServeArgs {
     )]
     notify_redis: Vec<TargetConfig>,
     /// An NSQ topic buckets' notification rules can send events to, as
-    /// ID=HOST:PORT,topic=NAME, the nsqd's TCP address (repeat for more; in the
+    /// ID=HOST:PORT,topic=NAME, the nsqd's TCP address, with `tls=true` or `ca=PATH` (and
+    /// `client_cert=PATH` and `client_key=PATH`) for TLS (repeat for more; in the
     /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:nsq`; each
-    /// event is published as a webhook is sent it.
+    /// event is published as a webhook is sent it. The secret for an nsqd that wants
+    /// `AUTH`, `TEIFS_NOTIFY_NSQ_SECRET_ID`, is read only from the environment and sent
+    /// only over TLS.
     #[arg(
         long = "notify-nsq",
         value_name = "ID=HOST:PORT,topic=NAME",
@@ -1038,13 +1041,20 @@ fn parse_notify_mysql(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(spec.id, TargetKind::Mysql(db))
 }
 
-/// An NSQ topic, `ID=HOST:PORT,topic=NAME`.
+/// An NSQ topic, `ID=HOST:PORT,topic=NAME[,tls=true][,ca=PATH]`; its `AUTH` secret comes
+/// from the environment later.
 fn parse_notify_nsq(text: &str) -> Result<TargetConfig, String> {
-    let (id, address, options) = target_spec(text, "ID=HOST:PORT,topic=NAME", &["topic"])?;
+    let (id, address, options) = target_spec(
+        text,
+        "ID=HOST:PORT,topic=NAME",
+        &["topic", "tls", "ca", "client_cert", "client_key"],
+    )?;
     let topic = options
         .get("topic")
         .ok_or_else(|| "name the topic: ID=HOST:PORT,topic=NAME".to_owned())?;
-    TargetConfig::new(id, TargetKind::Nsq(Nsq::new(address, topic)?))
+    let mut nsq = Nsq::new(address, topic)?;
+    nsq.tls = target_tls(&options)?;
+    TargetConfig::new(id, TargetKind::Nsq(nsq))
 }
 
 /// A NATS subject, `ID=HOST:PORT,subject=NAME[,jetstream=true][,user=U][,creds=PATH]
@@ -1380,7 +1390,7 @@ fn target_secrets(
                 ));
             }
         }
-        TargetKind::Nsq(_) => {}
+        TargetKind::Nsq(nsq) => nsq.secret = secret("SECRET"),
         TargetKind::Postgres(pg) => pg.password = secret("PASSWORD"),
         TargetKind::Mysql(db) => db.password = secret("PASSWORD"),
         TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(arn, secret, &env)?,
@@ -1956,7 +1966,16 @@ mod tests {
         let queue = parse_notify_nsq("queue=nsqd.local:4150,topic=s3").unwrap();
         assert_eq!(queue.arn().to_string(), "arn:teifs:sqs::queue:nsq");
         assert_eq!(queue.shown(), "nsq://nsqd.local:4150 topic s3");
+        let env = |name: &str| (name == "TEIFS_NOTIFY_NSQ_SECRET_SAFE").then(|| "s".into());
+        let safe = parse_notify_nsq("safe=nsqd.local:4150,topic=s3,tls=true").unwrap();
+        let targets = notify_targets(vec![safe], env).unwrap();
+        let TargetKind::Nsq(safe) = &targets[0].kind else {
+            panic!("not NSQ")
+        };
+        assert!(safe.tls.is_some());
+        assert_eq!(safe.secret.as_deref().map(String::as_str), Some("s"));
         for bad in [
+            "q=nsqd.local:4150,topic=s3,tls=maybe",
             "q=nsqd.local:4150",
             "q=nsqd.local,topic=s3",
             "q=nsqd.local:4150,topic=a b",

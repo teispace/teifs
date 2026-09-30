@@ -485,8 +485,8 @@ async fn redis_is_reached_over_tls() {
 /// answered.
 #[tokio::test]
 async fn nsq_publishes_each_event() {
-    use crate::testing::NsqServer;
-    let server = NsqServer::start().await;
+    use crate::testing::{NsqServer, NsqSetup};
+    let server = NsqServer::start(NsqSetup::default()).await;
     let nsq = Nsq::new(server.address(), "s3-events").unwrap();
     let dir = tempfile::tempdir().unwrap();
     let notifier = Notifier::start(
@@ -517,6 +517,85 @@ async fn nsq_publishes_each_event() {
 
     let nowhere = Nsq::new("127.0.0.1:1", "t").unwrap();
     assert!(nowhere.test().await.unwrap_err().contains("can't connect"));
+}
+
+/// NSQ over TLS, as `nsqd` negotiates it after `IDENTIFY`, and `AUTH` over it: the
+/// `nsqd` is verified with the operator's CA; one without TLS, or one the CA didn't sign,
+/// is refused; the secret is sent only over TLS, and an `nsqd` that doesn't negotiate is
+/// spoken to as before.
+#[tokio::test]
+async fn nsq_is_reached_over_tls_with_auth() {
+    use crate::testing::{NsqServer, NsqSetup};
+    let (acceptor, ca_pem) = test_tls();
+    let server = NsqServer::start(NsqSetup {
+        tls: Some(acceptor.clone()),
+        secret: Some("s3cret".into()),
+        ..NsqSetup::default()
+    })
+    .await;
+    let secure = |address: &str, secret: Option<&str>| {
+        let mut nsq = Nsq::new(address, "s3-events").unwrap();
+        nsq.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+        nsq.secret = secret.map(|s| Zeroizing::new(s.to_owned()));
+        nsq
+    };
+    let nsq = secure(server.address(), Some("s3cret"));
+    assert_eq!(
+        nsq.shown(),
+        format!("nsq://{} topic s3-events (TLS)", server.address())
+    );
+    nsq.send(&message("s3:ObjectCreated:Put", "b/k"))
+        .await
+        .unwrap();
+    assert_eq!(server.published(1).await.len(), 1);
+    let connection = &server.connections()[0];
+    assert!(connection.tls);
+    assert_eq!(connection.identify["tls_v1"], true);
+    assert_eq!(connection.identify["feature_negotiation"], true);
+    assert_eq!(connection.auths, ["s3cret"]);
+
+    let err = secure(server.address(), Some("wrong"))
+        .test()
+        .await
+        .unwrap_err();
+    assert!(err.contains("E_UNAUTHORIZED"), "{err}");
+    let err = secure(server.address(), None).test().await.unwrap_err();
+    assert!(err.contains("TEIFS_NOTIFY_NSQ_SECRET_ID"), "{err}");
+    let mut plain = secure(server.address(), Some("s3cret"));
+    plain.tls = None;
+    let err = plain.test().await.unwrap_err();
+    assert!(err.contains("only over TLS"), "{err}");
+    assert!(
+        server
+            .connections()
+            .iter()
+            .all(|c| c.tls || c.auths.is_empty())
+    );
+    let mut untrusted = secure(server.address(), Some("s3cret"));
+    untrusted.tls = Some(tls_config(None, None).unwrap());
+    assert!(untrusted.test().await.unwrap_err().contains("TLS failed"));
+
+    for setup in [
+        NsqSetup::default(),
+        NsqSetup {
+            negotiates: false,
+            ..NsqSetup::default()
+        },
+    ] {
+        let without = NsqServer::start(setup).await;
+        let err = secure(without.address(), None).test().await.unwrap_err();
+        assert!(err.contains("doesn't take TLS"), "{err}");
+    }
+    let old = NsqServer::start(NsqSetup {
+        negotiates: false,
+        ..NsqSetup::default()
+    })
+    .await;
+    let nsq = Nsq::new(old.address(), "t").unwrap();
+    nsq.send(&message("s3:ObjectCreated:Put", "b/k"))
+        .await
+        .unwrap();
+    assert_eq!(old.published(1).await.len(), 1);
 }
 
 /// NATS targets: each event published to the subject, the server's `PONG` confirming
