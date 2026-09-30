@@ -1799,3 +1799,85 @@ async fn access_logs_are_set_shown_delivered_and_removed() {
     cli.fails(&["logging", "set", "t/app", "other/logs"], 2)
         .await;
 }
+
+#[tokio::test]
+async fn websites_are_set_shown_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/site"]).await;
+    let info = async || records(&cli.ok(&["--json", "website", "info", "t/site"]).await).remove(0);
+    assert_eq!(info().await["enabled"], false);
+    std::fs::write(
+        cli.path("rules.json"),
+        r#"[{"Condition": {"KeyPrefixEquals": "docs/"},
+             "Redirect": {"ReplaceKeyPrefixWith": "documents/"}}]"#,
+    )
+    .unwrap();
+    let rules = cli.path("rules.json");
+    let text = cli
+        .ok(&[
+            "website",
+            "set",
+            "t/site",
+            "--error",
+            "404.html",
+            "--rules",
+            rules.to_str().unwrap(),
+        ])
+        .await;
+    assert!(
+        text.contains("Website t/site: index index.html, errors 404.html, 1 redirection rule"),
+        "{text}"
+    );
+    let got = info().await;
+    assert_eq!(
+        (
+            &got["indexDocument"],
+            &got["errorDocument"],
+            &got["routingRules"]
+        ),
+        (
+            &serde_json::json!("index.html"),
+            &serde_json::json!("404.html"),
+            &serde_json::json!(1)
+        )
+    );
+    let text = cli
+        .ok(&[
+            "website",
+            "set",
+            "t/site",
+            "--redirect-all",
+            "https://example.com",
+        ])
+        .await;
+    assert!(
+        text.contains("Website t/site: every request to https://example.com"),
+        "{text}"
+    );
+    assert_eq!(info().await["redirectAllProtocol"], "https");
+    // The server's checks come back as errors.
+    let err = cli
+        .fails(&["website", "set", "t/site", "--index", "a/index.html"], 1)
+        .await;
+    assert!(
+        err.contains("The IndexDocument Suffix is not well formed"),
+        "{err}"
+    );
+    cli.fails(
+        &[
+            "website",
+            "set",
+            "t/site",
+            "--redirect-all",
+            "x",
+            "--error",
+            "e",
+        ],
+        2,
+    )
+    .await;
+    let text = cli.ok(&["website", "rm", "t/site"]).await;
+    assert!(text.contains("Website t/site: off"), "{text}");
+    assert_eq!(info().await["enabled"], false);
+}

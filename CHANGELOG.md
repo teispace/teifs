@@ -185,6 +185,13 @@ behaviour; the on-disk format is always upgraded automatically.
   info` and `teifs logging rm`.
 - An embedded server releases its drive when it stops, so the same process can open it
   again.
+- Website configurations, as S3's: `PutBucketWebsite`, `GetBucketWebsite` and
+  `DeleteBucketWebsite`, with an index document, an error document and up to 50
+  redirection rules, or every request redirected to another host; checked with S3's
+  error codes and messages, answered as given, and carried by admin exports and imports.
+  From the command line: `teifs website set ALIAS/BUCKET [--index I] [--error E]
+  [--rules FILE]` (redirection rules as the S3 console writes them) or `--redirect-all
+  URL`, `teifs website info` and `teifs website rm`.
 - Webhook, audit webhook and Elasticsearch targets over TLS of their own, as MinIO's
   webhooks: `ca=PATH` to verify the server with a CA, and `client_cert=PATH` and
   `client_key=PATH` for a server that asks for a client certificate (mutual TLS).

@@ -36,7 +36,7 @@ use crate::{
     observe,
     post_form::{self, Form},
     sse::{self, set_sse},
-    tagging,
+    tagging, website,
 };
 
 /// How many keys a listing returns at most, and by default.
@@ -2132,6 +2132,40 @@ impl S3 for Drive {
             log.turn_on();
         }
         Ok(S3Response::new(dto::PutBucketLoggingOutput::default()))
+    }
+
+    async fn get_bucket_website(
+        &self,
+        req: S3Request<dto::GetBucketWebsiteInput>,
+    ) -> S3Result<S3Response<dto::GetBucketWebsiteOutput>> {
+        let config = self.store.bucket_website(&req.input.bucket).await.s3()?;
+        let config = config.ok_or_else(website::no_such_website)?;
+        Ok(S3Response::new(website::to_dto(&config)))
+    }
+
+    async fn put_bucket_website(
+        &self,
+        req: S3Request<dto::PutBucketWebsiteInput>,
+    ) -> S3Result<S3Response<dto::PutBucketWebsiteOutput>> {
+        let input = req.input;
+        let config = website::from_dto(input.website_configuration)?;
+        self.store
+            .set_bucket_website(&input.bucket, Some(config))
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketWebsiteOutput::default()))
+    }
+
+    /// Removes the bucket's website configuration; one that has none answers the same.
+    async fn delete_bucket_website(
+        &self,
+        req: S3Request<dto::DeleteBucketWebsiteInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketWebsiteOutput>> {
+        self.store
+            .set_bucket_website(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteBucketWebsiteOutput::default()))
     }
 
     async fn get_bucket_cors(

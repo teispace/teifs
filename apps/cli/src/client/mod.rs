@@ -16,6 +16,7 @@ mod transfer;
 pub(crate) mod trust;
 mod versions;
 mod watch;
+mod website;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -158,6 +159,12 @@ pub enum Command {
     Logging {
         #[command(subcommand)]
         action: LoggingAction,
+    },
+    /// Serve a bucket as a static website (its index and error documents and
+    /// redirects, as S3's website hosting), or show or remove its configuration.
+    Website {
+        #[command(subcommand)]
+        action: WebsiteAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
@@ -306,6 +313,43 @@ pub enum LoggingAction {
         bucket: String,
     },
     /// Stop logging a bucket's requests.
+    Rm {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WebsiteAction {
+    /// Make `ALIAS/BUCKET` a website: requests for a folder get its index document,
+    /// errors the error document; or, with `--redirect-all`, send every request
+    /// elsewhere.
+    Set {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+        /// What a request for a folder (`/`, `docs/`) is answered with: the folder's
+        /// object of this name.
+        #[arg(long, default_value = "index.html", conflicts_with = "redirect_all")]
+        index: String,
+        /// The object answered, with the error's status, when a request fails.
+        #[arg(long, conflicts_with = "redirect_all")]
+        error: Option<String>,
+        /// A JSON file of redirection rules, as the S3 console takes them
+        /// (`[{"Condition": {"KeyPrefixEquals": "docs/"}, "Redirect":
+        /// {"ReplaceKeyPrefixWith": "documents/"}}]`).
+        #[arg(long, conflicts_with = "redirect_all")]
+        rules: Option<std::path::PathBuf>,
+        /// Send every request to this host (`example.com`, or `https://example.com`
+        /// for a protocol).
+        #[arg(long)]
+        redirect_all: Option<String>,
+    },
+    /// Show a bucket's website configuration.
+    Info {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+    /// Stop serving a bucket as a website.
     Rm {
         /// `ALIAS/BUCKET`.
         bucket: String,

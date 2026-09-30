@@ -35,6 +35,7 @@ mod sig_v2;
 mod sse;
 mod tagging;
 mod trace;
+mod website;
 
 use std::sync::Arc;
 

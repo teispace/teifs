@@ -4,7 +4,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
-use teifs_types::{Acl, SseMode, logging::LoggingConfig, notify::NotificationConfig};
+use teifs_types::{
+    Acl, SseMode, logging::LoggingConfig, notify::NotificationConfig, website::WebsiteConfig,
+};
 
 use crate::{
     Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lifecycle::Lifecycle,
@@ -49,6 +51,9 @@ pub(crate) struct BucketConfig {
     /// Where its access log goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     logging: Option<LoggingConfig>,
+    /// How its website endpoint answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    website: Option<WebsiteConfig>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -94,6 +99,9 @@ pub struct BucketSettings {
     /// Where its access log goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
+    /// How its website endpoint answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<WebsiteConfig>,
 }
 
 /// How a bucket encrypts objects written without asking, and which encryption it
@@ -370,6 +378,7 @@ impl Store {
             lifecycle: config.lifecycle,
             notifications: config.notifications,
             logging: config.logging,
+            website: config.website,
         })
     }
 
@@ -453,6 +462,33 @@ impl Store {
         logging: Option<LoggingConfig>,
     ) -> Result<()> {
         self.change_config(bucket, move |config| config.logging = logging)
+            .await
+    }
+
+    /// How a bucket's website endpoint answers, if it's a website; from memory once
+    /// read.
+    pub async fn bucket_website(&self, bucket: &str) -> Result<Option<Arc<WebsiteConfig>>> {
+        if let Some(found) = self.inner.websites.cached(bucket) {
+            return Ok(found);
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            inner.websites.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.website)
+            })
+        })
+        .await
+    }
+
+    /// Replaces a bucket's website configuration (checked by the caller); `None`
+    /// removes it.
+    pub async fn set_bucket_website(
+        &self,
+        bucket: &str,
+        website: Option<WebsiteConfig>,
+    ) -> Result<()> {
+        self.change_config(bucket, move |config| config.website = website)
             .await
     }
 
@@ -709,6 +745,7 @@ impl Inner {
         self.lifecycles.clear();
         self.notifications.clear();
         self.logging.clear();
+        self.websites.clear();
     }
 
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.

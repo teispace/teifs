@@ -281,6 +281,8 @@ struct Inner {
     notifications: cache::SettingCache<teifs_types::notify::NotificationConfig>,
     /// Buckets' access logging, read once.
     logging: cache::SettingCache<teifs_types::logging::LoggingConfig>,
+    /// Buckets' website configurations, read once.
+    websites: cache::SettingCache<teifs_types::website::WebsiteConfig>,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
     day_ms: i64,
     /// How long each stage of reads and writes takes.
@@ -389,6 +391,7 @@ impl Store {
             lifecycles: cache::SettingCache::default(),
             notifications: cache::SettingCache::default(),
             logging: cache::SettingCache::default(),
+            websites: cache::SettingCache::default(),
             stages: stages::new(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)

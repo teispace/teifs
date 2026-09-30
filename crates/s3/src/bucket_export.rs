@@ -20,6 +20,7 @@ use teifs_types::{
     },
     logging::LoggingConfig,
     notify::NotificationConfig,
+    website::WebsiteConfig,
 };
 
 use crate::{
@@ -30,7 +31,7 @@ use crate::{
     errors::StoreResultExt,
     lifecycle, logging, object_lock,
     routes::{s3_refusal, signed_body},
-    tagging,
+    tagging, website,
 };
 
 /// The settings an import knows, in the order it applies them: Block Public Access
@@ -48,6 +49,7 @@ const SETTINGS: &[&str] = &[
     "lifecycle",
     "encryption",
     "notifications",
+    "website",
     "logging",
 ];
 
@@ -332,6 +334,10 @@ impl Import<'_> {
             let result = self.notifications(value).await;
             self.report("notifications", result.map(|()| APPLIED));
         }
+        if let Some(value) = settings.get("website") {
+            let result = self.website(value).await;
+            self.report("website", result.map(|()| APPLIED));
+        }
     }
 
     async fn object_lock(&self, value: &Value) -> S3Result<()> {
@@ -482,6 +488,16 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Checked as `PutBucketWebsite` checks it.
+    async fn website(&self, value: &Value) -> S3Result<()> {
+        let config: WebsiteConfig = parse("website", value)?;
+        let config = website::check(&config)?;
+        self.store
+            .set_bucket_website(self.bucket, Some(config))
+            .await
+            .s3()
+    }
+
     /// Checked as `PutBucketLogging` checks it.
     async fn logging(&self, value: &Value, account: &str) -> S3Result<()> {
         let config: LoggingConfig = parse("logging", value)?;
@@ -593,6 +609,10 @@ mod tests {
                 target_prefix: String::new(),
                 key_format: None,
                 grants: Vec::new(),
+            }),
+            website: Some(WebsiteConfig::RedirectAll {
+                host_name: String::new(),
+                protocol: None,
             }),
         };
         let Value::Object(given) = serde_json::to_value(all).unwrap() else {

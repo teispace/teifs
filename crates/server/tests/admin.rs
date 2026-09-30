@@ -608,7 +608,9 @@ fn items(report: &BucketsImportReport) -> Vec<(&str, &str)> {
 
 #[tokio::test]
 async fn buckets_move_to_another_drive_with_their_settings() {
-    use aws_sdk_s3::types::{BucketLoggingStatus, LoggingEnabled};
+    use aws_sdk_s3::types::{
+        BucketLoggingStatus, IndexDocument, LoggingEnabled, WebsiteConfiguration,
+    };
 
     let from = start().await;
     configured(&from, "logs").await;
@@ -635,6 +637,21 @@ async fn buckets_move_to_another_drive_with_their_settings() {
                     LoggingEnabled::builder()
                         .target_bucket("plain")
                         .target_prefix("access/")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_website()
+        .bucket("plain")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(
+                    IndexDocument::builder()
+                        .suffix("index.html")
                         .build()
                         .unwrap(),
                 )
@@ -678,6 +695,7 @@ async fn buckets_move_to_another_drive_with_their_settings() {
     assert!(items(&report).contains(&("bucket", "created")));
     assert!(items(&report).contains(&("lifecycle", "applied")));
     assert!(items(&report).contains(&("logging", "applied")));
+    assert!(items(&report).contains(&("website", "applied")));
     // The other drive now exports the same.
     let (_, again) = get(&to, ROOT, ADMIN_BUCKETS).await;
     let again: BucketsExport = serde_json::from_str(&again).unwrap();
@@ -750,7 +768,11 @@ async fn an_import_checks_each_setting_as_s3_does() {
                 "name": "fresh",
                 "layout": "object",
                 "versioning": "enabled",
-                "settings": {"cors": [{"allowedMethods": ["FETCH"], "allowedOrigins": ["*"]}]}
+                "settings": {
+                    "cors": [{"allowedMethods": ["FETCH"], "allowedOrigins": ["*"]}],
+                    // An index document in a folder.
+                    "website": {"site": {"indexSuffix": "a/index.html"}},
+                }
             },
         ]
     });
@@ -778,6 +800,7 @@ async fn an_import_checks_each_setting_as_s3_does() {
             ("fresh", "bucket", "created"),
             ("fresh", "versioning", "applied"),
             ("fresh", "cors", "failed"),
+            ("fresh", "website", "failed"),
         ],
         "{answer}"
     );

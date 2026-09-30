@@ -10,6 +10,7 @@ mod names;
 pub mod notify;
 mod object;
 pub mod verify;
+pub mod website;
 
 pub use acl::{Acl, AclCaller, AclGrant, Grantee, OWNER_ID, Permission};
 pub use names::{
