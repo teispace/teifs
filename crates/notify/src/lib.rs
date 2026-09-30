@@ -17,6 +17,7 @@ mod nkey;
 mod nsq;
 mod queue;
 mod redis;
+mod sns;
 mod sqs;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -40,6 +41,7 @@ pub use net::tls_config;
 pub use nkey::UserKey;
 pub use nsq::Nsq;
 pub use redis::Redis;
+pub use sns::Sns;
 pub use sqs::Sqs;
 use teifs_types::notify::TargetArn;
 use tokio::{sync::Notify, task::JoinHandle};
@@ -79,6 +81,8 @@ pub enum TargetKind {
     Mqtt(Mqtt),
     /// An SQS queue, sent each event as S3 sends it.
     Sqs(Sqs),
+    /// An SNS topic.
+    Sns(Sns),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -154,6 +158,7 @@ impl TargetConfig {
             TargetKind::Nats(nats) => nats.shown(),
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
+            TargetKind::Sns(sns) => sns.shown(),
         }
     }
 }
@@ -170,6 +175,17 @@ impl TargetKind {
             Self::Nats(_) => "nats",
             Self::Mqtt(_) => "mqtt",
             Self::Sqs(_) => "sqs",
+            Self::Sns(_) => "sns",
+        }
+    }
+
+    /// Its ARN on AWS, when it's an AWS queue or topic: the other name rules may give it.
+    #[must_use]
+    pub fn aws_arn(&self) -> Option<String> {
+        match self {
+            Self::Sqs(sqs) => sqs.aws_arn(),
+            Self::Sns(sns) => Some(sns.topic_arn.clone()),
+            _ => None,
         }
     }
 }
@@ -233,6 +249,7 @@ impl Target {
             TargetKind::Nats(nats) => nats.send(&body).await,
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
+            TargetKind::Sns(sns) => sns.send(client, &body).await,
         }
     }
 
@@ -246,8 +263,9 @@ impl Target {
             TargetKind::Nsq(nsq) => nsq.test().await,
             TargetKind::Nats(nats) => nats.test().await,
             TargetKind::Mqtt(mqtt) => mqtt.test().await,
-            // As S3 does: the queue is sent the test event.
+            // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
+            TargetKind::Sns(sns) => sns.send(client, &body).await,
         }
     }
 }
@@ -370,7 +388,7 @@ impl Notifier {
     }
 
     /// The target a rule's ARN names: `arn:teifs:sqs::ID:KIND` (or `MinIO`'s form), or an
-    /// SQS queue's own ARN on AWS, as S3's rules name it.
+    /// SQS queue's or SNS topic's own ARN on AWS, as S3's rules name them.
     #[must_use]
     pub fn resolve(&self, arn: &str) -> Option<TargetArn> {
         if let Some(ours) = TargetArn::parse(arn) {
@@ -378,7 +396,7 @@ impl Notifier {
         }
         self.targets
             .iter()
-            .find(|(_, t)| matches!(&t.config.kind, TargetKind::Sqs(sqs) if sqs.is_named_by(arn)))
+            .find(|(_, t)| t.config.kind.aws_arn().as_deref() == Some(arn.trim()))
             .map(|(ours, _)| ours.clone())
     }
 

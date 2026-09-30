@@ -37,6 +37,43 @@ pub fn region_of(host: &str, service: &str) -> Option<String> {
     (domain.starts_with("amazonaws.") && !region.is_empty()).then(|| region.to_owned())
 }
 
+/// `bytes` in lower-case hex.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+/// A FIFO message group for `key`: the key itself when SQS and SNS take it (up to 128
+/// ASCII letters, digits and punctuation), else its SHA-256 in hex, so each object's
+/// events keep one group either way.
+pub(crate) fn group_id(key: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    if !key.is_empty() && key.len() <= 128 && key.bytes().all(|b| b.is_ascii_graphic()) {
+        key.to_owned()
+    } else {
+        hex(&Sha256::digest(key.as_bytes()))
+    }
+}
+
+/// The text of the first `<tag>` in an XML answer, unescaped.
+pub(crate) fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(
+        xml[start..end]
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
 /// A request to `service` in `region`: `POST url` with `headers` and `body`.
 pub(crate) struct Call<'a> {
     pub service: &'a str,
@@ -143,6 +180,31 @@ mod tests {
         ] {
             assert_eq!(region_of(other, "sqs"), None, "{other}");
         }
+    }
+
+    #[test]
+    fn groups_are_keys_or_their_digests() {
+        assert_eq!(group_id("photos/a.jpg"), "photos/a.jpg");
+        let long = "a".repeat(129);
+        for other in ["photos/a b.jpg", "photos/ü.jpg", long.as_str(), ""] {
+            let group = group_id(other);
+            assert_eq!(group.len(), 64, "{other}");
+            assert_eq!(group, group_id(other), "the same each time");
+        }
+        assert_eq!(group_id(&"a".repeat(128)).len(), 128);
+    }
+
+    #[test]
+    fn xml_answers_are_read() {
+        let xml = "<ErrorResponse><Error><Type>Sender</Type><Code>NotFound</Code>\
+                   <Message>Topic &amp; &lt;it&gt; does not exist</Message></Error></ErrorResponse>";
+        assert_eq!(xml_text(xml, "Code").as_deref(), Some("NotFound"));
+        assert_eq!(
+            xml_text(xml, "Message").as_deref(),
+            Some("Topic & <it> does not exist")
+        );
+        assert_eq!(xml_text(xml, "MessageId"), None);
+        assert_eq!(xml_text("<Code>open", "Code"), None);
     }
 
     #[test]

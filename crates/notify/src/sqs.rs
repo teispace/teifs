@@ -8,7 +8,7 @@ use md5::{Digest as _, Md5};
 use sha2::Sha256;
 use teifs_types::notify::EventMessage;
 
-use crate::aws::{self, AwsCredentials, Call};
+use crate::aws::{self, AwsCredentials, Call, group_id, hex};
 
 /// A queue events are sent to.
 #[derive(Debug, Clone)]
@@ -91,12 +91,6 @@ impl Sqs {
         ))
     }
 
-    /// Whether it's the queue `arn` names, as S3's rules name queues.
-    #[must_use]
-    pub fn is_named_by(&self, arn: &str) -> bool {
-        self.aws_arn().as_deref() == Some(arn.trim())
-    }
-
     /// Whether it's a FIFO queue, whose messages need a group.
     fn fifo(&self) -> bool {
         // SQS names them so, in lower case.
@@ -122,7 +116,7 @@ impl Sqs {
         if self.fifo() {
             // A group per object keeps each object's events in order; the same message
             // sent again is dropped as a duplicate.
-            request["MessageGroupId"] = group.into();
+            request["MessageGroupId"] = group_id(&group).into();
             request["MessageDeduplicationId"] = hex(&Sha256::digest(message.as_bytes())).into();
         }
         let mut endpoint = self.queue_url.clone();
@@ -156,16 +150,6 @@ impl Sqs {
         }
         Ok(())
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
-            use std::fmt::Write as _;
-            let _ = write!(out, "{b:02x}");
-            out
-        })
 }
 
 #[cfg(test)]
@@ -230,17 +214,6 @@ mod tests {
             "as LocalStack names it"
         );
         assert_eq!(arn("http://localhost:4566/queue/eu/1/q", None), None);
-        let sqs = Sqs::new("https://sqs.eu-west-1.amazonaws.com/123456789012/q", None).unwrap();
-        assert!(sqs.is_named_by("arn:aws:sqs:eu-west-1:123456789012:q"));
-        for other in [
-            "arn:aws:sqs:eu-west-2:123456789012:q",
-            "arn:aws:sqs:eu-west-1:210987654321:q",
-            "arn:aws:sqs:eu-west-1:123456789012:q2",
-            "arn:aws:sns:eu-west-1:123456789012:q",
-            "arn:teifs:sqs::q:sqs",
-        ] {
-            assert!(!sqs.is_named_by(other), "{other}");
-        }
     }
 
     #[test]

@@ -588,3 +588,58 @@ async fn rules_name_sqs_queues_by_their_aws_arns() {
     assert_eq!(record["s3"]["object"]["key"], "a.txt");
     assert!(bodies[1].get("EventName").is_none(), "no MinIO envelope");
 }
+
+/// A topic rule names an SNS topic by its ARN, as on S3.
+#[tokio::test]
+async fn topic_rules_publish_to_sns() {
+    use aws_sdk_s3::types::TopicConfiguration;
+    use teifs_notify::testing::AwsServer;
+    use teifs_server::{AwsCredentials, Sns};
+    let aws = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let arn = "arn:aws:sns:eu-west-1:123456789012:uploads";
+    let mut sns = Sns::new(arn, Some(aws.url())).unwrap();
+    sns.credentials = Some(AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: "s3cret".to_owned().into(),
+        session_token: None,
+    });
+    let target = TargetConfig::new("uploads", TargetKind::Sns(sns)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    s3.put_bucket_notification_configuration()
+        .bucket("bkt")
+        .notification_configuration(
+            NotificationConfiguration::builder()
+                .topic_configurations(
+                    TopicConfiguration::builder()
+                        .topic_arn(arn)
+                        .events(Event::from("s3:ObjectCreated:*"))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("bkt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.topic_configurations()[0].topic_arn(), arn);
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let requests = aws.requests(2).await;
+    let messages: Vec<&str> = requests.iter().map(|r| r.message.as_str()).collect();
+    assert!(messages[0].contains("s3:TestEvent"));
+    let event: serde_json::Value = serde_json::from_str(messages[1]).unwrap();
+    assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
+}

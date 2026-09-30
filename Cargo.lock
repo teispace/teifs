@@ -3137,6 +3137,7 @@ dependencies = [
  "aws-lc-rs",
  "aws-sigv4",
  "base64",
+ "form_urlencoded",
  "http-body-util",
  "hyper",
  "hyper-util",

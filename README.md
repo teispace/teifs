@@ -285,7 +285,7 @@ keys, DSSE-KMS (two layers: a named key's and the drive's), and SSE-C with your 
 objects can't be read without it.
 
 **Bucket notifications**, as S3's and MinIO's: `teifs serve --notify-webhook
-orders=https://hooks.example/s3` (or `--notify-elasticsearch`, `--notify-redis`, `--notify-nsq`, `--notify-nats`, `--notify-mqtt`, `--notify-sqs`) gives the server a target, and a bucket's rules
+orders=https://hooks.example/s3` (or `--notify-elasticsearch`, `--notify-redis`, `--notify-nsq`, `--notify-nats`, `--notify-mqtt`, `--notify-sqs`, `--notify-sns`) gives the server a target, and a bucket's rules
 (`teifs event add`, `aws s3api put-bucket-notification-configuration`, `mc event add`) send it the events
 they pick (objects written, deleted, tagged, read, expired), each queued on the drive
 before the request is answered and retried until it's taken. `teifs watch` and `mc watch`

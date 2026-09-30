@@ -26,9 +26,9 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, Format,
-    JobOptions, KeyRules, KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, Sqs,
-    TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials,
-    tls_config,
+    JobOptions, KeyRules, KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, Sns,
+    Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
+    credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -334,6 +334,22 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_SQS"
     )]
     notify_sqs: Vec<TargetConfig>,
+    /// An SNS topic buckets' notification rules can publish events to, as S3 publishes
+    /// them, as `ID=TOPIC_ARN` (`arn:aws:sns:REGION:ACCOUNT:NAME`), with endpoint=URL for a
+    /// service other than AWS's (repeat for more; in the environment, separated by
+    /// spaces). Rules name it by the topic's ARN, as on S3, or `arn:teifs:sqs::ID:sns`.
+    /// Requests are signed with `TEIFS_NOTIFY_SNS_ACCESS_KEY_ID`,
+    /// `TEIFS_NOTIFY_SNS_SECRET_KEY_ID` and `TEIFS_NOTIFY_SNS_SESSION_TOKEN_ID`, else
+    /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, read only from
+    /// the environment.
+    #[arg(
+        long = "notify-sns",
+        value_name = "ID=TOPIC_ARN",
+        value_parser = parse_notify_sns,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_SNS"
+    )]
+    notify_sns: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -927,10 +943,11 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
-/// An SQS target's keys: its own (`TEIFS_NOTIFY_SQS_ACCESS_KEY_ID`, `…_SECRET_KEY_ID`,
-/// `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if neither.
-fn sqs_credentials(
-    id: &str,
+/// An SQS or SNS target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
+/// `…_SECRET_KEY_ID`, `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if
+/// neither.
+fn aws_credentials(
+    arn: &teifs_types::notify::TargetArn,
     own: impl Fn(&str) -> Option<Zeroizing<String>>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<AwsCredentials>, String> {
@@ -957,9 +974,18 @@ fn sqs_credentials(
         })),
         (None, None) => Ok(None),
         _ => Err(format!(
-            "the SQS target `{id}` needs both an access key and its secret key"
+            "the {} target `{}` needs both an access key and its secret key",
+            arn.kind.to_ascii_uppercase(),
+            arn.id
         )),
     }
+}
+
+/// `ID=TOPIC_ARN`, with `endpoint=URL`; its keys come from the environment later.
+fn parse_notify_sns(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(text, "ID=TOPIC_ARN,endpoint=URL", &["endpoint"])?;
+    let sns = Sns::new(address, options.get("endpoint").copied())?;
+    TargetConfig::new(id, TargetKind::Sns(sns))
 }
 
 /// `ID=QUEUE_URL`, with `region=NAME`; its keys come from the environment later.
@@ -982,6 +1008,14 @@ fn notify_targets(
             return Err(format!(
                 "two notification targets are named `{}` ({})",
                 arn.id, arn.kind
+            ));
+        }
+        if let Some(aws) = target.kind.aws_arn()
+            && let Some(other) = out.iter().find(|t| t.kind.aws_arn().as_ref() == Some(&aws))
+        {
+            return Err(format!(
+                "the notification targets `{}` and `{}` are both {aws}",
+                other.id, arn.id
             ));
         }
         let secret = |what: &str| {
@@ -1007,19 +1041,8 @@ fn notify_targets(
                 }
             }
             TargetKind::Nsq(_) => {}
-            TargetKind::Sqs(sqs) => {
-                sqs.credentials = sqs_credentials(&arn.id, secret, &env)?;
-                let same = |t: &TargetConfig| {
-                    matches!(&t.kind, TargetKind::Sqs(other) if other.aws_arn().is_some()
-                        && other.aws_arn() == sqs.aws_arn())
-                };
-                if let Some(other) = out.iter().find(|t| same(t)) {
-                    return Err(format!(
-                        "the SQS targets `{}` and `{}` are the same queue",
-                        other.id, arn.id
-                    ));
-                }
-            }
+            TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(&arn, secret, &env)?,
+            TargetKind::Sns(sns) => sns.credentials = aws_credentials(&arn, secret, &env)?,
             TargetKind::Mqtt(mqtt) => {
                 mqtt.password = secret("PASSWORD");
                 if mqtt.password.is_some() && mqtt.user.is_none() {
@@ -1126,7 +1149,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_nsq)
                 .chain(args.notify_nats)
                 .chain(args.notify_mqtt)
-                .chain(args.notify_sqs),
+                .chain(args.notify_sqs)
+                .chain(args.notify_sns),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1794,6 +1818,53 @@ mod tests {
             "q=https://localhost/1/q,topic=t",
         ] {
             assert!(parse_notify_sqs(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sns_targets_take_a_topic_and_their_keys_from_the_environment() {
+        let sns_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Sns(sns) => sns.clone(),
+            _ => panic!("not SNS"),
+        };
+        let topic = parse_notify_sns("t=arn:aws:sns:eu-west-1:123456789012:events").unwrap();
+        assert_eq!(topic.arn().to_string(), "arn:teifs:sqs::t:sns");
+        assert_eq!(
+            sns_of(&topic).endpoint.as_str(),
+            "https://sns.eu-west-1.amazonaws.com/"
+        );
+        let local = parse_notify_sns(
+            "l=arn:aws:sns:us-east-1:000000000000:events,endpoint=http://localhost:4566",
+        )
+        .unwrap();
+        assert_eq!(sns_of(&local).endpoint.as_str(), "http://localhost:4566/");
+        let env = |name: &str| match name {
+            "TEIFS_NOTIFY_SNS_ACCESS_KEY_T" => Some("AKIDSNS".to_owned()),
+            "TEIFS_NOTIFY_SNS_SECRET_KEY_T" => Some("sns".to_owned()),
+            _ => None,
+        };
+        let targets = notify_targets(vec![topic.clone()], env).unwrap();
+        let keys = sns_of(&targets[0]).credentials.unwrap();
+        assert_eq!(
+            (keys.access_key.as_str(), keys.secret.as_str()),
+            ("AKIDSNS", "sns")
+        );
+        let half = |name: &str| (name == "TEIFS_NOTIFY_SNS_SECRET_KEY_T").then(|| "s".into());
+        assert!(
+            notify_targets(vec![topic.clone()], half)
+                .unwrap_err()
+                .contains("SNS target `t`")
+        );
+        // One topic, two targets: its ARN would name either.
+        let again = parse_notify_sns("u=arn:aws:sns:eu-west-1:123456789012:events").unwrap();
+        assert!(notify_targets(vec![topic, again], |_| None).is_err());
+        for bad in [
+            "t=arn:aws:sqs:eu-west-1:123456789012:q",
+            "t=https://sns.eu-west-1.amazonaws.com/",
+            "t=arn:aws:sns:eu-west-1:123456789012:t,endpoint=ftp://h",
+            "t=arn:aws:sns:eu-west-1:123456789012:t,region=eu-west-2",
+        ] {
+            assert!(parse_notify_sns(bad).is_err(), "{bad}");
         }
     }
 

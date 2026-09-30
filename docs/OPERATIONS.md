@@ -338,7 +338,25 @@ Rules can also name the queue by its own ARN, as on S3:
 `arn:aws:sqs:eu-west-1:123456789012:orders` names the target above, so an existing
 `put-bucket-notification-configuration` works unchanged. The ARN is read from the queue's
 URL (`…/ACCOUNT/NAME`) and region, and `teifs admin config` shows it; the rule keeps the
-ARN it was given. Two targets for the same queue are refused.
+ARN it was given. Two targets for the same queue are refused. A FIFO message group is
+the object's `BUCKET/KEY` when SQS takes it (up to 128 ASCII letters, digits and
+punctuation), else the key's SHA-256, so each object keeps one group.
+
+```sh
+teifs serve --notify-sns uploads=arn:aws:sns:eu-west-1:123456789012:uploads
+export TEIFS_NOTIFY_SNS_ACCESS_KEY_UPLOADS=AKIA… TEIFS_NOTIFY_SNS_SECRET_KEY_UPLOADS=…
+```
+
+An SNS target publishes each event to a topic as S3 does: `Publish` in SNS's Query
+protocol, signed with Signature Version 4, the message S3's `{"Records":[...]}` and the
+subject `Amazon S3 Notification`. Rules name it by the topic's ARN, as on S3 (a
+`TopicConfiguration`), or `arn:teifs:sqs::ID:sns`. Requests go to SNS in the topic's
+region; `endpoint=URL` sends them to another service that speaks SNS's API. A FIFO topic
+(`….fifo`) gets the same groups and deduplication ids as a FIFO queue. The keys come from
+`TEIFS_NOTIFY_SNS_ACCESS_KEY_ID`, `TEIFS_NOTIFY_SNS_SECRET_KEY_ID` and
+`TEIFS_NOTIFY_SNS_SESSION_TOKEN_ID`, else AWS's variables, and need `sns:Publish` on the
+topic. Starting to name it publishes S3's test event, so a topic that doesn't exist
+(`NotFound`) or refused keys are named at once.
 
 ### Rules
 
@@ -452,5 +470,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: SNS and Lambda targets, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
+Not yet: Lambda targets, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
 certificates for webhooks and Elasticsearch.

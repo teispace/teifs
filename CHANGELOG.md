@@ -156,6 +156,10 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- SNS notification targets, as S3's: `teifs serve --notify-sns ID=TOPIC_ARN[,endpoint=URL]`
+  publishes each event to the topic as S3 does (`{"Records":[...]}`, subject `Amazon S3
+  Notification`), with `Publish` signed with Signature Version 4. Rules name it by the
+  topic's ARN, as on S3.
 - SQS notification targets, as S3's: `teifs serve --notify-sqs ID=QUEUE_URL[,region=NAME]`
   sends each event to the queue as S3 does (`{"Records":[...]}`), with `SendMessage`
   signed with Signature Version 4, keys from `TEIFS_NOTIFY_SQS_ACCESS_KEY_ID` and

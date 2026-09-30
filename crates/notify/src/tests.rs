@@ -159,6 +159,8 @@ async fn rules_name_targets_by_our_arns_or_a_queues_own() {
         "arn:teifs:sqs::other:webhook",
         "arn:teifs:sqs::hook:sqs",
         "arn:aws:sqs:eu-west-1:123456789012:other",
+        "arn:aws:sqs:eu-west-2:123456789012:orders",
+        "arn:aws:sqs:eu-west-1:210987654321:orders",
         "arn:aws:sns:eu-west-1:123456789012:orders",
         "",
     ] {
@@ -898,4 +900,86 @@ async fn sqs_is_sent_each_event_as_s3_sends_it() {
         ..keys()
     });
     temporary.send(&client, b"{}").await.unwrap();
+}
+
+#[tokio::test]
+async fn sns_is_published_each_event_as_s3_publishes_it() {
+    use crate::testing::AwsServer;
+    let server = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let keys = || AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: Zeroizing::new("s3cret".into()),
+        session_token: None,
+    };
+    let topic = |name: &str| {
+        let mut sns = Sns::new(
+            &format!("arn:aws:sns:eu-west-1:123456789012:{name}"),
+            Some(server.url()),
+        )
+        .unwrap();
+        sns.credentials = Some(keys());
+        sns
+    };
+    let targets = vec![
+        TargetConfig::new("std", TargetKind::Sns(topic("events"))).unwrap(),
+        TargetConfig::new("fifo", TargetKind::Sns(topic("events.fifo"))).unwrap(),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), targets).unwrap();
+    assert_eq!(
+        notifier
+            .resolve("arn:aws:sns:eu-west-1:123456789012:events.fifo")
+            .map(|t| t.to_string())
+            .as_deref(),
+        Some("arn:teifs:sqs::fifo:sns")
+    );
+    let put = message("s3:ObjectCreated:Put", "photos/a b.jpg");
+    let test = br#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"photos"}"#;
+    for id in ["std", "fifo"] {
+        let arn = TargetArn::parse(&format!("arn:teifs:sqs::{id}:sns")).unwrap();
+        notifier.send_now(&arn, test.to_vec()).await.unwrap();
+        notifier.queue(vec![(arn, put.clone())]).await.unwrap();
+    }
+    let requests = server.requests(4).await;
+    notifier.stop().await;
+    let records = serde_json::from_slice::<serde_json::Value>(&put).unwrap()["Records"].clone();
+    for request in &requests {
+        assert_eq!(request.target, "AmazonSNS.Publish");
+        let form: std::collections::BTreeMap<String, String> =
+            form_urlencoded::parse(request.body.as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(form["Version"], "2010-03-31");
+        assert_eq!(form["Subject"], "Amazon S3 Notification");
+        let fifo = form["TopicArn"].strip_suffix(".fifo").is_some();
+        let message = &form["Message"];
+        if message.contains("s3:TestEvent") {
+            assert_eq!(message.as_bytes(), test);
+        } else {
+            let body: serde_json::Value = serde_json::from_str(message).unwrap();
+            assert_eq!(body, serde_json::json!({ "Records": records }));
+            if fifo {
+                // A key SNS won't take as a group is grouped by its digest.
+                assert_eq!(form["MessageGroupId"].len(), 64);
+            }
+        }
+        assert_eq!(fifo, form.contains_key("MessageDeduplicationId"));
+    }
+
+    let client = reqwest::Client::new();
+    let gone = topic("gone");
+    server.missing(&gone.topic_arn);
+    let missing = gone.send(&client, b"{}").await.unwrap_err();
+    assert!(
+        missing.contains("NotFound (Topic does not exist)"),
+        "{missing}"
+    );
+    server.wrong_digest(true);
+    let odd = topic("events").send(&client, b"{}").await.unwrap_err();
+    assert!(odd.contains("no message id"), "{odd}");
+    server.wrong_digest(false);
+    let mut elsewhere = topic("events");
+    elsewhere.region = "us-east-1".into();
+    let refused = elsewhere.send(&client, b"{}").await.unwrap_err();
+    assert!(refused.contains("SignatureDoesNotMatch"), "{refused}");
 }

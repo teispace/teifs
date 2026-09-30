@@ -970,16 +970,19 @@ async fn mqtt_serve(
 /// A request an [`AwsServer`] took.
 #[derive(Debug, Clone)]
 pub struct AwsRequest {
-    /// Its `X-Amz-Target`, for the JSON protocols.
+    /// Its `X-Amz-Target` for the JSON protocols, `AmazonSNS.Publish` for SNS's.
     pub target: String,
     /// Its path.
     pub path: String,
     /// Its body.
     pub body: String,
+    /// The message it sends: SQS's `MessageBody`, SNS's `Message`.
+    pub message: String,
 }
 
-/// A server that answers as AWS's SQS does (`SendMessage` in its JSON protocol), and
-/// takes only requests signed with its keys for its region.
+/// A server that answers as AWS's SQS (`SendMessage` in its JSON protocol) and SNS
+/// (`Publish` in its Query protocol) do, and takes only requests signed with its keys for
+/// its region.
 pub struct AwsServer {
     url: String,
     state: Arc<AwsState>,
@@ -992,6 +995,17 @@ struct AwsState {
     requests: Mutex<Vec<AwsRequest>>,
     missing: Mutex<Vec<String>>,
     wrong_digest: std::sync::atomic::AtomicBool,
+}
+
+impl AwsState {
+    /// Whether the queue or topic `name` was said not to exist.
+    fn is_missing(&self, name: &str) -> bool {
+        self.missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|m| m == name)
+    }
 }
 
 impl AwsServer {
@@ -1037,7 +1051,7 @@ impl AwsServer {
         &self.url
     }
 
-    /// Answers that the queue at `queue_url` doesn't exist.
+    /// Answers that the queue at `queue_url`, or the topic with that ARN, doesn't exist.
     pub fn missing(&self, queue_url: &str) {
         self.state
             .missing
@@ -1046,7 +1060,8 @@ impl AwsServer {
             .push(queue_url.to_owned());
     }
 
-    /// Answers with a digest that doesn't match what was sent.
+    /// Answers wrongly: SQS with a digest that doesn't match what was sent, SNS without
+    /// a message id.
     pub fn wrong_digest(&self, wrong: bool) {
         self.state.wrong_digest.store(wrong, Ordering::SeqCst);
     }
@@ -1140,14 +1155,6 @@ async fn aws_answer(
     base: String,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, Infallible> {
-    use md5::Digest as _;
-    let reply = |status: u16, body: String| {
-        Ok(hyper::Response::builder()
-            .status(status)
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
-            .expect("a valid response"))
-    };
     let header = |name: &str| {
         req.headers()
             .get(name)
@@ -1179,30 +1186,126 @@ async fn aws_answer(
         .await
         .map(|b| b.to_bytes().to_vec())
         .unwrap_or_default();
+    let form: std::collections::BTreeMap<String, String> =
+        form_urlencoded::parse(&body).into_owned().collect();
+    let sns = form.get("Action").is_some_and(|a| a == "Publish");
     let service = if target.starts_with("AmazonSQS.") {
         "sqs"
+    } else if sns {
+        "sns"
     } else {
         "unknown"
     };
     let url = format!("{base}{path}");
     let token = (!token.is_empty()).then_some(token.as_str());
-    if aws_expected(&state, service, &url, &headers, &date, token, &body).as_deref()
-        != Some(authorization.as_str())
-    {
-        return reply(
+    let signed = aws_expected(&state, service, &url, &headers, &date, token, &body).as_deref()
+        == Some(authorization.as_str());
+    if sns {
+        return sns_answer(&state, signed, path, &body, &form);
+    }
+    sqs_answer(&state, signed, &target, path, &body)
+}
+
+/// SNS's answer to a `Publish`, `signed` or not.
+fn sns_answer(
+    state: &AwsState,
+    signed: bool,
+    path: String,
+    body: &[u8],
+    form: &std::collections::BTreeMap<String, String>,
+) -> Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, Infallible> {
+    let xml = |status: u16, body: String| {
+        Ok(hyper::Response::builder()
+            .status(status)
+            .header("content-type", "text/xml")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .expect("a valid response"))
+    };
+    let error = |status, code: &str, message: &str| {
+        xml(
+            status,
+            format!(
+                "<ErrorResponse xmlns=\"https://sns.amazonaws.com/doc/2010-03-31/\"><Error>\
+                 <Type>Sender</Type><Code>{code}</Code><Message>{message}</Message></Error>\
+                 <RequestId>1</RequestId></ErrorResponse>"
+            ),
+        )
+    };
+    if !signed {
+        return error(
             403,
-            r#"{"__type":"com.amazon.coral.service#InvalidSignatureException","message":"The request signature we calculated does not match the signature you provided."}"#.to_owned(),
+            "SignatureDoesNotMatch",
+            "The request signature we calculated does not match the signature you provided.",
         );
     }
-    let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
     state
         .requests
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(AwsRequest {
-            target: target.clone(),
+            target: "AmazonSNS.Publish".to_owned(),
             path,
-            body: String::from_utf8_lossy(&body).into_owned(),
+            body: String::from_utf8_lossy(body).into_owned(),
+            message: form.get("Message").cloned().unwrap_or_default(),
+        });
+    let topic = form.get("TopicArn").map_or("", String::as_str);
+    if state.is_missing(topic) {
+        return error(404, "NotFound", "Topic does not exist");
+    }
+    let fifo = topic.strip_suffix(".fifo").is_some();
+    if fifo != form.contains_key("MessageGroupId") {
+        return error(400, "InvalidParameter", "Invalid parameter: MessageGroupId");
+    }
+    if state.wrong_digest.load(Ordering::SeqCst) {
+        return xml(
+            200,
+            "<PublishResponse><PublishResult/></PublishResponse>".to_owned(),
+        );
+    }
+    xml(
+        200,
+        "<PublishResponse xmlns=\"https://sns.amazonaws.com/doc/2010-03-31/\"><PublishResult>\
+         <MessageId>94f20ce6-13c5-43a0-9a9e-ca52d816e90b</MessageId></PublishResult>\
+         <ResponseMetadata><RequestId>1</RequestId></ResponseMetadata></PublishResponse>"
+            .to_owned(),
+    )
+}
+
+/// SQS's answer to a request in its JSON protocol, `signed` or not.
+fn sqs_answer(
+    state: &AwsState,
+    signed: bool,
+    target: &str,
+    path: String,
+    body: &[u8],
+) -> Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, Infallible> {
+    use md5::Digest as _;
+    let reply = |status: u16, body: String| {
+        Ok(hyper::Response::builder()
+            .status(status)
+            .header("content-type", "application/x-amz-json-1.0")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .expect("a valid response"))
+    };
+    if !signed {
+        return reply(
+            403,
+            r#"{"__type":"com.amazon.coral.service#InvalidSignatureException","message":"The request signature we calculated does not match the signature you provided."}"#.to_owned(),
+        );
+    }
+    let request: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    state
+        .requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(AwsRequest {
+            target: target.to_owned(),
+            path,
+            body: String::from_utf8_lossy(body).into_owned(),
+            message: request["MessageBody"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
         });
     if target != "AmazonSQS.SendMessage" {
         return reply(
@@ -1210,14 +1313,7 @@ async fn aws_answer(
             r#"{"__type":"com.amazonaws.sqs#UnsupportedOperation","message":"no"}"#.to_owned(),
         );
     }
-    let queue = request["QueueUrl"].as_str().unwrap_or_default();
-    if state
-        .missing
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .any(|q| q == queue)
-    {
+    if state.is_missing(request["QueueUrl"].as_str().unwrap_or_default()) {
         return reply(
             400,
             r#"{"__type":"com.amazonaws.sqs#QueueDoesNotExist","message":"The specified queue does not exist."}"#.to_owned(),
@@ -1228,14 +1324,12 @@ async fn aws_answer(
     if state.wrong_digest.load(Ordering::SeqCst) {
         digest[0] ^= 1;
     }
-    let hex = digest.iter().fold(String::new(), |mut out, b| {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-        out
-    });
     reply(
         200,
-        serde_json::json!({ "MD5OfMessageBody": hex, "MessageId": "5fea7756-0ea4-451a-a703-a558b933e274" })
-            .to_string(),
+        serde_json::json!({
+            "MD5OfMessageBody": crate::aws::hex(&digest),
+            "MessageId": "5fea7756-0ea4-451a-a703-a558b933e274",
+        })
+        .to_string(),
     )
 }
