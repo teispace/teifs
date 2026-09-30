@@ -174,9 +174,19 @@ fn decoded(value: &str) -> String {
 pub struct NotificationConfig {
     /// Its rules, in the order they were given.
     pub rules: Vec<NotificationRule>,
+    /// Whether every event goes to the server's EventBridge bus as well, as S3's
+    /// `EventBridgeConfiguration` asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub event_bridge: bool,
 }
 
 impl NotificationConfig {
+    /// Whether it sends nothing: no rules, and EventBridge off.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty() && !self.event_bridge
+    }
+
     /// The rules that send `event` for `key`.
     pub fn matching<'a>(
         &'a self,
@@ -595,7 +605,11 @@ mod tests {
     }
 
     fn check(rules: Vec<NotificationRule>) -> Result<(), NotifyError> {
-        NotificationConfig { rules }.check(|arn| TargetArn::parse(arn).filter(|t| t.id == "hook"))
+        NotificationConfig {
+            rules,
+            event_bridge: false,
+        }
+        .check(|arn| TargetArn::parse(arn).filter(|t| t.id == "hook"))
     }
 
     #[test]

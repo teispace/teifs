@@ -977,12 +977,13 @@ pub struct AwsRequest {
     pub path: String,
     /// Its body.
     pub body: String,
-    /// The message it sends: SQS's `MessageBody`, SNS's `Message`.
+    /// The message it sends: SQS's `MessageBody`, SNS's `Message`, Lambda's payload,
+    /// EventBridge's `Entries`.
     pub message: String,
 }
 
 /// A server that answers as AWS's SQS (`SendMessage` in its JSON protocol), SNS
-/// (`Publish` in its Query protocol) and Lambda (`Invoke`) do, and takes only requests signed with its keys for
+/// (`Publish` in its Query protocol), Lambda (`Invoke`) and EventBridge (`PutEvents`) do, and takes only requests signed with its keys for
 /// its region.
 pub struct AwsServer {
     url: String,
@@ -1063,7 +1064,8 @@ impl AwsServer {
     }
 
     /// Answers wrongly: SQS with a digest that doesn't match what was sent, SNS without
-    /// a message id, Lambda with the status of a synchronous call.
+    /// a message id, Lambda with the status of a synchronous call, EventBridge failing
+    /// each entry.
     pub fn wrong_digest(&self, wrong: bool) {
         self.state.wrong_digest.store(wrong, Ordering::SeqCst);
     }
@@ -1195,6 +1197,8 @@ async fn aws_answer(
     let lambda = path.starts_with("/2015-03-31/functions/");
     let service = if target.starts_with("AmazonSQS.") {
         "sqs"
+    } else if target.starts_with("AWSEvents.") {
+        "events"
     } else if lambda {
         "lambda"
     } else if sns {
@@ -1211,6 +1215,9 @@ async fn aws_answer(
     }
     if lambda {
         return Ok(lambda_answer(&state, signed, &invocation, path, &body));
+    }
+    if target == "AWSEvents.PutEvents" {
+        return Ok(events_answer(&state, signed, path, &body));
     }
     sqs_answer(&state, signed, &target, path, &body)
 }
@@ -1414,4 +1421,71 @@ fn lambda_answer(
             )),
         ),
     }
+}
+
+/// EventBridge's answer to a `PutEvents`, `signed` or not: an entry for a bus said not to
+/// exist fails, as EventBridge fails entries one by one.
+fn events_answer(
+    state: &AwsState,
+    signed: bool,
+    path: String,
+    body: &[u8],
+) -> hyper::Response<http_body_util::Full<hyper::body::Bytes>> {
+    let answer = |status: u16, body: serde_json::Value| {
+        hyper::Response::builder()
+            .status(status)
+            .header("content-type", "application/x-amz-json-1.1")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                body.to_string(),
+            )))
+            .expect("a valid response")
+    };
+    if !signed {
+        return answer(
+            400,
+            serde_json::json!({
+                "__type": "InvalidSignatureException",
+                "message": "The request signature we calculated does not match the signature you provided.",
+            }),
+        );
+    }
+    let request: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    state
+        .requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(AwsRequest {
+            target: "AWSEvents.PutEvents".to_owned(),
+            path,
+            body: String::from_utf8_lossy(body).into_owned(),
+            message: request["Entries"].to_string(),
+        });
+    let wrong = state.wrong_digest.load(Ordering::SeqCst);
+    let entries: Vec<serde_json::Value> = request["Entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| {
+            let bus = entry["EventBusName"].as_str().unwrap_or_default();
+            if state.is_missing(bus) {
+                serde_json::json!({
+                    "ErrorCode": "ResourceNotFoundException",
+                    "ErrorMessage": format!("Event bus {bus} does not exist."),
+                })
+            } else if wrong {
+                serde_json::json!({ "ErrorCode": "InternalFailure", "ErrorMessage": "try again" })
+            } else {
+                serde_json::json!({ "EventId": "11710aed-b79e-4468-a20b-bb3c0c3b4860" })
+            }
+        })
+        .collect();
+    let failed = entries
+        .iter()
+        .filter(|e| e["ErrorCode"].is_string())
+        .count();
+    answer(
+        200,
+        serde_json::json!({ "FailedEntryCount": failed, "Entries": entries }),
+    )
 }

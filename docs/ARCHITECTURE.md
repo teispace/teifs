@@ -55,9 +55,11 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
                                `Server::bind` / `run`, which the command and embedders
                                use.
 crates/notify   teifs-notify   Bucket notifications' delivery: the server's targets
-                               (webhooks), the queue on the drive (events.db, SQLite)
+                               (webhooks, Elasticsearch, Redis, NSQ, NATS, MQTT, and
+                               AWS's SQS, SNS, Lambda and EventBridge, signed in
+                               `aws.rs`), the queue on the drive (events.db, SQLite)
                                and a sender per target; the webhook code the audit log
-                               shares; a test receiver behind the `testing` feature.
+                               shares; test doubles behind the `testing` feature.
 crates/client   teifs-client   A typed client for the admin API (reqwest, Signature V4),
                                for `teifs admin` and apps that manage a server.
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
@@ -302,8 +304,10 @@ Bucket notifications: a bucket's rules (`teifs_types::notify`: event names, the
 overlap rule, target ARNs) are checked in `notification.rs` and kept with the bucket's
 settings, read once into memory (`SettingCache`, as lifecycle rules are). After an
 operation succeeds, `drive.rs` tells `events.rs` what happened to which objects; when the
-server has targets, the rules that match pick the targets, and each event (S3's record
-in MinIO's envelope) is queued by `teifs-notify` in one SQLite transaction before the
+server has targets, the rules that match pick the targets (`Notifier::resolve` reads a
+rule's ARN: ours, MinIO's, or an AWS queue's, topic's or function's own), a bucket with
+EventBridge on adds the server's bus for the events S3 sends there, and each event (S3's
+record in MinIO's envelope; AWS targets unwrap it as S3 sends to them) is queued by `teifs-notify` in one SQLite transaction before the
 request is answered. Each target's sender reads its events in order and deletes them once
 taken, retrying with the audit webhook's backoff. The store's lifecycle job reports what
 it removes through the `Expirations` hook, which `events.rs` implements, so expirations

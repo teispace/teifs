@@ -448,6 +448,12 @@ impl Import<'_> {
         config
             .check(|arn| self.notifier.resolve(arn))
             .map_err(|err| invalid(err.to_string()))?;
+        if config.event_bridge && self.notifier.event_bridge().is_none() {
+            return Err(invalid(
+                "the bucket sends its events to EventBridge, which this server doesn't have"
+                    .to_owned(),
+            ));
+        }
         self.store
             .set_bucket_notifications(self.bucket, Some(config))
             .await

@@ -400,14 +400,14 @@ impl Store {
         .await
     }
 
-    /// Replaces a bucket's notification rules (checked by the caller); `None` or no
-    /// rules removes them.
+    /// Replaces a bucket's notification rules (checked by the caller); `None`, or no rules
+    /// and EventBridge off, removes them.
     pub async fn set_bucket_notifications(
         &self,
         bucket: &str,
         rules: Option<NotificationConfig>,
     ) -> Result<()> {
-        let rules = rules.filter(|config| !config.rules.is_empty());
+        let rules = rules.filter(|config| !config.is_empty());
         self.change_config(bucket, move |config| config.notifications = rules)
             .await
     }

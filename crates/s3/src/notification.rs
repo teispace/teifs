@@ -4,16 +4,19 @@
 use s3s::{S3Result, dto, s3_error};
 use teifs_types::notify::{DestinationKind, NotificationConfig, NotificationRule, TargetArn};
 
-/// The rules a configuration gives, checked, with `resolve` giving the target an ARN names.
-/// A rule without an id gets one, as on S3.
+/// The rules a configuration gives, checked, with `resolve` giving the target an ARN names
+/// and `bus` saying whether the server has an EventBridge bus. A rule without an id gets
+/// one, as on S3.
 pub(crate) fn from_dto(
     config: dto::NotificationConfiguration,
     resolve: impl Fn(&str) -> Option<TargetArn>,
+    bus: bool,
 ) -> S3Result<NotificationConfig> {
-    if config.event_bridge_configuration.is_some() {
+    let event_bridge = config.event_bridge_configuration.is_some();
+    if event_bridge && !bus {
         return Err(s3_error!(
-            NotImplemented,
-            "EventBridge isn't available: name one of the server's targets instead"
+            InvalidArgument,
+            "EventBridge isn't set up on this server: start it with --notify-eventbridge"
         ));
     }
     let mut rules = Vec::new();
@@ -44,7 +47,10 @@ pub(crate) fn from_dto(
             function.filter,
         )?);
     }
-    let config = NotificationConfig { rules };
+    let config = NotificationConfig {
+        rules,
+        event_bridge,
+    };
     config
         .check(resolve)
         .map_err(|err| s3_error!(InvalidArgument, "{err}"))?;
@@ -101,6 +107,9 @@ pub(crate) fn to_dto(
     config: Option<&NotificationConfig>,
 ) -> dto::GetBucketNotificationConfigurationOutput {
     let mut out = dto::GetBucketNotificationConfigurationOutput::default();
+    if config.is_some_and(|c| c.event_bridge) {
+        out.event_bridge_configuration = Some(dto::EventBridgeConfiguration::default());
+    }
     for rule in config.map_or(&[][..], |c| &c.rules) {
         let (id, events, filter) = (
             Some(rule.id.clone()),
@@ -239,6 +248,7 @@ mod tests {
                 &[("prefix", "images/"), ("Suffix", ".jpg")],
             )]),
             known,
+            false,
         )
         .unwrap();
         let rule = &read.rules[0];
@@ -269,26 +279,26 @@ mod tests {
     #[test]
     fn bad_configurations_are_refused_as_s3_refuses_them() {
         let bad_name = config(vec![queue(None, &[("infix", "x")])]);
-        assert_eq!(code(from_dto(bad_name, known)), "InvalidArgument");
+        assert_eq!(code(from_dto(bad_name, known, false)), "InvalidArgument");
         let twice = config(vec![queue(None, &[("prefix", "a"), ("Prefix", "b")])]);
-        assert_eq!(code(from_dto(twice, known)), "InvalidArgument");
+        assert_eq!(code(from_dto(twice, known, false)), "InvalidArgument");
         let overlapping = config(vec![
             queue(Some("1"), &[("prefix", "a")]),
             queue(Some("2"), &[("prefix", "ab")]),
         ]);
-        assert_eq!(code(from_dto(overlapping, known)), "InvalidArgument");
+        assert_eq!(code(from_dto(overlapping, known, false)), "InvalidArgument");
         let unknown = config(vec![queue(None, &[])]);
-        assert_eq!(code(from_dto(unknown, |_| None)), "InvalidArgument");
-        let bridge = dto::NotificationConfiguration {
-            event_bridge_configuration: Some(dto::EventBridgeConfiguration {}),
-            ..Default::default()
-        };
-        assert_eq!(code(from_dto(bridge, known)), "NotImplemented");
+        assert_eq!(code(from_dto(unknown, |_| None, false)), "InvalidArgument");
     }
 
     #[test]
     fn only_targets_a_rule_starts_naming_are_tested() {
-        let one = from_dto(config(vec![queue(Some("1"), &[("prefix", "a/")])]), known).unwrap();
+        let one = from_dto(
+            config(vec![queue(Some("1"), &[("prefix", "a/")])]),
+            known,
+            false,
+        )
+        .unwrap();
         let mut two = one.clone();
         let mut other = two.rules[0].clone();
         other.id = "2".into();
@@ -308,5 +318,20 @@ mod tests {
         renamed.rules[0].arn = "arn:aws:sqs:us-east-1:123456789012:primary".into();
         let aws = |s: &str| any(s).or_else(|| (s == renamed.rules[0].arn).then(|| arn(ARN)));
         assert!(new_targets(&renamed, Some(&one), aws).is_empty());
+    }
+
+    #[test]
+    fn event_bridge_is_turned_on_when_the_server_has_a_bus() {
+        let on = || dto::NotificationConfiguration {
+            event_bridge_configuration: Some(dto::EventBridgeConfiguration::default()),
+            ..Default::default()
+        };
+        assert_eq!(code(from_dto(on(), known, false)), "InvalidArgument");
+        let config = from_dto(on(), known, true).unwrap();
+        assert!(config.event_bridge && config.rules.is_empty());
+        assert!(to_dto(Some(&config)).event_bridge_configuration.is_some());
+        let off = from_dto(dto::NotificationConfiguration::default(), known, true).unwrap();
+        assert!(!off.event_bridge);
+        assert!(to_dto(Some(&off)).event_bridge_configuration.is_none());
     }
 }

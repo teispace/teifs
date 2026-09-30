@@ -25,10 +25,10 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, Format,
-    JobOptions, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server,
-    Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
-    credentials, tls_config,
+    AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, EventBridge,
+    Format, JobOptions, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis,
+    Server, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey,
+    Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -366,6 +366,21 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_LAMBDA"
     )]
     notify_lambda: Vec<TargetConfig>,
+    /// The EventBridge event bus buckets send every event to once EventBridge is turned
+    /// on for them (`EventBridgeConfiguration`), as S3 does, as `ID=BUS_ARN`
+    /// (`arn:aws:events:REGION:ACCOUNT:event-bus/default`), with source=NAME (`teifs.s3`
+    /// by default: EventBridge keeps `aws.` sources for AWS's services) and endpoint=URL
+    /// for a service other than AWS's. Requests are signed with
+    /// `TEIFS_NOTIFY_EVENTBRIDGE_ACCESS_KEY_ID`, `TEIFS_NOTIFY_EVENTBRIDGE_SECRET_KEY_ID`
+    /// and `TEIFS_NOTIFY_EVENTBRIDGE_SESSION_TOKEN_ID`, else `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, read only from the environment.
+    #[arg(
+        long = "notify-eventbridge",
+        value_name = "ID=BUS_ARN",
+        value_parser = parse_notify_eventbridge,
+        env = "TEIFS_NOTIFY_EVENTBRIDGE"
+    )]
+    notify_eventbridge: Option<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -959,7 +974,7 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
-/// An SQS, SNS or Lambda target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
+/// An SQS, SNS, Lambda or EventBridge target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
 /// `…_SECRET_KEY_ID`, `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if
 /// neither.
 fn aws_credentials(
@@ -995,6 +1010,22 @@ fn aws_credentials(
             arn.id
         )),
     }
+}
+
+/// `ID=BUS_ARN`, with `endpoint=URL` and `source=NAME`; its keys come from the
+/// environment later.
+fn parse_notify_eventbridge(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(
+        text,
+        "ID=BUS_ARN,endpoint=URL,source=NAME",
+        &["endpoint", "source"],
+    )?;
+    let bus = EventBridge::new(
+        address,
+        options.get("endpoint").copied(),
+        options.get("source").copied(),
+    )?;
+    TargetConfig::new(id, TargetKind::EventBridge(bus))
 }
 
 /// `ID=FUNCTION_ARN`, with `endpoint=URL`; its keys come from the environment later.
@@ -1068,6 +1099,9 @@ fn notify_targets(
             TargetKind::Sns(sns) => sns.credentials = aws_credentials(&arn, secret, &env)?,
             TargetKind::Lambda(lambda) => {
                 lambda.credentials = aws_credentials(&arn, secret, &env)?;
+            }
+            TargetKind::EventBridge(bus) => {
+                bus.credentials = aws_credentials(&arn, secret, &env)?;
             }
             TargetKind::Mqtt(mqtt) => {
                 mqtt.password = secret("PASSWORD");
@@ -1177,7 +1211,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_mqtt)
                 .chain(args.notify_sqs)
                 .chain(args.notify_sns)
-                .chain(args.notify_lambda),
+                .chain(args.notify_lambda)
+                .chain(args.notify_eventbridge),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1924,6 +1959,37 @@ mod tests {
             "f=arn:aws:lambda:eu-west-1:123456789012:function:t,region=eu-west-2",
         ] {
             assert!(parse_notify_lambda(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_eventbridge_bus_takes_a_source_and_its_keys_from_the_environment() {
+        let bus_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::EventBridge(bus) => bus.clone(),
+            _ => panic!("not EventBridge"),
+        };
+        let bus = parse_notify_eventbridge(
+            "eb=arn:aws:events:eu-west-1:123456789012:event-bus/default,source=acme.s3",
+        )
+        .unwrap();
+        assert_eq!(bus.arn().to_string(), "arn:teifs:sqs::eb:eventbridge");
+        assert_eq!(bus_of(&bus).source, "acme.s3");
+        let env = |name: &str| match name {
+            "TEIFS_NOTIFY_EVENTBRIDGE_ACCESS_KEY_EB" => Some("AKIDEB".to_owned()),
+            "TEIFS_NOTIFY_EVENTBRIDGE_SECRET_KEY_EB" => Some("eb".to_owned()),
+            _ => None,
+        };
+        let targets = notify_targets(vec![bus], env).unwrap();
+        assert_eq!(
+            bus_of(&targets[0]).credentials.unwrap().access_key,
+            "AKIDEB"
+        );
+        for bad in [
+            "eb=default",
+            "eb=arn:aws:events:eu-west-1:123456789012:event-bus/default,source=aws.s3",
+            "eb=arn:aws:events:eu-west-1:123456789012:event-bus/default,region=eu-west-2",
+        ] {
+            assert!(parse_notify_eventbridge(bad).is_err(), "{bad}");
         }
     }
 

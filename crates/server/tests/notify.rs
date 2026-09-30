@@ -85,11 +85,10 @@ async fn events(receiver: &Receiver, count: usize) -> Vec<EventMessage> {
     panic!("the webhook never had {count} events");
 }
 
-/// Checks the target's figures in the metrics, once none of its events wait.
-async fn target_metrics(server: &Server, wanted: &[(&str, u64)]) {
+/// Checks the figures of `target` (its ARN) in the metrics, once none of its events wait.
+async fn target_metrics(server: &Server, target: &str, wanted: &[(&str, u64)]) {
     let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
-    let series =
-        |name: &str| format!("teifs_notify_{name}{{target=\"arn:teifs:sqs::primary:webhook\"}} ");
+    let series = |name: &str| format!("teifs_notify_{name}{{target=\"{target}\"}} ");
     let mut scraped = String::new();
     for _ in 0..100 {
         scraped = reqwest::Client::new()
@@ -195,6 +194,7 @@ async fn a_write_is_sent_as_s3_describes_it() {
 
     target_metrics(
         &server,
+        "arn:teifs:sqs::primary:webhook",
         &[
             ("sent_total", 1),
             ("failed_total", 0),
@@ -408,7 +408,8 @@ async fn bad_configurations_change_nothing() {
         )
         .send()
         .await;
-    assert_eq!(code(bridge), "NotImplemented");
+    // This server has no EventBridge bus.
+    assert_eq!(code(bridge), "InvalidArgument");
 
     receiver.fail(1);
     let refused = configure(&s3, vec![queue(None, created, None)]).await;
@@ -701,4 +702,180 @@ async fn function_rules_invoke_lambda() {
     assert_eq!(requests[1].target, "Lambda.Invoke:Event");
     let event: serde_json::Value = serde_json::from_str(&requests[1].message).unwrap();
     assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
+}
+
+/// The bus [`event_bridge_gets_every_event_as_s3_sends_it`] sends to.
+const BUS: &str = "arn:aws:events:eu-west-1:123456789012:event-bus/default";
+
+/// A server with an EventBridge bus (on an AWS double) and a webhook.
+async fn bridge_server() -> (teifs_notify::testing::AwsServer, Receiver, Server) {
+    use teifs_notify::testing::AwsServer;
+    use teifs_server::{AwsCredentials, EventBridge};
+    let aws = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let mut bus = EventBridge::new(BUS, Some(aws.url()), None).unwrap();
+    bus.credentials = Some(AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: "s3cret".to_owned().into(),
+        session_token: None,
+    });
+    let receiver = Receiver::start(0).await;
+    let hook = Webhook::new(receiver.url(), None).unwrap();
+    let targets = vec![
+        TargetConfig::new("bus", TargetKind::EventBridge(bus)).unwrap(),
+        TargetConfig::new("primary", TargetKind::Webhook(hook)).unwrap(),
+    ];
+    let server = start_with(|config| config.notify = targets).await;
+    (aws, receiver, server)
+}
+
+/// Makes `quiet`, whose rule sends to the webhook and which has EventBridge off, after
+/// checking a rule can't name the bus.
+async fn quiet_bucket(s3: &Client) {
+    s3.create_bucket().bucket("quiet").send().await.unwrap();
+    // A rule can't name the bus: EventBridge is turned on per bucket.
+    let bus_rule = QueueConfiguration::builder()
+        .queue_arn("arn:teifs:sqs::bus:eventbridge")
+        .events(Event::from("s3:ObjectCreated:*"))
+        .build()
+        .unwrap();
+    assert_eq!(
+        s3.put_bucket_notification_configuration()
+            .bucket("quiet")
+            .notification_configuration(
+                NotificationConfiguration::builder()
+                    .queue_configurations(bus_rule)
+                    .build(),
+            )
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| code::<(), _>(Err(e)))
+            .unwrap_err(),
+        "InvalidArgument"
+    );
+    s3.put_bucket_notification_configuration()
+        .bucket("quiet")
+        .notification_configuration(
+            NotificationConfiguration::builder()
+                .queue_configurations(queue(None, &["s3:ObjectCreated:*"], None))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// With EventBridge turned on, a bucket sends every event S3 sends there to the server's
+/// bus, as S3's `detail-type` and `detail`, whatever its rules say.
+#[tokio::test]
+async fn event_bridge_gets_every_event_as_s3_sends_it() {
+    use aws_sdk_s3::types::EventBridgeConfiguration;
+    let (aws, receiver, server) = bridge_server().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    quiet_bucket(&s3).await;
+    s3.put_bucket_notification_configuration()
+        .bucket("bkt")
+        .notification_configuration(
+            NotificationConfiguration::builder()
+                .event_bridge_configuration(EventBridgeConfiguration::builder().build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("bkt")
+        .send()
+        .await
+        .unwrap();
+    assert!(read.event_bridge_configuration().is_some());
+
+    s3.put_object()
+        .bucket("bkt")
+        .key("photos/a b.jpg")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+    s3.get_object()
+        .bucket("bkt")
+        .key("photos/a b.jpg")
+        .send()
+        .await
+        .unwrap();
+    s3.put_object_tagging()
+        .bucket("bkt")
+        .key("photos/a b.jpg")
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("k").value("v").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.delete_object()
+        .bucket("bkt")
+        .key("photos/a b.jpg")
+        .send()
+        .await
+        .unwrap();
+    // A bucket with rules but without EventBridge sends nothing there.
+    s3.put_object()
+        .bucket("quiet")
+        .key("a")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    // Only what S3 sends to EventBridge is queued for it: not the read.
+    target_metrics(
+        &server,
+        "arn:teifs:sqs::bus:eventbridge",
+        &[("sent_total", 3), ("failed_total", 0)],
+    )
+    .await;
+    events(&receiver, 1).await;
+    let requests = aws.requests(3).await;
+    check_bridge_entries(&requests);
+}
+
+/// The entries [`event_bridge_gets_every_event_as_s3_sends_it`] sent, one per request.
+fn check_bridge_entries(requests: &[teifs_notify::testing::AwsRequest]) {
+    let entries: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|r| serde_json::from_str::<serde_json::Value>(&r.message).unwrap()[0].clone())
+        .collect();
+    assert_eq!(entries.len(), 3, "reads aren't sent");
+    let types: Vec<&str> = entries
+        .iter()
+        .map(|e| e["DetailType"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        ["Object Created", "Object Tags Added", "Object Deleted"]
+    );
+    for entry in &entries {
+        assert_eq!(entry["Source"], "teifs.s3");
+        assert_eq!(entry["EventBusName"], BUS);
+        assert_eq!(entry["Resources"][0], "arn:aws:s3:::bkt");
+    }
+    let created: serde_json::Value =
+        serde_json::from_str(entries[0]["Detail"].as_str().unwrap()).unwrap();
+    assert_eq!(created["version"], "0");
+    assert_eq!(created["bucket"]["name"], "bkt");
+    assert_eq!(
+        created["object"]["key"], "photos/a b.jpg",
+        "not URL-encoded"
+    );
+    assert_eq!(created["object"]["size"], 5);
+    assert_eq!(created["reason"], "PutObject");
+    assert!(created["source-ip-address"].is_string());
+    let deleted: serde_json::Value =
+        serde_json::from_str(entries[2]["Detail"].as_str().unwrap()).unwrap();
+    assert_eq!(deleted["reason"], "DeleteObject");
+    assert_eq!(deleted["deletion-type"], "Permanently Deleted");
 }

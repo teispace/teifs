@@ -374,6 +374,28 @@ starting to name it makes a `DryRun` invocation, which checks the keys may invok
 without running it, so a function that doesn't exist (`ResourceNotFoundException`) or
 refused keys are named at once.
 
+```sh
+teifs serve --notify-eventbridge bus=arn:aws:events:eu-west-1:123456789012:event-bus/default
+aws s3api put-bucket-notification-configuration --bucket photos \
+  --notification-configuration '{"EventBridgeConfiguration":{}}'
+```
+
+EventBridge works as on S3: the server has one event bus, and a bucket whose
+configuration has `EventBridgeConfiguration` sends it every event S3 sends there, besides
+what its rules send and without choosing events: `Object Created` (with `reason`
+`PutObject`, `POST Object`, `CopyObject` or `CompleteMultipartUpload`), `Object Deleted`
+(`DeleteObject` or `Lifecycle Expiration`, with `deletion-type` `Permanently Deleted` or
+`Delete Marker Created`), `Object Tags Added`, `Object Tags Deleted`, `Object ACL Updated`
+and `Object Retention Updated`, each with S3's `detail` (the key not URL-encoded). They're
+sent with `PutEvents`, signed with Signature Version 4, and an entry EventBridge fails is
+retried. Only AWS's services may send events whose source starts with `aws.`, so the
+source is `teifs.s3` (`source=NAME` for another): a rule written for S3's events matches
+them once its `source` names it. Keys come from `TEIFS_NOTIFY_EVENTBRIDGE_ACCESS_KEY_ID`,
+`…_SECRET_KEY_ID` and `…_SESSION_TOKEN_ID`, else AWS's variables, and need
+`events:PutEvents` on the bus; `endpoint=URL` sends to another service. Turning it on
+where the server has no bus is refused (`400 InvalidArgument`), and rules can't name the
+bus.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -405,8 +427,8 @@ event for the same key (they share an event and their prefixes and suffixes over
 rule without an id gets one. Each target a rule starts naming is sent S3's test event
 first (`{"Service":"TeiFS","Event":"s3:TestEvent",…}`), and one that doesn't take it
 fails the request and nothing changes, unless the request sends
-`x-amz-skip-destination-validation: true`. An empty configuration removes the rules;
-EventBridge is `501 NotImplemented`. Bucket exports carry the rules, and an import checks
+`x-amz-skip-destination-validation: true`. An empty configuration removes the rules
+and turns EventBridge off. Bucket exports carry the rules, and an import checks
 them against the new server's targets.
 
 | Event | When |

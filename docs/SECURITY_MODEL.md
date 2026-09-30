@@ -246,8 +246,8 @@ targets' secrets are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`,
 `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`,
 `TEIFS_NOTIFY_NATS_PASSWORD_ID` or `_TOKEN_ID`, `TEIFS_NOTIFY_MQTT_PASSWORD_ID`), sent as
 sensitive headers, Redis's `AUTH`, or NATS's or MQTT's `CONNECT` (built in memory that's
-wiped), and never shown; a URL with a user or password in it is refused. An SQS, SNS or
-Lambda target's secret key (`TEIFS_NOTIFY_KIND_SECRET_KEY_ID`, else
+wiped), and never shown; a URL with a user or password in it is refused. An SQS, SNS,
+Lambda or EventBridge target's secret key (`TEIFS_NOTIFY_KIND_SECRET_KEY_ID`, else
 `AWS_SECRET_ACCESS_KEY`) is kept in
 memory that's wiped and only signs requests (Signature Version 4); it is never sent, and
 only the access key is shown.

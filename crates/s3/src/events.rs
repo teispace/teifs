@@ -169,6 +169,19 @@ impl Events {
                 let body = serde_json::to_vec(&message).expect("an event serializes");
                 queued.push((arn, body));
             }
+            // As on S3: with EventBridge on, every event it takes goes to the bus too.
+            if config.event_bridge
+                && teifs_notify::event_bridge_sends(&event)
+                && let Some(bus) = self.notifier.event_bridge()
+            {
+                let message = EventMessage {
+                    event_name: event.clone(),
+                    key: format!("{bucket}/{}", object.key),
+                    records: vec![self.record(&request, name, bucket, "", object)],
+                };
+                let body = serde_json::to_vec(&message).expect("an event serializes");
+                queued.push((bus, body));
+            }
         }
         if queued.is_empty() {
             return;

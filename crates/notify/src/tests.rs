@@ -1044,3 +1044,46 @@ async fn lambda_is_invoked_with_each_event_as_s3_invokes_it() {
     assert!(refused.contains("InvalidSignatureException"), "{refused}");
     function("f:$LATEST").test(&client).await.unwrap();
 }
+
+#[tokio::test]
+async fn event_bridge_names_what_it_refuses() {
+    use crate::testing::AwsServer;
+    let server = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let bus = |name: &str| {
+        let mut bus = EventBridge::new(
+            &format!("arn:aws:events:eu-west-1:123456789012:event-bus/{name}"),
+            Some(server.url()),
+            None,
+        )
+        .unwrap();
+        bus.credentials = Some(AwsCredentials {
+            access_key: "AKIDTEIFS".into(),
+            secret: Zeroizing::new("s3cret".into()),
+            session_token: None,
+        });
+        bus
+    };
+    let client = reqwest::Client::new();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    bus("default").send(&client, &put).await.unwrap();
+    let sent = server.requests(1).await;
+    assert_eq!(sent[0].target, "AWSEvents.PutEvents");
+    // An event S3 doesn't send there isn't sent.
+    let read = message("s3:ObjectAccessed:Get", "photos/a.jpg");
+    bus("default").send(&client, &read).await.unwrap();
+    let gone = bus("gone");
+    server.missing(&gone.bus_arn);
+    let missing = gone.send(&client, &put).await.unwrap_err();
+    assert!(missing.contains("ResourceNotFoundException"), "{missing}");
+    server.wrong_digest(true);
+    let failed = bus("default").send(&client, &put).await.unwrap_err();
+    assert!(failed.contains("InternalFailure"), "{failed}");
+    server.wrong_digest(false);
+    let mut elsewhere = bus("default");
+    elsewhere.region = "us-east-1".into();
+    let refused = elsewhere.send(&client, &put).await.unwrap_err();
+    assert!(refused.contains("InvalidSignatureException"), "{refused}");
+    // The put, the missing bus and the failed entry: nothing for the read, and the
+    // refused request isn't taken.
+    assert_eq!(server.requests(0).await.len(), 3);
+}

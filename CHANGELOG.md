@@ -156,6 +156,11 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- EventBridge, as S3's: with `teifs serve --notify-eventbridge ID=BUS_ARN`, a bucket
+  whose notification configuration has `EventBridgeConfiguration` sends every event S3
+  sends to EventBridge to the bus, with S3's `detail-type` and `detail`, using
+  `PutEvents` signed with Signature Version 4 (source `teifs.s3`, since `aws.` sources are
+  AWS's own). It was `501 NotImplemented`.
 - Lambda notification targets, as S3's: `teifs serve --notify-lambda
   ID=FUNCTION_ARN[,endpoint=URL]` invokes the function asynchronously with each event as
   S3 does, signed with Signature Version 4. Rules name it by the function's ARN, as on S3;

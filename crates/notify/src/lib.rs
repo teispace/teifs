@@ -10,6 +10,7 @@ mod tests;
 
 mod aws;
 mod elasticsearch;
+mod eventbridge;
 mod lambda;
 mod mqtt;
 mod nats;
@@ -36,6 +37,9 @@ use std::{
 
 pub use aws::{AwsCredentials, region_of};
 pub use elasticsearch::Elasticsearch;
+pub use eventbridge::EventBridge;
+/// Whether S3 sends an event to EventBridge.
+pub use eventbridge::sends as event_bridge_sends;
 pub use lambda::Lambda;
 pub use mqtt::Mqtt;
 pub use nats::Nats;
@@ -87,6 +91,8 @@ pub enum TargetKind {
     Sns(Sns),
     /// A Lambda function, invoked with each event as S3 invokes it.
     Lambda(Lambda),
+    /// The event bus buckets with EventBridge turned on send every event to.
+    EventBridge(EventBridge),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -164,6 +170,7 @@ impl TargetConfig {
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
             TargetKind::Lambda(lambda) => lambda.shown(),
+            TargetKind::EventBridge(bus) => bus.shown(),
         }
     }
 }
@@ -182,6 +189,7 @@ impl TargetKind {
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
             Self::Lambda(_) => "lambda",
+            Self::EventBridge(_) => "eventbridge",
         }
     }
 
@@ -258,6 +266,7 @@ impl Target {
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
+            TargetKind::EventBridge(bus) => bus.send(client, &body).await,
         }
     }
 
@@ -276,6 +285,8 @@ impl Target {
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             // As S3 does: permission is checked, and no test event is sent.
             TargetKind::Lambda(lambda) => lambda.test(client).await,
+            // Rules don't name it, and S3 doesn't test it.
+            TargetKind::EventBridge(_) => Ok(()),
         }
     }
 }
@@ -402,12 +413,26 @@ impl Notifier {
     #[must_use]
     pub fn resolve(&self, arn: &str) -> Option<TargetArn> {
         if let Some(ours) = TargetArn::parse(arn) {
-            return self.has(&ours).then_some(ours);
+            // The EventBridge bus is turned on per bucket, never named by a rule.
+            let named = self
+                .targets
+                .get(&ours)
+                .is_some_and(|t| !matches!(t.config.kind, TargetKind::EventBridge(_)));
+            return named.then_some(ours);
         }
         self.targets
             .iter()
             .find(|(_, t)| t.config.kind.aws_arn().as_deref() == Some(arn.trim()))
             .map(|(ours, _)| ours.clone())
+    }
+
+    /// The event bus buckets with EventBridge turned on send to, if the server has one.
+    #[must_use]
+    pub fn event_bridge(&self) -> Option<TargetArn> {
+        self.targets
+            .iter()
+            .find(|(_, t)| matches!(t.config.kind, TargetKind::EventBridge(_)))
+            .map(|(arn, _)| arn.clone())
     }
 
     /// The targets.
