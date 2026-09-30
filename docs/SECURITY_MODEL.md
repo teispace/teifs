@@ -245,6 +245,9 @@ query or fragment. Redirects aren't followed, so entries go nowhere but the URL 
 targets' secrets are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`,
 `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`),
 sent as sensitive headers or Redis's `AUTH`, and never shown; a URL with a user or password in it is refused.
+A Redis target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's certificate
+and name with the system's certificates or only the given CA, never skipping the check,
+before its password is sent.
 
 Bucket notifications can't reach anything the operator didn't name: a bucket's rules
 pick among the server's targets by ARN (an unknown one is refused when the rules are

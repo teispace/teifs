@@ -152,9 +152,10 @@ behaviour; the on-disk format is always upgraded automatically.
   per object (removed with it), the access format one per event; the index is created
   when missing.
 - Redis notification targets, as MinIO's: `teifs serve --notify-redis
-  ID=HOST:PORT,key=NAME[,format=namespace|access][,db=N][,user=NAME]`, with the password
-  from the environment. The namespace format keeps a hash with a field per object, the
-  access format a list with an entry per event.
+  ID=HOST:PORT,key=NAME[,format=namespace|access][,db=N][,user=NAME][,tls=true][,ca=PATH]`,
+  with the password from the environment. The namespace format keeps a hash with a field
+  per object, the access format a list with an entry per event. `tls=true` connects over
+  TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
 - NSQ notification targets, as MinIO's: `teifs serve --notify-nsq
   ID=HOST:PORT,topic=NAME` publishes each event to the topic over nsqd's TCP protocol. `teifs event add|ls|rm`
   manages a bucket's notification rules, as `mc event` does. It needs MinIO's

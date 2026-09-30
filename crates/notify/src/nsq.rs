@@ -10,6 +10,8 @@ use tokio::{
     sync::Mutex,
 };
 
+use crate::net;
+
 /// How long a connection or a command may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest frame read: more is a server that isn't `nsqd`.
@@ -37,10 +39,7 @@ impl Nsq {
     /// When `address` isn't `HOST:PORT`, or `topic` can't name a topic.
     pub fn new(address: &str, topic: &str) -> Result<Self, String> {
         let address = address.trim();
-        let valid = address.rsplit_once(':').is_some_and(|(host, port)| {
-            !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0)
-        });
-        if !valid {
+        if !net::is_address(address) {
             return Err(format!("`{address}` isn't HOST:PORT"));
         }
         let name = topic.strip_suffix("#ephemeral").unwrap_or(topic);
@@ -103,11 +102,7 @@ impl Nsq {
 
     /// Connects, and says who's publishing (`IDENTIFY`), which `nsqd` answers.
     async fn connect(&self) -> Result<Connection, String> {
-        let stream = tokio::time::timeout(TIMEOUT, TcpStream::connect(&self.address))
-            .await
-            .map_err(|_| "it didn't answer in time".to_owned())?
-            .map_err(|e| format!("can't connect: {e}"))?;
-        let _ = stream.set_nodelay(true);
+        let stream = net::connect(&self.address).await?;
         let mut connection = Connection {
             stream: BufReader::new(stream),
         };

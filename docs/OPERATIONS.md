@@ -269,6 +269,9 @@ A Redis target, `arn:teifs:sqs::ID:redis`, keeps events under a key: with
 `[{"Event":[record],"EventTime":"…"}]`, as MinIO's. `db=N` selects a database. A key that
 already holds another type is refused. Starting to name it checks that the server
 answers, takes the password and has a key of the right type, without writing to it.
+`tls=true` reaches it over TLS, the server verified with the system's certificates, and
+`ca=PATH` with a CA's PEM file instead (a managed Redis's or your own); a file with no
+certificate stops the server from starting.
 
 `--notify-nsq queue=nsqd.internal:4150,topic=s3-events` publishes each event to an NSQ
 topic, as a webhook is sent it, over nsqd's TCP protocol; rules name it
@@ -386,5 +389,4 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, databases), and Redis or NSQ
-over TLS.
+Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, databases), and NSQ over TLS.

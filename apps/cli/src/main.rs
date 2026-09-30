@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
     KmsLocation, Limits, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind, TlsSource,
-    Transit, TrustedProxies, Webhook, credentials,
+    Transit, TrustedProxies, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -260,8 +260,10 @@ pub(crate) struct ServeArgs {
     /// A Redis key buckets' notification rules can send events to, as
     /// ID=HOST:PORT,key=NAME, with format=namespace (a hash, a field per object, set by
     /// each event and removed with it: the default) or format=access (a list, an entry
-    /// per event), db=N and user=NAME (repeat for more; in the environment, separated by
-    /// spaces). Rules name it `arn:teifs:sqs::ID:redis`. Its password,
+    /// per event), db=N, user=NAME, and tls=true (the server verified with the system's
+    /// certificates) or ca=PATH (with a CA's PEM file) (repeat for more; in the
+    /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:redis`. Its
+    /// password,
     /// `TEIFS_NOTIFY_REDIS_PASSWORD_ID`, is read only from the environment.
     #[arg(
         long = "notify-redis",
@@ -698,13 +700,37 @@ fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Elasticsearch(es))
 }
 
-/// A Redis key, `ID=HOST:PORT,key=NAME[,format=F][,db=N][,user=U]`; its password comes
-/// from the environment later.
+/// A target's TLS from its options: `tls=true` verifies the server with the system's
+/// certificates, `ca=PATH` with a CA's PEM file; neither is a plain connection.
+fn target_tls(
+    options: &BTreeMap<&str, &str>,
+) -> Result<Option<std::sync::Arc<rustls::ClientConfig>>, String> {
+    let tls = match options.get("tls").copied() {
+        None => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(other) => return Err(format!("tls is true or false, not `{other}`")),
+    };
+    match (tls, options.get("ca")) {
+        (Some(false), Some(_)) => Err("a CA file is for TLS: leave out tls=false".to_owned()),
+        (_, Some(path)) => {
+            let pem = std::fs::read(path).map_err(|e| format!("can't read `{path}`: {e}"))?;
+            tls_config(Some(&pem))
+                .map(Some)
+                .map_err(|e| format!("`{path}`: {e}"))
+        }
+        (Some(true), None) => tls_config(None).map(Some),
+        (_, None) => Ok(None),
+    }
+}
+
+/// A Redis key, `ID=HOST:PORT,key=NAME[,format=F][,db=N][,user=U][,tls=true][,ca=PATH]`;
+/// its password comes from the environment later.
 fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
     let (id, address, options) = target_spec(
         text,
         "ID=HOST:PORT,key=NAME",
-        &["key", "format", "db", "user"],
+        &["key", "format", "db", "user", "tls", "ca"],
     )?;
     let key = options
         .get("key")
@@ -721,6 +747,7 @@ fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
         })
         .transpose()?;
     redis.user = options.get("user").map(|&u| u.to_owned());
+    redis.tls = target_tls(&options)?;
     TargetConfig::new(id, TargetKind::Redis(redis))
 }
 
@@ -1312,6 +1339,38 @@ mod tests {
         // A user needs its password.
         let passwordless = redis("other=redis.local:6379,key=k,user=teifs");
         assert!(notify_targets(vec![passwordless], env).is_err());
+    }
+
+    #[test]
+    fn redis_targets_take_tls_with_the_systems_certificates_or_a_ca_file() {
+        let tls_of = |text: &str| match parse_notify_redis(text).unwrap().kind {
+            TargetKind::Redis(redis) => redis.tls.is_some(),
+            _ => panic!("not Redis"),
+        };
+        assert!(!tls_of("x=redis.local:6379,key=k"));
+        assert!(!tls_of("x=redis.local:6379,key=k,tls=false"));
+        assert!(tls_of("x=redis.local:6379,key=k,tls=true"));
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        let missing = dir.path().join("missing.pem");
+        for bad in [
+            "x=redis.local:6379,key=k,tls=yes".to_owned(),
+            format!("x=redis.local:6379,key=k,tls=false,ca={}", empty.display()),
+            format!("x=redis.local:6379,key=k,ca={}", empty.display()),
+            format!("x=redis.local:6379,key=k,ca={}", missing.display()),
+        ] {
+            assert!(parse_notify_redis(&bad).is_err(), "{bad}");
+        }
+        let err = parse_notify_redis(&format!("x=h:1,key=k,ca={}", empty.display())).unwrap_err();
+        assert!(err.contains("holds no certificate"), "{err}");
+        let ca = dir.path().join("ca.pem");
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+        assert!(tls_of(&format!("x=h:1,key=k,ca={}", ca.display())));
+        assert!(tls_of(&format!("x=h:1,key=k,tls=true,ca={}", ca.display())));
     }
 
     #[test]

@@ -2,19 +2,22 @@
 //! per object (`BUCKET/KEY`) holding `{"Records":[record]}`, set by each event and
 //! removed with the object; in the `access` format each event is pushed onto a list as
 //! `[{"Event":[record],"EventTime":…}]`. The client speaks RESP itself over one
-//! connection, made again after a failure.
+//! connection (TLS when asked for), made again after a failure.
 
 use std::{fmt, sync::Arc, time::Duration};
 
+use rustls::ClientConfig;
 use teifs_types::notify::EventMessage;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
     sync::Mutex,
 };
 use zeroize::Zeroizing;
 
-use crate::Format;
+use crate::{
+    Format,
+    net::{self, Stream},
+};
 
 /// How long a connection or a command may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,6 +44,8 @@ pub struct Redis {
     pub user: Option<String>,
     /// Its password.
     pub password: Option<Zeroizing<String>>,
+    /// TLS, and how the server is verified; none for plain TCP.
+    pub tls: Option<Arc<ClientConfig>>,
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -52,10 +57,7 @@ impl Redis {
     /// When `address` isn't `HOST:PORT`, or `key` is empty.
     pub fn new(address: &str, key: &str, format: Format) -> Result<Self, String> {
         let address = address.trim();
-        let valid = address.rsplit_once(':').is_some_and(|(host, port)| {
-            !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0)
-        });
-        if !valid {
+        if !net::is_address(address) {
             return Err(format!("`{address}` isn't HOST:PORT"));
         }
         if key.is_empty() {
@@ -68,6 +70,7 @@ impl Redis {
             db: None,
             user: None,
             password: None,
+            tls: None,
             connection: Arc::new(Mutex::new(None)),
         })
     }
@@ -76,8 +79,13 @@ impl Redis {
     #[must_use]
     pub fn shown(&self) -> String {
         let db = self.db.map(|db| format!(" db {db}")).unwrap_or_default();
+        let scheme = if self.tls.is_some() {
+            "rediss"
+        } else {
+            "redis"
+        };
         format!(
-            "redis://{}{db} key {} ({})",
+            "{scheme}://{}{db} key {} ({})",
             self.address,
             self.key,
             self.format.name()
@@ -142,11 +150,8 @@ impl Redis {
 
     /// Connects, authenticates, selects the database and checks the key's type.
     async fn connect(&self) -> Result<Connection, String> {
-        let stream = tokio::time::timeout(TIMEOUT, TcpStream::connect(&self.address))
-            .await
-            .map_err(|_| "it didn't answer in time".to_owned())?
-            .map_err(|e| format!("can't connect: {e}"))?;
-        let _ = stream.set_nodelay(true);
+        let stream = net::connect(&self.address).await?;
+        let stream = net::secure(stream, &self.address, self.tls.as_ref()).await?;
         let mut connection = Connection {
             stream: BufReader::new(stream),
         };
@@ -207,7 +212,7 @@ pub(crate) enum Reply {
 
 /// A connection to the server.
 struct Connection {
-    stream: BufReader<TcpStream>,
+    stream: BufReader<Stream>,
 }
 
 impl Connection {

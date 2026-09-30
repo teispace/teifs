@@ -305,6 +305,83 @@ async fn redis_keeps_a_field_per_object_or_an_entry_per_event() {
     assert!(bad.test().await.unwrap_err().contains("WRONGPASS"));
 }
 
+/// A TLS terminator for `localhost` in front of `plain`, and the PEM of the CA that
+/// signed its certificate.
+async fn tls_in_front_of(plain: &str) -> (String, String) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    };
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.distinguished_name.push(DnType::CommonName, "test CA");
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_pem = ca.self_signed(&ca_key).unwrap().pem();
+    let key = KeyPair::generate().unwrap();
+    let issuer = Issuer::from_params(&ca, &ca_key);
+    let cert = CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&key, &issuer)
+        .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![cert.der().clone()],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let plain = plain.to_owned();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (acceptor, plain) = (acceptor.clone(), plain.clone());
+            tokio::spawn(async move {
+                let Ok(mut secured) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let mut inner = tokio::net::TcpStream::connect(plain).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut secured, &mut inner).await;
+            });
+        }
+    });
+    (format!("localhost:{port}"), ca_pem)
+}
+
+/// Redis over TLS: the server is verified with the operator's CA, and one the CA didn't
+/// sign is refused.
+#[tokio::test]
+async fn redis_is_reached_over_tls() {
+    use crate::testing::RedisServer;
+    let server = RedisServer::start("none", None).await;
+    let (address, ca_pem) = tls_in_front_of(server.address()).await;
+    let mut redis = Redis::new(&address, "objects", Format::Namespace).unwrap();
+    redis.tls = Some(tls_config(Some(ca_pem.as_bytes())).unwrap());
+    assert!(redis.shown().starts_with("rediss://"), "{}", redis.shown());
+    redis.test().await.unwrap();
+    assert!(
+        server
+            .commands(2)
+            .await
+            .contains(&vec!["TYPE".into(), "objects".into()])
+    );
+
+    // The system's trust store doesn't know the test CA.
+    redis.tls = Some(tls_config(None).unwrap());
+    let err = redis.test().await.unwrap_err();
+    assert!(err.contains("TLS failed"), "{err}");
+    // Nor does the plain server speak TLS.
+    let mut plain = Redis::new(server.address(), "objects", Format::Namespace).unwrap();
+    plain.tls = Some(tls_config(Some(ca_pem.as_bytes())).unwrap());
+    assert!(plain.test().await.is_err());
+}
+
 /// NSQ targets: each event published to the topic as a webhook gets it, heartbeats
 /// answered.
 #[tokio::test]

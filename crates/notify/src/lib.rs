@@ -9,6 +9,7 @@
 mod tests;
 
 mod elasticsearch;
+mod net;
 mod nsq;
 mod queue;
 mod redis;
@@ -27,6 +28,7 @@ use std::{
 };
 
 pub use elasticsearch::Elasticsearch;
+pub use net::tls_config;
 pub use nsq::Nsq;
 pub use redis::Redis;
 use teifs_types::notify::TargetArn;
