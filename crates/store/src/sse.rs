@@ -227,23 +227,25 @@ impl Store {
         let data_key = kms.unseal(&crypt.sealed, &context).await?;
         let sealed = kms.seal(Some(kms_key), &context, &data_key).await?;
         let new = Resealed {
+            mode: SseMode::Kms,
             crypt,
             sealed,
             bucket_key,
             data_key,
         };
-        self.write_resealed(bucket, key, row, new).await
+        self.write_resealed(bucket, key, row, new, true).await
     }
 
     /// Records `new` for the version `row` describes, if its record is still the one
     /// `row` holds (else it was written again meanwhile, and the caller may try again)
-    /// and Object Lock doesn't protect it.
+    /// and, if `respect_lock`, Object Lock doesn't protect it.
     pub(crate) async fn write_resealed(
         &self,
         bucket: &str,
         key: &str,
         row: VersionRow,
         new: Resealed,
+        respect_lock: bool,
     ) -> Result<()> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         self.blocking(move |inner| {
@@ -253,7 +255,9 @@ impl Store {
             };
             let old = row.crypt.as_deref().ok_or(StoreError::CorruptMetadata)?;
             let mut current = Inner::version_row(&conn, &bucket, &key, Some(&row.version_id))?;
-            check_removal(&current.attrs, false, now_ms())?;
+            if respect_lock {
+                check_removal(&current.attrs, false, now_ms())?;
+            }
             let crypt = new.record(&mut current)?;
             let replaced = conn.replace_version_crypt(
                 &bucket.id,
@@ -302,6 +306,8 @@ impl Store {
 
 /// An object's record once its data key is sealed again by a KMS key.
 pub(crate) struct Resealed {
+    /// Its mode from now on: SSE-KMS, or (for a key version's rewrap) the one it had.
+    pub mode: SseMode,
     /// The record it had.
     pub crypt: Crypt,
     /// The data key, sealed by the KMS key.
@@ -311,12 +317,12 @@ pub(crate) struct Resealed {
 }
 
 impl Resealed {
-    /// The new record (JSON) of the version `row` describes: SSE-KMS, with checksums an
-    /// SSE-S3 object kept in the open now sealed (as SSE-KMS keeps them).
+    /// The new record (JSON) of the version `row` describes; an SSE-S3 object that
+    /// becomes SSE-KMS has the checksums it kept in the open sealed (as SSE-KMS keeps them).
     fn record(self, row: &mut VersionRow) -> Result<String> {
-        let was_s3 = self.crypt.mode == SseMode::S3;
+        let was_s3 = self.crypt.mode == SseMode::S3 && self.mode != SseMode::S3;
         let mut crypt = Crypt {
-            mode: SseMode::Kms,
+            mode: self.mode,
             sealed: self.sealed,
             bucket_key: self.bucket_key,
             ..self.crypt

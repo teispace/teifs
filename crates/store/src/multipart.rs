@@ -190,7 +190,7 @@ impl Store {
     }
 
     /// The id of an object bucket; folder buckets can't hold encrypted objects.
-    async fn object_bucket_id(&self, bucket: &str) -> Result<String> {
+    pub(crate) async fn object_bucket_id(&self, bucket: &str) -> Result<String> {
         let name = bucket.to_owned();
         self.blocking(move |inner| match inner.bucket(&name)? {
             Bucket::Object(bucket) => Ok(bucket.id),

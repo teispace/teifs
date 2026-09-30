@@ -119,6 +119,18 @@ with `409 OperationAborted`). SSE-C and unencrypted objects can't be changed thi
 record is `crypt` in the index; `bucketKey: true` marks one reported as using an S3 Bucket
 Key.
 
+## Rotating and rewrapping keys
+
+Rotating a KMS key (`teifs key rotate NAME`) adds a version that seals new data keys;
+the versions before it keep unsealing what they sealed (`sealed.kmsVersion` in each
+record). `teifs key rewrap NAME` seals again, under the newest version, every data key an
+older version of `NAME` sealed: object versions (Object Lock doesn't stop it, since only
+the sealed key changes) and multipart uploads in progress. Each record keeps its mode,
+context, Bucket Key and checksums, and is replaced only if it's still the one read; one
+written again meanwhile is left for another run. It runs on a drive `teifs serve` isn't
+using, and running it again carries on. The copy of the sealed key in a data file's
+footer is written once and keeps the older version: the index is authoritative.
+
 ## Versions
 
 | Version | Change |

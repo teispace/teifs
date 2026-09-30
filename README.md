@@ -210,7 +210,7 @@ location / {
 | `teifs encrypt set sse-s3\|sse-kms [KEY] ALIAS/BUCKET` \| `clear\|info ALIAS/BUCKET` | How a bucket encrypts new objects (`--bucket-key`), and whether it takes customer keys (`--block-sse-c`, `--allow-sse-c`) |
 | `teifs encrypt update --kms-key KEY ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Move objects to a KMS key in place, without rewriting them (`--bucket-key`) |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
-| `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
+| `teifs key list\|create NAME\|rotate NAME\|rewrap NAME` | Manage the KMS keys that encrypt objects; `rewrap` seals objects' keys again under a key's newest version (`--dry-run` counts) |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |

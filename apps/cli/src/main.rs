@@ -278,6 +278,16 @@ enum KeyAction {
         #[command(flatten)]
         keyring: KeyringArgs,
     },
+    /// Seal again, under a key's newest version, the objects' keys its older versions
+    /// sealed (the drive, while `teifs serve` isn't using it). Their data stays as it is.
+    Rewrap {
+        name: String,
+        /// Only count what would be sealed again.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        keyring: KeyringArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -685,30 +695,35 @@ async fn key(action: KeyAction) -> Result<(), error::Error> {
     use teifs_store::{Kms, LocalKms, TransitKms};
     let (KeyAction::List { keyring }
     | KeyAction::Create { keyring, .. }
-    | KeyAction::Rotate { keyring, .. }) = &action;
-    let (kms, place): (Box<dyn Kms>, String) = if let Some(address) = &keyring.kms_transit {
-        let token = std::env::var("VAULT_TOKEN")
-            .or_else(|_| std::env::var("BAO_TOKEN"))
-            .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
-        let kms = TransitKms::new(
-            address,
-            &keyring.kms_transit_mount,
-            token,
-            keyring.kms_transit_namespace.clone(),
-        )
-        .map_err(|e| e.to_string())?;
-        (Box::new(kms), format!("the transit engine at {address}"))
-    } else {
-        let path = if let Some(path) = &keyring.kms_keyring {
-            path.clone()
+    | KeyAction::Rotate { keyring, .. }
+    | KeyAction::Rewrap { keyring, .. }) = &action;
+    let (kms, place): (std::sync::Arc<dyn Kms>, String) =
+        if let Some(address) = &keyring.kms_transit {
+            let token = std::env::var("VAULT_TOKEN")
+                .or_else(|_| std::env::var("BAO_TOKEN"))
+                .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
+            let kms = TransitKms::new(
+                address,
+                &keyring.kms_transit_mount,
+                token,
+                keyring.kms_transit_namespace.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            (
+                std::sync::Arc::new(kms),
+                format!("the transit engine at {address}"),
+            )
         } else {
-            let store = open(&keyring.dir)?;
-            teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
+            let path = if let Some(path) = &keyring.kms_keyring {
+                path.clone()
+            } else {
+                let store = open(&keyring.dir)?;
+                teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
+            };
+            let kms = LocalKms::open(&path)
+                .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
+            (std::sync::Arc::new(kms), path.display().to_string())
         };
-        let kms = LocalKms::open(&path)
-            .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
-        (Box::new(kms), path.display().to_string())
-    };
     match action {
         KeyAction::List { .. } => {
             let mut table = ui::Table::new(&["NAME", ">VERSION", "CREATED"]);
@@ -743,8 +758,58 @@ async fn key(action: KeyAction) -> Result<(), error::Error> {
                 || serde_json::json!({"type": "key", "name": name, "version": info.version}),
             );
         }
+        KeyAction::Rewrap {
+            name,
+            dry_run,
+            keyring,
+        } => {
+            let store = open(&keyring.dir)?;
+            store.attach_kms(kms).map_err(|e| e.to_string())?;
+            let done = store
+                .rewrap(&name, dry_run)
+                .await
+                .map_err(|e| format!("can't rewrap {name}: {e}"))?;
+            rewrapped(&name, dry_run, done);
+        }
     }
     Ok(())
+}
+
+/// Says what `teifs key rewrap` did.
+fn rewrapped(name: &str, dry_run: bool, done: teifs_store::Rewrapped) {
+    let what = format!(
+        "{} object version{} and {} upload{}",
+        done.versions,
+        plural(done.versions),
+        done.uploads,
+        plural(done.uploads)
+    );
+    let title = if dry_run {
+        format!("{what} to seal again under {name} version {}", done.newest)
+    } else {
+        format!("Sealed {what} again under {name} version {}", done.newest)
+    };
+    ui::done(title, || {
+        serde_json::json!({
+            "type": "rewrap",
+            "key": name,
+            "newest": done.newest,
+            "versions": done.versions,
+            "uploads": done.uploads,
+            "changedMeanwhile": done.changed_meanwhile,
+            "dryRun": dry_run,
+        })
+    });
+    if done.changed_meanwhile > 0 {
+        ui::note(format!(
+            "{} changed meanwhile: run it again to seal them too.",
+            done.changed_meanwhile
+        ));
+    }
+}
+
+const fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 async fn bucket(action: BucketAction) -> Result<(), error::Error> {

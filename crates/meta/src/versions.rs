@@ -369,6 +369,40 @@ impl Index {
         Ok(changed == 1)
     }
 
+    /// Versions (of every bucket) whose data key is sealed by a version of the KMS key
+    /// `kms_key` older than `newest`, after `after` (a bucket id, key and `seq`), in that
+    /// order; at most `limit`.
+    pub fn sealed_before(
+        &self,
+        kms_key: &str,
+        newest: u32,
+        after: Option<(&str, &str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<VersionRow>> {
+        let (bucket_id, key, seq) = after.unwrap_or(("", "", i64::MIN));
+        let sql = format!(
+            "SELECT {READ} FROM object_versions
+             WHERE crypt IS NOT NULL
+               AND json_extract(crypt, '$.sealed.kmsKey') = ?1
+               AND json_extract(crypt, '$.sealed.kmsVersion') < ?2
+               AND (bucket_id, key, seq) > (?3, ?4, ?5)
+             ORDER BY bucket_id, key, seq LIMIT ?6"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                kms_key,
+                newest,
+                bucket_id,
+                key.as_bytes(),
+                seq,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Forgets every version in a bucket (it's being deleted and has none left that
     /// matter), queuing their data files.
     pub fn forget_bucket_versions(&self, bucket_id: &str, now_ms: i64) -> Result<Vec<String>> {
@@ -679,6 +713,54 @@ mod tests {
                 .replace_version_crypt("b1", "a", NULL_VERSION, "old", new)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn versions_sealed_by_older_key_versions_are_found_in_pages() {
+        let (_dir, index) = index();
+        let sealed = |key: &str, version: u32| {
+            Some(format!(
+                r#"{{"mode":"s3","sealed":{{"kmsKey":"{key}","kmsVersion":{version}}}}}"#
+            ))
+        };
+        for (name, crypt) in [
+            ("a", sealed("k", 1)),
+            ("b", sealed("k", 2)),
+            ("c", sealed("k", 1)),
+            ("d", sealed("other", 1)),
+            ("e", None),
+        ] {
+            index
+                .put_version(
+                    &VersionRow {
+                        crypt,
+                        ..row(name, name)
+                    },
+                    1,
+                )
+                .unwrap();
+        }
+        let keys = |rows: Vec<VersionRow>| rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
+        assert_eq!(
+            keys(index.sealed_before("k", 2, None, 10).unwrap()),
+            ["a", "c"]
+        );
+        assert_eq!(
+            keys(index.sealed_before("k", 3, None, 10).unwrap()),
+            ["a", "b", "c"]
+        );
+        let first = index.sealed_before("k", 2, None, 1).unwrap();
+        assert_eq!(keys(first.clone()), ["a"]);
+        let after = (
+            first[0].bucket_id.as_str(),
+            first[0].key.as_str(),
+            first[0].seq,
+        );
+        assert_eq!(
+            keys(index.sealed_before("k", 2, Some(after), 10).unwrap()),
+            ["c"]
+        );
+        assert!(index.sealed_before("k", 1, None, 10).unwrap().is_empty());
     }
 
     #[test]

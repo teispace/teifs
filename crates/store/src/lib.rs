@@ -22,6 +22,7 @@ mod lock;
 mod multipart;
 mod objects;
 mod reconcile;
+mod rewrap;
 mod settings;
 mod space;
 mod sse;
@@ -51,6 +52,7 @@ pub use lock::{
     DefaultRetention, MAX_RETENTION_DAYS, MAX_RETENTION_YEARS, ObjectLock, RetentionPeriod,
 };
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
+pub use rewrap::Rewrapped;
 pub use settings::{
     BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,
     PublicAccessBlock,

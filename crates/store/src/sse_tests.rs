@@ -800,13 +800,14 @@ async fn an_object_written_meanwhile_keeps_its_own_key() {
     let sealed = drive.kms.seal(None, &context, &data_key).await.unwrap();
     put(store, "k", b"new", &Encryption::S3).await;
     let new = Resealed {
+        mode: SseMode::Kms,
         crypt,
         sealed,
         bucket_key: false,
         data_key,
     };
     assert!(matches!(
-        store.write_resealed("vault", "k", row, new).await,
+        store.write_resealed("vault", "k", row, new, true).await,
         Err(StoreError::ChangedMeanwhile)
     ));
     // The new object keeps its own key; trying again starts from what's there now.
@@ -816,4 +817,120 @@ async fn an_object_written_meanwhile_keeps_its_own_key() {
         .await
         .unwrap();
     assert_eq!(get(store, "k", None).await.unwrap(), b"new");
+}
+
+/// The KMS key and version that seal the data key of `key`'s current version.
+async fn sealed_by(store: &Store, key: &str) -> (String, u32) {
+    let (_, row) = store.updatable_row("vault", key, None).await.unwrap();
+    let sealed = crypt_of(&row).unwrap().unwrap().sealed;
+    (sealed.kms_key, sealed.kms_version)
+}
+
+#[tokio::test]
+async fn rewrap_seals_old_key_versions_under_the_newest() {
+    let drive = drive().await;
+    let store = &drive.store;
+    drive.kms.create_key("photos").await.unwrap();
+    store
+        .set_bucket_versioning("vault", Versioning::Enabled)
+        .await
+        .unwrap();
+    store
+        .set_bucket_object_lock(
+            "vault",
+            ObjectLock {
+                default_retention: None,
+            },
+        )
+        .await
+        .unwrap();
+    let photos = Encryption::Kms {
+        key: Some("photos".into()),
+        context: [("app".into(), "album".into())].into(),
+        bucket_key: true,
+    };
+    let bytes = pattern(70_000);
+    let s3 = sse_s3_upload(&drive, "s3", &bytes).await;
+    assert!(!s3.attrs.checksums.is_empty());
+    // Folder buckets have nothing to rewrap.
+    store.create_bucket("plain", Layout::Folder).await.unwrap();
+    let before = put(store, "kms", &bytes, &photos).await;
+    put(store, "c", &bytes, &Encryption::Customer(customer(3))).await;
+    // Locked, and still rewrapped: nothing about it changes.
+    store
+        .set_legal_hold("vault", "kms", None, true)
+        .await
+        .unwrap();
+    let upload = store
+        .create_upload(
+            "vault",
+            "up",
+            ObjectAttrs::default(),
+            None,
+            &photos,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut staged = store.stage_part(&upload.id, 1, None).await.unwrap();
+    staged.write(&bytes).await.unwrap();
+    let part = store
+        .put_part(&upload.id, 1, staged, BTreeMap::new())
+        .await
+        .unwrap();
+    drive.kms.rotate_key("photos").await.unwrap();
+    drive.kms.rotate_key(DEFAULT_KEY).await.unwrap();
+
+    // A dry run counts; a real one reseals under version 2, once.
+    let counted = Rewrapped {
+        newest: 2,
+        versions: 1,
+        uploads: 1,
+        changed_meanwhile: 0,
+    };
+    assert_eq!(store.rewrap("photos", true).await.unwrap(), counted);
+    assert_eq!(sealed_by(store, "kms").await, ("photos".into(), 1));
+    assert_eq!(store.rewrap("photos", false).await.unwrap(), counted);
+    assert_eq!(sealed_by(store, "kms").await, ("photos".into(), 2));
+    let after = store.head("vault", "kms").await.unwrap();
+    assert_eq!(
+        (&after.etag, after.modified, &after.sse),
+        (&before.etag, before.modified, &before.sse)
+    );
+    assert!(after.sse.as_ref().unwrap().bucket_key);
+    assert_eq!(get(store, "kms", None).await.unwrap(), bytes);
+    let nothing = Rewrapped {
+        newest: 2,
+        ..Rewrapped::default()
+    };
+    assert_eq!(store.rewrap("photos", false).await.unwrap(), nothing);
+
+    // The upload finishes with its resealed key.
+    store
+        .complete(
+            &upload.id,
+            vec![(1, part.etag)],
+            Precondition::default(),
+            CompleteWith::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get(store, "up", None).await.unwrap(), bytes);
+
+    // SSE-S3 objects go with the managed key; SSE-C ones have no KMS key.
+    assert_eq!(sealed_by(store, "s3").await, (DEFAULT_KEY.into(), 1));
+    let managed = store.rewrap(DEFAULT_KEY, false).await.unwrap();
+    assert_eq!((managed.versions, managed.uploads), (1, 0));
+    assert_eq!(sealed_by(store, "s3").await, (DEFAULT_KEY.into(), 2));
+    let head = store.head("vault", "s3").await.unwrap();
+    assert_eq!(head.sse.unwrap().mode, SseMode::S3);
+    // Its checksums stay in the open, as SSE-S3 keeps them.
+    assert_eq!(head.attrs.checksums, s3.attrs.checksums);
+    assert_eq!(get(store, "s3", None).await.unwrap(), bytes);
+    assert_eq!(get(store, "c", Some(&customer(3))).await.unwrap(), bytes);
+    assert!(matches!(
+        store.rewrap("nope", true).await,
+        Err(StoreError::Crypto(teifs_crypto::CryptoError::NoSuchKey(_)))
+    ));
 }

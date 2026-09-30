@@ -461,6 +461,29 @@ impl Index {
             .optional()?)
     }
 
+    /// Uploads whose data key is sealed by a version of the KMS key `kms_key` older than
+    /// `newest`.
+    pub fn uploads_sealed_before(&self, kms_key: &str, newest: u32) -> Result<Vec<Upload>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads
+             WHERE crypt IS NOT NULL
+               AND json_extract(crypt, '$.sealed.kmsKey') = ?1
+               AND json_extract(crypt, '$.sealed.kmsVersion') < ?2
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![kms_key, newest], upload_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Replaces an upload's encryption record if it's still `old`; whether it was.
+    pub fn replace_upload_crypt(&self, id: &str, old: &str, new: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached("UPDATE uploads SET crypt = ?3 WHERE id = ?1 AND crypt = ?2")?
+            .execute(params![id, old, new])?;
+        Ok(changed == 1)
+    }
+
     /// Uploads in a bucket, ordered by key then id, after the given markers.
     pub fn list_uploads(
         &self,
@@ -685,6 +708,50 @@ mod tests {
             .unwrap();
         assert_eq!(index.completed_upload("old").unwrap(), None);
         assert_eq!(index.completed_upload("new").unwrap(), Some(done("k2")));
+    }
+
+    #[test]
+    fn uploads_sealed_by_older_key_versions_are_found_and_resealed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let sealed =
+            |version: u32| format!(r#"{{"sealed":{{"kmsKey":"k","kmsVersion":{version}}}}}"#);
+        for (id, crypt) in [
+            ("old", Some(sealed(1))),
+            ("new", Some(sealed(2))),
+            ("plain", None),
+        ] {
+            index
+                .insert_upload(&Upload {
+                    id: id.into(),
+                    bucket: "b".into(),
+                    key: "k".into(),
+                    owner: None,
+                    attrs: ObjectAttrs::default(),
+                    created_ms: 1,
+                    crypt,
+                    checksum: None,
+                    max_size: None,
+                })
+                .unwrap();
+        }
+        let ids = |uploads: Vec<Upload>| uploads.into_iter().map(|u| u.id).collect::<Vec<_>>();
+        assert_eq!(ids(index.uploads_sealed_before("k", 2).unwrap()), ["old"]);
+        assert!(
+            !index
+                .replace_upload_crypt("old", &sealed(2), &sealed(3))
+                .unwrap()
+        );
+        assert!(
+            index
+                .replace_upload_crypt("old", &sealed(1), &sealed(2))
+                .unwrap()
+        );
+        assert!(index.uploads_sealed_before("k", 2).unwrap().is_empty());
+        assert_eq!(
+            index.get_upload("old").unwrap().unwrap().crypt,
+            Some(sealed(2))
+        );
     }
 
     #[test]
