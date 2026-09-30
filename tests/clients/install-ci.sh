@@ -22,12 +22,18 @@ fetch https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_l
   f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c restic.bz2
 bunzip2 --stdout "$tmp/restic.bz2" > "$BIN/restic"
 
+fetch https://github.com/kopia/kopia/releases/download/v0.23.1/kopia-0.23.1-linux-x64.tar.gz \
+  416d0f84a3dbb321a8b2d8f0997b1a0a6e915babe79ee76fa6e4d2bd1e1c5178 kopia.tar.gz
+tar -xzf "$tmp/kopia.tar.gz" -C "$tmp" kopia-0.23.1-linux-x64/kopia
+mv "$tmp/kopia-0.23.1-linux-x64/kopia" "$BIN/kopia"
+
 fetch https://releases.hashicorp.com/terraform/1.16.4/terraform_1.16.4_linux_amd64.zip \
   dc94af0eef1147718ad7c8daea792ed199e3e0492eec180d0adafa2a65a879df terraform.zip
 unzip -q "$tmp/terraform.zip" terraform -d "$BIN"
 
-chmod +x "$BIN/rclone" "$BIN/restic" "$BIN/terraform"
+chmod +x "$BIN/rclone" "$BIN/restic" "$BIN/kopia" "$BIN/terraform"
 # Whole outputs: `| head -1` can kill the writer with SIGPIPE, failing under pipefail.
 "$BIN/rclone" version
 "$BIN/restic" version
+"$BIN/kopia" --version
 "$BIN/terraform" version

@@ -13,7 +13,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 WORK="${CLIENTS_WORK:-$ROOT/target/clients}"
 PORT="${CLIENTS_PORT:-9313}"
 LAYOUT="${CLIENTS_LAYOUT:-object}"
-ALL=(aws rclone restic boto3 go js terraform)
+ALL=(aws rclone restic kopia boto3 go js terraform)
 
 # The tool each client needs.
 tool() {

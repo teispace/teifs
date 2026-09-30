@@ -52,7 +52,8 @@ jobs:
 
   clients:
     # Real clients doing what people do with them (tests/clients): the AWS CLI, rclone,
-    # restic, boto3, the Go and JavaScript SDKs, and Terraform's S3 backend.
+    # restic and Kopia (with Object Lock), boto3, the Go and JavaScript SDKs, and
+    # Terraform's S3 backend.
     name: Clients, ${{ matrix.layout }} buckets
     strategy:
       fail-fast: false
