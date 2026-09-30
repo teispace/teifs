@@ -156,6 +156,14 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- AMQP 0-9-1 notification targets (RabbitMQ, LavinMQ), as MinIO's: `teifs serve
+  --notify-amqp ID=amqp[s]://HOST[:PORT][/VHOST],exchange=NAME,routing_key=KEY`
+  publishes each event to the exchange as JSON, with MinIO's `minio-bucket` and
+  `minio-event` headers, persistent, and waits for the broker's publisher confirm. The
+  exchange is declared when the connection is made (`exchange_type`, `durable`,
+  `auto_delete`, `internal`), or only checked with `declare=false`; `mandatory=true` makes
+  a message no queue takes fail and be tried again. The password comes from
+  `TEIFS_NOTIFY_AMQP_PASSWORD_ID`, and `amqps://` connects over TLS.
 - Kafka notification targets, as MinIO's: `teifs serve --notify-kafka
   ID=BROKER[;BROKER…],topic=NAME` produces each event, keyed `bucket/object`, to the
   partition Kafka's own clients pick for the key, on its leader, so each object's events

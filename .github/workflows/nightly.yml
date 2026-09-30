@@ -151,6 +151,9 @@ jobs:
           KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
           KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
           KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          # The image refuses a SASL listener without KAFKA_OPTS (meant for a JAAS file);
+          # the listener's own JAAS settings above are used instead.
+          KAFKA_OPTS: -Djava.net.preferIPv4Stack=true
         ports:
           - 9092:9092
           - 9094:9094
@@ -186,4 +189,46 @@ jobs:
             test "$(grep -c "^$bucket/a.txt|" records.txt)" -eq 2
             grep -q "^$bucket/dir/b c.txt|.*s3:ObjectCreated:Put" records.txt
             grep -q "^$bucket/a.txt|.*s3:ObjectRemoved:Delete" records.txt
+          done
+
+  rabbitmq:
+    # Notifications to a real RabbitMQ: declared and checked exchanges, confirms, a
+    # refused login; the messages are read back through its management API.
+    name: AMQP notifications (RabbitMQ)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      rabbitmq:
+        image: rabbitmq:4.1-management
+        env:
+          RABBITMQ_DEFAULT_USER: teifs
+          RABBITMQ_DEFAULT_PASS: amqp-test-only
+        ports:
+          - 5672:5672
+          - 15672:15672
+    env:
+      API: http://127.0.0.1:15672/api
+      LOGIN: teifs:amqp-test-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: The exchange, bound to a queue
+        run: |
+          for i in $(seq 60); do curl -sf -u "$LOGIN" "$API/overview" >/dev/null && break; sleep 2; done
+          curl -sf -u "$LOGIN" -X PUT -H 'content-type: application/json' "$API/exchanges/%2F/teifs" -d '{"type":"direct","durable":true}'
+          curl -sf -u "$LOGIN" -X PUT -H 'content-type: application/json' "$API/queues/%2F/teifs-events" -d '{"durable":true}'
+          curl -sf -u "$LOGIN" -X POST -H 'content-type: application/json' "$API/bindings/%2F/e/teifs/q/teifs-events" -d '{"routing_key":"events"}'
+      - run: cargo test --locked -p teifs-server --test amqp -- --nocapture
+        env:
+          TEIFS_TEST_AMQP: amqp://127.0.0.1:5672
+          TEIFS_TEST_AMQP_PASSWORD: amqp-test-only
+      - name: The messages, as RabbitMQ keeps them
+        run: |
+          curl -sf -u "$LOGIN" -X POST -H 'content-type: application/json' "$API/queues/%2F/teifs-events/get" \
+            -d '{"count":20,"ackmode":"ack_requeue_false","encoding":"auto"}' > messages.json
+          jq -c '.[] | [.properties.delivery_mode, .properties.headers, (.payload | fromjson | .Key)]' messages.json
+          test "$(jq length messages.json)" -eq 6
+          test "$(jq '[.[] | select(.properties.delivery_mode == 2 and .properties.content_type == "application/json")] | length' messages.json)" -eq 6
+          for bucket in declared checked; do
+            test "$(jq --arg b "$bucket" '[.[] | select(.properties.headers["minio-bucket"] == $b)] | length' messages.json)" -eq 3
           done

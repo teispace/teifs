@@ -1,5 +1,5 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, SQS
+//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, AMQP exchanges, SQS
 //! queues, SNS topics, Lambda functions and an EventBridge bus) are named by ARN,
 //! `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
@@ -10,6 +10,7 @@
 #[cfg(test)]
 mod tests;
 
+mod amqp;
 mod aws;
 mod elasticsearch;
 mod eventbridge;
@@ -39,6 +40,7 @@ use std::{
     time::Duration,
 };
 
+pub use amqp::{Amqp, Exchange};
 pub use aws::{AwsCredentials, region_of};
 pub use elasticsearch::Elasticsearch;
 pub use eventbridge::EventBridge;
@@ -93,6 +95,8 @@ pub enum TargetKind {
     Mqtt(Mqtt),
     /// A Kafka topic, produced each event as JSON, keyed by its object.
     Kafka(Kafka),
+    /// An AMQP exchange, published each event as JSON.
+    Amqp(Amqp),
     /// An SQS queue, sent each event as S3 sends it.
     Sqs(Sqs),
     /// An SNS topic.
@@ -176,6 +180,7 @@ impl TargetConfig {
             TargetKind::Nats(nats) => nats.shown(),
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
             TargetKind::Kafka(kafka) => kafka.shown(),
+            TargetKind::Amqp(amqp) => amqp.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
             TargetKind::Lambda(lambda) => lambda.shown(),
@@ -196,6 +201,7 @@ impl TargetKind {
             Self::Nats(_) => "nats",
             Self::Mqtt(_) => "mqtt",
             Self::Kafka(_) => "kafka",
+            Self::Amqp(_) => "amqp",
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
             Self::Lambda(_) => "lambda",
@@ -274,6 +280,7 @@ impl Target {
             TargetKind::Nats(nats) => nats.send(&body).await,
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
             TargetKind::Kafka(kafka) => kafka.send(&body).await,
+            TargetKind::Amqp(amqp) => amqp.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
@@ -292,6 +299,7 @@ impl Target {
             TargetKind::Nats(nats) => nats.test().await,
             TargetKind::Mqtt(mqtt) => mqtt.test().await,
             TargetKind::Kafka(kafka) => kafka.test().await,
+            TargetKind::Amqp(amqp) => amqp.test().await,
             // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,

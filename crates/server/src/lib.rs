@@ -31,9 +31,9 @@ pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 use teifs_notify::Notifier;
 pub use teifs_notify::{
-    Acks, AwsCredentials, Compression, Elasticsearch, EventBridge, Format, Kafka, KafkaSasl,
-    Lambda, Mqtt, Nats, Nsq, Redis, SaslMechanism, Sns, Sqs, TargetConfig, TargetKind, UserKey,
-    Webhook, tls_config,
+    Acks, Amqp, AwsCredentials, Compression, Elasticsearch, EventBridge, Exchange, Format, Kafka,
+    KafkaSasl, Lambda, Mqtt, Nats, Nsq, Redis, SaslMechanism, Sns, Sqs, TargetConfig, TargetKind,
+    UserKey, Webhook, tls_config,
 };
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};

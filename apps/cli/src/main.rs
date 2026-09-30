@@ -25,10 +25,11 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Acks, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability, Elasticsearch,
-    EventBridge, Format, JobOptions, Kafka, KafkaSasl, KeyRules, KmsLocation, Lambda, Limits, Mqtt,
-    Nats, Nsq, ProxyHeader, Redis, SaslMechanism, Server, Sns, Sqs, TargetConfig, TargetKind,
-    TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials, tls_config,
+    Acks, Amqp, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability,
+    Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl, KeyRules,
+    KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, SaslMechanism, Server, Sns,
+    Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
+    credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -335,6 +336,24 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_KAFKA"
     )]
     notify_kafka: Vec<TargetConfig>,
+    /// An AMQP 0-9-1 exchange (`RabbitMQ`) buckets' notification rules can send events
+    /// to, as `ID=amqp[s]://HOST[:PORT][/VHOST],exchange=NAME,routing_key=KEY`, with
+    /// `exchange_type=direct` (the default), fanout, topic or headers, `durable=false`,
+    /// `auto_delete=true`, `internal=true`, `declare=false` (only check that the exchange
+    /// exists), `mandatory=true` (a message no queue takes fails and is tried again),
+    /// `persistent=false`, `user=NAME`, and for `amqps://` `ca=PATH`, `client_cert=PATH` and
+    /// `client_key=PATH` (repeat for more; in the environment, separated by spaces). Rules
+    /// name it `arn:teifs:sqs::ID:amqp`; each event is published as a webhook is sent it
+    /// and confirmed by the broker. Its password, `TEIFS_NOTIFY_AMQP_PASSWORD_ID`, is read
+    /// only from the environment.
+    #[arg(
+        long = "notify-amqp",
+        value_name = "ID=URL,exchange=NAME,routing_key=KEY",
+        value_parser = parse_notify_amqp,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_AMQP"
+    )]
+    notify_amqp: Vec<TargetConfig>,
     /// An SQS queue buckets' notification rules can send events to, as S3 sends them,
     /// as `ID=QUEUE_URL` (`https://sqs.REGION.amazonaws.com/ACCOUNT/NAME`, or any service
     /// that speaks SQS's API), with region=NAME when its host doesn't name it (repeat for
@@ -1034,6 +1053,68 @@ fn parse_notify_kafka(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Kafka(kafka))
 }
 
+/// An AMQP exchange, `ID=amqp[s]://HOST[:PORT][/VHOST],exchange=NAME,routing_key=KEY` and
+/// its options; its password comes from the environment later.
+fn parse_notify_amqp(text: &str) -> Result<TargetConfig, String> {
+    let form = "ID=amqp://HOST:PORT/VHOST,exchange=NAME,routing_key=KEY";
+    let (id, url, options) = target_spec(
+        text,
+        form,
+        &[
+            "exchange",
+            "routing_key",
+            "exchange_type",
+            "durable",
+            "auto_delete",
+            "internal",
+            "declare",
+            "mandatory",
+            "persistent",
+            "user",
+            "ca",
+            "client_cert",
+            "client_key",
+        ],
+    )?;
+    let exchange = options.get("exchange").copied().unwrap_or_default();
+    let routing_key = options.get("routing_key").copied().unwrap_or_default();
+    let mut amqp = Amqp::new(url, exchange, routing_key)?;
+    let flag = |name: &str, default: bool| {
+        target_flag(&options, name).map(|given| given.unwrap_or(default))
+    };
+    let mut declared = Exchange::default();
+    if let Some(kind) = options.get("exchange_type") {
+        declared.set_kind(kind)?;
+    }
+    declared.durable = flag("durable", true)?;
+    declared.auto_delete = flag("auto_delete", false)?;
+    declared.internal = flag("internal", false)?;
+    let declare = flag("declare", true)?;
+    if !declare
+        && ["exchange_type", "durable", "auto_delete", "internal"]
+            .iter()
+            .any(|o| options.contains_key(o))
+    {
+        return Err("an exchange that's only checked (declare=false) takes no settings".to_owned());
+    }
+    if exchange.is_empty() && options.contains_key("declare") {
+        return Err("the default exchange isn't declared: leave out declare".to_owned());
+    }
+    amqp.declare = declare.then_some(declared);
+    amqp.mandatory = flag("mandatory", false)?;
+    amqp.persistent = flag("persistent", true)?;
+    amqp.user = options.get("user").map(|&u| u.to_owned());
+    amqp.tls = target_tls(&options)?;
+    match (amqp.wants_tls(), amqp.tls.is_some()) {
+        (true, false) => amqp.tls = Some(tls_config(None, None)?),
+        (false, true) => {
+            return Err("a CA or client certificate is for TLS: use amqps://".to_owned());
+        }
+        _ => {}
+    }
+    TargetConfig::new(id, TargetKind::Amqp(amqp))
+}
+
 /// An SQS, SNS, Lambda or EventBridge target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
 /// `…_SECRET_KEY_ID`, `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if
 /// neither.
@@ -1208,6 +1289,17 @@ fn target_secrets(
                 }
             }
         }
+        TargetKind::Amqp(amqp) => {
+            amqp.password = secret("PASSWORD");
+            if amqp.user.is_some() != amqp.password.is_some() {
+                return Err(format!(
+                    "the AMQP target `{}` needs both a user=NAME and its password in \
+                     TEIFS_NOTIFY_AMQP_PASSWORD_{}",
+                    arn.id,
+                    arn.id.to_ascii_uppercase().replace('-', "_")
+                ));
+            }
+        }
         TargetKind::Nats(nats) => {
             nats.password = secret("PASSWORD");
             nats.token = secret("TOKEN");
@@ -1304,6 +1396,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_nats)
                 .chain(args.notify_mqtt)
                 .chain(args.notify_kafka)
+                .chain(args.notify_amqp)
                 .chain(args.notify_sqs)
                 .chain(args.notify_sns)
                 .chain(args.notify_lambda)
@@ -1949,6 +2042,62 @@ mod tests {
         let bare = parse_notify_kafka("u=k.local:9092,topic=t").unwrap();
         let env = |name: &str| (name == "TEIFS_NOTIFY_KAFKA_PASSWORD_U").then(|| "pw".into());
         assert!(notify_targets(vec![bare], env).is_err());
+    }
+
+    #[test]
+    fn amqp_targets_take_options_and_their_password_from_the_environment() {
+        let amqp_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Amqp(amqp) => amqp.clone(),
+            _ => panic!("not AMQP"),
+        };
+        let rabbit = parse_notify_amqp(
+            "rabbit=amqps://mq.local/prod,exchange=s3,routing_key=events,exchange_type=topic,\
+             durable=false,mandatory=true,persistent=false,user=teifs",
+        )
+        .unwrap();
+        assert_eq!(rabbit.arn().to_string(), "arn:teifs:sqs::rabbit:amqp");
+        let env = |name: &str| (name == "TEIFS_NOTIFY_AMQP_PASSWORD_RABBIT").then(|| "pw".into());
+        let amqp = amqp_of(&notify_targets(vec![rabbit.clone()], env).unwrap()[0]);
+        assert_eq!(
+            (
+                amqp.address.as_str(),
+                amqp.vhost.as_str(),
+                amqp.tls.is_some()
+            ),
+            ("mq.local:5671", "prod", true),
+            "amqps verifies with the system's certificates"
+        );
+        let declared = amqp.declare.clone().unwrap();
+        assert_eq!((declared.kind.as_str(), declared.durable), ("topic", false));
+        assert_eq!((amqp.mandatory, amqp.persistent), (true, false));
+        assert_eq!(amqp.password.as_deref().map(String::as_str), Some("pw"));
+        let plain = amqp_of(&parse_notify_amqp("p=amqp://mq.local,exchange=s3").unwrap());
+        assert_eq!(plain.declare, Some(Exchange::default()), "the defaults");
+        assert_eq!(
+            (plain.mandatory, plain.persistent, plain.tls.is_none()),
+            (false, true, true)
+        );
+        let checked =
+            amqp_of(&parse_notify_amqp("c=amqp://mq.local,exchange=s3,declare=false").unwrap());
+        assert!(checked.declare.is_none());
+        for bad in [
+            "x=mq.local:5672,exchange=s3",
+            "x=amqp://u:p@mq.local,exchange=s3",
+            "x=amqp://mq.local",
+            "x=amqp://mq.local,exchange=s3,exchange_type=x",
+            "x=amqp://mq.local,exchange=s3,durable=maybe",
+            "x=amqp://mq.local,exchange=s3,declare=false,durable=false",
+            "x=amqp://mq.local,routing_key=q,declare=true",
+            "x=amqp://mq.local,exchange=s3,ca=/nonexistent",
+            "x=amqp://mq.local,exchange=s3,topic=t",
+        ] {
+            assert!(parse_notify_amqp(bad).is_err(), "{bad}");
+        }
+        // A user needs its password, and a password its user.
+        assert!(notify_targets(vec![rabbit], |_: &str| None).is_err());
+        let userless = parse_notify_amqp("u=amqp://mq.local,exchange=s3").unwrap();
+        let env = |name: &str| (name == "TEIFS_NOTIFY_AMQP_PASSWORD_U").then(|| "pw".into());
+        assert!(notify_targets(vec![userless], env).is_err());
     }
 
     #[test]

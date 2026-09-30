@@ -942,3 +942,50 @@ async fn kafka_rules_produce_each_event_keyed_by_object() {
     )
     .await;
 }
+
+/// A rule names an AMQP target by its ARN; each event is published to the exchange with
+/// `MinIO`'s headers, confirmed by the broker, and counted as sent.
+#[tokio::test]
+async fn amqp_rules_publish_each_event_to_the_exchange() {
+    use teifs_notify::testing::{AmqpServer, AmqpSetup};
+    use teifs_server::Amqp;
+    let broker = AmqpServer::start(AmqpSetup::default()).await;
+    broker.bind("s3", "events");
+    let amqp = Amqp::new(&format!("amqp://{}", broker.address()), "s3", "events").unwrap();
+    let target = TargetConfig::new("rabbit", TargetKind::Amqp(amqp)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    let rule = QueueConfiguration::builder()
+        .queue_arn("arn:minio:sqs::rabbit:amqp")
+        .events(Event::from("s3:ObjectCreated:*"))
+        .build()
+        .unwrap();
+    configure(&s3, vec![rule]).await.unwrap();
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let messages = broker.messages(1).await;
+    let event: EventMessage = serde_json::from_str(&messages[0].body).unwrap();
+    assert_eq!(
+        (event.key.as_str(), event.event_name.as_str()),
+        ("bkt/a.txt", "s3:ObjectCreated:Put")
+    );
+    assert_eq!(
+        messages[0].headers,
+        [
+            ("minio-bucket".to_owned(), "bkt".to_owned()),
+            ("minio-event".to_owned(), "s3:ObjectCreated:Put".to_owned())
+        ]
+    );
+    target_metrics(
+        &server,
+        "arn:teifs:sqs::rabbit:amqp",
+        &[("sent_total", 1), ("failed_total", 0)],
+    )
+    .await;
+}

@@ -1322,3 +1322,189 @@ async fn kafka_is_reached_over_tls() {
     let err = kafka.test().await.unwrap_err();
     assert!(err.contains("TLS failed"), "{err}");
 }
+
+fn amqp_target(address: &str, vhost: &str, exchange: &str, key: &str) -> Amqp {
+    let mut amqp = Amqp::new(&format!("amqp://{address}/{vhost}"), exchange, key).unwrap();
+    amqp.user = Some("teifs".into());
+    amqp.password = Some(Zeroizing::new("pw".into()));
+    amqp
+}
+
+fn amqp_setup() -> crate::testing::AmqpSetup {
+    crate::testing::AmqpSetup {
+        login: ("teifs".into(), "pw".into()),
+        vhosts: vec!["/".into(), "prod".into()],
+        ..crate::testing::AmqpSetup::default()
+    }
+}
+
+/// AMQP targets: the exchange is declared when the connection is made, and each event is
+/// published to it as JSON with `MinIO`'s headers, persistent, each confirmed by the
+/// broker; a body larger than a frame is split as the broker agreed.
+#[tokio::test]
+async fn amqp_publishes_each_event_with_a_confirm() {
+    use crate::testing::AmqpServer;
+    let broker = AmqpServer::start(amqp_setup()).await;
+    broker.bind("s3", "events");
+    let amqp = amqp_target(broker.address(), "prod", "s3", "events");
+    let config = TargetConfig::new("rabbit", TargetKind::Amqp(amqp.clone())).unwrap();
+    let arn = config.arn();
+    assert_eq!(arn.to_string(), "arn:teifs:sqs::rabbit:amqp");
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), vec![config]).unwrap();
+    notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    let delete = message("s3:ObjectRemoved:Delete", "photos/a.jpg");
+    notifier
+        .queue(vec![(arn.clone(), put.clone()), (arn, delete.clone())])
+        .await
+        .unwrap();
+    let messages = broker.messages(2).await;
+    assert_eq!(messages.len(), 2, "the test publishes nothing");
+    for (message, (body, name)) in messages.iter().zip([
+        (&put, "s3:ObjectCreated:Put"),
+        (&delete, "s3:ObjectRemoved:Delete"),
+    ]) {
+        assert_eq!(message.body.as_bytes(), body);
+        assert_eq!(
+            (
+                message.vhost.as_str(),
+                message.exchange.as_str(),
+                message.routing_key.as_str()
+            ),
+            ("prod", "s3", "events")
+        );
+        assert_eq!(message.content_type, "application/json");
+        assert_eq!(
+            message.headers,
+            [
+                ("minio-bucket".to_owned(), "photos".to_owned()),
+                ("minio-event".to_owned(), name.to_owned())
+            ]
+        );
+        assert_eq!((message.delivery_mode, message.mandatory), (2, false));
+    }
+    let declares = broker.declares();
+    assert!(!declares.is_empty());
+    assert!(
+        declares.iter().all(|d| d.name == "s3"
+            && !d.passive
+            && d.exchange == crate::amqp::Exchange::default())
+    );
+    assert!(broker.heartbeats().iter().all(|h| *h == 0), "no heartbeats");
+    notifier.stop().await;
+
+    // Larger than a frame: split into as many as it takes.
+    let large = vec![b'x'; 10_000];
+    amqp.send(&large).await.unwrap();
+    let last = broker.messages(3).await.pop().unwrap();
+    assert_eq!((last.body.len(), last.frames), (10_000, 3));
+    assert_eq!(
+        last.headers[0],
+        ("minio-bucket".to_owned(), String::new()),
+        "not an event"
+    );
+}
+
+/// What the broker refuses is named: the user, the virtual host, an exchange declared
+/// with other settings or missing, a message it nacks or no queue takes.
+#[tokio::test]
+async fn amqp_names_what_the_broker_refuses() {
+    use crate::testing::{AmqpServer, AmqpSetup};
+    let mut setup = amqp_setup();
+    setup
+        .exchanges
+        .insert("logs".into(), ("fanout".into(), false));
+    let broker = AmqpServer::start(setup).await;
+    let address = broker.address().to_owned();
+
+    let mut wrong = amqp_target(&address, "", "logs", "k");
+    wrong.password = Some(Zeroizing::new("nope".into()));
+    let err = wrong.test().await.unwrap_err();
+    assert!(err.contains("403 ACCESS_REFUSED"), "{err}");
+    let err = amqp_target(&address, "staging", "logs", "k")
+        .test()
+        .await
+        .unwrap_err();
+    assert!(err.contains("530 NOT_ALLOWED"), "{err}");
+
+    let mut logs = amqp_target(&address, "", "logs", "k");
+    let err = logs.test().await.unwrap_err();
+    assert!(
+        err.contains("406 PRECONDITION_FAILED") && err.contains("declare=false"),
+        "{err}"
+    );
+    logs.declare = None;
+    logs.test().await.unwrap();
+    assert!(broker.declares().last().unwrap().passive);
+    let mut fanout = crate::amqp::Exchange::default();
+    fanout.set_kind("fanout").unwrap();
+    fanout.durable = false;
+    logs.declare = Some(fanout);
+    logs.test().await.unwrap();
+    let mut missing = amqp_target(&address, "", "missing", "k");
+    missing.declare = None;
+    let err = missing.test().await.unwrap_err();
+    assert!(err.contains("404 NOT_FOUND"), "{err}");
+
+    let body = message("s3:ObjectCreated:Put", "b/k");
+    logs.send(&body).await.unwrap();
+    broker.nack(1);
+    let err = logs.send(&body).await.unwrap_err();
+    assert!(err.contains("nack"), "{err}");
+
+    logs.mandatory = true;
+    let err = logs.send(&body).await.unwrap_err();
+    assert!(
+        err.contains("no queue took it") && err.contains("312 NO_ROUTE"),
+        "{err}"
+    );
+    broker.bind("logs", "k");
+    logs.send(&body).await.unwrap();
+    logs.persistent = false;
+    logs.send(&body).await.unwrap();
+    let messages = broker.messages(3).await;
+    assert_eq!(messages.len(), 3, "the returned one isn't kept");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| (m.mandatory, m.delivery_mode))
+            .collect::<Vec<_>>(),
+        [(false, 2), (true, 2), (true, 1)]
+    );
+
+    // The default exchange: the routing key names the queue, and nothing is declared.
+    let declared = broker.declares().len();
+    let queue = amqp_target(&address, "", "", "q1");
+    queue.send(&body).await.unwrap();
+    assert_eq!(broker.declares().len(), declared);
+    assert_eq!(broker.messages(4).await[3].exchange, "");
+
+    // The guest login, when no user is given.
+    let guest = AmqpServer::start(AmqpSetup::default()).await;
+    let mut anonymous = Amqp::new(&format!("amqp://{}", guest.address()), "s3", "k").unwrap();
+    anonymous.test().await.unwrap();
+    anonymous.user = Some("teifs".into());
+    assert!(anonymous.test().await.is_err());
+}
+
+/// AMQP over TLS, `amqps://`: the broker verified with the operator's CA.
+#[tokio::test]
+async fn amqp_is_reached_over_tls() {
+    use crate::testing::AmqpServer;
+    let broker = AmqpServer::start(amqp_setup()).await;
+    let (address, ca_pem) = tls_in_front_of(broker.address()).await;
+    let mut amqp = Amqp::new(&format!("amqps://{address}"), "s3", "k").unwrap();
+    assert!(amqp.wants_tls());
+    amqp.user = Some("teifs".into());
+    amqp.password = Some(Zeroizing::new("pw".into()));
+    amqp.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert!(amqp.shown().starts_with("amqps://"));
+    amqp.send(&message("s3:ObjectCreated:Put", "b/k"))
+        .await
+        .unwrap();
+    assert_eq!(broker.messages(1).await.len(), 1);
+    amqp.tls = Some(tls_config(None, None).unwrap());
+    let err = amqp.test().await.unwrap_err();
+    assert!(err.contains("TLS failed"), "{err}");
+}

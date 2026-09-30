@@ -331,7 +331,30 @@ the brokers must make topics. Starting to name it checks that a broker takes the
 connection and knows the topic, without producing. It needs Kafka 1.0 or later (Kafka 4
 included); nightly CI runs it against a real broker.
 
-Redis, NSQ, NATS, MQTT and Kafka targets each keep their connections. One the server
+```sh
+teifs serve --notify-amqp rabbit=amqps://mq.internal/prod,exchange=s3,routing_key=events,user=teifs
+export TEIFS_NOTIFY_AMQP_PASSWORD_RABBIT=…
+```
+
+An AMQP target, `arn:teifs:sqs::ID:amqp`, publishes each event over AMQP 0-9-1
+(RabbitMQ, LavinMQ) to an exchange with a routing key, as a webhook is sent it:
+`application/json`, with MinIO's headers `minio-bucket` and `minio-event`, and persistent
+(`persistent=false` for transient messages). Each waits for the broker's publisher
+confirm, so an event is removed from the queue only once the broker has it. The exchange
+is declared when the connection is made, a durable `direct` one unless `exchange_type`,
+`durable`, `auto_delete` or `internal` say otherwise; one that exists with other settings
+is named, and `declare=false` only checks that it exists (for a user that may not
+configure). Without an exchange, the routing key names a queue on the default exchange.
+`mandatory=true` makes a message no queue is bound for fail and be tried again, rather than
+be dropped by the broker. The URL is `amqp://HOST[:PORT][/VHOST]` (the virtual host `/`
+when none is given; `%2F` for a `/` in its name), or `amqps://` for TLS, verified with the
+system's certificates or `ca=PATH`, with `client_cert` and `client_key` for a broker that
+asks. The user is `user=NAME` and its password comes from
+`TEIFS_NOTIFY_AMQP_PASSWORD_ID`; without them, AMQP's `guest`. Starting to name it checks
+that the broker takes the user, the virtual host and the exchange, without publishing.
+Nightly CI runs it against a real RabbitMQ.
+
+Redis, NSQ, NATS, MQTT, Kafka and AMQP targets each keep their connections. One the server
 closed while it was idle (nsqd does after missed heartbeats, NATS after missed pings, an
 MQTT broker after its keep alive, Kafka after `connections.max.idle.ms`, Redis with a
 `timeout` set) is made again at once, rather than failing the event and waiting to
@@ -533,6 +556,6 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (AMQP, databases), Kafka's snappy, lz4 and zstd
+Not yet: database targets (PostgreSQL, MySQL), Kafka's snappy, lz4 and zstd
 compression, MQTT over WebSockets, NSQ over TLS, and client certificates for webhooks and
 Elasticsearch.

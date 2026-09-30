@@ -1,8 +1,9 @@
 //! Targets on this machine, for tests (the `testing` feature): a webhook receiver that
 //! takes requests (`POST`s, and the others an Elasticsearch target makes), or fails as
-//! many as it's told to first, Redis, NSQ, NATS and MQTT servers, a Kafka cluster, and a
+//! many as it's told to first, Redis, NSQ, NATS and MQTT servers, a Kafka cluster, an AMQP broker, and a
 //! server that answers as AWS's SQS, SNS, Lambda and EventBridge do.
 
+mod amqp;
 mod kafka;
 
 use std::{
@@ -14,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+pub use amqp::{AmqpDeclare, AmqpMessage, AmqpServer, AmqpSetup};
 use http_body_util::BodyExt;
 pub use kafka::{KafkaRecord, KafkaServer, KafkaSetup};
 
