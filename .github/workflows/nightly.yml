@@ -301,12 +301,12 @@ jobs:
           MYSQL_PASSWORD: mysql-test-only
         ports:
           - 3306:3306
-    env:
-      SQL: docker exec -e MYSQL_PWD=mysql-test-only ${{ job.services.db.id }} ${{ matrix.client }} -h127.0.0.1 --protocol=TCP -uteifs teifs -N -B -e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: The server, over TCP
+        env:
+          SQL: docker exec -e MYSQL_PWD=mysql-test-only ${{ job.services.db.id }} ${{ matrix.client }} -h127.0.0.1 --protocol=TCP -uteifs teifs -N -B -e
         run: |
           for i in $(seq 90); do $SQL "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
           $SQL "SELECT VERSION(), @@default_authentication_plugin" 2>/dev/null || $SQL "SELECT VERSION()"
@@ -320,6 +320,8 @@ jobs:
           TEIFS_TEST_MYSQL: 127.0.0.1:3306
           TEIFS_TEST_MYSQL_PASSWORD: mysql-test-only
       - name: The rows, as the server keeps them
+        env:
+          SQL: docker exec -e MYSQL_PWD=mysql-test-only ${{ job.services.db.id }} ${{ matrix.client }} -h127.0.0.1 --protocol=TCP -uteifs teifs -N -B -e
         run: |
           $SQL "SELECT key_name, JSON_UNQUOTE(JSON_EXTRACT(value, '$.Records[0].eventName')) FROM teifs_objects"
           test "$($SQL "SELECT key_name FROM teifs_objects")" = "objects/dir/b c.txt"
