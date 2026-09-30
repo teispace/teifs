@@ -1087,3 +1087,238 @@ async fn event_bridge_names_what_it_refuses() {
     // refused request isn't taken.
     assert_eq!(server.requests(0).await.len(), 3);
 }
+
+fn kafka_target(id: &str, kafka: Kafka) -> (TargetArn, TargetConfig) {
+    let config = TargetConfig::new(id, TargetKind::Kafka(kafka)).unwrap();
+    (config.arn(), config)
+}
+
+/// Kafka targets: the topic's leaders are looked up on any bootstrap broker, and each
+/// event is produced, keyed by its object, to the partition Kafka's own clients pick for
+/// the key, on that partition's leader, in order.
+#[tokio::test]
+async fn kafka_produces_each_event_to_its_objects_partition_leader() {
+    use crate::testing::{KafkaServer, KafkaSetup};
+    let cluster = KafkaServer::start(KafkaSetup::new(3, "s3-events", 6)).await;
+    // Only the last broker is named, and the first doesn't answer.
+    let brokers = format!("127.0.0.1:1;{}", cluster.addresses()[2]);
+    let (arn, config) = kafka_target("stream", Kafka::new(&brokers, "s3-events").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), vec![config]).unwrap();
+    notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+    let events: Vec<Vec<u8>> = [
+        ("s3:ObjectCreated:Put", "photos/a.jpg"),
+        ("s3:ObjectCreated:Put", "photos/b.jpg"),
+        ("s3:ObjectRemoved:Delete", "photos/a.jpg"),
+        ("s3:ObjectCreated:Copy", "docs/c.txt"),
+    ]
+    .iter()
+    .map(|(name, key)| message(name, key))
+    .collect();
+    notifier
+        .queue(events.iter().map(|e| (arn.clone(), e.clone())).collect())
+        .await
+        .unwrap();
+    let records = cluster.records(4).await;
+    assert_eq!(records.len(), 4, "the test produces nothing");
+    for (record, event) in records.iter().zip(&events) {
+        let key = serde_json::from_slice::<serde_json::Value>(event).unwrap()["Key"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let partition = crate::kafka::wire::partition(key.as_bytes(), 6);
+        assert_eq!(record.key.as_deref(), Some(key.as_str()));
+        assert_eq!(record.value.as_bytes(), event);
+        assert_eq!(record.partition, partition, "{key}");
+        assert_eq!(record.broker, partition % 3, "its leader took it");
+        assert_eq!((record.acks, record.compression), (-1, 0));
+    }
+    assert_eq!(
+        cluster.lookups(),
+        1,
+        "the test's connection was kept for the events"
+    );
+    notifier.stop().await;
+
+    let missing = Kafka::new(&cluster.addresses()[0], "missing").unwrap();
+    let err = missing.test().await.unwrap_err();
+    assert!(err.contains("`missing` doesn't exist"), "{err}");
+    let down = Kafka::new("127.0.0.1:1;127.0.0.1:2", "s3-events").unwrap();
+    let err = down.test().await.unwrap_err();
+    assert!(
+        err.starts_with("no broker took the connection (127.0.0.1:1: "),
+        "{err}"
+    );
+}
+
+/// A leader that moved is looked up again at once; a topic whose leader is being elected
+/// is waited for, a little; a record the leader refuses fails with the leader's reason;
+/// `acks=1` and gzip are as asked.
+#[tokio::test]
+async fn kafka_follows_leaders_and_names_refusals() {
+    use crate::testing::{KafkaServer, KafkaSetup};
+    let cluster = KafkaServer::start(KafkaSetup::new(2, "t", 1)).await;
+    let kafka = Kafka::new(&cluster.addresses()[0], "t").unwrap();
+    let put = message("s3:ObjectCreated:Put", "b/k");
+    kafka.send(&put).await.unwrap();
+    cluster.move_leader(0, 1);
+    kafka.send(&put).await.unwrap();
+    let records = cluster.records(2).await;
+    assert_eq!((records[0].broker, records[1].broker), (0, 1));
+    assert_eq!(
+        cluster.lookups(),
+        2,
+        "looked up again once, on the same connection"
+    );
+
+    cluster.refuse(19, 1);
+    let err = kafka.send(&put).await.unwrap_err();
+    assert_eq!(err, "it answered NOT_ENOUGH_REPLICAS (19)");
+    kafka.send(&put).await.unwrap();
+    assert_eq!(cluster.records(3).await.len(), 3);
+    assert_eq!(cluster.lookups(), 2, "a refusal keeps the connection");
+
+    cluster.electing(2);
+    kafka.test().await.unwrap();
+    cluster.electing(3);
+    let err = kafka.test().await.unwrap_err();
+    assert!(err.contains("LEADER_NOT_AVAILABLE"), "{err}");
+
+    let mut quick = Kafka::new(&cluster.addresses()[1], "t").unwrap();
+    quick.acks = Acks::Leader;
+    quick.compression = Compression::Gzip;
+    quick.send(&put).await.unwrap();
+    let last = cluster.records(4).await.pop().unwrap();
+    assert_eq!((last.acks, last.compression), (1, 1));
+    assert_eq!(last.value.as_bytes(), put);
+}
+
+/// SASL: PLAIN and SCRAM sign in, a wrong password or mechanism is named, and a broker
+/// older than the versions used is refused.
+#[tokio::test]
+async fn kafka_signs_in_with_sasl() {
+    use crate::testing::{KafkaServer, KafkaSetup};
+    for mechanism in ["plain", "scram-sha-256", "scram-sha-512"] {
+        let mechanism = SaslMechanism::parse(mechanism).unwrap();
+        let mut setup = KafkaSetup::new(2, "t", 2);
+        setup.sasl = Some((mechanism.name().into(), "teifs".into(), "s3cr=t,pw".into()));
+        let cluster = KafkaServer::start(setup).await;
+        let signed = |password: &str, mechanism| {
+            let mut kafka = Kafka::new(&cluster.addresses()[0], "t").unwrap();
+            kafka.sasl = Some(KafkaSasl {
+                mechanism,
+                user: "teifs".into(),
+                password: Zeroizing::new(password.into()),
+            });
+            kafka
+        };
+        let kafka = signed("s3cr=t,pw", mechanism);
+        for key in ["b/one", "b/two", "b/three"] {
+            kafka
+                .send(&message("s3:ObjectCreated:Put", key))
+                .await
+                .unwrap();
+        }
+        assert_eq!(cluster.records(3).await.len(), 3);
+        let signins = cluster.signins();
+        assert!(
+            signins.len() >= 2,
+            "each broker's connection signs in: {signins:?}"
+        );
+        assert!(
+            signins
+                .iter()
+                .all(|s| *s == format!("{} teifs", mechanism.name()))
+        );
+
+        let err = signed("wrong", mechanism).test().await.unwrap_err();
+        assert!(err.contains("refused the user or password"), "{err}");
+        let other = if mechanism == SaslMechanism::Plain {
+            SaslMechanism::Scram(ScramHash::Sha256)
+        } else {
+            SaslMechanism::Plain
+        };
+        let err = signed("s3cr=t,pw", other).test().await.unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "it doesn't take SASL {}, only {}",
+                other.name(),
+                mechanism.name()
+            )
+        );
+        let err = Kafka::new(&cluster.addresses()[0], "t")
+            .unwrap()
+            .send(b"{}")
+            .await
+            .unwrap_err();
+        assert!(err.contains("connection failed"), "unsigned: {err}");
+    }
+
+    // A server that doesn't know the password can't prove it does.
+    let mut impostor = KafkaSetup::new(1, "t", 1);
+    impostor.sasl = Some(("SCRAM-SHA-256".into(), "teifs".into(), "pw".into()));
+    impostor.impostor = true;
+    let cluster = KafkaServer::start(impostor).await;
+    let mut kafka = Kafka::new(&cluster.addresses()[0], "t").unwrap();
+    kafka.sasl = Some(KafkaSasl {
+        mechanism: SaslMechanism::Scram(ScramHash::Sha256),
+        user: "teifs".into(),
+        password: Zeroizing::new("pw".into()),
+    });
+    let err = kafka.test().await.unwrap_err();
+    assert!(err.contains("it isn't the server"), "{err}");
+
+    // Brokers older than the versions used: Produce v3, or SASL's handshake v1.
+    for (api, newest) in [(0, 2), (17, 0)] {
+        let mut old = KafkaSetup::new(1, "t", 1);
+        old.sasl = Some(("PLAIN".into(), "teifs".into(), "pw".into()));
+        for version in &mut old.versions {
+            if version.0 == api {
+                version.2 = newest;
+            }
+        }
+        let cluster = KafkaServer::start(old).await;
+        let mut kafka = Kafka::new(&cluster.addresses()[0], "t").unwrap();
+        kafka.sasl = Some(KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            user: "teifs".into(),
+            password: Zeroizing::new("pw".into()),
+        });
+        let err = kafka.test().await.unwrap_err();
+        assert!(err.contains(&format!("API {api} version")), "{err}");
+        assert!(err.contains("use Kafka 1.0 or later"), "{err}");
+    }
+}
+
+/// Kafka over TLS: each broker verified with the operator's CA, leaders included.
+#[tokio::test]
+async fn kafka_is_reached_over_tls() {
+    use crate::testing::{KafkaServer, KafkaSetup};
+    let cluster = KafkaServer::start(KafkaSetup::new(2, "t", 2)).await;
+    let mut ca = String::new();
+    for broker in 0..2 {
+        let (address, ca_pem) = tls_in_front_of(&cluster.addresses()[broker]).await;
+        let (host, port) = address.rsplit_once(':').unwrap();
+        cluster.advertise(broker, host, port.parse().unwrap());
+        ca.push_str(&ca_pem);
+    }
+    // The bootstrap broker is reached through a proxy of its own.
+    let (bootstrap, ca_pem) = tls_in_front_of(&cluster.addresses()[0]).await;
+    ca.push_str(&ca_pem);
+    let mut kafka = Kafka::new(&bootstrap, "t").unwrap();
+    kafka.tls = Some(tls_config(Some(ca.as_bytes()), None).unwrap());
+    assert!(kafka.shown().starts_with("kafka+tls://"));
+    for key in ["b/one", "b/two", "b/three", "b/four"] {
+        kafka
+            .send(&message("s3:ObjectCreated:Put", key))
+            .await
+            .unwrap();
+    }
+    let records = cluster.records(4).await;
+    assert!(records.iter().any(|r| r.broker == 0) && records.iter().any(|r| r.broker == 1));
+
+    kafka.tls = Some(tls_config(None, None).unwrap());
+    let err = kafka.test().await.unwrap_err();
+    assert!(err.contains("TLS failed"), "{err}");
+}

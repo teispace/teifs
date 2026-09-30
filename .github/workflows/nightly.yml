@@ -123,3 +123,67 @@ jobs:
         env:
           TEIFS_TEST_TRANSIT_ADDR: http://127.0.0.1:8200
           VAULT_TOKEN: dev-only-token
+
+  kafka:
+    # Notifications to a real Kafka broker: plain, SASL PLAIN and SCRAM, gzip; the records
+    # are read back with Kafka's own consumer.
+    name: Kafka notifications
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      kafka:
+        image: apache/kafka:4.1.0
+        env:
+          CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,SASL_PLAINTEXT://:9094
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256,SCRAM-SHA-512
+          KAFKA_LISTENER_NAME_SASL__PLAINTEXT_PLAIN_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required user_teifs="plain-test-only";
+          KAFKA_LISTENER_NAME_SASL__PLAINTEXT_SCRAM___SHA___256_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
+          KAFKA_LISTENER_NAME_SASL__PLAINTEXT_SCRAM___SHA___512_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+        ports:
+          - 9092:9092
+          - 9094:9094
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: The topic and the SCRAM user
+        env:
+          KAFKA: docker exec ${{ job.services.kafka.id }} /opt/kafka/bin
+        run: |
+          for i in $(seq 60); do
+            $KAFKA/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 && break
+            sleep 2
+          done
+          $KAFKA/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic teifs-events --partitions 3 --replication-factor 1
+          $KAFKA/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users --entity-name teifs \
+            --add-config 'SCRAM-SHA-256=[iterations=4096,password=scram-test-only],SCRAM-SHA-512=[password=scram-test-only]'
+      - run: cargo test --locked -p teifs-server --test kafka -- --nocapture
+        env:
+          TEIFS_TEST_KAFKA: 127.0.0.1:9092
+          TEIFS_TEST_KAFKA_SASL: 127.0.0.1:9094
+          TEIFS_TEST_KAFKA_PLAIN_PASSWORD: plain-test-only
+          TEIFS_TEST_KAFKA_SCRAM_PASSWORD: scram-test-only
+      - name: The records, as Kafka's consumer reads them
+        env:
+          KAFKA: docker exec ${{ job.services.kafka.id }} /opt/kafka/bin
+        run: |
+          $KAFKA/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic teifs-events \
+            --from-beginning --max-messages 12 --timeout-ms 30000 --property print.key=true --property key.separator='|' > records.txt
+          cut -c1-160 records.txt
+          test "$(wc -l < records.txt)" -eq 12
+          for bucket in k0 k1 k2 k3; do
+            test "$(grep -c "^$bucket/a.txt|" records.txt)" -eq 2
+            grep -q "^$bucket/dir/b c.txt|.*s3:ObjectCreated:Put" records.txt
+            grep -q "^$bucket/a.txt|.*s3:ObjectRemoved:Delete" records.txt
+          done

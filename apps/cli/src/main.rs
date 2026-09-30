@@ -25,10 +25,10 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, EventBridge,
-    Format, JobOptions, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis,
-    Server, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey,
-    Webhook, credentials, tls_config,
+    Acks, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability, Elasticsearch,
+    EventBridge, Format, JobOptions, Kafka, KafkaSasl, KeyRules, KmsLocation, Lambda, Limits, Mqtt,
+    Nats, Nsq, ProxyHeader, Redis, SaslMechanism, Server, Sns, Sqs, TargetConfig, TargetKind,
+    TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -318,6 +318,23 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_MQTT"
     )]
     notify_mqtt: Vec<TargetConfig>,
+    /// A Kafka topic buckets' notification rules can send events to, as
+    /// ID=BROKER[;BROKER…],topic=NAME, the brokers first asked about the topic
+    /// (`HOST:PORT`), with acks=all (the default: every in-sync replica has each event) or
+    /// acks=1, compression=gzip, sasl=plain, scram-sha-256 or scram-sha-512 with
+    /// user=NAME, and tls=true or ca=PATH with `client_cert=PATH` and `client_key=PATH`
+    /// (repeat for more; in the environment, separated by spaces). Rules name it
+    /// `arn:teifs:sqs::ID:kafka`; each event is produced as a webhook is sent it, keyed
+    /// `bucket/object`. Its SASL password, `TEIFS_NOTIFY_KAFKA_PASSWORD_ID`, is read only
+    /// from the environment.
+    #[arg(
+        long = "notify-kafka",
+        value_name = "ID=BROKER,topic=NAME",
+        value_parser = parse_notify_kafka,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_KAFKA"
+    )]
+    notify_kafka: Vec<TargetConfig>,
     /// An SQS queue buckets' notification rules can send events to, as S3 sends them,
     /// as `ID=QUEUE_URL` (`https://sqs.REGION.amazonaws.com/ACCOUNT/NAME`, or any service
     /// that speaks SQS's API), with region=NAME when its host doesn't name it (repeat for
@@ -580,7 +597,7 @@ fn main() -> ExitCode {
         cli.color,
     );
     let result = runtime.block_on(async move {
-        match tokio::spawn(async move { run(cli.command, &sources).await }).await {
+        match tokio::spawn(async move { Box::pin(run(cli.command, &sources)).await }).await {
             Ok(result) => result,
             Err(err) => std::panic::resume_unwind(err.into_panic()),
         }
@@ -974,6 +991,49 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
+/// A Kafka topic, `ID=BROKER[;BROKER…],topic=NAME[,acks=A][,compression=C][,sasl=M,user=U]`
+/// and TLS options; its SASL password comes from the environment later.
+fn parse_notify_kafka(text: &str) -> Result<TargetConfig, String> {
+    let form = "ID=HOST:PORT[;HOST:PORT…],topic=NAME";
+    let (id, brokers, options) = target_spec(
+        text,
+        form,
+        &[
+            "topic",
+            "acks",
+            "compression",
+            "sasl",
+            "user",
+            "tls",
+            "ca",
+            "client_cert",
+            "client_key",
+        ],
+    )?;
+    let topic = options
+        .get("topic")
+        .ok_or_else(|| format!("name the topic: {form}"))?;
+    let mut kafka = Kafka::new(brokers, topic)?;
+    if let Some(acks) = options.get("acks") {
+        kafka.acks = Acks::parse(acks)?;
+    }
+    if let Some(compression) = options.get("compression") {
+        kafka.compression = Compression::parse(compression)?;
+    }
+    kafka.sasl = match (options.get("sasl"), options.get("user")) {
+        (Some(mechanism), Some(user)) => Some(KafkaSasl {
+            mechanism: SaslMechanism::parse(mechanism)?,
+            user: (*user).to_owned(),
+            // Read from the environment later.
+            password: Zeroizing::new(String::new()),
+        }),
+        (None, None) => None,
+        _ => return Err("give both sasl=MECHANISM and user=NAME".to_owned()),
+    };
+    kafka.tls = target_tls(&options)?;
+    TargetConfig::new(id, TargetKind::Kafka(kafka))
+}
+
 /// An SQS, SNS, Lambda or EventBridge target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
 /// `…_SECRET_KEY_ID`, `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if
 /// neither.
@@ -1082,75 +1142,109 @@ fn notify_targets(
                 .filter(|s| !s.trim().is_empty())
                 .map(Zeroizing::new)
         };
-        match &mut target.kind {
-            TargetKind::Webhook(hook) => hook.token = secret("TOKEN"),
-            TargetKind::Elasticsearch(es) => {
-                es.password = secret("PASSWORD");
-                es.api_key = secret("API_KEY");
-                if es.password.is_some() && es.username.is_none() {
-                    return Err(format!(
-                        "the Elasticsearch target `{}` has a password: give its user=NAME",
-                        arn.id
-                    ));
-                }
+        target_secrets(&mut target.kind, &arn, secret, &env)?;
+        out.push(target);
+    }
+    Ok(out)
+}
+
+/// Reads a target's secrets with `secret` (its own variables, by what they are) and
+/// `env` (AWS's), and checks they go with its options.
+fn target_secrets(
+    kind: &mut TargetKind,
+    arn: &teifs_types::notify::TargetArn,
+    secret: impl Fn(&str) -> Option<Zeroizing<String>> + Copy,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    match kind {
+        TargetKind::Webhook(hook) => hook.token = secret("TOKEN"),
+        TargetKind::Elasticsearch(es) => {
+            es.password = secret("PASSWORD");
+            es.api_key = secret("API_KEY");
+            if es.password.is_some() && es.username.is_none() {
+                return Err(format!(
+                    "the Elasticsearch target `{}` has a password: give its user=NAME",
+                    arn.id
+                ));
             }
-            TargetKind::Nsq(_) => {}
-            TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(&arn, secret, &env)?,
-            TargetKind::Sns(sns) => sns.credentials = aws_credentials(&arn, secret, &env)?,
-            TargetKind::Lambda(lambda) => {
-                lambda.credentials = aws_credentials(&arn, secret, &env)?;
+        }
+        TargetKind::Nsq(_) => {}
+        TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(arn, secret, &env)?,
+        TargetKind::Sns(sns) => sns.credentials = aws_credentials(arn, secret, &env)?,
+        TargetKind::Lambda(lambda) => {
+            lambda.credentials = aws_credentials(arn, secret, &env)?;
+        }
+        TargetKind::EventBridge(bus) => {
+            bus.credentials = aws_credentials(arn, secret, &env)?;
+        }
+        TargetKind::Mqtt(mqtt) => {
+            mqtt.password = secret("PASSWORD");
+            if mqtt.password.is_some() && mqtt.user.is_none() {
+                return Err(format!(
+                    "the MQTT target `{}` has a password: give its user=NAME",
+                    arn.id
+                ));
             }
-            TargetKind::EventBridge(bus) => {
-                bus.credentials = aws_credentials(&arn, secret, &env)?;
-            }
-            TargetKind::Mqtt(mqtt) => {
-                mqtt.password = secret("PASSWORD");
-                if mqtt.password.is_some() && mqtt.user.is_none() {
+        }
+        TargetKind::Kafka(kafka) => {
+            let password = secret("PASSWORD");
+            match (&mut kafka.sasl, password) {
+                (Some(sasl), Some(password)) => sasl.password = password,
+                (None, None) => {}
+                (Some(_), None) => {
                     return Err(format!(
-                        "the MQTT target `{}` has a password: give its user=NAME",
-                        arn.id
-                    ));
-                }
-            }
-            TargetKind::Nats(nats) => {
-                nats.password = secret("PASSWORD");
-                nats.token = secret("TOKEN");
-                let variable = |what: &str| {
-                    format!(
-                        "TEIFS_NOTIFY_NATS_{what}_{}",
-                        arn.id.to_ascii_uppercase().replace('-', "_")
-                    )
-                };
-                if nats.user.is_some() != nats.password.is_some() {
-                    return Err(format!(
-                        "the NATS target `{}` needs both a user=NAME and its password in {}",
-                        arn.id,
-                        variable("PASSWORD")
-                    ));
-                }
-                if nats.token.is_some() && (nats.user.is_some() || nats.key.is_some()) {
-                    return Err(format!(
-                        "the NATS target `{}` has a token in {}: leave out its user and key",
-                        arn.id,
-                        variable("TOKEN")
-                    ));
-                }
-            }
-            TargetKind::Redis(redis) => {
-                redis.password = secret("PASSWORD");
-                if redis.user.is_some() && redis.password.is_none() {
-                    return Err(format!(
-                        "the Redis target `{}` has a user: set its password in \
-                         TEIFS_NOTIFY_REDIS_PASSWORD_{}",
+                        "the Kafka target `{}` signs in with SASL: set its password in \
+                         TEIFS_NOTIFY_KAFKA_PASSWORD_{}",
                         arn.id,
                         arn.id.to_ascii_uppercase().replace('-', "_")
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(format!(
+                        "the Kafka target `{}` has a password: give its sasl=MECHANISM and \
+                         user=NAME",
+                        arn.id
                     ));
                 }
             }
         }
-        out.push(target);
+        TargetKind::Nats(nats) => {
+            nats.password = secret("PASSWORD");
+            nats.token = secret("TOKEN");
+            let variable = |what: &str| {
+                format!(
+                    "TEIFS_NOTIFY_NATS_{what}_{}",
+                    arn.id.to_ascii_uppercase().replace('-', "_")
+                )
+            };
+            if nats.user.is_some() != nats.password.is_some() {
+                return Err(format!(
+                    "the NATS target `{}` needs both a user=NAME and its password in {}",
+                    arn.id,
+                    variable("PASSWORD")
+                ));
+            }
+            if nats.token.is_some() && (nats.user.is_some() || nats.key.is_some()) {
+                return Err(format!(
+                    "the NATS target `{}` has a token in {}: leave out its user and key",
+                    arn.id,
+                    variable("TOKEN")
+                ));
+            }
+        }
+        TargetKind::Redis(redis) => {
+            redis.password = secret("PASSWORD");
+            if redis.user.is_some() && redis.password.is_none() {
+                return Err(format!(
+                    "the Redis target `{}` has a user: set its password in \
+                     TEIFS_NOTIFY_REDIS_PASSWORD_{}",
+                    arn.id,
+                    arn.id.to_ascii_uppercase().replace('-', "_")
+                ));
+            }
+        }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Checks a trusted proxy's address or network.
@@ -1209,6 +1303,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_nsq)
                 .chain(args.notify_nats)
                 .chain(args.notify_mqtt)
+                .chain(args.notify_kafka)
                 .chain(args.notify_sqs)
                 .chain(args.notify_sns)
                 .chain(args.notify_lambda)
@@ -1798,6 +1893,62 @@ mod tests {
         let userless = parse_notify_mqtt("u=broker.local:1883,topic=t").unwrap();
         let env = |name: &str| (name == "TEIFS_NOTIFY_MQTT_PASSWORD_U").then(|| "pw".into());
         assert!(notify_targets(vec![userless], env).is_err());
+    }
+
+    #[test]
+    fn kafka_targets_take_options_and_their_password_from_the_environment() {
+        let kafka_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Kafka(kafka) => kafka.clone(),
+            _ => panic!("not Kafka"),
+        };
+        let stream = parse_notify_kafka(
+            "stream=k1.local:9093;k2.local:9093,topic=s3-events,acks=1,compression=gzip,\
+             sasl=scram-sha-512,user=teifs,tls=true",
+        )
+        .unwrap();
+        assert_eq!(stream.arn().to_string(), "arn:teifs:sqs::stream:kafka");
+        let env = |name: &str| (name == "TEIFS_NOTIFY_KAFKA_PASSWORD_STREAM").then(|| "pw".into());
+        let kafka = kafka_of(&notify_targets(vec![stream.clone()], env).unwrap()[0]);
+        assert_eq!(kafka.brokers, ["k1.local:9093", "k2.local:9093"]);
+        assert_eq!(
+            (kafka.acks, kafka.compression, kafka.tls.is_some()),
+            (Acks::Leader, Compression::Gzip, true)
+        );
+        let sasl = kafka.sasl.unwrap();
+        assert_eq!(
+            (sasl.mechanism.name(), sasl.user.as_str()),
+            ("SCRAM-SHA-512", "teifs")
+        );
+        assert_eq!(sasl.password.as_str(), "pw");
+        let plain = kafka_of(&parse_notify_kafka("p=k.local:9092,topic=t").unwrap());
+        assert_eq!(
+            (
+                plain.acks,
+                plain.compression,
+                plain.sasl.is_none(),
+                plain.tls.is_none()
+            ),
+            (Acks::All, Compression::None, true, true),
+            "the defaults"
+        );
+        for bad in [
+            "x=k.local:9092",
+            "x=k.local,topic=t",
+            "x=k.local:9092,topic=a/b",
+            "x=k.local:9092,topic=t,acks=0",
+            "x=k.local:9092,topic=t,compression=zip",
+            "x=k.local:9092,topic=t,sasl=gssapi,user=u",
+            "x=k.local:9092,topic=t,sasl=plain",
+            "x=k.local:9092,topic=t,user=u",
+            "x=k.local:9092,topic=t,subject=s",
+        ] {
+            assert!(parse_notify_kafka(bad).is_err(), "{bad}");
+        }
+        // SASL needs its password, and a password its SASL.
+        assert!(notify_targets(vec![stream], |_: &str| None).is_err());
+        let bare = parse_notify_kafka("u=k.local:9092,topic=t").unwrap();
+        let env = |name: &str| (name == "TEIFS_NOTIFY_KAFKA_PASSWORD_U").then(|| "pw".into());
+        assert!(notify_targets(vec![bare], env).is_err());
     }
 
     #[test]

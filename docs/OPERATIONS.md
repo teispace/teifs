@@ -310,9 +310,31 @@ and `qos=0` for the answer to a ping sent after it; messages aren't retained.
 drops the connection. TLS takes the same options as Redis's. Starting to name it checks
 that the broker takes the connection and the user and password, without publishing.
 
-Redis, NSQ, NATS and MQTT targets each keep one connection. One the server closed while it
-was idle (nsqd does after missed heartbeats, NATS after missed pings, an MQTT broker
-after its keep alive, Redis with a `timeout` set) is made again at once, rather than failing the event and waiting to
+```sh
+teifs serve --notify-kafka 'stream=k1.internal:9093;k2.internal:9093,topic=s3-events,sasl=scram-sha-512,user=teifs,tls=true'
+export TEIFS_NOTIFY_KAFKA_PASSWORD_STREAM=…
+```
+
+A Kafka target, `arn:teifs:sqs::ID:kafka`, produces each event to a topic, as a webhook
+is sent it, keyed `bucket/object` (the key as written, as MinIO's is). The brokers given
+(separated by `;`) are asked, in turn, for the topic's partitions and their leaders; each
+record goes to the partition Kafka's own clients pick for its key (murmur2), so one
+object's events stay in order on one partition, and to that partition's leader, which
+answers once every in-sync replica has it (`acks=all`, the default) or once it has it
+(`acks=1`). A leader that moved or a partition being elected is looked up again at once;
+a record the broker refuses (`NOT_ENOUGH_REPLICAS`, say) is tried again later, like any
+event a target doesn't take. `compression=gzip` compresses each record. `sasl=plain`,
+`scram-sha-256` or `scram-sha-512` with `user=NAME` signs in, the password from
+`TEIFS_NOTIFY_KAFKA_PASSWORD_ID`; SCRAM never sends the password, and PLAIN is for TLS
+only. TLS takes the same options as Redis's, for every broker. The topic must exist, or
+the brokers must make topics. Starting to name it checks that a broker takes the
+connection and knows the topic, without producing. It needs Kafka 1.0 or later (Kafka 4
+included); nightly CI runs it against a real broker.
+
+Redis, NSQ, NATS, MQTT and Kafka targets each keep their connections. One the server
+closed while it was idle (nsqd does after missed heartbeats, NATS after missed pings, an
+MQTT broker after its keep alive, Kafka after `connections.max.idle.ms`, Redis with a
+`timeout` set) is made again at once, rather than failing the event and waiting to
 retry it.
 
 ```sh
@@ -511,5 +533,6 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
-certificates for webhooks and Elasticsearch.
+Not yet: other kinds of targets (AMQP, databases), Kafka's snappy, lz4 and zstd
+compression, MQTT over WebSockets, NSQ over TLS, and client certificates for webhooks and
+Elasticsearch.

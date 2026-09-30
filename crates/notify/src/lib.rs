@@ -1,5 +1,7 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics and SQS queues) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, SQS
+//! queues, SNS topics, Lambda functions and an EventBridge bus) are named by ARN,
+//! `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -11,6 +13,7 @@ mod tests;
 mod aws;
 mod elasticsearch;
 mod eventbridge;
+mod kafka;
 mod lambda;
 mod mqtt;
 mod nats;
@@ -19,6 +22,7 @@ mod nkey;
 mod nsq;
 mod queue;
 mod redis;
+mod scram;
 mod sns;
 mod sqs;
 #[cfg(feature = "testing")]
@@ -40,6 +44,7 @@ pub use elasticsearch::Elasticsearch;
 pub use eventbridge::EventBridge;
 /// Whether S3 sends an event to EventBridge.
 pub use eventbridge::sends as event_bridge_sends;
+pub use kafka::{Acks, Compression, Kafka, KafkaSasl, SaslMechanism};
 pub use lambda::Lambda;
 pub use mqtt::Mqtt;
 pub use nats::Nats;
@@ -47,6 +52,7 @@ pub use net::tls_config;
 pub use nkey::UserKey;
 pub use nsq::Nsq;
 pub use redis::Redis;
+pub use scram::ScramHash;
 pub use sns::Sns;
 pub use sqs::Sqs;
 use teifs_types::notify::TargetArn;
@@ -85,6 +91,8 @@ pub enum TargetKind {
     Nats(Nats),
     /// An MQTT topic, published each event as JSON.
     Mqtt(Mqtt),
+    /// A Kafka topic, produced each event as JSON, keyed by its object.
+    Kafka(Kafka),
     /// An SQS queue, sent each event as S3 sends it.
     Sqs(Sqs),
     /// An SNS topic.
@@ -167,6 +175,7 @@ impl TargetConfig {
             TargetKind::Nsq(nsq) => nsq.shown(),
             TargetKind::Nats(nats) => nats.shown(),
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
+            TargetKind::Kafka(kafka) => kafka.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
             TargetKind::Lambda(lambda) => lambda.shown(),
@@ -186,6 +195,7 @@ impl TargetKind {
             Self::Nsq(_) => "nsq",
             Self::Nats(_) => "nats",
             Self::Mqtt(_) => "mqtt",
+            Self::Kafka(_) => "kafka",
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
             Self::Lambda(_) => "lambda",
@@ -263,6 +273,7 @@ impl Target {
             TargetKind::Nsq(nsq) => nsq.send(&body).await,
             TargetKind::Nats(nats) => nats.send(&body).await,
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
+            TargetKind::Kafka(kafka) => kafka.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
@@ -280,6 +291,7 @@ impl Target {
             TargetKind::Nsq(nsq) => nsq.test().await,
             TargetKind::Nats(nats) => nats.test().await,
             TargetKind::Mqtt(mqtt) => mqtt.test().await,
+            TargetKind::Kafka(kafka) => kafka.test().await,
             // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,

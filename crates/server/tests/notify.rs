@@ -879,3 +879,66 @@ fn check_bridge_entries(requests: &[teifs_notify::testing::AwsRequest]) {
     assert_eq!(deleted["reason"], "DeleteObject");
     assert_eq!(deleted["deletion-type"], "Permanently Deleted");
 }
+
+/// A rule names a Kafka target by its ARN; each event is produced keyed `bucket/object`
+/// (the key as written, not escaped) to its partition's leader, and counted as sent.
+#[tokio::test]
+async fn kafka_rules_produce_each_event_keyed_by_object() {
+    use teifs_notify::testing::{KafkaServer, KafkaSetup};
+    use teifs_server::Kafka;
+    let cluster = KafkaServer::start(KafkaSetup::new(2, "s3-events", 4)).await;
+    let kafka = Kafka::new(&cluster.addresses()[1], "s3-events").unwrap();
+    let target = TargetConfig::new("stream", TargetKind::Kafka(kafka)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    let rule = QueueConfiguration::builder()
+        .queue_arn("arn:minio:sqs::stream:kafka")
+        .events(Event::from("s3:ObjectCreated:*"))
+        .events(Event::from("s3:ObjectRemoved:*"))
+        .build()
+        .unwrap();
+    configure(&s3, vec![rule]).await.unwrap();
+    for key in ["a.txt", "dir/b c.txt"] {
+        s3.put_object()
+            .bucket("bkt")
+            .key(key)
+            .body(ByteStream::from_static(b"hi"))
+            .send()
+            .await
+            .unwrap();
+    }
+    s3.delete_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .send()
+        .await
+        .unwrap();
+    let records = cluster.records(3).await;
+    let taken: Vec<(Option<&str>, String)> = records
+        .iter()
+        .map(|r| {
+            let event: EventMessage = serde_json::from_str(&r.value).unwrap();
+            assert_eq!(r.key.as_deref(), Some(event.key.as_str()));
+            (r.key.as_deref(), event.event_name)
+        })
+        .collect();
+    assert_eq!(
+        taken,
+        [
+            (Some("bkt/a.txt"), "s3:ObjectCreated:Put".to_owned()),
+            (Some("bkt/dir/b c.txt"), "s3:ObjectCreated:Put".to_owned()),
+            (Some("bkt/a.txt"), "s3:ObjectRemoved:Delete".to_owned()),
+        ]
+    );
+    assert_eq!(
+        records[0].partition, records[2].partition,
+        "one object's events share a partition"
+    );
+    target_metrics(
+        &server,
+        "arn:teifs:sqs::stream:kafka",
+        &[("sent_total", 3), ("failed_total", 0)],
+    )
+    .await;
+}

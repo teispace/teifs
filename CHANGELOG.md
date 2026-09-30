@@ -156,6 +156,14 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- Kafka notification targets, as MinIO's: `teifs serve --notify-kafka
+  ID=BROKER[;BROKER…],topic=NAME` produces each event, keyed `bucket/object`, to the
+  partition Kafka's own clients pick for the key, on its leader, so each object's events
+  stay in order. Every in-sync replica acknowledges each record (`acks=all`, or `acks=1`),
+  a leader that moved is looked up again at once, and `compression=gzip`, SASL (`sasl=plain`,
+  `scram-sha-256` or `scram-sha-512` with `user=NAME`, the password from
+  `TEIFS_NOTIFY_KAFKA_PASSWORD_ID`) and TLS are optional. Works with Kafka 1.0 and later,
+  Kafka 4 included.
 - EventBridge, as S3's: with `teifs serve --notify-eventbridge ID=BUS_ARN`, a bucket
   whose notification configuration has `EventBridgeConfiguration` sends every event S3
   sends to EventBridge to the bus, with S3's `detail-type` and `detail`, using

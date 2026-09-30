@@ -36,6 +36,8 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 md-5 = "0.11"
 # S3's additional checksums, the same crates s3s uses (so no new code is trusted).
 crc-fast = "1.10"
+# Kafka targets' gzip.
+flate2 = "1.1"
 sha1 = "0.11"
 sha2 = "0.11"
 xxhash-rust = { version = "0.8.17", features = ["std", "xxh64", "xxh3"] }
