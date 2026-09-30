@@ -26,7 +26,7 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
-    KmsLocation, Limits, ProxyHeader, Server, TargetConfig, TargetKind, TlsSource, Transit,
+    KmsLocation, Limits, ProxyHeader, Redis, Server, TargetConfig, TargetKind, TlsSource, Transit,
     TrustedProxies, Webhook, credentials,
 };
 use teifs_store::{Layout, Store};
@@ -257,6 +257,20 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_ELASTICSEARCH"
     )]
     notify_elasticsearch: Vec<TargetConfig>,
+    /// A Redis key buckets' notification rules can send events to, as
+    /// ID=HOST:PORT,key=NAME, with format=namespace (a hash, a field per object, set by
+    /// each event and removed with it: the default) or format=access (a list, an entry
+    /// per event), db=N and user=NAME (repeat for more; in the environment, separated by
+    /// spaces). Rules name it `arn:teifs:sqs::ID:redis`. Its password,
+    /// `TEIFS_NOTIFY_REDIS_PASSWORD_ID`, is read only from the environment.
+    #[arg(
+        long = "notify-redis",
+        value_name = "ID=HOST:PORT,key=NAME",
+        value_parser = parse_notify_redis,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_REDIS"
+    )]
+    notify_redis: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -672,6 +686,32 @@ fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Elasticsearch(es))
 }
 
+/// A Redis key, `ID=HOST:PORT,key=NAME[,format=F][,db=N][,user=U]`; its password comes
+/// from the environment later.
+fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(
+        text,
+        "ID=HOST:PORT,key=NAME",
+        &["key", "format", "db", "user"],
+    )?;
+    let key = options
+        .get("key")
+        .ok_or_else(|| "name the key: ID=HOST:PORT,key=NAME".to_owned())?;
+    let format = options
+        .get("format")
+        .map_or(Ok(Format::Namespace), |f| Format::parse(f))?;
+    let mut redis = Redis::new(address, key, format)?;
+    redis.db = options
+        .get("db")
+        .map(|db| {
+            db.parse()
+                .map_err(|_| format!("`{db}` isn't a database number"))
+        })
+        .transpose()?;
+    redis.user = options.get("user").map(|&u| u.to_owned());
+    TargetConfig::new(id, TargetKind::Redis(redis))
+}
+
 /// The notification targets, each with its secrets from the environment
 /// (`TEIFS_NOTIFY_KIND_SECRET_ID`, the ID in capitals and `-` as `_`).
 fn notify_targets(
@@ -706,6 +746,17 @@ fn notify_targets(
                     return Err(format!(
                         "the Elasticsearch target `{}` has a password: give its user=NAME",
                         arn.id
+                    ));
+                }
+            }
+            TargetKind::Redis(redis) => {
+                redis.password = secret("PASSWORD");
+                if redis.user.is_some() && redis.password.is_none() {
+                    return Err(format!(
+                        "the Redis target `{}` has a user: set its password in \
+                         TEIFS_NOTIFY_REDIS_PASSWORD_{}",
+                        arn.id,
+                        arn.id.to_ascii_uppercase().replace('-', "_")
                     ));
                 }
             }
@@ -766,7 +817,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         notify: notify_targets(
             args.notify_webhooks
                 .into_iter()
-                .chain(args.notify_elasticsearch),
+                .chain(args.notify_elasticsearch)
+                .chain(args.notify_redis),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1180,7 +1232,7 @@ mod tests {
             .iter()
             .map(|t| match &t.kind {
                 TargetKind::Webhook(hook) => hook.token.as_deref().cloned(),
-                TargetKind::Elasticsearch(_) => unreachable!(),
+                TargetKind::Elasticsearch(_) | TargetKind::Redis(_) => unreachable!(),
             })
             .collect();
         assert_eq!(tokens, [Some("t".to_owned()), None]);
@@ -1189,6 +1241,39 @@ mod tests {
         // The same id for two kinds is two targets.
         let es = parse_notify_elasticsearch("a=https://es.example,index=events").unwrap();
         assert!(notify_targets(vec![hook("a=https://a.example"), es], env).is_ok());
+    }
+
+    #[test]
+    fn redis_targets_take_options_and_their_password_from_the_environment() {
+        let env = |name: &str| (name == "TEIFS_NOTIFY_REDIS_PASSWORD_CACHE").then(|| "pw".into());
+        let redis = |text| parse_notify_redis(text).unwrap();
+        let cache = redis("cache=redis.local:6379,key=events,format=access,db=3,user=teifs");
+        assert_eq!(cache.arn().to_string(), "arn:teifs:sqs::cache:redis");
+        let targets = notify_targets(vec![cache], env).unwrap();
+        let TargetKind::Redis(cache) = &targets[0].kind else {
+            panic!("not Redis")
+        };
+        assert_eq!(
+            (
+                cache.key.as_str(),
+                cache.format,
+                cache.db,
+                cache.user.as_deref()
+            ),
+            ("events", Format::Access, Some(3), Some("teifs"))
+        );
+        assert_eq!(cache.password.as_deref().map(String::as_str), Some("pw"));
+        for bad in [
+            "x=redis.local:6379",
+            "x=redis.local,key=k",
+            "x=redis.local:6379,key=k,db=two",
+            "x=redis.local:6379,key=k,index=i",
+        ] {
+            assert!(parse_notify_redis(bad).is_err(), "{bad}");
+        }
+        // A user needs its password.
+        let passwordless = redis("other=redis.local:6379,key=k,user=teifs");
+        assert!(notify_targets(vec![passwordless], env).is_err());
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Bucket notifications' delivery. The server's targets (webhooks and Elasticsearch
-//! indexes) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
+//! indexes and Redis keys) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -10,6 +10,7 @@ mod tests;
 
 mod elasticsearch;
 mod queue;
+mod redis;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod webhook;
@@ -25,6 +26,7 @@ use std::{
 };
 
 pub use elasticsearch::Elasticsearch;
+pub use redis::Redis;
 use teifs_types::notify::TargetArn;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -53,6 +55,8 @@ pub enum TargetKind {
     Webhook(Webhook),
     /// An Elasticsearch index, each event a document.
     Elasticsearch(Elasticsearch),
+    /// A Redis key: a hash, a field per object, or a list, an entry per event.
+    Redis(Redis),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -123,6 +127,7 @@ impl TargetConfig {
         match &self.kind {
             TargetKind::Webhook(hook) => hook.shown(),
             TargetKind::Elasticsearch(es) => es.shown(),
+            TargetKind::Redis(redis) => redis.shown(),
         }
     }
 }
@@ -134,6 +139,7 @@ impl TargetKind {
         match self {
             Self::Webhook(_) => "webhook",
             Self::Elasticsearch(_) => "elasticsearch",
+            Self::Redis(_) => "redis",
         }
     }
 }
@@ -192,6 +198,7 @@ impl Target {
         match &self.config.kind {
             TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
             TargetKind::Elasticsearch(es) => es.send(client, &body).await,
+            TargetKind::Redis(redis) => redis.send(&body).await,
         }
     }
 
@@ -201,6 +208,7 @@ impl Target {
         match &self.config.kind {
             TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
             TargetKind::Elasticsearch(es) => es.test(client).await,
+            TargetKind::Redis(redis) => redis.test().await,
         }
     }
 }

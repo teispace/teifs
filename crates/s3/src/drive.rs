@@ -1989,7 +1989,7 @@ impl S3 for Drive {
                         s3_error!(
                             InvalidArgument,
                             "Unable to validate the following destination configurations: \
-                             {arn} didn't take the test event ({err})"
+                             {arn} failed its test ({err})"
                         )
                     })?;
             }

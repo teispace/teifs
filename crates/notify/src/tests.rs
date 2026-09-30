@@ -226,3 +226,81 @@ async fn elasticsearch_keeps_a_document_per_object_or_per_event() {
     );
     notifier.stop().await;
 }
+
+/// Redis targets: a hash with a field per object (removed with it), or a list with an
+/// entry per event; the password and database are used, and a key of the wrong type is
+/// refused.
+#[tokio::test]
+async fn redis_keeps_a_field_per_object_or_an_entry_per_event() {
+    use crate::testing::RedisServer;
+    let server = RedisServer::start("none", Some("pw")).await;
+    let mut objects = Redis::new(server.address(), "objects", Format::Namespace).unwrap();
+    objects.password = Some(Zeroizing::new("pw".into()));
+    objects.db = Some(2);
+    let mut log = Redis::new(server.address(), "log", Format::Access).unwrap();
+    log.password = Some(Zeroizing::new("pw".into()));
+    log.user = Some("teifs".into());
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(
+        &dir.path().join("events.db"),
+        vec![
+            TargetConfig::new("objects", TargetKind::Redis(objects)).unwrap(),
+            TargetConfig::new("log", TargetKind::Redis(log)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let objects = TargetArn::parse("arn:teifs:sqs::objects:redis").unwrap();
+    let log = TargetArn::parse("arn:teifs:sqs::log:redis").unwrap();
+    notifier.send_now(&objects, b"test".to_vec()).await.unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    notifier
+        .queue(vec![
+            (objects.clone(), put.clone()),
+            (objects, message("s3:ObjectRemoved:Delete", "photos/a.jpg")),
+        ])
+        .await
+        .unwrap();
+    notifier.queue(vec![(log, put)]).await.unwrap();
+    let commands = server.commands(9).await;
+    let names: Vec<String> = commands
+        .iter()
+        .map(|c| c[..2.min(c.len())].join(" "))
+        .collect();
+    // The test's connection, kept for the events; the log's own.
+    let objects_commands: Vec<&String> = names
+        .iter()
+        .filter(|n| n.contains("objects") || n.starts_with("SELECT") || n.starts_with("PING"))
+        .collect();
+    assert_eq!(
+        objects_commands,
+        [
+            "SELECT 2",
+            "TYPE objects",
+            "PING",
+            "HSET objects",
+            "HDEL objects"
+        ]
+    );
+    let hset = commands.iter().find(|c| c[0] == "HSET").unwrap();
+    assert_eq!(hset[2], "photos/a.jpg");
+    let value: serde_json::Value = serde_json::from_str(&hset[3]).unwrap();
+    assert_eq!(value["Records"][0]["s3"]["object"]["key"], "a.jpg");
+    let rpush = commands.iter().find(|c| c[0] == "RPUSH").unwrap();
+    let entry: serde_json::Value = serde_json::from_str(&rpush[2]).unwrap();
+    assert_eq!(entry[0]["EventTime"], "2026-09-30T12:00:00.000Z");
+    assert_eq!(entry[0]["Event"][0]["eventName"], "ObjectCreated:Put");
+    assert!(names.contains(&"TYPE log".to_owned()));
+    notifier.stop().await;
+
+    // A key that holds something else, or a wrong password, fails the test.
+    let hash = RedisServer::start("hash", None).await;
+    let wrong = Redis::new(hash.address(), "k", Format::Access).unwrap();
+    let err = wrong.test().await.unwrap_err();
+    assert!(
+        err.contains("holds a hash") && err.contains("needs a list"),
+        "{err}"
+    );
+    let mut bad = Redis::new(server.address(), "k", Format::Access).unwrap();
+    bad.password = Some(Zeroizing::new("nope".into()));
+    assert!(bad.test().await.unwrap_err().contains("WRONGPASS"));
+}

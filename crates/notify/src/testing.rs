@@ -1,6 +1,6 @@
-//! A webhook receiver on this machine, for tests (the `testing` feature): it takes
-//! requests (`POST`s, and the others an Elasticsearch target makes), or fails as many as
-//! it's told to first.
+//! Targets on this machine, for tests (the `testing` feature): a webhook receiver that
+//! takes requests (`POST`s, and the others an Elasticsearch target makes), or fails as
+//! many as it's told to first, and a Redis server.
 
 use std::{
     convert::Infallible,
@@ -183,4 +183,118 @@ async fn take(
         .status(status)
         .body(http_body_util::Empty::new())
         .expect("a valid response"))
+}
+
+/// A Redis server on this machine, for tests: it answers the commands a Redis target
+/// sends and keeps them.
+#[derive(Debug, Clone)]
+pub struct RedisServer {
+    address: String,
+    commands: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl RedisServer {
+    /// Starts one whose keys all have type `kind` (`none`, `hash`, `list`…) and which
+    /// wants `password`, if any.
+    ///
+    /// # Panics
+    ///
+    /// When it can't listen.
+    pub async fn start(kind: &str, password: Option<&str>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let address = listener.local_addr().expect("a bound address").to_string();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let (kind, password) = (kind.to_owned(), password.map(str::to_owned));
+        let kept = Arc::clone(&commands);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (kept, kind, password) = (Arc::clone(&kept), kind.clone(), password.clone());
+                tokio::spawn(async move {
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let mut authenticated = password.is_none();
+                    while let Ok(crate::redis::Reply::Array(Some(parts))) =
+                        crate::redis::read_reply(&mut stream, 0).await
+                    {
+                        let command: Vec<String> = parts
+                            .into_iter()
+                            .map(|p| match p {
+                                crate::redis::Reply::Bulk(Some(b)) => {
+                                    String::from_utf8_lossy(&b).into_owned()
+                                }
+                                other => format!("{other:?}"),
+                            })
+                            .collect();
+                        let name = command[0].to_ascii_uppercase();
+                        let reply: &[u8] = match name.as_str() {
+                            "AUTH" => {
+                                authenticated =
+                                    command.last().map(String::as_str) == password.as_deref();
+                                if authenticated {
+                                    b"+OK\r\n"
+                                } else {
+                                    b"-WRONGPASS invalid\r\n"
+                                }
+                            }
+                            _ if !authenticated => b"-NOAUTH Authentication required.\r\n",
+                            "PING" => b"+PONG\r\n",
+                            "TYPE" => {
+                                let reply = format!("+{kind}\r\n");
+                                kept.lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .push(command);
+                                let _ = tokio::io::AsyncWriteExt::write_all(
+                                    stream.get_mut(),
+                                    reply.as_bytes(),
+                                )
+                                .await;
+                                continue;
+                            }
+                            "HSET" | "HDEL" | "RPUSH" => b":1\r\n",
+                            _ => b"+OK\r\n",
+                        };
+                        if name != "AUTH" {
+                            kept.lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(command);
+                        }
+                        if tokio::io::AsyncWriteExt::write_all(stream.get_mut(), reply)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        Self { address, commands }
+    }
+
+    /// Its `HOST:PORT`.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The commands it took (but `AUTH`), once there are at least `count`.
+    ///
+    /// # Panics
+    ///
+    /// When there aren't within ten seconds.
+    pub async fn commands(&self, count: usize) -> Vec<Vec<String>> {
+        for _ in 0..500 {
+            let taken = self
+                .commands
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if taken.len() >= count {
+                return taken;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the Redis server never took {count} commands");
+    }
 }

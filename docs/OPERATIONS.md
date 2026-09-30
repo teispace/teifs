@@ -256,6 +256,20 @@ one per event. Basic authentication takes `user=NAME` and the password from
 `TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID`. A rule that starts naming it checks that the
 cluster answers and the index exists, without writing a test document.
 
+```sh
+teifs serve --notify-redis objects=redis.internal:6379,key=s3:objects \
+            --notify-redis log=redis.internal:6379,key=s3:log,format=access,db=1
+export TEIFS_NOTIFY_REDIS_PASSWORD_OBJECTS=…   # with user=NAME for a Redis 6 ACL user
+```
+
+A Redis target, `arn:teifs:sqs::ID:redis`, keeps events under a key: with
+`format=namespace` (the default) a hash with a field per object (`BUCKET/KEY`) holding
+`{"Records":[record]}`, set by each event and removed with the object; with
+`format=access` a list with an entry per event pushed on its end,
+`[{"Event":[record],"EventTime":"…"}]`, as MinIO's. `db=N` selects a database. A key that
+already holds another type is refused. Starting to name it checks that the server
+answers, takes the password and has a key of the right type, without writing to it.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -368,4 +382,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, NSQ, databases).
+Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, NSQ, databases), and Redis over
+TLS.

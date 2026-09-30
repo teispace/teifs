@@ -27,7 +27,7 @@ hyper-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 
 [features]
-# A webhook receiver for tests: `teifs_notify::testing`.
+# A webhook receiver and a Redis server for tests: `teifs_notify::testing`.
 testing = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dev-dependencies]
