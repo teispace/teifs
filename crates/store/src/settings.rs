@@ -54,6 +54,9 @@ pub(crate) struct BucketConfig {
     /// How its website endpoint answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     website: Option<WebsiteConfig>,
+    /// The most bytes it may hold (`MinIO`'s hard quota).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quota: Option<u64>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -102,6 +105,9 @@ pub struct BucketSettings {
     /// How its website endpoint answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<WebsiteConfig>,
+    /// The most bytes it may hold (`MinIO`'s hard quota).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<u64>,
 }
 
 /// How a bucket encrypts objects written without asking, and which encryption it
@@ -379,6 +385,7 @@ impl Store {
             notifications: config.notifications,
             logging: config.logging,
             website: config.website,
+            quota: config.quota,
         })
     }
 
@@ -489,6 +496,28 @@ impl Store {
         website: Option<WebsiteConfig>,
     ) -> Result<()> {
         self.change_config(bucket, move |config| config.website = website)
+            .await
+    }
+
+    /// The most bytes a bucket may hold, if it has a quota; from memory once read.
+    pub async fn bucket_quota(&self, bucket: &str) -> Result<Option<u64>> {
+        if let Some(found) = self.inner.quotas.cached(bucket) {
+            return Ok(found.map(|quota| *quota));
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            let quota = inner.quotas.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.quota)
+            })?;
+            Ok(quota.map(|quota| *quota))
+        })
+        .await
+    }
+
+    /// Sets the most bytes a bucket may hold; `None` removes its quota.
+    pub async fn set_bucket_quota(&self, bucket: &str, quota: Option<u64>) -> Result<()> {
+        self.change_config(bucket, move |config| config.quota = quota)
             .await
     }
 
@@ -746,6 +775,7 @@ impl Inner {
         self.notifications.clear();
         self.logging.clear();
         self.websites.clear();
+        self.quotas.clear();
     }
 
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.

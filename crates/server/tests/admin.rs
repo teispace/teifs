@@ -660,6 +660,9 @@ async fn buckets_move_to_another_drive_with_their_settings() {
         .send()
         .await
         .unwrap();
+    let quota = br#"{"size":1048576,"quotatype":"hard"}"#;
+    let path = "/minio/admin/v3/set-bucket-quota?bucket=plain";
+    assert_eq!(signed(&from, ROOT, "PUT", path, &[], quota).await.0, 200);
     let (status, answer) = get(&from, ROOT, ADMIN_BUCKETS).await;
     assert_eq!(status, 200, "{answer}");
     let export: BucketsExport = serde_json::from_str(&answer).unwrap();
@@ -696,6 +699,7 @@ async fn buckets_move_to_another_drive_with_their_settings() {
     assert!(items(&report).contains(&("lifecycle", "applied")));
     assert!(items(&report).contains(&("logging", "applied")));
     assert!(items(&report).contains(&("website", "applied")));
+    assert!(items(&report).contains(&("quota", "applied")));
     // The other drive now exports the same.
     let (_, again) = get(&to, ROOT, ADMIN_BUCKETS).await;
     let again: BucketsExport = serde_json::from_str(&again).unwrap();
@@ -772,6 +776,7 @@ async fn an_import_checks_each_setting_as_s3_does() {
                     "cors": [{"allowedMethods": ["FETCH"], "allowedOrigins": ["*"]}],
                     // An index document in a folder.
                     "website": {"site": {"indexSuffix": "a/index.html"}},
+                    "quota": 0,
                 }
             },
         ]
@@ -801,6 +806,7 @@ async fn an_import_checks_each_setting_as_s3_does() {
             ("fresh", "versioning", "applied"),
             ("fresh", "cors", "failed"),
             ("fresh", "website", "failed"),
+            ("fresh", "quota", "failed"),
         ],
         "{answer}"
     );

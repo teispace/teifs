@@ -46,6 +46,14 @@ pub const ADMIN_BUCKETS: &str = "/.teifs/admin/v1/buckets";
 /// [`crate::audit::TraceFilter`].
 pub const ADMIN_TRACE: &str = "/.teifs/admin/v1/trace";
 
+/// `MinIO`'s admin API: `PUT` sets `?bucket=NAME`'s quota (`admin:SetBucketQuota`), as
+/// `mc quota set` and `clear` do.
+pub const MINIO_SET_BUCKET_QUOTA: &str = "/minio/admin/v3/set-bucket-quota";
+
+/// `MinIO`'s admin API: `GET` answers `?bucket=NAME`'s quota (`admin:GetBucketQuota`),
+/// as `mc quota info` reads it.
+pub const MINIO_GET_BUCKET_QUOTA: &str = "/minio/admin/v3/get-bucket-quota";
+
 /// The format of a [`BucketsExport`]; a server refuses any other.
 pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
 

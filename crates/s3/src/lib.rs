@@ -30,6 +30,7 @@ mod object_lock;
 mod observe;
 mod post_form;
 mod proxy;
+mod quota;
 mod routes;
 mod sig_v2;
 mod sse;

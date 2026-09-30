@@ -199,6 +199,14 @@ behaviour; the on-disk format is always upgraded automatically.
   rules, redirects of every request and of single objects, S3's HTML error pages,
   ranges, conditional requests and CORS. Access logs record these requests as
   `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- Bucket quotas, as `MinIO`'s hard quotas: `mc quota set|info|clear` (`MinIO`'s admin
+  API, `/minio/admin/v3/set-bucket-quota` and `get-bucket-quota`, with its
+  `admin:SetBucketQuota` and `admin:GetBucketQuota` actions) and `teifs quota set
+  ALIAS/BUCKET --size SIZE`, `info` and `clear`. Writes that would reach a bucket's quota
+  (`PutObject`, `POST`, `CopyObject`, `UploadPart`, `UploadPartCopy`) are refused with
+  `MinIO`'s `XMinioAdminBucketQuotaExceeded`. Admin exports and imports carry quotas, and
+  `teifs-client` has `bucket_quota` and `set_bucket_quota`.
+- Sizes on the command line take `TiB` and `PiB` too.
 - A `304 Not Modified` answers the object's `ETag` and `Last-Modified`, as HTTP says
   and S3 does.
 - An object's `x-amz-website-redirect-location` must start with `/`, `http://` or

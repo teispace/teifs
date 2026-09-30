@@ -550,7 +550,7 @@ async fn presigned_links_work_without_keys() {
     cli.fails(&["presign", "t/share/note.txt", "--max-size", "1K"], 2)
         .await;
     cli.fails(
-        &["presign", "t/share/up.txt", "--put", "--max-size", "1T"],
+        &["presign", "t/share/up.txt", "--put", "--max-size", "1E"],
         2,
     )
     .await;
@@ -1880,4 +1880,34 @@ async fn websites_are_set_shown_and_removed() {
     let text = cli.ok(&["website", "rm", "t/site"]).await;
     assert!(text.contains("Website t/site: off"), "{text}");
     assert_eq!(info().await["enabled"], false);
+}
+
+#[tokio::test]
+async fn quotas_are_set_shown_and_cleared() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/photos"]).await;
+    let info = async || records(&cli.ok(&["--json", "quota", "info", "t/photos"]).await).remove(0);
+    assert_eq!(info().await["quota"], serde_json::Value::Null);
+    let text = cli.ok(&["quota", "set", "t/photos", "--size", "8"]).await;
+    assert!(text.contains("Quota t/photos: 8 B"), "{text}");
+    assert_eq!(info().await["quota"], 8);
+    let text = cli.ok(&["quota", "info", "t/photos"]).await;
+    assert!(text.contains("8 B"), "{text}");
+    // Writes that would reach it are refused, with MinIO's error.
+    std::fs::write(cli.path("small"), b"0123456789").unwrap();
+    let small = cli.path("small");
+    let err = cli
+        .fails(&["cp", small.to_str().unwrap(), "t/photos/small"], 1)
+        .await;
+    assert!(err.contains("Bucket quota exceeded"), "{err}");
+    cli.fails(&["quota", "set", "t/photos", "--size", "0"], 2)
+        .await;
+    let err = cli.fails(&["quota", "info", "t/nothing"], 5).await;
+    assert!(err.contains("NoSuchBucket"), "{err}");
+    let text = cli.ok(&["quota", "clear", "t/photos"]).await;
+    assert!(text.contains("Quota t/photos: none"), "{text}");
+    assert_eq!(info().await["quota"], serde_json::Value::Null);
+    cli.ok(&["cp", small.to_str().unwrap(), "t/photos/small"])
+        .await;
 }

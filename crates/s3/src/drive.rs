@@ -35,6 +35,7 @@ use crate::{
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     observe,
     post_form::{self, Form},
+    quota,
     sse::{self, set_sse},
     tagging, website,
 };
@@ -305,11 +306,12 @@ impl Drive {
     }
 
     /// Refuses a write before its body is read: a key (when it names one) the bucket
-    /// can't create, or `len` bytes (when the request says how many) that wouldn't leave
-    /// the room kept free for deletes.
+    /// can't create, `len` bytes (when the request says how many) that wouldn't leave
+    /// the room kept free for deletes, or that would reach the bucket's quota.
     async fn check_write(&self, bucket: &str, key: Option<&str>, len: Option<i64>) -> S3Result<()> {
         let len = len.and_then(|len| u64::try_from(len).ok());
-        self.store.check_write(bucket, key, len).await.s3()
+        self.store.check_write(bucket, key, len).await.s3()?;
+        quota::check(&self.store, bucket, len.unwrap_or_default()).await
     }
 
     /// Decides a write's encryption from its SSE headers and the bucket's default.
@@ -322,8 +324,6 @@ impl Drive {
         sse::for_write(request, default.as_ref())
     }
 
-    /// Streams a request body into `staged`, hashing it for the checksums asked for. A
-    /// body longer than `limit` is cut off with `EntityTooLarge`, whatever it declared.
     /// A version whose lock is asked about, in a bucket that must have Object Lock.
     async fn locked_version(
         &self,

@@ -146,7 +146,8 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Parses a size: bytes, or a number with `KiB`, `MiB` or `GiB` (`K`, `M`, `G` too).
+/// Parses a size: bytes, or a number with `KiB`, `MiB`, `GiB`, `TiB` or `PiB` (`K`, `M`,
+/// `G`, `T`, `P` too).
 pub fn parse_size(text: &str) -> Result<u64, String> {
     let text = text.trim();
     let split = text
@@ -161,7 +162,9 @@ pub fn parse_size(text: &str) -> Result<u64, String> {
         "k" | "kib" => 1 << 10,
         "m" | "mib" => 1 << 20,
         "g" | "gib" => 1 << 30,
-        _ => return Err(format!("`{text}` needs a unit: KiB, MiB or GiB")),
+        "t" | "tib" => 1 << 40,
+        "p" | "pib" => 1 << 50,
+        _ => return Err(format!("`{text}` needs a unit: KiB, MiB, GiB or TiB")),
     };
     number
         .checked_mul(unit)
@@ -225,7 +228,10 @@ mod tests {
         assert_eq!(parse_size(" 3 MiB "), Ok(3 << 20));
         assert_eq!(parse_size("1g"), Ok(1 << 30));
         assert_eq!(parse_size("17179869183G"), Ok(17_179_869_183 << 30));
-        for bad in ["", "MiB", "-1", "1.5M", "8MB", "1T", "17179869184G"] {
+        assert_eq!(parse_size("2TiB"), Ok(2 << 40));
+        assert_eq!(parse_size("1p"), Ok(1 << 50));
+        assert!(parse_size("16384P").is_err(), "too large");
+        for bad in ["", "MiB", "-1", "1.5M", "8MB", "1E", "17179869184G"] {
             assert!(parse_size(bad).is_err(), "{bad}");
         }
     }

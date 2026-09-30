@@ -32,7 +32,7 @@ pub use zeroize::Zeroizing;
 
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY,
-    ADMIN_SNAPSHOTS, ADMIN_TRACE,
+    ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
@@ -255,7 +255,50 @@ impl Client {
         self.call(Method::PUT, ADMIN_BUCKETS, None, body).await
     }
 
-    /// Sends a signed request and reads its JSON answer.
+    /// A bucket's hard quota in bytes, `None` when it has none (`MinIO`'s admin API,
+    /// `admin:GetBucketQuota`).
+    pub async fn bucket_quota(&self, bucket: &str) -> Result<Option<u64>, ClientError> {
+        let query = format!("bucket={bucket}");
+        let quota: BucketQuota = self
+            .call(
+                Method::GET,
+                MINIO_GET_BUCKET_QUOTA,
+                Some(&query),
+                Vec::new(),
+            )
+            .await?;
+        let bytes = if quota.size > 0 {
+            quota.size
+        } else {
+            quota.quota
+        };
+        Ok((bytes > 0).then_some(bytes))
+    }
+
+    /// Sets a bucket's hard quota in bytes, or with `None` clears it (`MinIO`'s admin
+    /// API, `admin:SetBucketQuota`).
+    pub async fn set_bucket_quota(
+        &self,
+        bucket: &str,
+        bytes: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let quota = bytes.map_or_else(BucketQuota::default, |bytes| BucketQuota {
+            quota: 0,
+            size: bytes,
+            kind: Some("hard".to_owned()),
+        });
+        let body = serde_json::to_vec(&quota).map_err(|e| ClientError::Answer(e.to_string()))?;
+        let query = format!("bucket={bucket}");
+        let response = self
+            .send(Method::PUT, MINIO_SET_BUCKET_QUOTA, Some(&query), body)
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_error(status, &response.bytes().await?));
+        }
+        Ok(())
+    }
+
     /// A live trace of the requests the server answers from now on, those `filter`
     /// shows (`teifs:ServerTrace`): read it with [`Trace::next`].
     pub async fn trace(&self, filter: &TraceFilter) -> Result<Trace, ClientError> {
@@ -395,6 +438,14 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
             request_id: Some(err.request_id),
         };
     }
+    if let Ok(err) = serde_json::from_slice::<MinioError>(body) {
+        return ClientError::Api {
+            status: status.as_u16(),
+            code: err.code,
+            message: err.message,
+            request_id: err.request_id,
+        };
+    }
     let text = String::from_utf8_lossy(body);
     let element = |name: &str| {
         let start = text.find(&format!("<{name}>"))? + name.len() + 2;
@@ -419,6 +470,28 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
         message: element("Message").unwrap_or_default(),
         request_id: element("RequestId"),
     }
+}
+
+/// A bucket's quota, as `MinIO`'s admin API takes and answers it.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct BucketQuota {
+    /// The limit as older clients send it.
+    #[serde(default)]
+    quota: u64,
+    /// The limit, in bytes.
+    #[serde(default)]
+    size: u64,
+    #[serde(default, rename = "quotatype", skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+}
+
+/// An error of `MinIO`'s admin API.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MinioError {
+    code: String,
+    message: String,
+    request_id: Option<String>,
 }
 
 /// A live trace: the requests a server answers, as it answers them.

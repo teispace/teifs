@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use rusqlite::OptionalExtension;
+
 use crate::{Index, Result, index::from_db};
 
 /// The counters, their triggers, and the counts of what's already there.
@@ -133,44 +135,68 @@ impl Index {
     pub fn usage(&self) -> Result<Usages> {
         let mut usages = Usages::default();
         let mut versions = self.conn.prepare_cached(
-            "SELECT bucket_id, objects, versions, delete_markers, bytes FROM usage_versions",
+            "SELECT objects, versions, delete_markers, bytes, bucket_id FROM usage_versions",
         )?;
-        let rows = versions.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                Usage {
-                    objects: from_db(r.get(1)?),
-                    versions: from_db(r.get(2)?),
-                    delete_markers: from_db(r.get(3)?),
-                    bytes: from_db(r.get(4)?),
-                },
-            ))
-        })?;
+        let rows = versions.query_map([], |r| Ok((r.get::<_, String>(4)?, versions_row(r)?)))?;
         for row in rows {
             let (id, usage) = row?;
             usages.versions.insert(id, usage);
         }
         let mut files = self
             .conn
-            .prepare_cached("SELECT bucket, objects, bytes FROM usage_files")?;
-        let rows = files.query_map([], |r| {
-            let objects = from_db(r.get(1)?);
-            Ok((
-                r.get::<_, String>(0)?,
-                Usage {
-                    objects,
-                    versions: objects,
-                    delete_markers: 0,
-                    bytes: from_db(r.get(2)?),
-                },
-            ))
-        })?;
+            .prepare_cached("SELECT objects, bytes, bucket FROM usage_files")?;
+        let rows = files.query_map([], |r| Ok((r.get::<_, String>(2)?, files_row(r)?)))?;
         for row in rows {
             let (bucket, usage) = row?;
             usages.files.insert(bucket, usage);
         }
         Ok(usages)
     }
+
+    /// One bucket's counters: its versions' (by the bucket's id) and, for a folder
+    /// bucket, its current files' (by its name).
+    pub fn bucket_usage(&self, id: &str, folder: Option<&str>) -> Result<Usage> {
+        let versions = self
+            .conn
+            .prepare_cached(
+                "SELECT objects, versions, delete_markers, bytes FROM usage_versions \
+                 WHERE bucket_id = ?1",
+            )?
+            .query_row([id], versions_row)
+            .optional()?
+            .unwrap_or_default();
+        let files = match folder {
+            Some(name) => self
+                .conn
+                .prepare_cached("SELECT objects, bytes FROM usage_files WHERE bucket = ?1")?
+                .query_row([name], files_row)
+                .optional()?
+                .unwrap_or_default(),
+            None => Usage::default(),
+        };
+        Ok(versions + files)
+    }
+}
+
+/// A `usage_versions` row's counters, from its first four columns.
+fn versions_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Usage> {
+    Ok(Usage {
+        objects: from_db(r.get(0)?),
+        versions: from_db(r.get(1)?),
+        delete_markers: from_db(r.get(2)?),
+        bytes: from_db(r.get(3)?),
+    })
+}
+
+/// A `usage_files` row's counters, from its first two columns: a file is one version.
+fn files_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Usage> {
+    let objects = from_db(r.get(0)?);
+    Ok(Usage {
+        objects,
+        versions: objects,
+        delete_markers: 0,
+        bytes: from_db(r.get(1)?),
+    })
 }
 
 #[cfg(test)]
@@ -304,11 +330,18 @@ mod tests {
                 _ if next(30) == 0 => index.forget_bucket(bucket).unwrap(),
                 _ => {}
             }
-            assert_eq!(
-                kept(index.usage().unwrap()),
-                kept(recounted(&index)),
-                "after step {step}"
-            );
+            let usages = index.usage().unwrap();
+            for bucket in ["b1", "b2", "b3"] {
+                let versions = usages.versions.get(bucket).copied().unwrap_or_default();
+                let files = usages.files.get(bucket).copied().unwrap_or_default();
+                assert_eq!(index.bucket_usage(bucket, None).unwrap(), versions);
+                assert_eq!(
+                    index.bucket_usage(bucket, Some(bucket)).unwrap(),
+                    versions + files,
+                    "{bucket} after step {step}"
+                );
+            }
+            assert_eq!(kept(usages), kept(recounted(&index)), "after step {step}");
         }
     }
 

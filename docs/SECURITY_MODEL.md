@@ -71,6 +71,9 @@ site answers `403`. Only `GET` and `HEAD` reach it. A website domain can't also 
 the other way round. Values an error page quotes are HTML-escaped, and an object's
 `x-amz-website-redirect-location` must be a key of the bucket (`/…`) or an `http`/`https`
 URL, checked when it's written.
+A bucket's quota is set and read only with `MinIO`'s admin actions
+(`admin:SetBucketQuota`, `admin:GetBucketQuota`) on that bucket, which `s3:*` doesn't
+grant, so a user who may write objects can't lift the quota that limits them.
 
 ACLs are disabled on every new bucket (Object Ownership `BucketOwnerEnforced`, as on
 AWS): a request with an ACL other than the bucket owner's full control is refused, and

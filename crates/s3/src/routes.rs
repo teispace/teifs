@@ -1,5 +1,6 @@
 //! Every request that isn't an S3 operation: the IAM and STS Query APIs, S3 Control,
-//! TeiFS's admin API, and `MinIO`'s listen API ([`crate::listen`]).
+//! TeiFS's admin API, and `MinIO`'s listen API ([`crate::listen`]) and the calls of its
+//! admin API that TeiFS serves (bucket quotas).
 //! s3s hands them to one custom route, [`Routes`], before it parses a path as a bucket
 //! and key, and after it has checked the signature.
 //!
@@ -19,7 +20,8 @@ use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX,
-    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE, ServerConfig,
+    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
+    ServerConfig,
 };
 
 use crate::{
@@ -31,6 +33,7 @@ use crate::{
     events::Events,
     iam_api, listen,
     observe::{self, Seen},
+    quota,
     trace::Tracers,
 };
 
@@ -45,6 +48,9 @@ pub enum Api {
     /// TeiFS's admin API: JSON under `/.teifs/admin/v1/`, which can't be a bucket (but
     /// can be a key, so virtual-hosted-style requests are never for it).
     Admin,
+    /// `MinIO`'s admin API, for the calls TeiFS serves: `/minio/admin/v3/…` (or `v4`),
+    /// only at their exact paths, so a bucket named `minio` keeps its other keys.
+    Minio,
 }
 
 /// What an endpoint needs of its caller.
@@ -55,6 +61,9 @@ pub(crate) enum Needs {
     /// This action on the bucket the path names, decided with the caller's policies and
     /// the bucket's own, and its tags while they decide access.
     OnBucket(&'static str),
+    /// This action on the bucket the query names (`?bucket=NAME`), decided with the
+    /// caller's policies (as `MinIO` decides its admin actions).
+    OnQueryBucket(&'static str),
     /// The Query APIs name an action in each call's body, and IAM decides it.
     PerCall,
     /// Only the account's root user, whatever policies say.
@@ -99,6 +108,8 @@ enum Handler {
     ExportBuckets,
     ImportBuckets,
     Trace,
+    SetBucketQuota,
+    GetBucketQuota,
 }
 
 impl Handler {
@@ -123,6 +134,8 @@ impl Handler {
             Self::ExportBuckets => "ExportBucketMetadata",
             Self::ImportBuckets => "ImportBucketMetadata",
             Self::Trace => "ServerTrace",
+            Self::SetBucketQuota => "SetBucketQuota",
+            Self::GetBucketQuota => "GetBucketQuota",
         }
     }
 }
@@ -294,7 +307,38 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::RotateRootKey,
         about: "Replaces a root key the drive generated and answers the new one: `RootKeyRotated`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: MINIO_SET_BUCKET_QUOTA,
+        needs: Needs::OnQueryBucket("admin:SetBucketQuota"),
+        handler: Handler::SetBucketQuota,
+        about: "Sets `?bucket=NAME`'s hard quota in bytes (`{\"size\":N,\"quotatype\":\"hard\"}`, or `quota` for `size`), or clears it with none: `mc quota set` and `clear`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: MINIO_GET_BUCKET_QUOTA,
+        needs: Needs::OnQueryBucket("admin:GetBucketQuota"),
+        handler: Handler::GetBucketQuota,
+        about: "`?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info`",
+    },
 ];
+
+/// `MinIO`'s admin API, as its clients reach it.
+const MINIO_ADMIN: &str = "/minio/admin/v3/";
+/// The same, as newer clients reach it.
+const MINIO_ADMIN_V4: &str = "/minio/admin/v4/";
+
+/// A `MinIO` admin API path, spelled as its `v3` endpoint is.
+fn minio_admin_path(path: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if path.starts_with(MINIO_ADMIN) {
+        Some(std::borrow::Cow::Borrowed(path))
+    } else {
+        let rest = path.strip_prefix(MINIO_ADMIN_V4)?;
+        Some(std::borrow::Cow::Owned(format!("{MINIO_ADMIN}{rest}")))
+    }
+}
 
 /// One endpoint, as [`endpoints`] describes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,7 +369,9 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         },
         path: e.path,
         action: match e.needs {
-            Needs::Action(action, _) | Needs::OnBucket(action) => Some(action),
+            Needs::Action(action, _) | Needs::OnBucket(action) | Needs::OnQueryBucket(action) => {
+                Some(action)
+            }
             Needs::PerCall | Needs::Root => None,
         },
         root_only: e.needs == Needs::Root,
@@ -344,6 +390,13 @@ fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap, domains: &[String]) -
         Some(Api::Control)
     } else if path.starts_with(ADMIN_PREFIX) && admin::virtual_bucket(headers, domains).is_none() {
         Some(Api::Admin)
+    } else if minio_admin_path(path).is_some_and(|path| {
+        ENDPOINTS
+            .iter()
+            .any(|e| e.api == Api::Minio && e.path == path)
+    }) && admin::virtual_bucket(headers, domains).is_none()
+    {
+        Some(Api::Minio)
     } else {
         None
     }
@@ -352,9 +405,13 @@ fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap, domains: &[String]) -
 /// The endpoint a request is for, among its API's.
 fn endpoint(api: Api, method: &Method, path: &str) -> Option<&'static Endpoint> {
     let verb = Verb::of(method)?;
+    let path = match api {
+        Api::Minio => minio_admin_path(path)?,
+        Api::Query | Api::Control | Api::Admin => std::borrow::Cow::Borrowed(path),
+    };
     ENDPOINTS
         .iter()
-        .find(|e| e.api == api && e.verb == verb && matches(e.path, path))
+        .find(|e| e.api == api && e.verb == verb && matches(e.path, &path))
 }
 
 /// Whether `path` is an endpoint's: the same, or, for a path ending in a `{label}`, one
@@ -419,7 +476,7 @@ impl S3Route for Routes {
                 Api::Query if req.service.as_deref() == Some("iam") => "IAM",
                 Api::Query => "STS",
                 Api::Control => "Control",
-                Api::Admin => "Admin",
+                Api::Admin | Api::Minio => "Admin",
             });
             if let Some(credentials) = &req.credentials {
                 seen.signed_by(&credentials.access_key);
@@ -446,13 +503,19 @@ impl S3Route for Routes {
                 .serve(api, req)
                 .await
                 .unwrap_or_else(|err| admin::error_response(&err, &request_id)),
+            Api::Minio => {
+                let resource = req.uri.path().to_owned();
+                self.serve(api, req)
+                    .await
+                    .unwrap_or_else(|err| admin::minio_error_response(&err, &resource, &request_id))
+            }
         };
         // Refused before its endpoint was found: named by its API.
         if let Some(seen) = seen {
             seen.name(match api {
                 Api::Query => "STS",
                 Api::Control => "Control",
-                Api::Admin => "Admin",
+                Api::Admin | Api::Minio => "Admin",
             });
         }
         Ok(response)
@@ -466,11 +529,13 @@ impl Routes {
         let identity = self.authenticate(&req)?;
         // Temporary credentials that may not use IAM (`GetSessionToken`'s, federated
         // users') may not manage the drive either.
-        if api == Api::Admin && identity.session().is_some_and(|s| !s.may_manage()) {
+        if matches!(api, Api::Admin | Api::Minio)
+            && identity.session().is_some_and(|s| !s.may_manage())
+        {
             return Err(denied());
         }
         let endpoint = endpoint(api, &req.method, req.uri.path()).ok_or_else(|| match api {
-            Api::Admin => admin::not_found(),
+            Api::Admin | Api::Minio => admin::not_found(),
             Api::Control | Api::Query => S3Error::with_message(
                 S3ErrorCode::NotImplemented,
                 "TeiFS serves the account's Block Public Access and buckets' tags from S3 \
@@ -482,6 +547,7 @@ impl Routes {
         let context = || base_context(&identity, &req.headers, client, &self.iam.account());
         // A call on a bucket's tags is decided with what it asks for, read first.
         let mut on_bucket = None;
+        let mut query_bucket = None;
         let allowed = match endpoint.needs {
             Needs::Action(action, resource) => identity
                 .decide(&context(), action, resource, None)
@@ -505,6 +571,14 @@ impl Routes {
                 on_bucket = Some((bucket, call));
                 allowed
             }
+            Needs::OnQueryBucket(action) => {
+                let bucket = admin::query_bucket(req.uri.query())?;
+                let allowed = identity
+                    .decide(&context(), action, &teifs_policy::bucket_arn(&bucket), None)
+                    .is_allowed();
+                query_bucket = Some(bucket);
+                allowed
+            }
             Needs::Root => identity.is_root(),
             Needs::PerCall => false,
         };
@@ -514,7 +588,20 @@ impl Routes {
         if api == Api::Control {
             control::check_account(&req.headers, &self.iam.account())?;
         }
-        match endpoint.handler {
+        self.call(endpoint.handler, req, on_bucket, query_bucket)
+            .await
+    }
+
+    /// Calls an endpoint the caller may call, with what deciding it read: a tags call's
+    /// bucket and call, or the bucket its query names.
+    async fn call(
+        &self,
+        handler: Handler,
+        req: S3Request<Body>,
+        on_bucket: Option<(String, control::TagCall)>,
+        query_bucket: Option<String>,
+    ) -> S3Result<S3Response<Body>> {
+        match handler {
             Handler::GetAccountBlock => control::get_public_access_block(&self.store).await,
             Handler::PutAccountBlock => {
                 control::put_public_access_block(&self.store, &self.rules, req).await
@@ -548,6 +635,14 @@ impl Routes {
                 .await
             }
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
+            Handler::SetBucketQuota => {
+                let bucket = query_bucket.expect("decided on the query's bucket");
+                quota::set(&self.store, &bucket, req).await
+            }
+            Handler::GetBucketQuota => {
+                let bucket = query_bucket.expect("decided on the query's bucket");
+                quota::get(&self.store, &bucket).await
+            }
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -773,6 +868,7 @@ mod tests {
             (Api::Admin, "The admin API"),
             (Api::Control, "S3 Control"),
             (Api::Query, "IAM and STS"),
+            (Api::Minio, "MinIO's admin API"),
         ] {
             let _ = write!(
                 out,
@@ -832,6 +928,11 @@ mod tests {
                 Needs::OnBucket(action) => {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
                     assert!(matches!(e.handler, Handler::Tags(_)), "{e:?}");
+                }
+                Needs::OnQueryBucket(action) => {
+                    assert!(e.api == Api::Minio && action.starts_with("admin:"), "{e:?}");
+                    let v4 = e.path.replace(MINIO_ADMIN, MINIO_ADMIN_V4);
+                    assert!(std::ptr::eq(endpoint(e.api, &method, &v4).unwrap(), e));
                 }
             }
         }

@@ -82,6 +82,67 @@ fn iam_error(err: IamError) -> S3Error {
     error(status, err.code(), err.to_string())
 }
 
+/// The bucket a query names, when `bucket=NAME` is all it says.
+pub(crate) fn only_bucket(query: Option<&str>) -> S3Result<Option<String>> {
+    let mut only = None;
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if name != "bucket" || only.is_some() {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "The only parameter is bucket=NAME.",
+            ));
+        }
+        only = Some(value.into_owned());
+    }
+    Ok(only)
+}
+
+/// The bucket a `MinIO` admin call's query names: `bucket=NAME`.
+pub(crate) fn query_bucket(query: Option<&str>) -> S3Result<String> {
+    only_bucket(query)?
+        .filter(|bucket| !bucket.is_empty())
+        .ok_or_else(|| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "A bucket is needed: bucket=NAME.",
+            )
+        })
+}
+
+/// An error of `MinIO`'s admin API, as JSON its clients read.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MinioError<'a> {
+    code: &'a str,
+    message: &'a str,
+    resource: &'a str,
+    request_id: &'a str,
+}
+
+/// A `MinIO` admin API error: its status, and its code and message as JSON.
+pub(crate) fn minio_error_response(
+    err: &S3Error,
+    resource: &str,
+    request_id: &str,
+) -> S3Response<Body> {
+    let mut response = json(&MinioError {
+        code: err.code().as_str(),
+        message: err.message().unwrap_or_default(),
+        resource,
+        request_id,
+    });
+    response.status = Some(
+        err.status_code()
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    if let Ok(id) = HeaderValue::from_str(request_id) {
+        response.headers.insert("x-amz-request-id", id);
+    }
+    response
+}
+
 /// A path the admin API doesn't serve.
 pub(crate) fn not_found() -> S3Error {
     let mut err = S3Error::with_message(

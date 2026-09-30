@@ -1,13 +1,16 @@
-// The AWS SDK for Go v2 against TeiFS: what applications do with it.
+// The AWS SDK for Go v2 against TeiFS: what applications do with it; and madmin-go, the
+// library `mc` calls MinIO's admin API with, for bucket quotas.
 package main
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	"github.com/minio/madmin-go/v3"
 )
 
 func must(err error) {
@@ -111,6 +116,26 @@ func main() {
 	linked, err := io.ReadAll(resp.Body)
 	must(err)
 	check(resp.StatusCode == 200 && bytes.Equal(linked, small), "presigned link")
+
+	step("a bucket quota through MinIO's admin API, as mc quota sets it")
+	endpoint, err := url.Parse(os.Getenv("ENDPOINT"))
+	must(err)
+	adm, err := madmin.New(endpoint.Host, os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), false)
+	must(err)
+	must(adm.SetBucketQuota(ctx, *bucket, &madmin.BucketQuota{Quota: 1024, Type: madmin.HardQuota}))
+	quota, err := adm.GetBucketQuota(ctx, *bucket)
+	must(err)
+	check(quota.Size == 1024 && quota.Type == madmin.HardQuota, fmt.Sprintf("the quota read back: %+v", quota))
+	_, err = s3c.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: bucket, Key: aws.String("over.txt"), Body: bytes.NewReader([]byte("x")),
+	})
+	var refused smithy.APIError
+	check(errors.As(err, &refused) && refused.ErrorCode() == "XMinioAdminBucketQuotaExceeded",
+		fmt.Sprintf("a write past the quota refused: %v", err))
+	must(adm.SetBucketQuota(ctx, *bucket, &madmin.BucketQuota{}))
+	quota, err = adm.GetBucketQuota(ctx, *bucket)
+	must(err)
+	check(quota.Size == 0 && quota.Quota == 0, fmt.Sprintf("the quota cleared: %+v", quota))
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})

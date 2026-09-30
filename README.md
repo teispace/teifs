@@ -222,6 +222,7 @@ requests live. See
 | `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
 | `teifs event add ALIAS/BUCKET ARN [--event put,delete,get,ilm] [--prefix P] [--suffix S] [--id ID]` \| `event ls\|rm ALIAS/BUCKET …` \| `event eventbridge ALIAS/BUCKET on\|off` | A bucket's notification rules, sending its events to the server's targets (as `mc event`; an AWS queue's, topic's or function's ARN too), and EventBridge |
 | `teifs watch ALIAS[/BUCKET[/PREFIX]] [--events put,delete,get,ilm,bucket] [--suffix S]` | Show a bucket's events (or every bucket's) as they happen, as `mc watch`; `--json` for S3's event records |
+| `teifs quota set ALIAS/BUCKET --size SIZE` \| `quota info\|clear ALIAS/BUCKET` | A bucket's hard quota (`MinIO`'s, as `mc quota` sets it): writes that would reach it are refused |
 | `teifs website set ALIAS/BUCKET [--index I] [--error E] [--rules FILE] \| --redirect-all URL` \| `website info\|rm ALIAS/BUCKET` | A bucket's website configuration: its index and error documents and redirection rules (JSON as the S3 console takes it), or a redirect of every request |
 | `teifs logging set ALIAS/BUCKET ALIAS/TARGET[/PREFIX] [--format simple\|event-time\|delivery-time] [--no-policy]` \| `logging info\|rm ALIAS/BUCKET` | A bucket's server access log: where its records go, letting the logging service into the target's bucket policy |
 | `teifs ilm rule add\|edit\|ls\|rm\|export\|import ALIAS/BUCKET` | Lifecycle rules: expire objects (`--expire-days 30 --prefix logs/`), older versions and lone delete markers, abort old uploads; `export`/`import` in AWS's JSON |
@@ -306,6 +307,10 @@ web.example.com`, `teifs website set local/blog --index index.html --error 404.h
 makes `http://blog.web.example.com/` the bucket's site, showing what its policy lets
 anybody read, with S3's index and error documents, redirects and error pages. See
 [OPERATIONS.md](docs/OPERATIONS.md#static-websites).
+
+**Bucket quotas**, as `MinIO`'s: `teifs quota set local/photos --size 100GiB` (or
+`mc quota set`) refuses writes that would take a bucket past it. See
+[OPERATIONS.md](docs/OPERATIONS.md#bucket-quotas).
 
 **Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
 storage classes (every object is `STANDARD`), replication, several disks or

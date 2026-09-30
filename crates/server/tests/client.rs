@@ -79,6 +79,38 @@ async fn errors_carry_the_servers_code() {
 }
 
 #[tokio::test]
+async fn bucket_quotas_are_set_read_and_cleared() {
+    let server = start().await;
+    let client = as_root(&server);
+    let s3 = common::client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("photos").send().await.unwrap();
+    assert_eq!(client.bucket_quota("photos").await.unwrap(), None);
+    client.set_bucket_quota("photos", Some(5)).await.unwrap();
+    assert_eq!(client.bucket_quota("photos").await.unwrap(), Some(5));
+    client.set_bucket_quota("photos", None).await.unwrap();
+    assert_eq!(client.bucket_quota("photos").await.unwrap(), None);
+    // MinIO's errors, as JSON.
+    let err = client.bucket_quota("nothing").await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ClientError::Api {
+                status: 404,
+                request_id: Some(_),
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(err.code(), Some("NoSuchBucket"));
+    let err = client
+        .set_bucket_quota("nothing", Some(1))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("NoSuchBucket"));
+}
+
+#[tokio::test]
 async fn the_root_key_is_rotated_and_the_new_one_signs() {
     let server = start_with(|config| config.credentials = None).await;
     let old = teifs_server::credentials::load(server.dir.path())

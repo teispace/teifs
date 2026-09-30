@@ -11,7 +11,7 @@ drive on port 9313 (`CLIENTS_PORT`), and runs them.
 | `restic` | A repository in a bucket: backups, `check --read-data`, forget and prune, restore; then in a bucket with Object Lock (governance by default): prune leaves delete markers, the pruned versions stay and can't be removed | `restic`, `aws` |
 | `kopia` | A repository with Kopia's own Object Lock (`--retention-mode=GOVERNANCE`): locked blobs, snapshots, `verify` of every file, restore, full maintenance under the lock | `kopia`, `aws`, `python3` |
 | `boto3` | Metadata and checksums, the transfer manager, ranges, paginators, presigned GET and PUT, conditional writes; that its default (Version 2) presigned links are refused | `python3` |
-| `go` | The AWS SDK for Go v2: default checksums, the transfer manager, paginators, presigned links | `go` |
+| `go` | The AWS SDK for Go v2: default checksums, the transfer manager, paginators, presigned links; madmin-go (as `mc quota` calls it): a bucket quota set, read, enforced and cleared | `go` |
 | `js` | The AWS SDK for JavaScript v3: default checksums, `lib-storage` multipart from a stream, paginators, presigned links | `npm` |
 | `terraform` | The S3 state backend with `use_lockfile`: two applies, and a held lock stopping a third | `terraform`, `aws` |
 

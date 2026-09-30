@@ -235,7 +235,7 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
                 TAG_BLUE.as_bytes(),
             ),
             Api::Control => (vec![("x-amz-account-id", account.as_str())], b""),
-            Api::Admin => (Vec::new(), b""),
+            Api::Admin | Api::Minio => (Vec::new(), b""),
         };
         let method = Method::from_bytes(endpoint.method.as_bytes()).unwrap();
         // A bucket's tags: a real bucket, and a key to remove.
@@ -244,6 +244,8 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
             .replace("{resourceArn}", "arn:aws:s3:::photos");
         let path = if endpoint.method == "DELETE" && path.contains("/tags/") {
             format!("{path}?tagKeys=team")
+        } else if endpoint.api == Api::Minio {
+            format!("{path}?bucket=photos")
         } else {
             path
         };

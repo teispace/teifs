@@ -29,7 +29,7 @@ use crate::{
     bucket_access::{Rules, parse_policy, public_policy_blocked},
     cors,
     errors::StoreResultExt,
-    lifecycle, logging, object_lock,
+    lifecycle, logging, object_lock, quota,
     routes::{s3_refusal, signed_body},
     tagging, website,
 };
@@ -50,12 +50,13 @@ const SETTINGS: &[&str] = &[
     "encryption",
     "notifications",
     "website",
+    "quota",
     "logging",
 ];
 
 /// `GET buckets`: every bucket, or `?bucket=NAME`'s alone.
 pub(crate) async fn export(store: &Store, query: Option<&str>) -> S3Result<S3Response<Body>> {
-    let only = only_bucket(query)?;
+    let only = admin::only_bucket(query)?;
     let mut buckets = Vec::new();
     for info in store.list_buckets().await.s3()? {
         if only.as_ref().is_some_and(|only| *only != info.name) {
@@ -88,21 +89,6 @@ pub(crate) async fn export(store: &Store, query: Option<&str>) -> S3Result<S3Res
 }
 
 /// `?bucket=NAME`, the only parameter.
-fn only_bucket(query: Option<&str>) -> S3Result<Option<String>> {
-    let mut only = None;
-    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
-        if name != "bucket" || only.is_some() {
-            return Err(admin::error(
-                http::StatusCode::BAD_REQUEST,
-                "InvalidArgument",
-                "The only parameter is bucket=NAME.",
-            ));
-        }
-        only = Some(value.into_owned());
-    }
-    Ok(only)
-}
-
 fn no_such_bucket(name: &str) -> S3Error {
     admin::error(
         http::StatusCode::NOT_FOUND,
@@ -338,6 +324,10 @@ impl Import<'_> {
             let result = self.website(value).await;
             self.report("website", result.map(|()| APPLIED));
         }
+        if let Some(value) = settings.get("quota") {
+            let result = self.quota(value).await;
+            self.report("quota", result.map(|()| APPLIED));
+        }
     }
 
     async fn object_lock(&self, value: &Value) -> S3Result<()> {
@@ -498,6 +488,16 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Checked as `MinIO`'s `SetBucketQuota` checks it.
+    async fn quota(&self, value: &Value) -> S3Result<()> {
+        let quota: u64 = parse("quota", value)?;
+        let quota = quota::size(quota)?;
+        self.store
+            .set_bucket_quota(self.bucket, Some(quota))
+            .await
+            .s3()
+    }
+
     /// Checked as `PutBucketLogging` checks it.
     async fn logging(&self, value: &Value, account: &str) -> S3Result<()> {
         let config: LoggingConfig = parse("logging", value)?;
@@ -614,6 +614,7 @@ mod tests {
                 host_name: String::new(),
                 protocol: None,
             }),
+            quota: Some(1),
         };
         let Value::Object(given) = serde_json::to_value(all).unwrap() else {
             unreachable!()
@@ -627,10 +628,13 @@ mod tests {
 
     #[test]
     fn only_a_bucket_is_a_parameter() {
-        assert_eq!(only_bucket(None).unwrap(), None);
-        assert_eq!(only_bucket(Some("bucket=a")).unwrap().as_deref(), Some("a"));
+        assert_eq!(admin::only_bucket(None).unwrap(), None);
+        assert_eq!(
+            admin::only_bucket(Some("bucket=a")).unwrap().as_deref(),
+            Some("a")
+        );
         for bad in ["name=a", "bucket=a&bucket=b", "Bucket=a"] {
-            assert!(only_bucket(Some(bad)).is_err(), "{bad}");
+            assert!(admin::only_bucket(Some(bad)).is_err(), "{bad}");
         }
     }
 

@@ -253,7 +253,14 @@ checks S3's calls make (the same `from_dto` conversions, policy parsing and Bloc
 Access checks), and forgets the bucket's cached access rules after each change that
 feeds them. Requests s3s refuses before the route (a signature that doesn't match,
 an unknown key) get S3's XML errors, everything after the admin API's JSON;
-`teifs-client` reads both. Its messages are in `teifs_types::admin`, for the server and
+`teifs-client` reads both. The few calls of `MinIO`'s admin API TeiFS serves (bucket
+quotas, `quota.rs`) are `Api::Minio` routes at `MinIO`'s exact paths
+(`/minio/admin/v3/…`, and `v4` taken as `v3`), matched only path-style, so a bucket named
+`minio` keeps its keys; they're decided with `MinIO`'s `admin:*` actions on the bucket
+their query names (`Needs::OnQueryBucket`) and answer `MinIO`'s JSON errors. Quotas are
+enforced in `Drive::check_write`, before a write's body is read, against the bucket's
+usage counters (`Store::bucket_usage`, every version), so the check reads counters,
+never a listing. Its messages are in `teifs_types::admin`, for the server and
 clients alike; the server hands the service its settings (`Options::config`), and the drive
 keeps its jobs' status (`Store::job_status`) for whoever holds it. IAM's changing
 operations are methods of a `Draft` (a copy of the state and the writes to make), each

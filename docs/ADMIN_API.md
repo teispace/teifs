@@ -31,8 +31,11 @@ say. S3 Control's calls on a bucket's tags are decided on the bucket
 (`arn:aws:s3:::bucket`), with its bucket policy and, while its ABAC is on, its tags
 (`aws:ResourceTag`); the tags a call adds are `aws:RequestTag` and `aws:TagKeys`, and
 the keys it removes are `aws:TagKeys`. A bucket policy's Deny binds the root user here
-too. Credentials from `GetSessionToken` and federated
-users' sessions can't call the admin API, as they can't call IAM on AWS.
+too. The calls of `MinIO`'s admin API TeiFS serves (bucket quotas) are decided on the
+bucket their `?bucket=NAME` names (`arn:aws:s3:::bucket`), with `MinIO`'s actions
+(`admin:SetBucketQuota`, `admin:GetBucketQuota`) in the caller's policies; `s3:*` grants
+none of them. Credentials from `GetSessionToken` and federated
+users' sessions can't call the admin API or `MinIO`'s, as they can't call IAM on AWS.
 
 ## Endpoints
 
@@ -75,6 +78,13 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 |---|---|---|---|
 | `POST` | `/` | The IAM and STS Query APIs: each call names its action in the signed form | the action each call names |
 
+### MinIO's admin API
+
+| Method | Path | What it does | Who may |
+|---|---|---|---|
+| `PUT` | `/minio/admin/v3/set-bucket-quota` | Sets `?bucket=NAME`'s hard quota in bytes (`{"size":N,"quotatype":"hard"}`, or `quota` for `size`), or clears it with none: `mc quota set` and `clear` | `admin:SetBucketQuota` |
+| `GET` | `/minio/admin/v3/get-bucket-quota` | `?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info` | `admin:GetBucketQuota` |
+
 <!-- end generated -->
 
 ## Messages
@@ -104,7 +114,12 @@ every answer's, S3's included) also in the `x-amz-request-id` header:
 IAM's own errors keep IAM's code and status (`EntityAlreadyExists`, `409`). A path or
 method the admin API doesn't serve is `404 NotFound`. Requests refused before they reach
 the admin API (a signature that doesn't match, an unknown key) get S3's XML errors, as
-from any S3 request; `teifs-client` reads both.
+from any S3 request; `teifs-client` reads both. `MinIO`'s admin API answers errors as
+`MinIO` does, the JSON its clients read:
+
+```json
+{"Code":"NoSuchBucket","Message":"…","Resource":"/minio/admin/v3/get-bucket-quota","RequestId":"…"}
+```
 
 ## Metrics
 

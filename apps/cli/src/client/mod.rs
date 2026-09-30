@@ -10,6 +10,7 @@ mod ilm;
 mod listing;
 mod lock;
 mod logging;
+mod quota;
 mod sse;
 mod target;
 mod transfer;
@@ -165,6 +166,12 @@ pub enum Command {
     Website {
         #[command(subcommand)]
         action: WebsiteAction,
+    },
+    /// Limit how much a bucket may hold (`MinIO`'s hard quota, as `mc quota` sets it):
+    /// writes that would reach it are refused.
+    Quota {
+        #[command(subcommand)]
+        action: QuotaAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
@@ -351,6 +358,28 @@ pub enum WebsiteAction {
     },
     /// Stop serving a bucket as a website.
     Rm {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum QuotaAction {
+    /// Let `ALIAS/BUCKET` hold at most `--size`: a write that would reach it is refused.
+    Set {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+        /// The most it may hold: bytes, or with KiB, MiB, GiB or TiB.
+        #[arg(long)]
+        size: String,
+    },
+    /// Show a bucket's quota.
+    Info {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+    /// Remove a bucket's quota.
+    Clear {
         /// `ALIAS/BUCKET`.
         bucket: String,
     },

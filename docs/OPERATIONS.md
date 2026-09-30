@@ -305,6 +305,31 @@ proxy in front that forwards to the server with `Host: BUCKET.DOMAIN`, and TLS t
 too; redirects keep the scheme the server was reached with (`X-Forwarded-Proto` from a
 `--trusted-proxy`).
 
+## Bucket quotas
+
+A bucket's quota, as `MinIO`'s hard quota, is the most it may hold: a write that would
+reach it is refused with `MinIO`'s error, `400 XMinioAdminBucketQuotaExceeded` ("Bucket
+quota exceeded"). It's set through `MinIO`'s admin API, so `mc quota` works as it does
+against `MinIO`:
+
+```sh
+teifs quota set local/photos --size 100GiB    # or: mc quota set local/photos --size 100GiB
+teifs quota info local/photos
+teifs quota clear local/photos
+```
+
+What a bucket holds is every version of every object (and, in a folder bucket, its
+files), as its usage counts them; uploads in progress count once they're completed. As
+on `MinIO`, `PutObject` (and a browser's `POST`), `CopyObject`, `UploadPart` and
+`UploadPartCopy` are refused, before their bodies are read, when what the bucket holds
+and what they write would reach the quota; so uploads that run at the same time can pass
+it together, and overwriting an object counts its new bytes in full until the old ones
+go. A quota set below what a bucket holds stops its writes until deletes (or lifecycle
+expirations) bring it under. Deliveries of access logs into a bucket at its quota are
+dropped, with a warning, as other refused deliveries are. Setting and reading quotas
+take `MinIO`'s actions, `admin:SetBucketQuota` and `admin:GetBucketQuota`, on the bucket
+(see [ADMIN_API.md](ADMIN_API.md)); admin exports and imports carry them.
+
 ## Bucket notifications
 
 A bucket's rules send events (an object written, read, tagged, deleted, expired…) to
