@@ -3038,6 +3038,7 @@ dependencies = [
  "serde_json",
  "teifs-client",
  "teifs-iam",
+ "teifs-notify",
  "teifs-server",
  "teifs-store",
  "teifs-types",

@@ -5,6 +5,7 @@ pub(crate) mod alias;
 mod commands;
 mod copy;
 mod encrypt;
+mod event;
 mod ilm;
 mod listing;
 mod lock;
@@ -183,6 +184,12 @@ pub enum Command {
         transfer: TransferArgs,
         #[command(flatten)]
         enc: EncArgs,
+    },
+    /// Send a bucket's events (objects written, read, deleted…) to the server's targets:
+    /// add, list or remove its notification rules.
+    Event {
+        #[command(subcommand)]
+        action: event::EventAction,
     },
     /// Show a bucket's events (or, for an alias, every bucket's) as they happen: objects
     /// written, read and deleted, until Ctrl-C.

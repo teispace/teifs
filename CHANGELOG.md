@@ -145,7 +145,8 @@ behaviour; the on-disk format is always upgraded automatically.
 - Listening for events, as MinIO's API: `GET /BUCKET?events=…` (or `GET /?events=…` for
   every bucket) answers with each event as it happens, filtered by event, prefix and
   suffix, whatever the bucket's rules, with buckets created and removed too; `mc watch`
-  works, and `teifs watch ALIAS[/BUCKET[/PREFIX]]` shows them. It needs MinIO's
+  works, and `teifs watch ALIAS[/BUCKET[/PREFIX]]` shows them. `teifs event add|ls|rm`
+  manages a bucket's notification rules, as `mc event` does. It needs MinIO's
   `s3:ListenBucketNotification` (which bucket policies may grant, anonymous listeners
   included) or `s3:ListenNotification`.
 - A client uploading to a server that refuses the upload (access denied, say) reads

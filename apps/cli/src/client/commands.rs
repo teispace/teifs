@@ -103,6 +103,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Retention { action } => super::lock::retention(action, &aliases).await,
         Command::Legalhold { action } => super::lock::legal_hold(action, &aliases).await,
         Command::Ilm { action } => super::ilm::ilm(action, &aliases).await,
+        Command::Event { action } => super::event::event(action, &aliases).await,
         Command::Watch(args) => super::watch::run(&aliases, args).await,
         Command::Encrypt { action } => super::encrypt::encrypt(action, &aliases).await,
         Command::Presign {

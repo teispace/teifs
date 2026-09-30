@@ -252,7 +252,15 @@ aws s3api put-bucket-notification-configuration --bucket photos --endpoint-url â
     "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "images/"},
                                        {"Name": "suffix", "Value": ".jpg"}]}}}]}'
 mc event add local/photos arn:minio:sqs::orders:webhook --event put --prefix images/
+teifs event add local/photos arn:teifs:sqs::orders:webhook --event put --prefix images/ --suffix .jpg
 ```
+
+`teifs event add ALIAS/BUCKET ARN` adds a rule (`--event` takes `put`, `delete`, `get`,
+`ilm` or S3's names, `put,delete,get` by default; `--id` names it), refusing one the
+bucket already has unless `--ignore-existing`; `teifs event ls ALIAS/BUCKET [ARN]` lists
+them, and `teifs event rm ALIAS/BUCKET` removes one (`--id`), those sending to an ARN, or
+all of them (`--all`). Each reads the bucket's rules and writes them back, so the server
+checks the whole configuration.
 
 A rule is a `QueueConfiguration`, `TopicConfiguration` or `CloudFunctionConfiguration`
 (all the same here): the target's ARN, events, and a key prefix and suffix (URL-encoded,
@@ -344,5 +352,4 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch)
-and `teifs event` commands.
+Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch).

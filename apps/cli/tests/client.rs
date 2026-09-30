@@ -1517,3 +1517,103 @@ async fn uploads_with_customer_keys_resume() {
         .await;
     assert_eq!(fs::read(cli.path("back.bin")).unwrap(), big);
 }
+
+/// `teifs event ACTION BUCKET` and the options in `rest`.
+fn event<'a>(action: &'a str, bucket: &'a str, rest: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["--json", "event", action, bucket];
+    args.extend(rest.split_whitespace());
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_rules_are_added_listed_and_removed() {
+    use teifs_server::{TargetConfig, TargetKind, Webhook};
+    let receiver = teifs_notify::testing::Receiver::start(0).await;
+    let hook = Webhook::new(receiver.url(), None).unwrap();
+    let target = TargetConfig::new("hook", TargetKind::Webhook(hook)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let cli = Client::new(&server);
+    let arn = "arn:teifs:sqs::hook:webhook";
+    cli.ok(&["mb", "t/events"]).await;
+    let run = cli.run(&["event", "ls", "t/events"]).await;
+    assert!(
+        run.stderr.contains("no notification rules"),
+        "{}",
+        run.stderr
+    );
+
+    let logs = format!("{arn} --id logs --event put,delete --prefix logs/");
+    let added = records(&cli.ok(&event("add", "t/events", &logs)).await);
+    assert_eq!(added[0]["id"], "logs");
+    assert_eq!(
+        added[0]["events"],
+        serde_json::json!(["s3:ObjectCreated:*", "s3:ObjectRemoved:*"])
+    );
+    assert_eq!(receiver.posts(1).await.len(), 1, "the target was tested");
+    // The same rule again, under another id or none.
+    cli.fails(
+        &event(
+            "add",
+            "t/events",
+            &format!("{arn} --event delete,put --prefix logs/"),
+        ),
+        6,
+    )
+    .await;
+    let again = format!("{arn} --event put,delete --prefix logs/ --ignore-existing");
+    assert_eq!(
+        records(&cli.ok(&event("add", "t/events", &again)).await)[0]["id"],
+        "logs"
+    );
+    cli.fails(
+        &event("add", "t/events", &format!("{arn} --id logs --suffix .x")),
+        6,
+    )
+    .await;
+    // The server's checks come through: an overlapping rule, an unknown target.
+    cli.fails(
+        &event(
+            "add",
+            "t/events",
+            &format!("{arn} --event put --prefix logs/a"),
+        ),
+        1,
+    )
+    .await;
+    cli.fails(&event("add", "t/events", "arn:teifs:sqs::nope:webhook"), 1)
+        .await;
+
+    let images = format!("{arn} --event get --suffix .jpg");
+    let made = records(&cli.ok(&event("add", "t/events", &images)).await);
+    let made = made[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(made.len(), 32, "made up by the server");
+    let listed = records(&cli.ok(&event("ls", "t/events", "")).await);
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[1]["suffix"], ".jpg");
+    assert_eq!(
+        listed[1]["events"],
+        serde_json::json!(["s3:ObjectAccessed:*"])
+    );
+    let table = cli.ok(&["event", "ls", "t/events", arn]).await;
+    assert!(
+        table.contains("logs/*") && table.contains("*.jpg"),
+        "{table}"
+    );
+    assert!(
+        records(
+            &cli.ok(&event("ls", "t/events", "arn:teifs:sqs::other:webhook"))
+                .await
+        )
+        .is_empty()
+    );
+
+    cli.fails(&event("rm", "t/events", "--id nope"), 5).await;
+    let removed = records(&cli.ok(&event("rm", "t/events", "--id logs")).await);
+    assert_eq!(removed[0]["removed"], 1);
+    let removed = records(&cli.ok(&event("rm", "t/events", arn)).await);
+    assert_eq!(removed[0]["removed"], 1);
+    cli.fails(&event("rm", "t/events", "--all --force"), 5)
+        .await;
+    cli.fails(&["event", "rm", "t/events"], 2).await;
+    cli.fails(&["event", "ls", "t/events/key"], 2).await;
+}

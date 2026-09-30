@@ -5,7 +5,7 @@
 use clap::Args;
 use teifs_client::{EventRecord, ListenFilter, event_key_decoded};
 
-use super::{Error, alias::Aliases, target::Target};
+use super::{Error, alias::Aliases, event::events_of, target::Target};
 use crate::{admin, ui, units::size};
 
 #[derive(Args)]
@@ -20,19 +20,6 @@ pub struct WatchArgs {
     /// Only keys ending with this.
     #[arg(long, default_value = "")]
     suffix: String,
-}
-
-/// The events a short name stands for, or `name` itself.
-fn events_of(name: &str) -> Vec<String> {
-    let events: &[&str] = match name {
-        "put" => &["s3:ObjectCreated:*"],
-        "delete" => &["s3:ObjectRemoved:*"],
-        "get" => &["s3:ObjectAccessed:*"],
-        "ilm" => &["s3:LifecycleExpiration:*"],
-        "bucket" => &["s3:BucketCreated:*", "s3:BucketRemoved:*"],
-        other => return vec![other.to_owned()],
-    };
-    events.iter().map(|&e| e.to_owned()).collect()
 }
 
 pub async fn run(aliases: &Aliases, args: WatchArgs) -> Result<(), Error> {
@@ -84,22 +71,4 @@ fn line(record: &EventRecord) -> String {
         line.push_str(&ui::dim(format!("version {version}")));
     }
     line
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_names_stand_for_groups() {
-        assert_eq!(events_of("put"), ["s3:ObjectCreated:*"]);
-        assert_eq!(
-            events_of("bucket"),
-            ["s3:BucketCreated:*", "s3:BucketRemoved:*"]
-        );
-        assert_eq!(
-            events_of("s3:ObjectCreated:Copy"),
-            ["s3:ObjectCreated:Copy"]
-        );
-    }
 }
