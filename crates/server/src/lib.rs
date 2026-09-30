@@ -66,6 +66,9 @@ pub struct Config {
     pub durability: Durability,
     /// Which names folder buckets may create.
     pub key_rules: KeyRules,
+    /// How long a day is for lifecycle rules; `None` is a real day. Only for testing
+    /// rules without waiting days.
+    pub lifecycle_day: Option<std::time::Duration>,
     /// Bounds on what clients can make the server hold.
     pub limits: Limits,
     /// Accept Signature Version 2 (deprecated; off by default, as on AWS).
@@ -311,6 +314,7 @@ impl Server {
                 default_encryption,
                 durability: config.durability,
                 key_rules: config.key_rules,
+                lifecycle_day: config.lifecycle_day,
             },
         )
         .map_err(|source| ServerError::Open {

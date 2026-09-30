@@ -210,6 +210,9 @@ pub(crate) struct ServeArgs {
     /// this system can hold). Object buckets take any S3 key either way.
     #[arg(long, value_enum, default_value = "portable", env = "TEIFS_KEY_NAMES")]
     key_names: KeyNamesArg,
+    /// For testing lifecycle rules: how long a "day" is (`10s`). Never on real data.
+    #[arg(long, hide = true, value_parser = parse_duration, env = "TEIFS_LIFECYCLE_DAY")]
+    lifecycle_day: Option<std::time::Duration>,
     /// How long a client has to send a request's headers; idle connections close
     /// after it too.
     #[arg(long, default_value = "30s", value_parser = parse_duration, env = "TEIFS_HEADER_TIMEOUT")]
@@ -548,6 +551,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         },
         durability: args.durability.into(),
         key_rules: args.key_names.into(),
+        lifecycle_day: args.lifecycle_day,
         limits: Limits {
             header_timeout: args.header_timeout,
             body_timeout: args.body_timeout,

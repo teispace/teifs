@@ -11,7 +11,7 @@ that is also a bucket for the AWS CLI, rclone, restic, boto3 and every other S3 
 > **Early development.** The S3 core, encryption and both bucket kinds work and are
 > tested with the official AWS SDK, the AWS CLI and the ceph/s3-tests suite. IAM users,
 > groups, policies and bucket policies work, managed with `aws iam` and `aws s3api`.
-> Versioning and Object Lock work; lifecycle rules are next. Don't store data you can't
+> Versioning, Object Lock and lifecycle rules work. Don't store data you can't
 > afford to lose with it yet.
 
 ## Why
@@ -231,6 +231,7 @@ location / {
 | Objects | put, browser uploads (`POST` with a signed form and policy), get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
 | Versions | versioning enabled or suspended, every version readable, taggable and deletable by id, delete markers, ListObjectVersions, restoring a version by copying it |
 | Object Lock | buckets created with it or given it later, default retention in days or years, governance and compliance retention and legal holds per version (set on writes, copies, uploads in parts, or later), governance bypassed only with `s3:BypassGovernanceRetention` |
+| Lifecycle | rules by prefix, tags and size (alone or combined), expiring current versions by days or date, removing noncurrent versions by age and count and delete markers left alone, aborting old uploads; `x-amz-expiration` on writes and reads, abort dates on uploads; Object Lock always wins |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
@@ -258,7 +259,8 @@ keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
-**Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle rules, website
+**Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
+storage classes (every object is `STANDARD`), website
 hosting, event notifications, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 

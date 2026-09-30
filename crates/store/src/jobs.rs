@@ -19,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Inner, Store, error::Result};
 
+mod lifecycle;
+#[cfg(test)]
+pub(crate) use lifecycle::ApplyLifecycle;
+
 /// How long an idle staged file may sit before it's swept (active writes keep touching it).
 const STAGED_IDLE: Duration = Duration::from_hours(1);
 /// How long answers kept for retries (client tokens, completed uploads) live.
@@ -26,7 +30,7 @@ const RETRY_WINDOW: Duration = Duration::from_hours(24);
 /// The longest pause between two busy steps, whatever the pace.
 const MAX_PAUSE: Duration = Duration::from_secs(5);
 /// Uploads one step may expire, and garbage files one step may remove.
-const BATCH: usize = 256;
+pub(crate) const BATCH: usize = 256;
 
 /// How the background jobs run.
 #[derive(Debug, Clone)]
@@ -187,7 +191,7 @@ impl Job for Housekeeping {
     }
 }
 
-fn millis(time: SystemTime) -> i64 {
+pub(crate) fn millis(time: SystemTime) -> i64 {
     time.duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, millis_of)
 }
@@ -245,6 +249,7 @@ impl Store {
             Box::new(Housekeeping),
             Box::new(SweepStaging),
             Box::new(crate::reconcile::IndexFolders::default()),
+            Box::new(lifecycle::ApplyLifecycle::new(self.clone())),
         ];
         if let Some(after) = options.upload_expiry {
             jobs.push(Box::new(ExpireUploads { after }));

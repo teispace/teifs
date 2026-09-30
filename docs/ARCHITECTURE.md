@@ -379,6 +379,13 @@ A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), st
 | `sweep-staging` | Removes staged files no write has touched for an hour (a crashed client's leftovers) |
 | `housekeeping` | Retries data files the garbage queue holds; forgets retry answers older than a day |
 | `index-folders` | Walks folder buckets page by page: hashes files added or changed outside TeiFS, re-adopts rows of restored files, forgets rows of deleted ones; rests 30 minutes after a full pass |
+| `lifecycle` | Applies buckets' lifecycle rules (`crates/store/src/jobs/lifecycle.rs`): walks each bucket with enabled rules a page of versions at a time (a key's versions always together), expires, removes and aborts through the store's own delete and abort operations, with the listed object's ETag, size and modification time as the delete's conditions; rests an hour after a full pass |
+
+Lifecycle configurations are part of a bucket's settings (`crates/store/src/lifecycle.rs`
+keeps them as they were given and evaluates them); a small cache, cleared whenever any
+bucket's settings change, answers `x-amz-expiration` without reading them for every
+request. `serve` has a hidden `--lifecycle-day` (`TEIFS_LIFECYCLE_DAY`) that makes a
+lifecycle day seconds long, for testing rules; answers still count real days.
 
 Each job works in bounded steps on the blocking pool. After a step that did something it
 sleeps for as long as the step took (so it uses at most half a core), and after a step

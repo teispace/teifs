@@ -35,6 +35,17 @@ behaviour; the on-disk format is always upgraded automatically.
   `-r`, or a bucket's default with `--default`), `teifs legalhold set|clear|info`, and
   `rm --bypass` for governance-locked versions. `stat` shows an object's retention and
   legal hold and a bucket's Object Lock.
+- Lifecycle rules, with AWS's rules, in both layouts:
+  `Put/Get/DeleteBucketLifecycleConfiguration` (and the older form with a prefix on
+  each rule), filters by prefix, tag, object size or all of them together, expiration
+  of current versions after days or from a date (a delete marker with versioning),
+  removal of noncurrent versions after days, keeping the newest ones
+  (`NewerNoncurrentVersions`), removal of delete markers left alone, and aborting
+  uploads left unfinished. Writes and reads answer `x-amz-expiration`, and
+  CreateMultipartUpload and ListParts the abort date and rule. A background job applies
+  the rules through the same checks as requests, so an object written again meanwhile
+  and a version Object Lock protects stay. Transitions to other storage classes are
+  refused (`InvalidStorageClass`). 20 more tests of the s3-tests suite pass.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

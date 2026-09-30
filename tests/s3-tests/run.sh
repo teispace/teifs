@@ -46,11 +46,13 @@ mkdir -p "$WORK/drive"
 for key in testkey-1 testkey-2; do
   "$ROOT/target/release/teifs" key create "$key" --kms-keyring "$WORK/keyring.json" > /dev/null
 done
+# Lifecycle rules count days of 3 seconds, as s3tests.conf's lc_debug_interval says.
 # The suite predates AWS's 2023 and 2026 defaults: its buckets take public ACLs and
 # SSE-C keys, as S3's did before, and it signs forms and some requests with Signature V2.
 TEIFS_ACCESS_KEY="$ACCESS_KEY" TEIFS_SECRET_KEY="$SECRET_KEY" TEIFS_LOG=warn \
   TEIFS_DEFAULT_LAYOUT="$LAYOUT" TEIFS_KMS_KEYRING="$WORK/keyring.json" \
   TEIFS_ALLOW_SSE_C=true TEIFS_LEGACY_BUCKET_DEFAULTS=true TEIFS_ALLOW_SIGV2=true \
+  TEIFS_LIFECYCLE_DAY=3s \
   "$ROOT/target/release/teifs" serve "$WORK/drive" --listen "127.0.0.1:$PORT" \
   > "$WORK/server.log" 2>&1 &
 server=$!

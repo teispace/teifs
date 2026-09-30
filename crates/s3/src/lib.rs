@@ -15,6 +15,7 @@ mod encode;
 mod errors;
 mod health;
 mod iam_api;
+mod lifecycle;
 mod limits;
 mod object_lock;
 mod post_form;

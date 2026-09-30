@@ -16,6 +16,7 @@ mod folder_versions;
 mod folders;
 mod format;
 mod jobs;
+mod lifecycle;
 mod list;
 mod lock;
 mod multipart;
@@ -41,6 +42,10 @@ pub use body::{BodyReader, ObjectBody};
 pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
 pub use jobs::{JobOptions, JobStatus, Jobs};
+pub use lifecycle::{
+    And, Condition, DAY_MS, Expiration, Expiry, Lifecycle, LifecycleRule, MAX_LIFECYCLE_RULES,
+    MAX_NEWER_NONCURRENT, MAX_RULE_ID_LEN, NoncurrentExpiration, RuleFilter, Tag,
+};
 pub use list::{After, ListQuery, Listing, ObjectVersion, VersionListing, VersionsQuery};
 pub use lock::{
     DefaultRetention, MAX_RETENTION_DAYS, MAX_RETENTION_YEARS, ObjectLock, RetentionPeriod,
@@ -249,6 +254,10 @@ struct Inner {
     default_encryption: BucketEncryption,
     /// What each background job has done since the drive opened.
     jobs: jobs::StatusMap,
+    /// Buckets' lifecycle configurations, read once.
+    lifecycles: lifecycle::LifecycleCache,
+    /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
+    day_ms: i64,
 }
 
 /// How hard a write is made to survive a power cut before it's acknowledged.
@@ -292,6 +301,9 @@ pub struct StoreOptions {
     pub durability: Durability,
     /// Which names folder buckets may create.
     pub key_rules: KeyRules,
+    /// How long a day is for lifecycle rules; `None` is a real day. Shorter days are
+    /// for testing rules without waiting.
+    pub lifecycle_day: Option<std::time::Duration>,
 }
 
 impl Store {
@@ -345,6 +357,10 @@ impl Store {
             format,
             kms: std::sync::OnceLock::new(),
             jobs: jobs::StatusMap::default(),
+            lifecycles: lifecycle::LifecycleCache::default(),
+            day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
+                i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)
+            }),
             default_encryption: options
                 .default_encryption
                 .unwrap_or_else(BucketEncryption::aws_default),
@@ -518,6 +534,7 @@ impl Store {
             let unfinished = conn.list_uploads(&name, "", None, usize::MAX)?;
             conn.forget_bucket(&name)?;
             inner.system().forget_bucket(&name)?;
+            inner.lifecycles.clear();
             drop(conn);
             for upload in unfinished {
                 let _ = fs::remove_dir_all(inner.uploads.join(&upload.id));
@@ -1397,6 +1414,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod layout_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]

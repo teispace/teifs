@@ -40,3 +40,4 @@ test_versioning_concurrent_multi_object_delete  # passes only when re-creating a
 test_versioned_object_acl  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
 test_versioned_object_acl_no_version_specified  # sorts grants by DisplayName, comparing None with a string (TypeError), unless the first grant is a group's (Ceph's order); S3 doesn't order grants
 test_delete_marker_nonversioned  # expects x-amz-delete-marker: false after deleting in an unversioned bucket (Ceph RGW); AWS never sends the header as false, and sends none there
+test_delete_marker_expiration  # the rules work (the marker goes), then the test expects `x-amz-delete-marker: false` on the 404 for a key with no versions left: RGW's answer; S3 sends no delete-marker header for a key that has none

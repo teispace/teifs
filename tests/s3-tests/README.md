@@ -42,7 +42,9 @@ public ACLs and uploads with SSE-C keys. The server it runs therefore starts wit
 `--legacy-bucket-defaults` (new buckets have ACLs enabled and no Block Public Access)
 and `--allow-sse-c`, and with Signature V2 allowed (`TEIFS_ALLOW_SIGV2`), because the
 suite signs its POST forms and some requests with it. TeiFS's own tests prove the
-current AWS defaults.
+current AWS defaults. Lifecycle days are 3 seconds long on that server
+(`TEIFS_LIFECYCLE_DAY`), as the configuration's `lc_debug_interval` tells the suite, so
+tests that wait for rules to apply take seconds.
 
 ## Users
 

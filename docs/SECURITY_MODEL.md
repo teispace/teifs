@@ -285,8 +285,9 @@ delete. A bucket setting that can't be read refuses the write instead of writing
 its default retention. Governance is bypassed only when the request asks
 (`x-amz-bypass-governance-retention`) and the caller is allowed
 `s3:BypassGovernanceRetention` on that object; a legal hold or compliance retention
-holds whoever asks. In a folder bucket this binds S3 requests only: another program
-with access to the folder can still change its files.
+holds whoever asks. Lifecycle rules remove versions through the same store operations,
+so they never remove a protected one either. In a folder bucket this binds S3 requests
+only: another program with access to the folder can still change its files.
 
 ### 13. Authorization before existence
 A caller without access learns nothing about whether an object exists: requests are

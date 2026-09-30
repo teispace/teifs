@@ -17,6 +17,9 @@ display_name = teifs
 user_id = teifs
 email = main@example.com
 api_name = default
+# How long a lifecycle "day" is, in seconds: the server runs with the same
+# (TEIFS_LIFECYCLE_DAY in run.sh), so tests that wait for rules take seconds.
+lc_debug_interval = 3
 access_key = @ACCESS_KEY@
 secret_key = @SECRET_KEY@
 

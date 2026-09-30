@@ -26,6 +26,7 @@ use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
+    lifecycle,
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     post_form::{self, Form},
     sse::{self, set_sse},
@@ -70,6 +71,38 @@ impl Drive {
             store,
             default_layout,
             legacy_bucket_defaults,
+        }
+    }
+
+    /// The `x-amz-expiration` of the current version `info` of an object in `bucket`,
+    /// when a lifecycle rule expires it. Only informative: a damaged configuration
+    /// leaves it out rather than failing the request.
+    async fn expiration(&self, bucket: &str, info: &ObjectInfo) -> Option<String> {
+        match self.store.expiry(bucket, info).await {
+            Ok(expiry) => expiry.as_ref().map(lifecycle::expiration_header),
+            Err(err) => {
+                tracing::warn!(bucket, error = %err, "couldn't read the lifecycle configuration");
+                None
+            }
+        }
+    }
+
+    /// When a lifecycle rule aborts `upload`, and the rule's id.
+    async fn abort_date(
+        &self,
+        upload: &teifs_store::Upload,
+    ) -> (Option<Timestamp>, Option<String>) {
+        match self
+            .store
+            .upload_abort(&upload.bucket, &upload.key, upload.created_ms)
+            .await
+        {
+            Ok(Some(expiry)) => (Some(millis(expiry.at_ms)), Some(expiry.rule_id)),
+            Ok(None) => (None, None),
+            Err(err) => {
+                tracing::warn!(bucket = upload.bucket, error = %err, "couldn't read the lifecycle configuration");
+                (None, None)
+            }
         }
     }
 
@@ -659,7 +692,7 @@ fn part_number(number: i32) -> S3Result<u32> {
         .ok_or_else(|| s3_error!(InvalidArgument, "part numbers go from 1 to 10000"))
 }
 
-fn http_date(timestamp: &Timestamp) -> String {
+pub(crate) fn http_date(timestamp: &Timestamp) -> String {
     let mut out = Vec::new();
     let _ = timestamp.format(dto::TimestampFormat::HttpDate, &mut out);
     String::from_utf8(out).unwrap_or_default()
@@ -1353,6 +1386,7 @@ impl S3 for Drive {
             e_tag: Some(etag(&info.etag)),
             checksum_type: checksum_type(&computed, None),
             version_id: written_version(&info),
+            expiration: self.expiration(&input.bucket, &info).await,
             ..Default::default()
         };
         set_checksums!(out, &computed);
@@ -1508,6 +1542,10 @@ impl S3 for Drive {
             metadata: user_metadata(&info.attrs),
             tag_count: tag_count(&info.attrs)
                 .filter(|_| caller.as_ref().is_none_or(|c| c.may(TAGGING))),
+            expiration: match version_id {
+                None => self.expiration(&input.bucket, &info).await,
+                Some(_) => None,
+            },
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1567,6 +1605,10 @@ impl S3 for Drive {
             metadata: user_metadata(&info.attrs),
             tag_count: tag_count(&info.attrs)
                 .filter(|_| caller.as_ref().is_none_or(|c| c.may(TAGGING))),
+            expiration: match version_id {
+                None => self.expiration(&input.bucket, &info).await,
+                Some(_) => None,
+            },
             ..Default::default()
         };
         if let Some(sums) = slice.checksums
@@ -1823,6 +1865,56 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteBucketCorsOutput::default()))
+    }
+
+    async fn get_bucket_lifecycle_configuration(
+        &self,
+        req: S3Request<dto::GetBucketLifecycleConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketLifecycleConfigurationOutput>> {
+        let lifecycle = self
+            .store
+            .bucket_lifecycle(&req.input.bucket)
+            .await
+            .s3()?
+            .ok_or_else(|| {
+                s3_error!(
+                    NoSuchLifecycleConfiguration,
+                    "The lifecycle configuration does not exist"
+                )
+            })?;
+        Ok(S3Response::new(lifecycle::to_dto(&lifecycle)))
+    }
+
+    async fn put_bucket_lifecycle_configuration(
+        &self,
+        req: S3Request<dto::PutBucketLifecycleConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketLifecycleConfigurationOutput>> {
+        let input = req.input;
+        let config = lifecycle::from_dto(
+            input.lifecycle_configuration,
+            input.transition_default_minimum_object_size.as_ref(),
+        )?;
+        let minimum_size = lifecycle::minimum_size(&config);
+        self.store
+            .set_bucket_lifecycle(&input.bucket, Some(config))
+            .await
+            .s3()?;
+        Ok(S3Response::new(
+            dto::PutBucketLifecycleConfigurationOutput {
+                transition_default_minimum_object_size: Some(minimum_size),
+            },
+        ))
+    }
+
+    async fn delete_bucket_lifecycle(
+        &self,
+        req: S3Request<dto::DeleteBucketLifecycleInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketLifecycleOutput>> {
+        self.store
+            .set_bucket_lifecycle(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::DeleteBucketLifecycleOutput::default()))
     }
 
     async fn get_bucket_policy(
@@ -2335,6 +2427,7 @@ impl S3 for Drive {
             }),
             version_id: written_version(&info),
             copy_source_version_id: source.version_id.clone(),
+            expiration: self.expiration(&input.bucket, &info).await,
             ..Default::default()
         };
         set_sse!(out, with_customer_md5(info.sse, customer_md5).as_ref());
@@ -2618,10 +2711,13 @@ impl S3 for Drive {
             )
             .await
             .s3()?;
+        let (abort_date, abort_rule_id) = self.abort_date(&upload).await;
         let mut out = dto::CreateMultipartUploadOutput {
             bucket: Some(input.bucket),
             key: Some(input.key),
             upload_id: Some(upload.id.clone()),
+            abort_date,
+            abort_rule_id,
             ..Default::default()
         };
         if checksum.requested {
@@ -2817,6 +2913,7 @@ impl S3 for Drive {
             .await
             .s3()?;
         let (checksum_algorithm, checksum_type) = upload_checksum_dto(&upload);
+        let (abort_date, abort_rule_id) = self.abort_date(&upload).await;
         let truncated = parts.len() > limit;
         parts.truncate(limit);
         let next = parts
@@ -2850,6 +2947,8 @@ impl S3 for Drive {
             storage_class: Some(dto::StorageClass::from_static(dto::StorageClass::STANDARD)),
             checksum_algorithm,
             checksum_type,
+            abort_date,
+            abort_rule_id,
             ..Default::default()
         }))
     }
@@ -2976,6 +3075,7 @@ impl S3 for Drive {
             .await
             .s3()?;
         let mut out = complete_output(&input.bucket, &input.key, &info, &sums, kind);
+        out.expiration = self.expiration(&input.bucket, &info).await;
         // S3 reports SSE-S3 and SSE-KMS here, not SSE-C.
         let headers = sse::headers(info.sse.as_ref());
         out.server_side_encryption = headers.sse;

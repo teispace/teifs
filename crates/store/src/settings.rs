@@ -7,7 +7,8 @@ use teifs_meta::{BucketRecord, Layout, Versioning};
 use teifs_types::{Acl, SseMode};
 
 use crate::{
-    Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lock::ObjectLock, now_ms,
+    Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lifecycle::Lifecycle,
+    lock::ObjectLock, now_ms,
 };
 
 /// Why a bucket's tags can't be replaced or deleted as a whole.
@@ -39,6 +40,9 @@ pub(crate) struct BucketConfig {
     /// Its Object Lock, once turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) object_lock: Option<ObjectLock>,
+    /// Its lifecycle rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lifecycle: Option<Lifecycle>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -569,6 +573,8 @@ impl Inner {
         if !system.set_bucket_config(name, &json)? {
             return Err(StoreError::NoSuchBucket);
         }
+        drop(system);
+        self.lifecycles.clear();
         Ok(())
     }
 }

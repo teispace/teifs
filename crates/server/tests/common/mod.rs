@@ -53,6 +53,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         jobs: teifs_server::JobOptions::default(),
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,
+        lifecycle_day: None,
         allow_sig_v2: false,
         legacy_bucket_defaults: false,
         limits: teifs_server::Limits::default(),
