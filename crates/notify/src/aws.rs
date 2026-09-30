@@ -74,6 +74,34 @@ pub(crate) fn xml_text(xml: &str, tag: &str) -> Option<String> {
     )
 }
 
+/// Where requests to `service` go: `endpoint` if one is given (an `http` or `https` URL
+/// without credentials), else AWS's endpoint for the partition and region.
+pub(crate) fn endpoint(
+    service: &str,
+    partition: &str,
+    region: &str,
+    endpoint: Option<&str>,
+) -> Result<reqwest::Url, String> {
+    let Some(given) = endpoint else {
+        let domain = if partition == "aws-cn" {
+            "amazonaws.com.cn"
+        } else {
+            "amazonaws.com"
+        };
+        return reqwest::Url::parse(&format!("https://{service}.{region}.{domain}/"))
+            .map_err(|_| format!("`{region}` isn't a region"));
+    };
+    let url = reqwest::Url::parse(given.trim())
+        .map_err(|_| format!("`{given}` isn't an endpoint's URL"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(format!("`{given}` isn't an http or https URL"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("give its keys in the environment, not in the URL".to_owned());
+    }
+    Ok(url)
+}
+
 /// A request to `service` in `region`: `POST url` with `headers` and `body`.
 pub(crate) struct Call<'a> {
     pub service: &'a str,
@@ -83,14 +111,21 @@ pub(crate) struct Call<'a> {
     pub body: Vec<u8>,
 }
 
+/// A service's answer.
+pub(crate) struct Answer {
+    pub status: reqwest::StatusCode,
+    /// The error's name, from `x-amzn-ErrorType` (without its `:URL` suffix).
+    pub error_type: Option<String>,
+    pub body: Vec<u8>,
+}
+
 impl Call<'_> {
-    /// Sends it, signed with `credentials` if there are any, and gives the status and
-    /// body of the answer.
+    /// Sends it, signed with `credentials` if there are any.
     pub(crate) async fn send(
         self,
         client: &reqwest::Client,
         credentials: Option<&AwsCredentials>,
-    ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
+    ) -> Result<Answer, String> {
         let mut request = client.post(self.url.clone());
         for (name, value) in self.headers {
             request = request.header(*name, *value);
@@ -106,11 +141,20 @@ impl Call<'_> {
             .await
             .map_err(|e| format!("can't reach it: {e}"))?;
         let status = answer.status();
+        let error_type = answer
+            .headers()
+            .get("x-amzn-errortype")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(':').next().unwrap_or(v).to_owned());
         let body = answer
             .bytes()
             .await
             .map_err(|e| format!("its answer was cut short: {e}"))?;
-        Ok((status, body.to_vec()))
+        Ok(Answer {
+            status,
+            error_type,
+            body: body.to_vec(),
+        })
     }
 
     /// The headers that sign it.

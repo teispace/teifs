@@ -132,8 +132,8 @@ impl Sqs {
             ],
             body: request.to_string().into_bytes(),
         };
-        let (status, answer) = call.send(client, self.credentials.as_ref()).await?;
-        let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap_or_default();
+        let aws::Answer { status, body, .. } = call.send(client, self.credentials.as_ref()).await?;
+        let answer: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         if !status.is_success() {
             let kind = answer["__type"]
                 .as_str()

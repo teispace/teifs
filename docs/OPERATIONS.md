@@ -358,6 +358,22 @@ region; `endpoint=URL` sends them to another service that speaks SNS's API. A FI
 topic. Starting to name it publishes S3's test event, so a topic that doesn't exist
 (`NotFound`) or refused keys are named at once.
 
+```sh
+teifs serve --notify-lambda thumbs=arn:aws:lambda:eu-west-1:123456789012:function:thumbs
+```
+
+A Lambda target invokes a function with each event as S3 does: asynchronously
+(`InvocationType` `Event`), with S3's `{"Records":[...]}` as the payload, signed with
+Signature Version 4. Rules name it by the function's ARN, as on S3 (a
+`LambdaFunctionConfiguration`), or `arn:teifs:sqs::ID:lambda`; a version or alias goes
+after the name (`…:function:thumbs:live`). Requests go to Lambda in the function's region,
+or to `endpoint=URL`. Keys come from `TEIFS_NOTIFY_LAMBDA_ACCESS_KEY_ID`,
+`TEIFS_NOTIFY_LAMBDA_SECRET_KEY_ID` and `TEIFS_NOTIFY_LAMBDA_SESSION_TOKEN_ID`, else AWS's
+variables, and need `lambda:InvokeFunction`. As on S3, a function isn't sent a test event:
+starting to name it makes a `DryRun` invocation, which checks the keys may invoke it
+without running it, so a function that doesn't exist (`ResourceNotFoundException`) or
+refused keys are named at once.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -470,5 +486,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: Lambda targets, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
+Not yet: other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
 certificates for webhooks and Elasticsearch.

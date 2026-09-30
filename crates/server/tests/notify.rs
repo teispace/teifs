@@ -643,3 +643,62 @@ async fn topic_rules_publish_to_sns() {
     let event: serde_json::Value = serde_json::from_str(messages[1]).unwrap();
     assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
 }
+
+/// A function rule names a Lambda function by its ARN, as on S3: the keys are checked
+/// with a dry run, and each event invokes it.
+#[tokio::test]
+async fn function_rules_invoke_lambda() {
+    use aws_sdk_s3::types::LambdaFunctionConfiguration;
+    use teifs_notify::testing::AwsServer;
+    use teifs_server::{AwsCredentials, Lambda};
+    let aws = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let arn = "arn:aws:lambda:eu-west-1:123456789012:function:thumbs";
+    let mut lambda = Lambda::new(arn, Some(aws.url())).unwrap();
+    lambda.credentials = Some(AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: "s3cret".to_owned().into(),
+        session_token: None,
+    });
+    let target = TargetConfig::new("thumbs", TargetKind::Lambda(lambda)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    s3.put_bucket_notification_configuration()
+        .bucket("bkt")
+        .notification_configuration(
+            NotificationConfiguration::builder()
+                .lambda_function_configurations(
+                    LambdaFunctionConfiguration::builder()
+                        .lambda_function_arn(arn)
+                        .events(Event::from("s3:ObjectCreated:*"))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("bkt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        read.lambda_function_configurations()[0].lambda_function_arn(),
+        arn
+    );
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let requests = aws.requests(2).await;
+    assert_eq!(requests[0].target, "Lambda.Invoke:DryRun");
+    assert_eq!(requests[1].target, "Lambda.Invoke:Event");
+    let event: serde_json::Value = serde_json::from_str(&requests[1].message).unwrap();
+    assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
+}

@@ -983,3 +983,64 @@ async fn sns_is_published_each_event_as_s3_publishes_it() {
     let refused = elsewhere.send(&client, b"{}").await.unwrap_err();
     assert!(refused.contains("SignatureDoesNotMatch"), "{refused}");
 }
+
+#[tokio::test]
+async fn lambda_is_invoked_with_each_event_as_s3_invokes_it() {
+    use crate::testing::AwsServer;
+    let server = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let function = |name: &str| {
+        let mut lambda = Lambda::new(
+            &format!("arn:aws:lambda:eu-west-1:123456789012:function:{name}"),
+            Some(server.url()),
+        )
+        .unwrap();
+        lambda.credentials = Some(AwsCredentials {
+            access_key: "AKIDTEIFS".into(),
+            secret: Zeroizing::new("s3cret".into()),
+            session_token: None,
+        });
+        lambda
+    };
+    let target = TargetConfig::new("thumbs", TargetKind::Lambda(function("thumbs:live"))).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), vec![target]).unwrap();
+    let arn = notifier
+        .resolve("arn:aws:lambda:eu-west-1:123456789012:function:thumbs:live")
+        .unwrap();
+    assert_eq!(arn.to_string(), "arn:teifs:sqs::thumbs:lambda");
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+    notifier.queue(vec![(arn, put.clone())]).await.unwrap();
+    let requests = server.requests(2).await;
+    notifier.stop().await;
+    assert_eq!(requests[0].target, "Lambda.Invoke:DryRun", "no test event");
+    assert_eq!(requests[1].target, "Lambda.Invoke:Event");
+    assert_eq!(
+        requests[1].path,
+        "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aeu-west-1%3A123456789012%3Afunction%3Athumbs%3Alive/invocations"
+    );
+    let records = serde_json::from_slice::<serde_json::Value>(&put).unwrap()["Records"].clone();
+    let sent: serde_json::Value = serde_json::from_str(&requests[1].message).unwrap();
+    assert_eq!(sent, serde_json::json!({ "Records": records }));
+
+    let client = reqwest::Client::new();
+    let gone = function("gone");
+    server.missing(&gone.function_arn);
+    let missing = gone.test(&client).await.unwrap_err();
+    assert!(
+        missing.contains("404 Not Found: ResourceNotFoundException (Function not found"),
+        "{missing}"
+    );
+    assert!(gone.send(&client, &put).await.is_err());
+    server.wrong_digest(true);
+    assert!(
+        function("f").send(&client, &put).await.is_err(),
+        "a 200 isn't a 202"
+    );
+    server.wrong_digest(false);
+    let mut elsewhere = function("f");
+    elsewhere.region = "us-east-1".into();
+    let refused = elsewhere.test(&client).await.unwrap_err();
+    assert!(refused.contains("InvalidSignatureException"), "{refused}");
+    function("f:$LATEST").test(&client).await.unwrap();
+}

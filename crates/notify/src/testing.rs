@@ -970,7 +970,8 @@ async fn mqtt_serve(
 /// A request an [`AwsServer`] took.
 #[derive(Debug, Clone)]
 pub struct AwsRequest {
-    /// Its `X-Amz-Target` for the JSON protocols, `AmazonSNS.Publish` for SNS's.
+    /// Its `X-Amz-Target` for the JSON protocols, `AmazonSNS.Publish` for SNS's,
+    /// `Lambda.Invoke:TYPE` for Lambda's.
     pub target: String,
     /// Its path.
     pub path: String,
@@ -980,8 +981,8 @@ pub struct AwsRequest {
     pub message: String,
 }
 
-/// A server that answers as AWS's SQS (`SendMessage` in its JSON protocol) and SNS
-/// (`Publish` in its Query protocol) do, and takes only requests signed with its keys for
+/// A server that answers as AWS's SQS (`SendMessage` in its JSON protocol), SNS
+/// (`Publish` in its Query protocol) and Lambda (`Invoke`) do, and takes only requests signed with its keys for
 /// its region.
 pub struct AwsServer {
     url: String,
@@ -1051,7 +1052,8 @@ impl AwsServer {
         &self.url
     }
 
-    /// Answers that the queue at `queue_url`, or the topic with that ARN, doesn't exist.
+    /// Answers that the queue at `queue_url`, or the topic or function with that ARN,
+    /// doesn't exist.
     pub fn missing(&self, queue_url: &str) {
         self.state
             .missing
@@ -1061,7 +1063,7 @@ impl AwsServer {
     }
 
     /// Answers wrongly: SQS with a digest that doesn't match what was sent, SNS without
-    /// a message id.
+    /// a message id, Lambda with the status of a synchronous call.
     pub fn wrong_digest(&self, wrong: bool) {
         self.state.wrong_digest.store(wrong, Ordering::SeqCst);
     }
@@ -1162,6 +1164,7 @@ async fn aws_answer(
             .unwrap_or_default()
             .to_owned()
     };
+    let invocation = header("x-amz-invocation-type");
     let (authorization, date, token, target) = (
         header("authorization"),
         header("x-amz-date"),
@@ -1189,8 +1192,11 @@ async fn aws_answer(
     let form: std::collections::BTreeMap<String, String> =
         form_urlencoded::parse(&body).into_owned().collect();
     let sns = form.get("Action").is_some_and(|a| a == "Publish");
+    let lambda = path.starts_with("/2015-03-31/functions/");
     let service = if target.starts_with("AmazonSQS.") {
         "sqs"
+    } else if lambda {
+        "lambda"
     } else if sns {
         "sns"
     } else {
@@ -1202,6 +1208,9 @@ async fn aws_answer(
         == Some(authorization.as_str());
     if sns {
         return sns_answer(&state, signed, path, &body, &form);
+    }
+    if lambda {
+        return Ok(lambda_answer(&state, signed, &invocation, path, &body));
     }
     sqs_answer(&state, signed, &target, path, &body)
 }
@@ -1332,4 +1341,77 @@ fn sqs_answer(
         })
         .to_string(),
     )
+}
+
+/// Lambda's answer to an `Invoke`, `signed` or not.
+fn lambda_answer(
+    state: &AwsState,
+    signed: bool,
+    invocation: &str,
+    path: String,
+    body: &[u8],
+) -> hyper::Response<http_body_util::Full<hyper::body::Bytes>> {
+    let answer = |status: u16, error: Option<(&str, &str)>| {
+        let mut response = hyper::Response::builder()
+            .status(status)
+            .header("content-type", "application/json");
+        let mut body = String::new();
+        if let Some((kind, message)) = error {
+            response = response.header(
+                "x-amzn-ErrorType",
+                format!("{kind}:http://internal.amazon.com/coral/com.amazonaws.lambda/"),
+            );
+            body = serde_json::json!({ "Type": "User", "message": message }).to_string();
+        }
+        response
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .expect("a valid response")
+    };
+    if !signed {
+        return answer(
+            403,
+            Some((
+                "InvalidSignatureException",
+                "The request signature we calculated does not match the signature you provided.",
+            )),
+        );
+    }
+    let function = path
+        .trim_start_matches("/2015-03-31/functions/")
+        .trim_end_matches("/invocations")
+        .replace("%3A", ":")
+        .replace("%24", "$");
+    state
+        .requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(AwsRequest {
+            target: format!("Lambda.Invoke:{invocation}"),
+            path,
+            body: String::from_utf8_lossy(body).into_owned(),
+            message: String::from_utf8_lossy(body).into_owned(),
+        });
+    if state.is_missing(&function) {
+        return answer(
+            404,
+            Some((
+                "ResourceNotFoundException",
+                &format!("Function not found: {function}"),
+            )),
+        );
+    }
+    if state.wrong_digest.load(Ordering::SeqCst) {
+        return answer(200, None);
+    }
+    match invocation {
+        "Event" => answer(202, None),
+        "DryRun" => answer(204, None),
+        _ => answer(
+            400,
+            Some((
+                "InvalidParameterValueException",
+                "Unsupported invocation type",
+            )),
+        ),
+    }
 }

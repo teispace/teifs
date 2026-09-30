@@ -6,7 +6,7 @@
 use sha2::{Digest as _, Sha256};
 use teifs_types::notify::EventMessage;
 
-use crate::aws::{AwsCredentials, Call, group_id, hex, xml_text};
+use crate::aws::{Answer, AwsCredentials, Call, group_id, hex, xml_text};
 
 /// The subject S3 publishes its notifications with.
 pub const SUBJECT: &str = "Amazon S3 Notification";
@@ -53,24 +53,7 @@ impl Sns {
         {
             return Err(wrong());
         }
-        let endpoint = if let Some(url) = endpoint {
-            let url = reqwest::Url::parse(url.trim())
-                .map_err(|_| format!("`{url}` isn't an endpoint's URL"))?;
-            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                return Err(format!("`{url}` isn't an http or https URL"));
-            }
-            if !url.username().is_empty() || url.password().is_some() {
-                return Err("give its keys in the environment, not in the URL".to_owned());
-            }
-            url
-        } else {
-            let domain = if *partition == "aws-cn" {
-                "amazonaws.com.cn"
-            } else {
-                "amazonaws.com"
-            };
-            reqwest::Url::parse(&format!("https://sns.{region}.{domain}/")).map_err(|_| wrong())?
-        };
+        let endpoint = crate::aws::endpoint("sns", partition, region, endpoint)?;
         Ok(Self {
             topic_arn: topic_arn.to_owned(),
             region: (*region).to_owned(),
@@ -130,8 +113,8 @@ impl Sns {
             )],
             body: form.into_bytes(),
         };
-        let (status, answer) = call.send(client, self.credentials.as_ref()).await?;
-        let answer = String::from_utf8_lossy(&answer);
+        let Answer { status, body, .. } = call.send(client, self.credentials.as_ref()).await?;
+        let answer = String::from_utf8_lossy(&body);
         if !status.is_success() {
             let code = xml_text(&answer, "Code").unwrap_or_default();
             let why = xml_text(&answer, "Message").unwrap_or_else(|| "no reason".to_owned());

@@ -26,8 +26,8 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, Format,
-    JobOptions, KeyRules, KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, Sns,
-    Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
+    JobOptions, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server,
+    Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
     credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
@@ -350,6 +350,22 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_SNS"
     )]
     notify_sns: Vec<TargetConfig>,
+    /// A Lambda function buckets' notification rules can invoke with events, as S3
+    /// invokes it, as `ID=FUNCTION_ARN` (`arn:aws:lambda:REGION:ACCOUNT:function:NAME`,
+    /// with `:VERSION` or `:ALIAS` if one is meant), with endpoint=URL for a service other
+    /// than AWS's (repeat for more; in the environment, separated by spaces). Rules name
+    /// it by the function's ARN, as on S3, or `arn:teifs:sqs::ID:lambda`. Requests are
+    /// signed with `TEIFS_NOTIFY_LAMBDA_ACCESS_KEY_ID`, `TEIFS_NOTIFY_LAMBDA_SECRET_KEY_ID`
+    /// and `TEIFS_NOTIFY_LAMBDA_SESSION_TOKEN_ID`, else `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, read only from the environment.
+    #[arg(
+        long = "notify-lambda",
+        value_name = "ID=FUNCTION_ARN",
+        value_parser = parse_notify_lambda,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_LAMBDA"
+    )]
+    notify_lambda: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -943,7 +959,7 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
-/// An SQS or SNS target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
+/// An SQS, SNS or Lambda target's keys: its own (`TEIFS_NOTIFY_KIND_ACCESS_KEY_ID`,
 /// `…_SECRET_KEY_ID`, `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if
 /// neither.
 fn aws_credentials(
@@ -979,6 +995,13 @@ fn aws_credentials(
             arn.id
         )),
     }
+}
+
+/// `ID=FUNCTION_ARN`, with `endpoint=URL`; its keys come from the environment later.
+fn parse_notify_lambda(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(text, "ID=FUNCTION_ARN,endpoint=URL", &["endpoint"])?;
+    let lambda = Lambda::new(address, options.get("endpoint").copied())?;
+    TargetConfig::new(id, TargetKind::Lambda(lambda))
 }
 
 /// `ID=TOPIC_ARN`, with `endpoint=URL`; its keys come from the environment later.
@@ -1043,6 +1066,9 @@ fn notify_targets(
             TargetKind::Nsq(_) => {}
             TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(&arn, secret, &env)?,
             TargetKind::Sns(sns) => sns.credentials = aws_credentials(&arn, secret, &env)?,
+            TargetKind::Lambda(lambda) => {
+                lambda.credentials = aws_credentials(&arn, secret, &env)?;
+            }
             TargetKind::Mqtt(mqtt) => {
                 mqtt.password = secret("PASSWORD");
                 if mqtt.password.is_some() && mqtt.user.is_none() {
@@ -1150,7 +1176,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_nats)
                 .chain(args.notify_mqtt)
                 .chain(args.notify_sqs)
-                .chain(args.notify_sns),
+                .chain(args.notify_sns)
+                .chain(args.notify_lambda),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1865,6 +1892,38 @@ mod tests {
             "t=arn:aws:sns:eu-west-1:123456789012:t,region=eu-west-2",
         ] {
             assert!(parse_notify_sns(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn lambda_targets_take_a_function_and_their_keys_from_the_environment() {
+        let lambda_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Lambda(lambda) => lambda.clone(),
+            _ => panic!("not Lambda"),
+        };
+        let f = parse_notify_lambda("f=arn:aws:lambda:eu-west-1:123456789012:function:thumbs:live")
+            .unwrap();
+        assert_eq!(f.arn().to_string(), "arn:teifs:sqs::f:lambda");
+        assert_eq!(
+            lambda_of(&f).endpoint.as_str(),
+            "https://lambda.eu-west-1.amazonaws.com/"
+        );
+        let env = |name: &str| match name {
+            "AWS_ACCESS_KEY_ID" => Some("AKIDAWS".to_owned()),
+            "AWS_SECRET_ACCESS_KEY" => Some("aws".to_owned()),
+            _ => None,
+        };
+        let targets = notify_targets(vec![f.clone()], env).unwrap();
+        let keys = lambda_of(&targets[0]).credentials.unwrap();
+        assert_eq!(keys.access_key, "AKIDAWS");
+        let half = |name: &str| (name == "TEIFS_NOTIFY_LAMBDA_ACCESS_KEY_F").then(|| "k".into());
+        assert!(notify_targets(vec![f], half).is_err());
+        for bad in [
+            "f=thumbs",
+            "f=arn:aws:lambda:eu-west-1:123456789012:function:t,endpoint=ftp://h",
+            "f=arn:aws:lambda:eu-west-1:123456789012:function:t,region=eu-west-2",
+        ] {
+            assert!(parse_notify_lambda(bad).is_err(), "{bad}");
         }
     }
 

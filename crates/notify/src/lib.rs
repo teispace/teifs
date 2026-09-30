@@ -10,6 +10,7 @@ mod tests;
 
 mod aws;
 mod elasticsearch;
+mod lambda;
 mod mqtt;
 mod nats;
 mod net;
@@ -35,6 +36,7 @@ use std::{
 
 pub use aws::{AwsCredentials, region_of};
 pub use elasticsearch::Elasticsearch;
+pub use lambda::Lambda;
 pub use mqtt::Mqtt;
 pub use nats::Nats;
 pub use net::tls_config;
@@ -83,6 +85,8 @@ pub enum TargetKind {
     Sqs(Sqs),
     /// An SNS topic.
     Sns(Sns),
+    /// A Lambda function, invoked with each event as S3 invokes it.
+    Lambda(Lambda),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -159,6 +163,7 @@ impl TargetConfig {
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
+            TargetKind::Lambda(lambda) => lambda.shown(),
         }
     }
 }
@@ -176,6 +181,7 @@ impl TargetKind {
             Self::Mqtt(_) => "mqtt",
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
+            Self::Lambda(_) => "lambda",
         }
     }
 
@@ -185,6 +191,7 @@ impl TargetKind {
         match self {
             Self::Sqs(sqs) => sqs.aws_arn(),
             Self::Sns(sns) => Some(sns.topic_arn.clone()),
+            Self::Lambda(lambda) => Some(lambda.function_arn.clone()),
             _ => None,
         }
     }
@@ -250,6 +257,7 @@ impl Target {
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
+            TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
         }
     }
 
@@ -266,6 +274,8 @@ impl Target {
             // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
+            // As S3 does: permission is checked, and no test event is sent.
+            TargetKind::Lambda(lambda) => lambda.test(client).await,
         }
     }
 }
