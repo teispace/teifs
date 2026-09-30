@@ -36,6 +36,8 @@ hyper.workspace = true
 tracing.workspace = true
 http-body-util.workspace = true
 ipnet.workspace = true
+prometheus-client.workspace = true
+fs4.workspace = true
 
 [dev-dependencies]
 md-5.workspace = true

@@ -93,8 +93,8 @@ gives everything new unique ids (names and ARNs stay); numbers policy versions f
 
 ## Errors
 
-Errors are JSON with the HTTP status that fits, and the request id also in the
-`x-amz-request-id` header:
+Errors are JSON with the HTTP status that fits, and the request id (16 hex digits, as
+every answer's, S3's included) also in the `x-amz-request-id` header:
 
 ```json
 {"code":"AccessDenied","message":"…","requestId":"…"}
@@ -104,3 +104,10 @@ IAM's own errors keep IAM's code and status (`EntityAlreadyExists`, `409`). A pa
 method the admin API doesn't serve is `404 NotFound`. Requests refused before they reach
 the admin API (a signature that doesn't match, an unknown key) get S3's XML errors, as
 from any S3 request; `teifs-client` reads both.
+
+## Metrics
+
+`GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, beside
+the admin API rather than in it: Prometheus can't sign requests, so a scrape carries a
+bearer token instead, which `teifs admin prometheus generate ALIAS` makes and
+[OPERATIONS.md](OPERATIONS.md) describes with every metric.

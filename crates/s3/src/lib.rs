@@ -18,7 +18,9 @@ mod health;
 mod iam_api;
 mod lifecycle;
 mod limits;
+mod metrics;
 mod object_lock;
+mod observe;
 mod post_form;
 mod proxy;
 mod routes;
@@ -47,6 +49,10 @@ pub use routes::{Api, EndpointInfo, endpoints};
 
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent setting of the server"
+)]
 pub struct Options {
     /// Who may sign requests and what each may do. `None` accepts unsigned requests
     /// and decides nothing: only for a drive nobody else can reach.
@@ -77,6 +83,9 @@ pub struct Options {
     /// Where the root key is kept, if the admin API may replace it (a key the drive
     /// generated); `None` answers that it's managed elsewhere.
     pub root_keys: Option<Arc<dyn RootKeyStore>>,
+    /// Serve metrics to anyone who can reach the server, not only to bearer tokens of
+    /// keys that may `teifs:GetMetrics`: for a network only Prometheus shares.
+    pub public_metrics: bool,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -87,6 +96,10 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.legacy_bucket_defaults,
     );
     let rules = drive.rules();
+    let scrapers = match &options.iam {
+        Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
+        _ => metrics::Scrapers::Anyone,
+    };
     let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
@@ -128,5 +141,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.body_timeout,
         options.plain_http_is_secure,
         options.trusted_proxies,
+        scrapers,
     ))
 }

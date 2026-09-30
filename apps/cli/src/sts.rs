@@ -405,7 +405,7 @@ fn deliver(
     );
     match output.file() {
         // `--output -`: the one place the secret goes to standard output, as asked.
-        None => ui::raw(&record),
+        None => ui::document(&record),
         Some(path) => {
             teifs_store::create_private(path, record.as_bytes())
                 .map_err(|e| Error::general(format!("can't write {}: {e}", path.display())))?;

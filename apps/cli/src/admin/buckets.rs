@@ -76,7 +76,7 @@ async fn export(
         } else {
             serde_json::to_string_pretty(&export)
         };
-        ui::raw(&text.map_err(|e| Error::general(e.to_string()))?);
+        ui::document(&text.map_err(|e| Error::general(e.to_string()))?);
         return Ok(());
     };
     let text = serde_json::to_vec_pretty(&export).map_err(|e| Error::general(e.to_string()))?;

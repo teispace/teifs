@@ -392,6 +392,8 @@ fn denied() -> s3s::S3Error {
 #[async_trait::async_trait]
 impl S3Access for Access {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
+        let operation = crate::observe::intern(cx.s3_op().name());
+        crate::observe::name(cx.extensions_mut(), operation);
         let client = cx
             .extensions_mut()
             .get::<Client>()
@@ -411,7 +413,6 @@ impl S3Access for Access {
                 identify(&self.iam, &credentials.access_key, token.as_deref())?
             }
         };
-        let operation = cx.s3_op().name();
         if operation == "UpdateObjectEncryption" && signed && !is_sig_v4(cx) {
             return Err(s3_error!(
                 InvalidRequest,

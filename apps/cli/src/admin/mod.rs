@@ -6,6 +6,7 @@
 mod buckets;
 mod oidc;
 mod policy;
+mod prometheus;
 mod roles;
 mod users;
 
@@ -55,6 +56,11 @@ pub enum AdminAction {
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
+    },
+    /// A Prometheus scrape configuration for a TeiFS server's metrics, with its token.
+    Prometheus {
+        #[command(subcommand)]
+        action: prometheus::PrometheusAction,
     },
     /// Replace the root key a TeiFS server's drive generated.
     RootKey {
@@ -163,6 +169,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
                 },
         } => import(&client(&aliases, &alias)?, &file, adopt_account).await,
         AdminAction::Bucket { action } => buckets::run(&aliases, action).await,
+        AdminAction::Prometheus { action } => prometheus::run(&aliases, action),
         AdminAction::Snapshot {
             action: SnapshotAction::Ls { alias },
         } => snapshots(&client(&aliases, &alias)?).await,
@@ -399,6 +406,7 @@ async fn config(client: &Client) -> Result<(), Error> {
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),
             ("Legacy buckets", yes_no(config.legacy_bucket_defaults)),
+            ("Public metrics", yes_no(config.public_metrics)),
             (
                 "Upload expiry",
                 config
@@ -457,7 +465,7 @@ async fn export(
         } else {
             serde_json::to_string_pretty(&export)
         };
-        ui::raw(&text.map_err(|e| Error::general(e.to_string()))?);
+        ui::document(&text.map_err(|e| Error::general(e.to_string()))?);
         return Ok(());
     };
     let text = Zeroizing::new(

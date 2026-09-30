@@ -27,6 +27,7 @@ use crate::{
     admin,
     bucket_access::Rules,
     bucket_export, control, iam_api,
+    observe::{self, Seen},
 };
 
 /// Which API a request is for, told apart before anything else is read.
@@ -93,6 +94,31 @@ enum Handler {
     TakeSnapshot,
     ExportBuckets,
     ImportBuckets,
+}
+
+impl Handler {
+    /// The operation's name, in metrics and the audit log.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Query => "IAM",
+            Self::GetAccountBlock => "GetPublicAccessBlock",
+            Self::PutAccountBlock => "PutPublicAccessBlock",
+            Self::DeleteAccountBlock => "DeletePublicAccessBlock",
+            Self::Tags(control::TagCallKind::List) => "ListTagsForResource",
+            Self::Tags(control::TagCallKind::Tag) => "TagResource",
+            Self::Tags(control::TagCallKind::Untag) => "UntagResource",
+            Self::Info => "GetServerInfo",
+            Self::Config => "GetServerConfig",
+            Self::ExportIam => "ExportIAM",
+            Self::ExportIamSecrets => "ExportIAMSecrets",
+            Self::ImportIam => "ImportIAM",
+            Self::RotateRootKey => "RotateRootKey",
+            Self::Snapshots => "ListSnapshots",
+            Self::TakeSnapshot => "TakeSnapshot",
+            Self::ExportBuckets => "ExportBucketMetadata",
+            Self::ImportBuckets => "ImportBucketMetadata",
+        }
+    }
 }
 
 /// One endpoint.
@@ -361,18 +387,39 @@ impl S3Route for Routes {
     async fn call(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
         let api = api_of(&req.method, &req.uri, &req.headers, &self.domains)
             .expect("matched by is_match");
+        let seen = req.extensions.get::<Arc<Seen>>().cloned();
+        let request_id = observe::request_id(&req.extensions);
         // Each API answers errors in its own format.
-        Ok(match api {
-            Api::Query => iam_api::serve(&self.iam, req).await,
+        let response = match api {
+            Api::Query => {
+                observe::name(
+                    &req.extensions,
+                    if req.service.as_deref() == Some("iam") {
+                        "IAM"
+                    } else {
+                        "STS"
+                    },
+                );
+                iam_api::serve(&self.iam, req).await
+            }
             Api::Control => self
                 .serve(api, req)
                 .await
-                .unwrap_or_else(|err| control::error_response(&err)),
+                .unwrap_or_else(|err| control::error_response(&err, &request_id)),
             Api::Admin => self
                 .serve(api, req)
                 .await
-                .unwrap_or_else(|err| admin::error_response(&err)),
-        })
+                .unwrap_or_else(|err| admin::error_response(&err, &request_id)),
+        };
+        // Refused before its endpoint was found: named by its API.
+        if let Some(seen) = seen {
+            seen.name(match api {
+                Api::Query => "STS",
+                Api::Control => "Control",
+                Api::Admin => "Admin",
+            });
+        }
+        Ok(response)
     }
 }
 
@@ -394,6 +441,7 @@ impl Routes {
                  Control, and nothing else yet.",
             ),
         })?;
+        observe::name(&req.extensions, endpoint.handler.name());
         let client = req.extensions.get::<Client>().copied().unwrap_or_default();
         let context = || base_context(&identity, &req.headers, client, &self.iam.account());
         // A call on a bucket's tags is decided with what it asks for, read first.

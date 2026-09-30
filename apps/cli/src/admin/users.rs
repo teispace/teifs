@@ -357,7 +357,7 @@ fn save_key(
     );
     let Some(path) = output.file() else {
         // `--output -`: the one place a secret goes to standard output, as asked.
-        ui::raw(&record);
+        ui::document(&record);
         return Ok(None);
     };
     teifs_store::create_private(path, record.as_bytes())

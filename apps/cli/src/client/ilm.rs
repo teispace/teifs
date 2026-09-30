@@ -270,7 +270,7 @@ async fn rm(bucket: &Lifecycle, id: Option<&str>, all: bool, force: bool) -> Res
 async fn export(bucket: &Lifecycle) -> Result<(), Error> {
     let rules = bucket.read_some().await?;
     let text = serde_json::to_string_pretty(&json!({"Rules": rules})).expect("JSON serializes");
-    ui::raw(&format!("{text}\n"));
+    ui::document(&text);
     Ok(())
 }
 

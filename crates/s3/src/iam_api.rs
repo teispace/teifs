@@ -83,7 +83,7 @@ pub(crate) async fn with_payload_hash(
 
 /// Answers an IAM or STS request, in the Query protocol's format.
 pub(crate) async fn serve(iam: &Iam, mut req: S3Request<Body>) -> S3Response<Body> {
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = crate::observe::request_id(&req.extensions);
     let reply = answer(iam, &mut req, &request_id).await;
     let mut response = S3Response::new(crate::routes::unlogged(reply.body));
     response.status =

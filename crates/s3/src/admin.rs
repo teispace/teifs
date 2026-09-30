@@ -32,19 +32,18 @@ pub trait RootKeyStore: Send + Sync + std::fmt::Debug + 'static {
 pub(crate) const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 
 /// An admin API error, as JSON.
-pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
-    let request_id = uuid::Uuid::new_v4().to_string();
+pub(crate) fn error_response(err: &S3Error, request_id: &str) -> S3Response<Body> {
     let status = err
         .status_code()
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = AdminError {
         code: err.code().as_str().to_owned(),
         message: err.message().unwrap_or_default().to_owned(),
-        request_id: request_id.clone(),
+        request_id: request_id.to_owned(),
     };
     let mut response = json(&body);
     response.status = Some(status);
-    if let Ok(id) = HeaderValue::from_str(&request_id) {
+    if let Ok(id) = HeaderValue::from_str(request_id) {
         response.headers.insert("x-amz-request-id", id);
     }
     response
@@ -315,7 +314,7 @@ mod tests {
 
     #[test]
     fn errors_are_json_with_their_status() {
-        let response = error_response(&not_found());
+        let response = error_response(&not_found(), "ID");
         assert_eq!(response.status, Some(StatusCode::NOT_FOUND));
         assert_eq!(
             response.headers[header::CONTENT_TYPE],

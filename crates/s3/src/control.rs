@@ -92,6 +92,12 @@ pub(crate) async fn call_encoded(
     if let Some(client) = req.extensions().get::<crate::Client>() {
         again.extensions_mut().insert(*client);
     }
+    if let Some(seen) = req
+        .extensions()
+        .get::<std::sync::Arc<crate::observe::Seen>>()
+    {
+        again.extensions_mut().insert(std::sync::Arc::clone(seen));
+    }
     again.extensions_mut().insert(EncodedTwice);
     *req.body_mut() = Body::from(body);
 
@@ -129,8 +135,7 @@ fn encoded_again(uri: &Uri) -> Option<Uri> {
 }
 
 /// An S3 Control error, which S3 Control wraps in `ErrorResponse` (unlike S3's).
-pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
-    let request_id = uuid::Uuid::new_v4().to_string();
+pub(crate) fn error_response(err: &S3Error, request_id: &str) -> S3Response<Body> {
     let mut xml = Vec::new();
     let mut s = Serializer::new(&mut xml);
     let written = s.decl().and_then(|()| {
@@ -139,7 +144,7 @@ pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
                 s.content("Code", err.code().as_str())?;
                 s.content("Message", err.message().unwrap_or_default())
             })?;
-            s.content("RequestId", request_id.as_str())
+            s.content("RequestId", request_id)
         })
     });
     debug_assert!(written.is_ok(), "writing to a Vec can't fail");
@@ -152,7 +157,7 @@ pub(crate) fn error_response(err: &S3Error) -> S3Response<Body> {
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/xml"),
     );
-    if let Ok(id) = HeaderValue::from_str(&request_id) {
+    if let Ok(id) = HeaderValue::from_str(request_id) {
         response.headers.insert("x-amz-request-id", id);
     }
     response

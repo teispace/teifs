@@ -275,6 +275,17 @@ without a `Form` is refused, so no form is ever decided without being read. s3s 
 the signature, the policy and every field against it; `post_form.rs` checks the policy's
 conditions again only to answer `403 AccessDenied` as AWS does.
 
+`cors::Service` also watches each request (`observe.rs`): it gives it an id and a `Seen`
+in its extensions, which `Access::check` and the routes name with the operation (s3s
+resolves it before checking the signature but tells nobody until the access hook, so a
+request refused by the signature check stays `unknown`). The request body is counted as
+it's read and the answer's body as it's sent; the request is recorded in `metrics.rs`
+when the answer's body is dropped, as canceled if that was before its end. On the way
+out, an S3 error body without `<RequestId>` gets the request's id, since s3s leaves it
+out. `GET /.teifs/metrics` is answered before s3s, like the health check, because a
+scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
+key's secret) rather than a signature.
+
 Upload size caps (`caps.rs`) are query parameters a Signature V4 signature covers.
 `Access` reads and checks them for every request (where they apply, and only when
 signed with V4) and passes them on as a request extension; `put_object` checks the

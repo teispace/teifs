@@ -9,6 +9,7 @@
 //! authentication never touches the database.
 
 mod api;
+mod bearer;
 mod ids;
 mod oidc;
 mod ops;
@@ -28,6 +29,7 @@ use teifs_crypto::{Context, CryptoError, DEFAULT_KEY, DataKey, Kms, SealedKey};
 use teifs_meta::{IamWrite, MetaError, System};
 
 pub use api::{Call, Reply};
+pub use bearer::metrics_token;
 pub use ops::{
     AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, NewOidcProvider, NewRole,
     OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo, RoleInfo, UserInfo,

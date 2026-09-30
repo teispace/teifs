@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 /// request for a bucket starts with this.
 pub const ADMIN_PREFIX: &str = "/.teifs/admin/v1/";
 
+/// Where a server serves its Prometheus metrics.
+pub const METRICS_PATH: &str = "/.teifs/metrics";
+
 /// `GET`: [`ServerInfo`].
 pub const ADMIN_INFO: &str = "/.teifs/admin/v1/info";
 
@@ -402,6 +405,9 @@ pub struct ServerConfig {
     pub allow_sig_v2: bool,
     /// Whether new buckets start with ACLs enabled and no Block Public Access.
     pub legacy_bucket_defaults: bool,
+    /// Whether anyone who can reach the server may read its metrics.
+    #[serde(default)]
+    pub public_metrics: bool,
     /// How long an unfinished multipart upload is kept; none for ever.
     pub upload_expiry_seconds: Option<u64>,
     /// How often every stored version is read back and checked; none if never.

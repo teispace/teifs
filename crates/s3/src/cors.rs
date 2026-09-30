@@ -19,6 +19,8 @@ use teifs_store::{CorsRule, Store, StoreError};
 use crate::{
     health,
     limits::{StallTimeout, refusal},
+    metrics::{self, Metrics, Scrapers},
+    observe::{self, Received, Seen},
 };
 
 /// How many rules a bucket's CORS configuration may have.
@@ -198,6 +200,8 @@ pub struct Service {
     proxies: Arc<crate::TrustedProxies>,
     /// The connection's peer.
     client: crate::Client,
+    metrics: Arc<Metrics>,
+    scrapers: Scrapers,
 }
 
 impl std::fmt::Debug for Service {
@@ -214,8 +218,10 @@ impl Service {
         body_timeout: Option<Duration>,
         plain_http_is_secure: bool,
         proxies: crate::TrustedProxies,
+        scrapers: Scrapers,
     ) -> Self {
         Self {
+            metrics: Arc::new(Metrics::new(&store)),
             s3,
             store,
             host: host.map(Arc::new),
@@ -223,6 +229,7 @@ impl Service {
             plain_http_is_secure,
             proxies: Arc::new(proxies),
             client: crate::Client::default(),
+            scrapers,
         }
     }
 
@@ -236,7 +243,11 @@ impl Service {
     }
 
     /// Passes a request to the S3 service, its body timed out if it stalls.
-    async fn s3(&self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
+    async fn s3(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        seen: &Arc<Seen>,
+    ) -> Result<HttpResponse, HttpError> {
         if let Some(refused) = crate::sig_v2::refusal(req.headers()) {
             return Ok(refused);
         }
@@ -244,9 +255,13 @@ impl Service {
         let client = self.proxies.client(self.client, req.headers());
         let mut req = req;
         req.extensions_mut().insert(client);
-        let req = req.map(|body| match timeout {
-            Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
-            None => s3s::Body::from(body),
+        req.extensions_mut().insert(Arc::clone(seen));
+        let req = req.map(|body| {
+            let body = Received::new(body, Arc::clone(seen));
+            match timeout {
+                Some(timeout) => s3s::Body::http_body(StallTimeout::new(body, timeout)),
+                None => s3s::Body::http_body(body),
+            }
         });
         let req = match crate::iam_api::with_payload_hash(req).await {
             Ok(req) => req,
@@ -374,19 +389,45 @@ impl Service {
     }
 
     async fn handle(self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
+        let path = req.uri().path();
+        if self.virtual_bucket(&req).is_none() {
+            if health::is_health_check(req.method(), path) {
+                return Ok(health::response(req.method()));
+            }
+            if metrics::is_scrape(req.method(), path) {
+                let client = self.proxies.client(self.client, req.headers());
+                let seen = Seen::new();
+                let response = metrics::scrape(
+                    &self.metrics,
+                    &self.scrapers,
+                    req.headers(),
+                    client,
+                    &seen.id,
+                );
+                return Ok(response);
+            }
+        }
+        let seen = Arc::new(Seen::new());
+        let request = observe::Request::new(Arc::clone(&self.metrics), Arc::clone(&seen));
+        let response = self.respond(req, &seen).await?;
+        Ok(observe::finish(response, request))
+    }
+
+    /// Answers anything but the health check and metrics.
+    async fn respond(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        seen: &Arc<Seen>,
+    ) -> Result<HttpResponse, HttpError> {
         if let Some(refused) = refusal(req.headers()) {
             return Ok(refused);
         }
-        if health::is_health_check(req.method(), req.uri().path())
-            && self.virtual_bucket(&req).is_none()
-        {
-            return Ok(health::response(req.method()));
-        }
         if req.method() == Method::OPTIONS {
+            seen.name("PreflightRequest");
             return Ok(self.preflight(&req).await);
         }
         let Some(origin) = header(req.headers(), "origin").map(str::to_owned) else {
-            return self.s3(req).await;
+            return self.s3(req, seen).await;
         };
         // S3-compatible servers match an actual request on Access-Control-Request-Method
         // when it's sent, else on the request's own method.
@@ -396,7 +437,7 @@ impl Service {
             Some(bucket) => self.store.bucket_cors(&bucket).await.ok().flatten(),
             None => None,
         };
-        let mut response = self.s3(req).await?;
+        let mut response = self.s3(req, seen).await?;
         if let Some(rules) = rules {
             let headers = response.headers_mut();
             headers.insert(header::VARY, HeaderValue::from_static(VARY));

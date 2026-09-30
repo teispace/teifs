@@ -120,6 +120,18 @@ behaviour; the on-disk format is always upgraded automatically.
   with `--forget-missing`, and files it can't tell apart safely, or folders of no
   bucket, are reported and left alone. It refuses databases SQLite finds damaged, and
   rebuilds a lost object index from the data files. Exit code 1 while problems are left.
+- Prometheus metrics at `/.teifs/metrics` (OpenMetrics text): requests by operation
+  and HTTP status, errors by S3 error code, requests in flight and canceled, time to
+  first byte and to the last, bytes received and sent, the disk's size and free space,
+  and the background jobs' progress. A scrape needs a bearer token whose key may
+  `teifs:GetMetrics`: `teifs admin prometheus generate ALIAS [--expires D]
+  [--token-file F]` makes one, signed with the alias's key as `mc admin prometheus
+  generate` does, and prints the scrape configuration. `teifs serve --public-metrics`
+  serves them to anyone instead.
+- Every answer has an `x-amz-request-id` (16 hex digits, as S3's), and S3 error bodies
+  now name it in `<RequestId>`, as AWS's do; the admin, IAM and STS APIs use the same id.
+- Documents printed to standard output (IAM and bucket exports, credentials with
+  `--output -`, lifecycle exports) end with a newline.
 - Snapshots and backups failed on Windows ("Access is denied"): their copies are now
   synced through a handle that may write.
 - Integrity scrubs: a running server reads every stored version back every 30 days

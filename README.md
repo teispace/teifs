@@ -187,12 +187,19 @@ location / {
 }
 ```
 
+### Monitoring
+
+Every answer carries an `x-amz-request-id`, and `/.teifs/metrics` serves Prometheus
+metrics (requests, errors, latency and bytes by operation; disk space; background jobs)
+to a bearer token that `teifs admin prometheus generate ALIAS` makes, with the scrape
+configuration to paste. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -219,6 +226,7 @@ location / {
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |
 | `teifs admin bucket export ALIAS[/BUCKET] [-o FILE [--force]]` \| `bucket import ALIAS FILE` | Move buckets with their settings (policy, lifecycle, Object Lock, encryption, CORS, tags, ACL, Block Public Access, versioning) to another server, as `mc admin cluster bucket export\|import`; each setting is checked and reported |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
+| `teifs admin prometheus generate ALIAS [--expires 90d] [--token-file FILE]` | A Prometheus scrape configuration for the server's metrics, with a token its key signs (as `mc admin prometheus generate`) |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |
 | `teifs admin user ls\|rm\|policy ALIAS …` \| `user key add\|ls\|rm ALIAS NAME …` | List, delete or re-permission users; add, list and delete their keys |

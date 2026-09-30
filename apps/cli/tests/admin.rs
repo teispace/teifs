@@ -489,8 +489,9 @@ async fn buckets_move_between_servers_through_a_file() {
     cli.ok(&["mb", "t/other"]).await;
     cli.ok(&["version", "enable", "t/logs"]).await;
     // To standard output, all of them or one.
-    let all: serde_json::Value =
-        serde_json::from_str(&cli.ok(&["admin", "bucket", "export", "t"]).await).unwrap();
+    let out = cli.ok(&["admin", "bucket", "export", "t"]).await;
+    assert!(out.ends_with("}\n"), "{out}");
+    let all: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(all["buckets"].as_array().unwrap().len(), 2);
     let one: serde_json::Value =
         serde_json::from_str(&cli.ok(&["admin", "bucket", "export", "t/logs"]).await).unwrap();
@@ -550,4 +551,101 @@ async fn buckets_move_between_servers_through_a_file() {
             2,
         )
         .await;
+}
+
+/// The token in a generated scrape configuration's `credentials: "…"` line.
+fn token_in(config: &str) -> String {
+    let line = config
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("credentials: "))
+        .unwrap();
+    serde_json::from_str(line).unwrap()
+}
+
+async fn scrape(server: &common::Server, token: &str) -> u16 {
+    reqwest::Client::new()
+        .get(format!("{}/.teifs/metrics", server.endpoint))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prometheus_scrapes_with_a_generated_configuration() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let address = server.endpoint.trim_start_matches("http://");
+    let config = cli.ok(&["admin", "prometheus", "generate", "t"]).await;
+    assert!(
+        config.starts_with("scrape_configs:\n  - job_name: teifs\n"),
+        "{config}"
+    );
+    assert!(config.contains("    metrics_path: /.teifs/metrics\n    scheme: http\n"));
+    assert!(
+        config.ends_with(&format!("      - targets: [\"{address}\"]\n")),
+        "{config}"
+    );
+    assert_eq!(scrape(&server, &token_in(&config)).await, 200);
+
+    // In a file of its own, which the configuration names; one that expires.
+    let file = cli.path("token");
+    let path = file.to_str().unwrap();
+    let config = cli
+        .ok(&[
+            "admin",
+            "prometheus",
+            "generate",
+            "t",
+            "--expires",
+            "1h",
+            "--token-file",
+            path,
+        ])
+        .await;
+    assert!(config.contains("credentials_file: \""), "{config}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        scrape(&server, &fs::read_to_string(&file).unwrap()).await,
+        200
+    );
+    cli.fails(
+        &["admin", "prometheus", "generate", "t", "--token-file", path],
+        6,
+    )
+    .await;
+    let json = records(
+        &cli.ok(&[
+            "--json",
+            "admin",
+            "prometheus",
+            "generate",
+            "t",
+            "--expires",
+            "1d",
+        ])
+        .await,
+    );
+    assert_eq!(json[0]["type"], "prometheusConfig");
+    assert!(json[0]["expires"].as_i64().unwrap() > 0);
+
+    // A key that may not scrape makes a token that's refused.
+    user(&server, "nobody", None);
+    let key = server.iam.create_access_key("nobody").unwrap();
+    let mut other = Client::new(&server);
+    other.env.push((
+        "TEIFS_ALIAS_N".to_owned(),
+        format!("http://{}:{}@{address}", key.info.id, key.secret.as_str()),
+    ));
+    let config = other.ok(&["admin", "prometheus", "generate", "n"]).await;
+    assert_eq!(scrape(&server, &token_in(&config)).await, 403);
 }

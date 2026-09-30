@@ -209,6 +209,11 @@ pub(crate) struct ServeArgs {
     /// blocked. Either way each bucket's settings can be changed.
     #[arg(long, env = "TEIFS_LEGACY_BUCKET_DEFAULTS")]
     legacy_bucket_defaults: bool,
+    /// Serve Prometheus metrics (`/.teifs/metrics`) to anyone who can reach the server.
+    /// Without it, a scrape needs a bearer token from `teifs admin prometheus generate`.
+    /// Metrics name operations and the drive's size: only on a network you trust.
+    #[arg(long, env = "TEIFS_PUBLIC_METRICS")]
+    public_metrics: bool,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -582,6 +587,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         allow_sse_c: args.allow_sse_c,
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
+        public_metrics: args.public_metrics,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,

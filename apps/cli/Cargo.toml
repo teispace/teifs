@@ -18,6 +18,7 @@ teifs-store.workspace = true
 teifs-server.workspace = true
 teifs-client.workspace = true
 teifs-types.workspace = true
+teifs-iam.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 clap.workspace = true
 clap_complete.workspace = true
@@ -50,7 +51,6 @@ aws-lc-rs.workspace = true
 
 [dev-dependencies]
 time.workspace = true
-teifs-iam.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 rcgen.workspace = true

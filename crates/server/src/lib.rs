@@ -32,6 +32,10 @@ pub use tls::{Tls, TlsError, TlsSource};
 
 /// How to serve a drive.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent setting of the server"
+)]
 pub struct Config {
     /// The drive's folder (created if missing).
     pub dir: PathBuf,
@@ -76,6 +80,8 @@ pub struct Config {
     /// New buckets start with ACLs enabled and no Block Public Access, as S3's did before
     /// April 2023 (off by default: AWS's defaults now).
     pub legacy_bucket_defaults: bool,
+    /// Serve metrics to anyone who can reach the server, without a bearer token.
+    pub public_metrics: bool,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
 }
@@ -268,6 +274,7 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         }),
         allow_sig_v2: config.allow_sig_v2,
         legacy_bucket_defaults: config.legacy_bucket_defaults,
+        public_metrics: config.public_metrics,
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
         scrub_every_seconds: config.jobs.scrub_every.map(|d| d.as_secs()),
         snapshots: config.jobs.snapshots,
@@ -372,6 +379,7 @@ impl Server {
                 body_timeout: Some(config.limits.body_timeout),
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
+                public_metrics: config.public_metrics,
                 config: Some(admin_config),
                 root_keys,
             },

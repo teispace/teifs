@@ -98,6 +98,16 @@ pub fn raw(text: &str) {
     }
 }
 
+/// A document (JSON, a configuration) on standard output as it is, ended with a newline
+/// if it has none, so a shell prompt doesn't run on after it.
+pub fn document(text: &str) {
+    if text.ends_with('\n') {
+        raw(text);
+    } else {
+        raw(&format!("{text}\n"));
+    }
+}
+
 fn stderr_line(line: &str) {
     use std::io::Write;
     let _ = around_bar(|| writeln!(anstream::stderr(), "{line}"));
