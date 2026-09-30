@@ -42,6 +42,17 @@ pub enum Grantee {
     LogDelivery,
 }
 
+/// Who a request is from, as far as an ACL's groups tell callers apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclCaller {
+    /// An unsigned request.
+    Anonymous,
+    /// A signed request.
+    Signed,
+    /// S3's log delivery writing access logs (an authenticated caller too).
+    LogDelivery,
+}
+
 /// What a grant allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -138,15 +149,18 @@ impl Acl {
         self.grants.iter().all(|g| g.grantee == Grantee::Owner)
     }
 
-    /// Whether it gives `permission` (itself or by full control) to everyone, or, for a
-    /// signed request (`authenticated`), to every authenticated caller.
+    /// Whether it gives `permission` (itself or by full control) to a caller other than
+    /// the owner: to everyone, to every authenticated caller, or to S3's log delivery.
+    /// Without `public`, grants to everyone and to every authenticated caller count for
+    /// nothing (Block Public Access's `IgnorePublicAcls`).
     #[must_use]
-    pub fn grants(&self, permission: Permission, authenticated: bool) -> bool {
+    pub fn grants(&self, permission: Permission, caller: AclCaller, public: bool) -> bool {
         self.grants.iter().any(|g| {
             let to_caller = match g.grantee {
-                Grantee::AllUsers => true,
-                Grantee::AuthenticatedUsers => authenticated,
-                Grantee::Owner | Grantee::LogDelivery => false,
+                Grantee::AllUsers => public,
+                Grantee::AuthenticatedUsers => public && caller != AclCaller::Anonymous,
+                Grantee::LogDelivery => caller == AclCaller::LogDelivery,
+                Grantee::Owner => false,
             };
             to_caller && (g.permission == permission || g.permission == Permission::FullControl)
         })
@@ -172,7 +186,9 @@ mod tests {
     #[test]
     fn public_means_a_group_of_everyone() {
         use Grantee::{AllUsers, AuthenticatedUsers, LogDelivery, Owner};
-        use Permission::{FullControl, Read, Write};
+        use Permission::{FullControl, Read, ReadAcp, Write};
+
+        use AclCaller::{Anonymous, LogDelivery as Delivery, Signed};
         assert!(!Acl::private().is_public() && Acl::private().owner_only());
         assert!(acl(&[(Owner, FullControl), (AllUsers, Read)]).is_public());
         assert!(acl(&[(AuthenticatedUsers, Read)]).is_public());
@@ -180,12 +196,26 @@ mod tests {
         assert!(!logs.is_public() && !logs.owner_only());
 
         let read = acl(&[(AllUsers, Read)]);
-        assert!(read.grants(Read, false) && read.grants(Read, true) && !read.grants(Write, true));
+        assert!([Anonymous, Signed, Delivery].iter().all(|&caller| {
+            read.grants(Read, caller, true)
+                && !read.grants(Write, caller, true)
+                && !read.grants(Read, caller, false)
+        }));
         let all = acl(&[(AllUsers, FullControl)]);
-        assert!(Permission::ALL.iter().all(|p| all.grants(*p, false)));
+        assert!(
+            Permission::ALL
+                .iter()
+                .all(|p| all.grants(*p, Anonymous, true))
+        );
         let signed = acl(&[(AuthenticatedUsers, FullControl)]);
-        assert!(signed.grants(Read, true) && !signed.grants(Read, false));
-        assert!(!logs.grants(Write, true) && !Acl::private().grants(Read, true));
+        assert!(signed.grants(Read, Signed, true) && signed.grants(Write, Delivery, true));
+        assert!(!signed.grants(Read, Anonymous, true) && !signed.grants(Read, Signed, false));
+        // The log delivery group isn't public: ignoring public grants leaves it.
+        assert!(logs.grants(Write, Delivery, true) && logs.grants(Write, Delivery, false));
+        assert!(!logs.grants(ReadAcp, Delivery, true));
+        assert!(!logs.grants(Write, Signed, true) && !logs.grants(Write, Anonymous, true));
+        let private = Acl::private();
+        assert!(!private.grants(Read, Signed, true) && !private.grants(Read, Delivery, true));
     }
 
     #[test]

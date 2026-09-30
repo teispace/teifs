@@ -222,6 +222,7 @@ requests live. See
 | `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
 | `teifs event add ALIAS/BUCKET ARN [--event put,delete,get,ilm] [--prefix P] [--suffix S] [--id ID]` \| `event ls\|rm ALIAS/BUCKET …` \| `event eventbridge ALIAS/BUCKET on\|off` | A bucket's notification rules, sending its events to the server's targets (as `mc event`; an AWS queue's, topic's or function's ARN too), and EventBridge |
 | `teifs watch ALIAS[/BUCKET[/PREFIX]] [--events put,delete,get,ilm,bucket] [--suffix S]` | Show a bucket's events (or every bucket's) as they happen, as `mc watch`; `--json` for S3's event records |
+| `teifs logging set ALIAS/BUCKET ALIAS/TARGET[/PREFIX] [--format simple\|event-time\|delivery-time] [--no-policy]` \| `logging info\|rm ALIAS/BUCKET` | A bucket's server access log: where its records go, letting the logging service into the target's bucket policy |
 | `teifs ilm rule add\|edit\|ls\|rm\|export\|import ALIAS/BUCKET` | Lifecycle rules: expire objects (`--expire-days 30 --prefix logs/`), older versions and lone delete markers, abort old uploads; `export`/`import` in AWS's JSON |
 | `teifs encrypt set sse-s3\|sse-kms\|dsse-kms [KEY] ALIAS/BUCKET` \| `clear\|info ALIAS/BUCKET` | How a bucket encrypts new objects (`--bucket-key`), and whether it takes customer keys (`--block-sse-c`, `--allow-sse-c`) |
 | `teifs encrypt update --kms-key KEY ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Move objects to a KMS key in place, without rewriting them (`--bucket-key`) |
@@ -293,6 +294,11 @@ they pick (objects written, deleted, tagged, read, expired), each queued on the 
 before the request is answered and retried until it's taken. `teifs watch` and `mc watch`
 show a bucket's events as they happen. See
 [OPERATIONS.md](docs/OPERATIONS.md#bucket-notifications).
+
+**Server access logs**, as S3's: `teifs logging set local/app local/logs/app/` (or
+`aws s3api put-bucket-logging`) sends every request on a bucket, one record each in
+S3's format, to log objects in another bucket (or the same one), which S3's log readers
+read. See [OPERATIONS.md](docs/OPERATIONS.md#server-access-logs).
 
 **Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
 storage classes (every object is `STANDARD`), website

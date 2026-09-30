@@ -18,6 +18,7 @@ use teifs_store::{CorsRule, Store, StoreError};
 use tracing::Instrument;
 
 use crate::{
+    access_log::Arrival,
     audit::Asked,
     health,
     limits::{StallTimeout, refusal},
@@ -203,6 +204,10 @@ pub struct Service {
     /// The connection's peer.
     client: crate::Client,
     watch: Arc<Watch>,
+    /// The access log's worker, until the server takes it to run.
+    access_log: Arc<std::sync::Mutex<Option<crate::AccessLogWorker>>>,
+    /// What the store tells the lifecycle's removals, kept while the service is.
+    expirations: Option<Arc<dyn teifs_store::Expirations>>,
 }
 
 impl std::fmt::Debug for Service {
@@ -223,6 +228,8 @@ impl Service {
     ) -> Self {
         Self {
             watch: Arc::new(watch),
+            access_log: Arc::default(),
+            expirations: None,
             s3,
             store,
             host: host.map(Arc::new),
@@ -231,6 +238,32 @@ impl Service {
             proxies: Arc::new(proxies),
             client: crate::Client::default(),
         }
+    }
+
+    /// The service with the access log's worker, for the server to take and run, and
+    /// what logs the lifecycle's removals.
+    #[must_use]
+    pub(crate) fn with_access_log(
+        mut self,
+        worker: crate::AccessLogWorker,
+        expirations: Arc<dyn teifs_store::Expirations>,
+    ) -> Self {
+        self.expirations = Some(expirations);
+        *self
+            .access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+        self
+    }
+
+    /// The access log's worker, which delivers buckets' access logs while it runs: the
+    /// first call has it, later ones none.
+    #[must_use]
+    pub fn access_log(&self) -> Option<crate::AccessLogWorker> {
+        self.access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// The service for one connection: requests on it come from `client`.
@@ -421,7 +454,12 @@ impl Service {
             let client = self.proxies.client(self.client, req.headers());
             Asked::of(&req, client.ip)
         });
-        let request = observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked);
+        let arrival = self.watch.access_log.on().then(|| {
+            let client = self.proxies.client(self.client, req.headers());
+            Arrival::of(&req, client, self.bucket_of(&req))
+        });
+        let request =
+            observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked, arrival);
         // Everything logged while answering names the request, as its answer does.
         let span = tracing::info_span!("request", id = %seen.id);
         // A client waiting for `100 Continue` hasn't sent the body the answer spares it.

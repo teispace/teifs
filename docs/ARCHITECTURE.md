@@ -318,6 +318,19 @@ are queued the same way before the job goes on. While someone listens (`listen.r
 MinIO's `GET /BUCKET?events=…`, claimed by the custom route before s3s reads the path),
 `events.rs` also broadcasts each event, and buckets' creations and removals, as
 ready-made lines that each listener's task filters.
+Server access logs: a bucket's logging (`logging.rs`, checked as S3 checks it, with the
+target's policy decided for the service principal `logging.s3.amazonaws.com`) is kept
+with its settings. While any bucket logs, `cors::Service` keeps each request's arrival
+(`access_log::Arrival`: the redacted URI, headers S3 logs, the client), `Access::check`
+adds the requester, the signature and the records a request adds besides its own (a
+copy's source, each key of a multi-object delete: `observe::also`), and `Watch::done`
+turns them into records (`access_log/record.rs`: S3's fields and operation names) on a
+bounded queue. The `AccessLogWorker`, which the server runs, appends them to a spool per
+bucket in the drive's `access-logs/` folder and rolls each into a log object
+(`Drive::deliver_log`, which decides the delivery for the service principal again) on
+the interval, at 1 MiB or on a new day; spools left by a stop are delivered at the next
+start. Lifecycle removals are logged through the same `Expirations` hook as their
+events; the store holds that hook weakly, since it holds a `Drive` that holds the store.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

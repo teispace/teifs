@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,6 +22,7 @@ use hyper::body::Incoming;
 use s3s::{HttpResponse, StdError};
 
 use crate::{
+    access_log::{AccessLog, Also, Arrival},
     audit::{self, Asked, AuditSink},
     metrics::{Metrics, Scrapers},
     trace::Tracers,
@@ -43,6 +44,14 @@ pub(crate) struct Seen {
     received: AtomicU64,
     /// What wasn't read of its body, if anything.
     leftover: Mutex<Option<Incoming>>,
+    /// Who asked, as access log records name them.
+    requester: OnceLock<String>,
+    /// How it was signed: `SigV4`/`SigV2`, and `AuthHeader`/`QueryString`.
+    signature: OnceLock<(&'static str, &'static str)>,
+    /// Whether an ACL was what allowed it.
+    acl_required: AtomicBool,
+    /// The access log records it adds to its own.
+    also: Mutex<Vec<Also>>,
 }
 
 impl Seen {
@@ -55,7 +64,50 @@ impl Seen {
             target: OnceLock::new(),
             received: AtomicU64::new(0),
             leftover: Mutex::new(None),
+            requester: OnceLock::new(),
+            signature: OnceLock::new(),
+            acl_required: AtomicBool::new(false),
+            also: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records who asked (an IAM ARN, or the owner's canonical id for the root user).
+    pub(crate) fn requester_is(&self, requester: String) {
+        let _ = self.requester.set(requester);
+    }
+
+    pub(crate) fn requester(&self) -> Option<&str> {
+        self.requester.get().map(String::as_str)
+    }
+
+    /// Records how it was signed.
+    pub(crate) fn signed_with(&self, version: &'static str, auth: &'static str) {
+        let _ = self.signature.set((version, auth));
+    }
+
+    pub(crate) fn signature(&self) -> Option<(&'static str, &'static str)> {
+        self.signature.get().copied()
+    }
+
+    /// Records that an ACL was what allowed it.
+    pub(crate) fn allowed_by_acl(&self) {
+        self.acl_required.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn acl_required(&self) -> bool {
+        self.acl_required.load(Ordering::Relaxed)
+    }
+
+    /// Adds an access log record to its own.
+    pub(crate) fn add(&self, also: Also) {
+        self.also
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(also);
+    }
+
+    pub(crate) fn also(&self) -> Vec<Also> {
+        std::mem::take(&mut *self.also.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Says which API it's for, when not S3's: `Admin`, `IAM`, `STS` or `Control`.
@@ -102,6 +154,13 @@ impl Seen {
     }
 }
 
+/// Adds an access log record to the request with these extensions' own.
+pub(crate) fn also(extensions: &http::Extensions, also: Also) {
+    if let Some(seen) = extensions.get::<Arc<Seen>>() {
+        seen.add(also);
+    }
+}
+
 /// Names the operation of the request with these extensions; the first name wins.
 pub(crate) fn name(extensions: &http::Extensions, operation: &'static str) {
     if let Some(seen) = extensions.get::<Arc<Seen>>() {
@@ -128,6 +187,11 @@ pub(crate) fn request_id(extensions: &http::Extensions) -> String {
     extensions
         .get::<Arc<Seen>>()
         .map_or_else(next_id, |seen| seen.id.clone())
+}
+
+/// An id for what no request did (a lifecycle rule's removal), ordered with requests'.
+pub(crate) fn new_id() -> String {
+    next_id()
 }
 
 /// A request id: 16 upper-case hex digits, as S3's, from the time in nanoseconds and
@@ -251,6 +315,8 @@ pub(crate) struct Watch {
     pub(crate) tracers: Arc<Tracers>,
     /// The drive's id, which audit entries carry.
     drive: String,
+    /// Where requests' access log records go.
+    pub(crate) access_log: Arc<AccessLog>,
 }
 
 impl Watch {
@@ -260,6 +326,7 @@ impl Watch {
         audit: Option<Arc<dyn AuditSink>>,
         tracers: Arc<Tracers>,
         drive: String,
+        access_log: Arc<AccessLog>,
     ) -> Self {
         Self {
             metrics,
@@ -267,12 +334,27 @@ impl Watch {
             audit,
             tracers,
             drive,
+            access_log,
         }
     }
 
     /// Whether requests are audited or traced, so what they asked is worth keeping.
     pub(crate) fn audits(&self) -> bool {
         self.audit.is_some() || self.tracers.watched()
+    }
+
+    /// Records a request that's done: its metrics were, this is the rest.
+    fn done(
+        &self,
+        (asked, arrival): (Option<Asked>, Option<Arrival>),
+        seen: &Seen,
+        answer: &Answer,
+        headers: &HeaderMap,
+    ) {
+        if let Some(arrival) = arrival {
+            arrival.finish(seen, answer, &self.access_log);
+        }
+        self.audit(asked, seen, answer, headers);
     }
 
     fn audit(&self, asked: Option<Asked>, seen: &Seen, answer: &Answer, headers: &HeaderMap) {
@@ -299,17 +381,25 @@ pub(crate) struct Request {
     started: Instant,
     /// What it asked, while it's audited.
     asked: Option<Asked>,
+    /// What it was, while requests are access logged.
+    arrival: Option<Arrival>,
     answered: bool,
 }
 
 impl Request {
-    pub(crate) fn new(watch: Arc<Watch>, seen: Arc<Seen>, asked: Option<Asked>) -> Self {
+    pub(crate) fn new(
+        watch: Arc<Watch>,
+        seen: Arc<Seen>,
+        asked: Option<Asked>,
+        arrival: Option<Arrival>,
+    ) -> Self {
         watch.metrics.begin();
         Self {
             watch,
             seen,
             started: Instant::now(),
             asked,
+            arrival,
             answered: false,
         }
     }
@@ -328,8 +418,12 @@ impl Drop for Request {
                 canceled: true,
                 ..Answer::default()
             };
-            self.watch
-                .audit(self.asked.take(), &self.seen, &answer, &HeaderMap::new());
+            self.watch.done(
+                (self.asked.take(), self.arrival.take()),
+                &self.seen,
+                &answer,
+                &HeaderMap::new(),
+            );
         }
     }
 }
@@ -348,6 +442,8 @@ pub(crate) struct Answer {
     pub(crate) sent: u64,
     /// Whether the client left before the whole answer was sent.
     pub(crate) canceled: bool,
+    /// The size of the object it's about, as its headers say (access logged only).
+    pub(crate) object_size: Option<u64>,
 }
 
 /// An answer's body that counts the bytes sent and records the request when it's
@@ -409,7 +505,12 @@ impl Drop for Sent {
         answer.received = request.seen.received();
         let watch = &request.watch;
         watch.metrics.record(request.seen.operation(), answer);
-        watch.audit(request.asked.take(), &request.seen, answer, &self.headers);
+        watch.done(
+            (request.asked.take(), request.arrival.take()),
+            &request.seen,
+            answer,
+            &self.headers,
+        );
     }
 }
 
@@ -431,6 +532,10 @@ pub(crate) fn finish(mut response: HttpResponse, request: Request) -> HttpRespon
         status,
         error,
         first_byte: Some(request.started.elapsed()),
+        object_size: request
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.object_size(response.headers())),
         ..Answer::default()
     };
     let length = response.body().size_hint().exact().or_else(|| {
@@ -528,6 +633,7 @@ mod tests {
             Some(sink),
             Arc::new(Tracers::new()),
             "drive".into(),
+            crate::access_log::AccessLog::new(false, crate::access_log::Counters::default()).0,
         );
         (dir, Arc::new(watch))
     }
@@ -536,7 +642,7 @@ mod tests {
         let asked = Asked::of(&http::Request::new(()), None);
         let seen = Arc::new(Seen::new());
         seen.name("PutObject");
-        Request::new(Arc::clone(watch), seen, Some(asked))
+        Request::new(Arc::clone(watch), seen, Some(asked), None)
     }
 
     #[tokio::test]

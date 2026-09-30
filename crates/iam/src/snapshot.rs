@@ -170,6 +170,17 @@ impl Identity {
         }
     }
 
+    /// An AWS service acting for the account (S3's log delivery, `logging.s3.amazonaws.com`):
+    /// no policies of its own, so only a resource policy naming it, or an ACL granting its
+    /// group, lets it do anything.
+    #[must_use]
+    pub fn service(name: &str) -> Self {
+        Self {
+            principal: Principal::service(name),
+            ..Self::anonymous()
+        }
+    }
+
     /// What a condition may test about any request of this identity's at `now`: the
     /// principal, its tags, and a session's issue time and source identity. The caller
     /// adds the connection and the request.

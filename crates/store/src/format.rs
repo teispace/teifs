@@ -30,6 +30,8 @@ pub(crate) const INDEX_DB: &str = "index.db";
 pub(crate) const SYSTEM_DB: &str = "system.db";
 /// Bucket notifications waiting to be sent.
 pub(crate) const EVENTS_DB: &str = "events.db";
+/// Access log records waiting to be delivered.
+pub(crate) const ACCESS_LOGS: &str = "access-logs";
 /// Where backups made before an upgrade go.
 pub(crate) const BACKUPS: &str = "backups";
 

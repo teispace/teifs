@@ -263,19 +263,45 @@ fn from_body(body: dto::AccessControlPolicy) -> S3Result<Acl> {
                 return Err(malformed_acl());
             };
             let permission = Permission::parse(permission.as_str()).ok_or_else(malformed_acl)?;
-            let (kind, value) = match who.type_.as_str() {
-                dto::Type::CANONICAL_USER => ("id", who.id),
-                dto::Type::GROUP => ("uri", who.uri),
-                dto::Type::AMAZON_CUSTOMER_BY_EMAIL => return Err(unresolvable_email()),
-                _ => return Err(malformed_acl()),
-            };
             Ok(AclGrant {
-                grantee: grantee(kind, &value.ok_or_else(malformed_acl)?)?,
+                grantee: grantee_from_dto(who, malformed_acl)?,
                 permission,
             })
         })
         .collect::<S3Result<Vec<_>>>()?;
     Ok(Acl { grants })
+}
+
+/// Who a grant in a request's body names; `malformed` is the error for a grantee
+/// without its type's field.
+pub(crate) fn grantee_from_dto(who: dto::Grantee, malformed: fn() -> S3Error) -> S3Result<Grantee> {
+    let (kind, value) = match who.type_.as_str() {
+        dto::Type::CANONICAL_USER => ("id", who.id),
+        dto::Type::GROUP => ("uri", who.uri),
+        dto::Type::AMAZON_CUSTOMER_BY_EMAIL => return Err(unresolvable_email()),
+        _ => return Err(malformed()),
+    };
+    grantee(kind, &value.ok_or_else(malformed)?)
+}
+
+/// A grantee, as answers name it.
+pub(crate) fn grantee_to_dto(grantee: Grantee) -> dto::Grantee {
+    match grantee.uri() {
+        None => dto::Grantee {
+            display_name: Some(OWNER_ID.to_owned()),
+            id: Some(OWNER_ID.to_owned()),
+            type_: dto::Type::from_static(dto::Type::CANONICAL_USER),
+            email_address: None,
+            uri: None,
+        },
+        Some(uri) => dto::Grantee {
+            type_: dto::Type::from_static(dto::Type::GROUP),
+            uri: Some(uri.to_owned()),
+            display_name: None,
+            email_address: None,
+            id: None,
+        },
+    }
 }
 
 fn malformed_acl() -> S3Error {
@@ -297,27 +323,9 @@ pub(crate) fn owner() -> dto::Owner {
 pub(crate) fn to_grants(acl: &Acl) -> dto::Grants {
     acl.grants
         .iter()
-        .map(|grant| {
-            let grantee = match grant.grantee.uri() {
-                None => dto::Grantee {
-                    display_name: Some(OWNER_ID.to_owned()),
-                    id: Some(OWNER_ID.to_owned()),
-                    type_: dto::Type::from_static(dto::Type::CANONICAL_USER),
-                    email_address: None,
-                    uri: None,
-                },
-                Some(uri) => dto::Grantee {
-                    type_: dto::Type::from_static(dto::Type::GROUP),
-                    uri: Some(uri.to_owned()),
-                    display_name: None,
-                    email_address: None,
-                    id: None,
-                },
-            };
-            dto::Grant {
-                grantee: Some(grantee),
-                permission: Some(dto::Permission::from(grant.permission.name().to_owned())),
-            }
+        .map(|grant| dto::Grant {
+            grantee: Some(grantee_to_dto(grant.grantee)),
+            permission: Some(dto::Permission::from(grant.permission.name().to_owned())),
         })
         .collect()
 }

@@ -47,6 +47,7 @@ async fn objects_are_sealed_by_the_transit_engine() {
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
         notify: Vec::new(),
+        access_log_interval: None,
         credentials: Some(DriveCredentials {
             access_key: ACCESS_KEY.into(),
             secret_key: SECRET_KEY.into(),

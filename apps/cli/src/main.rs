@@ -486,6 +486,11 @@ pub(crate) struct ServeArgs {
     /// this system can hold). Object buckets take any S3 key either way.
     #[arg(long, value_enum, default_value = "portable", env = "TEIFS_KEY_NAMES")]
     key_names: KeyNamesArg,
+    /// How often each bucket's server access log is delivered into its target bucket
+    /// as a log object (AWS delivers within hours; sooner here). A log object is also
+    /// delivered at 1 MiB, and when the day changes.
+    #[arg(long, default_value = "5m", value_parser = parse_duration, env = "TEIFS_ACCESS_LOG_INTERVAL")]
+    access_log_interval: Duration,
     /// For testing lifecycle rules: how long a "day" is (`10s`). Never on real data.
     #[arg(long, hide = true, value_parser = parse_duration, env = "TEIFS_LIFECYCLE_DAY")]
     lifecycle_day: Option<std::time::Duration>,
@@ -1591,6 +1596,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_eventbridge),
             |name| std::env::var(name).ok(),
         )?,
+        access_log_interval: Some(args.access_log_interval),
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,

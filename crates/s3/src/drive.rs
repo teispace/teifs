@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
+use bytes::Bytes;
 use futures::StreamExt;
 use s3s::{
     S3, S3Request, S3Response, S3Result,
@@ -17,10 +18,12 @@ use teifs_store::{
     Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
     SseMode, Staged, Store, Upload, Versioning, VersionsQuery,
 };
+use teifs_types::logging::LoggingConfig;
 use tokio_util::io::ReaderStream;
 
 use crate::{
     access,
+    access_log::{self, AccessLog},
     acl::{self, AclHeaders, acl_headers},
     bucket_access::{self, Rules},
     caps::{self, Caps},
@@ -28,8 +31,9 @@ use crate::{
     cors, encode,
     errors::{StoreResultExt, from_body},
     events::{Events, Happened},
-    lifecycle, notification,
+    lifecycle, logging, notification,
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
+    observe,
     post_form::{self, Form},
     sse::{self, set_sse},
     tagging,
@@ -64,16 +68,22 @@ pub struct Drive {
     legacy_bucket_defaults: bool,
     /// Where bucket notifications go.
     events: Events,
+    /// The account's id, when IAM decides requests (without, nothing is checked).
+    account: Option<Arc<str>>,
+    /// Where requests' access log records go, turned on once a bucket logs.
+    access_log: Option<Arc<AccessLog>>,
 }
 
 impl Drive {
-    /// Serves `store`; buckets created without choosing get `default_layout`.
+    /// Serves `store`; buckets created without choosing get `default_layout`. `account`
+    /// is the account's id when IAM decides requests.
     #[must_use]
     pub fn new(
         store: Store,
         default_layout: Layout,
         legacy_bucket_defaults: bool,
         notifier: Arc<Notifier>,
+        account: Option<&str>,
     ) -> Self {
         Self {
             rules: Arc::new(Rules::new(store.clone())),
@@ -81,7 +91,21 @@ impl Drive {
             store,
             default_layout,
             legacy_bucket_defaults,
+            account: account.map(Arc::from),
+            access_log: None,
         }
+    }
+
+    /// The drive with its access log.
+    #[must_use]
+    pub(crate) fn with_access_log(mut self, access_log: Arc<AccessLog>) -> Self {
+        self.access_log = Some(access_log);
+        self
+    }
+
+    /// The account's id, when IAM decides requests.
+    pub(crate) fn account(&self) -> Option<&str> {
+        self.account.as_deref()
     }
 
     /// Records that the request with these extensions did `name` to one object.
@@ -315,6 +339,71 @@ impl Drive {
             ));
         }
         self.store.head_version(bucket, key, version_id).await.s3()
+    }
+
+    /// Writes a log object for S3's log delivery into `config`'s target, as the logging
+    /// service: only if the target's policy or ACL lets it in (when IAM decides
+    /// requests), with the target's default encryption, the configuration's target
+    /// grants, and the event a write sends. The write isn't itself logged.
+    pub(crate) async fn deliver_log(
+        &self,
+        source: &str,
+        config: &LoggingConfig,
+        key: &str,
+        data: Bytes,
+    ) -> Result<ObjectInfo, access_log::Undelivered> {
+        use access_log::Undelivered;
+        let target = config.target_bucket.as_str();
+        let refused = |why: String| Undelivered::Refused(why);
+        let rules = self.rules.of(target).await.map_err(Undelivered::from)?;
+        if let Some(account) = self.account.as_deref()
+            && !logging::delivery_allowed(account, source, (target, key), &rules)
+        {
+            return Err(refused(format!(
+                "the bucket {target}'s policy and ACL don't let the logging service write {key}"
+            )));
+        }
+        let encryption = self
+            .write_encryption(target, sse::WriteRequest::default())
+            .await
+            .map_err(Undelivered::from)?;
+        let len = i64::try_from(data.len()).ok();
+        self.check_write(target, Some(key), len)
+            .await
+            .map_err(Undelivered::from)?;
+        let mut staged = self
+            .store
+            .stage_for(target, &encryption)
+            .await
+            .s3()
+            .map_err(Undelivered::from)?;
+        let mut hasher = checksums::hasher(&Sums::new(), [checksums::DEFAULT_ALGORITHM])
+            .map_err(Undelivered::from)?;
+        hasher.update(&data);
+        staged.write(&data).await.s3().map_err(Undelivered::from)?;
+        let mut attrs = ObjectAttrs {
+            content_type: Some("text/plain".to_owned()),
+            ..NewAttrs::default().into_attrs(hasher.finish())
+        };
+        if !config.grants.is_empty() {
+            let mut acl = Acl::private();
+            acl.grants.extend(config.grants.iter().copied());
+            attrs.acl = Some(acl);
+        }
+        let info = self
+            .store
+            .commit(target, key, staged, attrs, Precondition::default())
+            .await
+            .s3()
+            .map_err(Undelivered::from)?;
+        self.notify(
+            &http::Extensions::new(),
+            "ObjectCreated:Put",
+            target,
+            Happened::of(&info),
+        )
+        .await;
+        Ok(info)
     }
 
     async fn stage(
@@ -629,6 +718,7 @@ fn check_read(
 }
 
 /// The attributes a write sets.
+#[derive(Default)]
 struct NewAttrs {
     content_type: Option<String>,
     content_encoding: Option<String>,
@@ -2008,6 +2098,42 @@ impl S3 for Drive {
         ))
     }
 
+    async fn get_bucket_logging(
+        &self,
+        req: S3Request<dto::GetBucketLoggingInput>,
+    ) -> S3Result<S3Response<dto::GetBucketLoggingOutput>> {
+        let config = self.store.bucket_logging(&req.input.bucket).await.s3()?;
+        Ok(S3Response::new(logging::to_dto(config.as_deref())))
+    }
+
+    /// Turns the bucket's access logging on, after S3's checks of the target, or off.
+    async fn put_bucket_logging(
+        &self,
+        req: S3Request<dto::PutBucketLoggingInput>,
+    ) -> S3Result<S3Response<dto::PutBucketLoggingOutput>> {
+        let input = req.input;
+        let config = logging::from_dto(input.bucket_logging_status)?;
+        if let Some(config) = &config {
+            logging::check(
+                &self.store,
+                &self.rules,
+                self.account.as_deref(),
+                &input.bucket,
+                config,
+            )
+            .await?;
+        }
+        let on = config.is_some();
+        self.store
+            .set_bucket_logging(&input.bucket, config)
+            .await
+            .s3()?;
+        if on && let Some(log) = &self.access_log {
+            log.turn_on();
+        }
+        Ok(S3Response::new(dto::PutBucketLoggingOutput::default()))
+    }
+
     async fn get_bucket_cors(
         &self,
         req: S3Request<dto::GetBucketCorsInput>,
@@ -2516,6 +2642,17 @@ impl S3 for Drive {
                 Err(err) => Err(err),
             };
             if let Ok(done) = &result {
+                // As S3 logs a multi-delete: a record for each object it removed.
+                observe::also(
+                    &req.extensions,
+                    access_log::Also {
+                        bucket: input.bucket.clone(),
+                        key: object.key.clone(),
+                        version_id: object.version_id.clone(),
+                        operation: "BATCH.DELETE.OBJECT",
+                        status: Some(204),
+                    },
+                );
                 let (name, happened) = removed(&object.key, object.version_id.as_deref(), done);
                 if name == MARKED {
                     markers.push(happened);

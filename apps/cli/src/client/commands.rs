@@ -106,6 +106,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Event { action } => super::event::event(action, &aliases).await,
         Command::Watch(args) => super::watch::run(&aliases, args).await,
         Command::Encrypt { action } => super::encrypt::encrypt(action, &aliases).await,
+        Command::Logging { action } => super::logging::logging(action, &aliases).await,
         Command::Presign {
             target,
             expires,

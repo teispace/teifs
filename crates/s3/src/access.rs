@@ -27,8 +27,10 @@ use teifs_policy::{
     S3Key, TagKind, Target, bucket_arn, object_arn,
 };
 use teifs_store::{Store, StoreError};
+use teifs_types::{AclCaller, logging};
 
 use crate::{
+    access_log,
     acl::{self, AclOf},
     bucket_access::{BucketRules, Rules},
     caps::Caps,
@@ -112,6 +114,24 @@ pub(crate) struct Access {
 }
 
 impl Access {
+    /// The rules of the bucket a request is on and of its copy's source bucket.
+    async fn rules_of(
+        &self,
+        bucket: Option<&str>,
+        source: Option<&Source>,
+    ) -> S3Result<(Option<Arc<BucketRules>>, Option<Arc<BucketRules>>)> {
+        let rules = match bucket {
+            Some(bucket) => Some(self.rules.of(bucket).await?),
+            None => None,
+        };
+        let source_rules = match source {
+            Some((source, ..)) if bucket == Some(source.as_str()) => rules.clone(),
+            Some((source, ..)) => Some(self.rules.of(source).await?),
+            None => None,
+        };
+        Ok((rules, source_rules))
+    }
+
     pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>, store: Store) -> Self {
         let account = iam.account().into();
         Self {
@@ -134,25 +154,33 @@ impl Access {
         rules: Option<&BucketRules>,
         object: Option<ObjectRef<'_>>,
         creating: bool,
-    ) -> S3Result<bool> {
+    ) -> S3Result<Permitted> {
         let decision = decide(identity, context, action, arn, rules);
         let (Decision::ImplicitDeny, Some(rules)) = (decision, rules) else {
-            return Ok(decision.is_allowed());
+            return Ok(if decision.is_allowed() {
+                Permitted::Yes
+            } else {
+                Permitted::No
+            });
         };
         if bucket_acl_allows(identity, context, (action, arn), rules, creating) {
-            return Ok(true);
+            return Ok(Permitted::ByAcl);
         }
-        // The object's ACL, read only when the bucket's ACLs apply.
+        // The object's ACL, read only when it could grant the caller anything.
+        let caller = acl_caller(identity);
         let (Some((AclOf::Object, permission)), Some(object)) =
-            (acl_for(action, rules, creating), object)
+            (acl_for(action, rules, creating, caller), object)
         else {
-            return Ok(false);
+            return Ok(Permitted::No);
         };
         let acl = self.existing(object).await?.and_then(|info| info.attrs.acl);
-        Ok(
-            acl.is_some_and(|acl| acl.grants(permission, is_signed(identity)))
-                && identity.within_boundary(context, action, arn),
-        )
+        let granted = rules.acl_grants(acl.as_ref(), permission, caller)
+            && identity.within_boundary(context, action, arn);
+        Ok(if granted {
+            Permitted::ByAcl
+        } else {
+            Permitted::No
+        })
     }
 
     /// The object (the version) a request is on, `None` when there's none to read: no
@@ -276,19 +304,35 @@ fn is_signed(identity: &Identity) -> bool {
     identity.principal().kind() != PrincipalKind::Anonymous
 }
 
-/// The ACL that could allow `action` in a bucket whose ACLs apply. A request that makes
-/// an object (`creating`) sets the new object's ACL and tags as part of making it: the
-/// bucket's `WRITE`, which allows the object, allows them too, as on AWS.
+/// Who an ACL's groups see: S3's log delivery is in the `LogDelivery` group.
+fn acl_caller(identity: &Identity) -> AclCaller {
+    match identity.principal().kind() {
+        PrincipalKind::Anonymous => AclCaller::Anonymous,
+        PrincipalKind::Service if identity.principal().service_name() == Some(logging::SERVICE) => {
+            AclCaller::LogDelivery
+        }
+        _ => AclCaller::Signed,
+    }
+}
+
+/// The ACL that could allow `action` to `caller` in a bucket whose ACLs apply: none
+/// while ACLs are disabled, or while `IgnorePublicAcls` leaves no grant but the log
+/// delivery group's. A request that makes an object (`creating`) sets the new object's
+/// ACL and tags as part of making it: the bucket's `WRITE`, which allows the object,
+/// allows them too, as on AWS.
 fn acl_for(
     action: &str,
     rules: &BucketRules,
     creating: bool,
+    caller: AclCaller,
 ) -> Option<(AclOf, teifs_store::Permission)> {
     let action = match action {
         "s3:PutObjectAcl" | "s3:PutObjectTagging" if creating => "s3:PutObject",
         action => action,
     };
-    acl::permission_for(action).filter(|_| rules.acls_apply())
+    let grantable = rules.ownership.acls_enabled()
+        && (!rules.block.ignore_public_acls || caller == AclCaller::LogDelivery);
+    acl::permission_for(action).filter(|_| grantable)
 }
 
 /// Whether the bucket's ACL allows an action the policies left undecided.
@@ -299,8 +343,9 @@ fn bucket_acl_allows(
     rules: &BucketRules,
     creating: bool,
 ) -> bool {
-    matches!(acl_for(action, rules, creating), Some((AclOf::Bucket, permission))
-        if rules.acl.as_ref().is_some_and(|acl| acl.grants(permission, is_signed(identity))))
+    let caller = acl_caller(identity);
+    matches!(acl_for(action, rules, creating, caller), Some((AclOf::Bucket, permission))
+        if rules.acl_grants(rules.acl.as_ref(), permission, caller))
         && identity.within_boundary(context, action, arn)
 }
 
@@ -400,12 +445,52 @@ fn observed(cx: &mut S3AccessContext<'_>, operation: &'static str) -> Option<Arc
     Some(seen)
 }
 
+/// How a signed request carried its signature, as access log records name it: in the
+/// `Authorization` header, or in the query (a presigned link); `-` for a browser form.
+fn auth_type(cx: &S3AccessContext<'_>, form: bool) -> &'static str {
+    if form {
+        "-"
+    } else if cx.headers().contains_key(http::header::AUTHORIZATION) {
+        "AuthHeader"
+    } else {
+        "QueryString"
+    }
+}
+
+const fn signature_name(v4: bool) -> &'static str {
+    if v4 { "SigV4" } else { "SigV2" }
+}
+
 /// Tells the request's observer the bucket and key it's on.
 fn on_path(seen: &Seen, path: &S3Path) {
     match path {
         S3Path::Bucket { bucket } => seen.on(bucket, ""),
         S3Path::Object { bucket, key } => seen.on(bucket, key),
         S3Path::Root => {}
+    }
+}
+
+/// Notes for the access log who asks and how the request was signed.
+fn seen_caller(seen: &Seen, cx: &S3AccessContext<'_>, identity: &Identity, form: bool) {
+    if let Some(requester) = access_log::requester(identity) {
+        seen.requester_is(requester);
+    }
+    if cx.credentials().is_some() {
+        seen.signed_with(signature_name(is_sig_v4(cx)), auth_type(cx, form));
+    }
+}
+
+/// Notes for the access log a copy's read of its source, which S3 logs as a record of
+/// its own.
+fn seen_source(seen: &Seen, operation: &'static str, (bucket, key, version_id): &Source) {
+    if let Some(operation) = access_log::copy_source_operation(operation) {
+        seen.add(access_log::Also {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            version_id: version_id.clone(),
+            operation,
+            status: None,
+        });
     }
 }
 
@@ -433,6 +518,9 @@ impl S3Access for Access {
                 identify(&self.iam, &credentials.access_key, token.as_deref())?
             }
         };
+        if let Some(seen) = &seen {
+            seen_caller(seen, cx, &identity, form.is_some());
+        }
         if operation == "UpdateObjectEncryption" && signed && !is_sig_v4(cx) {
             return Err(s3_error!(
                 InvalidRequest,
@@ -444,6 +532,9 @@ impl S3Access for Access {
             on_path(seen, path);
         }
         let source = source(operation, cx)?;
+        if let (Some(seen), Some(source)) = (&seen, &source) {
+            seen_source(seen, operation, source);
+        }
         let bucket_name = match path {
             S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
             S3Path::Root => None,
@@ -458,15 +549,9 @@ impl S3Access for Access {
                 &self.account,
             )?;
         }
-        let rules = match &bucket_name {
-            Some(bucket) => Some(self.rules.of(bucket).await?),
-            None => None,
-        };
-        let source_rules = match &source {
-            Some((bucket, ..)) if bucket_name.as_ref() == Some(bucket) => rules.clone(),
-            Some((bucket, ..)) => Some(self.rules.of(bucket).await?),
-            None => None,
-        };
+        let (rules, source_rules) = self
+            .rules_of(bucket_name.as_deref(), source.as_ref())
+            .await?;
         // The root user is restricted only by a bucket policy, so without one needs no
         // context to decide with.
         let unrestricted = identity.is_root()
@@ -504,6 +589,7 @@ impl S3Access for Access {
             source: source.as_ref(),
             rules: rules.as_deref(),
             source_rules: source_rules.as_deref(),
+            seen: seen.as_deref(),
         };
         let withheld = self
             .decide_needs(&identity, &context, &facts, &asked)
@@ -547,6 +633,7 @@ impl S3Access for Access {
             source: None,
             rules: rules.as_deref(),
             source_rules: None,
+            seen: None,
         };
         let withheld = self
             .decide_needs(&identity, &context, &facts, &asked)
@@ -588,6 +675,17 @@ struct Asked<'a> {
     source: Option<&'a Source>,
     rules: Option<&'a BucketRules>,
     source_rules: Option<&'a BucketRules>,
+    /// The request's observer, told when an ACL is what allows it.
+    seen: Option<&'a Seen>,
+}
+
+/// Whether a permission is had, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Permitted {
+    No,
+    Yes,
+    /// Only an ACL allows it (an access log's `aclRequired`).
+    ByAcl,
 }
 
 impl Access {
@@ -607,6 +705,7 @@ impl Access {
             source,
             rules,
             source_rules,
+            seen,
         } = *asked;
         // An operation with no action is one only the root user may make.
         let needs = teifs_policy::authorizations(operation, facts);
@@ -635,7 +734,7 @@ impl Access {
                         }
                         _ => None,
                     };
-                    let allowed = self
+                    let permitted = self
                         .permits(
                             identity,
                             tagged.as_ref().unwrap_or(context),
@@ -645,7 +744,12 @@ impl Access {
                             creating,
                         )
                         .await?;
-                    if !allowed {
+                    if permitted == Permitted::ByAcl
+                        && let Some(seen) = seen
+                    {
+                        seen.allowed_by_acl();
+                    }
+                    if permitted == Permitted::No {
                         if need.required {
                             return Err(denied());
                         }

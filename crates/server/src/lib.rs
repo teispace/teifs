@@ -95,6 +95,9 @@ pub struct Config {
     pub audit: Vec<AuditTarget>,
     /// Where bucket notifications may be sent: buckets' rules name them by ARN.
     pub notify: Vec<TargetConfig>,
+    /// How often each logging bucket's access log records are delivered as a log
+    /// object; `None` is every five minutes.
+    pub access_log_interval: Option<std::time::Duration>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
 }
@@ -439,6 +442,14 @@ impl Server {
         let notifier = Arc::new(
             Notifier::start(&store.events_db(), config.notify).map_err(ServerError::Notify)?,
         );
+        let access_logging =
+            store
+                .any_bucket_logging()
+                .await
+                .map_err(|source| ServerError::Open {
+                    path: config.dir.clone(),
+                    source,
+                })?;
         let service = teifs_s3::service(
             store.clone(),
             Options {
@@ -453,6 +464,8 @@ impl Server {
                 public_metrics: config.public_metrics,
                 audit,
                 notifier: Some(Arc::clone(&notifier)),
+                access_logging,
+                access_log_interval: config.access_log_interval,
                 config: Some(admin_config),
                 root_keys,
             },
@@ -527,6 +540,12 @@ impl Server {
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let jobs = self.store.start_jobs(&self.jobs);
         let reloads = self.tls.clone().map(|tls| tokio::spawn(tls::watch(tls)));
+        let (access_log_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let access_log = self.service.access_log().map(|worker| {
+            tokio::spawn(worker.run(async move {
+                let _ = stopped.await;
+            }))
+        });
         // Live traces last until the server stops: they end when it starts to.
         let stopping = self.service.stopping();
         let shutdown = async move {
@@ -538,6 +557,11 @@ impl Server {
             reloads.abort();
         }
         jobs.stop().await;
+        // The connections are gone: what's spooled is delivered after the next start.
+        drop(access_log_stop);
+        if let Some(access_log) = access_log {
+            let _ = access_log.await;
+        }
         // What's still queued is sent after the next start.
         self.notifier.stop().await;
         // The service is gone with its connections, so the writers are finishing what's

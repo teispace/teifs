@@ -142,6 +142,17 @@ the source. Its Deny binds the root user too, except for reading, replacing and 
 the policy itself, so a policy can't lock the owner out. A stored policy that can no
 longer be read denies everything but that rescue, rather than being skipped.
 
+Server access logs are written by the server acting as S3's logging service, and only
+where the target lets it in: before `PutBucketLogging` stores a target and again before
+each delivery, the service principal `logging.s3.amazonaws.com` must be allowed
+`s3:PutObject` on the log object's key by the target's bucket policy, with
+`aws:SourceArn` and `aws:SourceAccount` naming the source bucket and account, or by a
+log delivery grant in the target's ACL. So whoever may configure one bucket's logging
+can't write into a bucket that didn't agree, and removing the permission stops
+deliveries (the records are dropped, as on S3). A `Service` principal names one
+service, never a wildcard, and no signed request is ever that principal
+(`crates/server/tests/logging.rs`).
+
 Every request signed with an IAM user's key is decided before its operation runs
 (`crates/s3/src/access.rs`), for exactly the bucket, key and copy or rename source the
 operation will act on (both parse them with the same functions). A permission TeiFS
@@ -238,7 +249,9 @@ secrets, nor the signing keys they give, in the log
 replay a request (`Authorization`, `X-Amz-Signature` and V2's `Signature` in a link,
 session tokens, cookies, SSE-C keys) with `REDACTED` before an entry is made, and is
 created readable only by its owner; a test sends each of them and looks for none in the
-file (`crates/server/tests/audit.rs`). An audit webhook's token is read only from the
+file (`crates/server/tests/audit.rs`). Server access log records replace the same
+secrets in a request's query (`crates/s3/src/access_log/mod.rs`), and record no
+headers but the referrer, user agent and host. An audit webhook's token is read only from the
 environment, is marked sensitive in the request that carries it, and is never shown:
 the webhook's `Debug` and `teifs admin config` show its URL without the user, password,
 query or fragment. Redirects aren't followed, so entries go nowhere but the URL given. A

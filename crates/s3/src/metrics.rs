@@ -80,6 +80,7 @@ pub struct Metrics {
     received: Family<Api, Counter>,
     sent: Family<Api, Counter>,
     audit_dropped: Counter,
+    access_log: crate::access_log::Counters,
     store: Store,
 }
 
@@ -95,6 +96,7 @@ impl Metrics {
         let received = Family::default();
         let sent = Family::default();
         let audit_dropped = Counter::default();
+        let access_log = crate::access_log::Counters::default();
         registry.register(
             "s3_requests",
             "Requests answered, by operation and HTTP status",
@@ -150,6 +152,21 @@ impl Metrics {
             "Audit entries lost because their destination couldn't keep up",
             audit_dropped.clone(),
         );
+        registry.register(
+            "access_log_records",
+            "Server access log records kept for delivery",
+            access_log.records.clone(),
+        );
+        registry.register(
+            "access_log_objects",
+            "Server access log objects delivered",
+            access_log.objects.clone(),
+        );
+        registry.register(
+            "access_log_dropped",
+            "Server access log records lost: the queue was full, the spool couldn't be written, or the target refused them",
+            access_log.dropped.clone(),
+        );
         registry.register_collector(Box::new(Server {
             store: store.clone(),
             started: SystemTime::now(),
@@ -166,8 +183,14 @@ impl Metrics {
             received,
             sent,
             audit_dropped,
+            access_log,
             store: store.clone(),
         }
+    }
+
+    /// The access log's counters, which its records and deliveries move.
+    pub(crate) fn access_log(&self) -> crate::access_log::Counters {
+        self.access_log.clone()
     }
 
     pub(crate) fn begin(&self) {

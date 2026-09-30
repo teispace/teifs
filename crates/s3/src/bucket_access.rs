@@ -14,6 +14,7 @@ use std::{
 use s3s::{S3Error, S3ErrorCode, S3Result, dto, s3_error};
 use teifs_policy::{Kind, Policy};
 use teifs_store::{Acl, BucketAccess, ObjectOwnership, PublicAccessBlock, Store, StoreError};
+use teifs_types::{AclCaller, Permission};
 
 use crate::errors::from_store;
 
@@ -63,10 +64,16 @@ impl BucketRules {
         }
     }
 
-    /// Whether ACLs grant anything: Object Ownership enables them and `IgnorePublicAcls`
-    /// is off (every grant that changes access is public).
-    pub(crate) fn acls_apply(&self) -> bool {
-        self.ownership.acls_enabled() && !self.block.ignore_public_acls
+    /// Whether an ACL's grant allows `permission` to `caller`, in a bucket whose Object
+    /// Ownership enables ACLs: `IgnorePublicAcls` takes away the grants to everyone and to
+    /// every authenticated caller (the log delivery group's stays).
+    pub(crate) fn acl_grants(
+        &self,
+        acl: Option<&Acl>,
+        permission: Permission,
+        caller: AclCaller,
+    ) -> bool {
+        acl.is_some_and(|acl| acl.grants(permission, caller, !self.block.ignore_public_acls))
     }
 
     /// Whether `RestrictPublicBuckets` is in force: the setting is on and the policy is

@@ -106,6 +106,9 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_notify_dropped_total` | counter | `target` | Events dropped because too many waited for it |
 | `teifs_notify_queued` | gauge | `target` | Events waiting on the drive for it |
 | `teifs_notify_online` | gauge | `target` | 1 when it took its last try |
+| `teifs_access_log_records_total` | counter | | Server access log records kept for delivery |
+| `teifs_access_log_objects_total` | counter | | Log objects delivered to target buckets |
+| `teifs_access_log_dropped_total` | counter | | Records lost: too many waited, the spool couldn't be written, or the target refused them |
 | `teifs_start_time_seconds` | gauge | | When the server started (Unix time) |
 | `teifs_build_info` | info | `version` | The TeiFS version |
 
@@ -226,6 +229,39 @@ filters (`errors=true`, `api`, `bucket`, `prefix`, `status`, `slowerThanMs`). Th
 makes entries only while an audit log is kept or someone traces. A trace that reads too
 slowly skips entries rather than slow requests down, and every trace ends when the server
 stops.
+
+## Server access logs
+
+A bucket's access log, as S3's server access logging, records every request on the
+bucket and its objects in S3's format and delivers the records as objects to a target
+bucket, where any tool that reads S3's access logs reads them.
+
+```sh
+teifs logging set local/app local/logs/app/      # app's requests, as log objects under logs/app/
+teifs logging info local/app
+teifs logging rm local/app
+```
+
+`teifs logging set` also adds a statement to the target's bucket policy that lets the
+logging service (`logging.s3.amazonaws.com`) write there for this bucket, as the S3
+console does; with `--no-policy`, grant it yourself (or, where the target's ACLs are on,
+give the log delivery group `WRITE`). A target without that permission, with a default
+Object Lock retention, or that doesn't exist is refused (`InvalidTargetBucketForLogging`),
+as on S3. `--format` names the log objects as S3 does: `simple` (the default,
+`PREFIX/YYYY-mm-DD-HH-MM-SS-UNIQUE`), or partitioned by `event-time` or
+`delivery-time` (`PREFIX/ACCOUNT/REGION/BUCKET/YYYY/MM/DD/YYYY-mm-DD-HH-MM-SS-UNIQUE`).
+
+Records are written first to the drive's system folder (`access-logs/`), then delivered:
+every 5 minutes (`serve --access-log-interval`, or `TEIFS_ACCESS_LOG_INTERVAL`), when
+a bucket's pending records reach 1 MiB, and when a new day (UTC) begins; what's pending
+when the server stops is delivered when it starts again. A delivery the target refuses (its
+permission was removed, it was deleted) drops those records, as S3 does, with a warning
+and `teifs_access_log_dropped_total`; a failure of the drive is tried again every minute.
+Delivered objects are written like any other: encrypted as the target's default says,
+counted in its usage, and announced by its notifications. Secrets in a request's query
+(a presigned link's signature and security token) are replaced by `REDACTED`. As on S3,
+logging is best effort: a record can arrive in a later object than its neighbours, and
+records of the last second before a crash can be lost.
 
 ## Bucket notifications
 

@@ -164,6 +164,27 @@ behaviour; the on-disk format is always upgraded automatically.
   `server_public_key=`) are relative to the file, as its other paths are.
 - Kafka targets compress with Snappy, LZ4 and zstd too (`compression=snappy|lz4|zstd`),
   as Kafka's own readers take them; zstd is produced with Produce v7 (Kafka 2.1 or later).
+- Server access logging, as S3's: `PutBucketLogging` and `GetBucketLogging` send a
+  bucket's requests, one S3 access log record each (all 27 fields, in S3's format and
+  with its operation names), to a target bucket, under a prefix, as log objects named as
+  S3 names them (`SimplePrefix`, or `PartitionedPrefix` by event or delivery time).
+  Copies also log the read of their source, multi-object deletes each key, and lifecycle
+  removals are logged as S3's own (`S3.EXPIRE.OBJECT`, requester `AmazonS3`). The target
+  must let the logging service in, as on S3: a bucket policy for the service principal
+  `logging.s3.amazonaws.com` (which policies may now name, with `aws:SourceArn` and
+  `aws:SourceAccount`) or, where ACLs are on, a grant to the log delivery group, which
+  `IgnorePublicAcls` leaves alone as on S3. Records wait in the drive's system folder and
+  are delivered every 5 minutes (`serve --access-log-interval`), at 1 MiB or at midnight,
+  and after a restart; secrets in a request's query never reach a record. Metrics:
+  `teifs_access_log_records_total`, `teifs_access_log_objects_total`,
+  `teifs_access_log_dropped_total`.
+  Admin exports and imports carry buckets' logging.
+- Access logs from the command line: `teifs logging set SOURCE TARGET[/PREFIX]
+  [--format simple|event-time|delivery-time]` (which, as the S3 console does, adds the
+  logging service to the target's bucket policy unless `--no-policy`), `teifs logging
+  info` and `teifs logging rm`.
+- An embedded server releases its drive when it stops, so the same process can open it
+  again.
 - Webhook, audit webhook and Elasticsearch targets over TLS of their own, as MinIO's
   webhooks: `ca=PATH` to verify the server with a CA, and `client_cert=PATH` and
   `client_key=PATH` for a server that asks for a client certificate (mutual TLS).

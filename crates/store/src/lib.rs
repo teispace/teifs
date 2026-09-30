@@ -265,8 +265,9 @@ struct Inner {
     format: DriveFormat,
     /// Seals and unseals the data keys of encrypted objects (set once, at or after open).
     kms: std::sync::OnceLock<Arc<dyn Kms>>,
-    /// Told what the lifecycle job removes (set once, after open).
-    expirations: std::sync::OnceLock<Arc<dyn jobs::Expirations>>,
+    /// Told what the lifecycle job removes (set once, after open), while whoever set it
+    /// keeps it: a listener that holds the store doesn't keep the drive open for ever.
+    expirations: std::sync::OnceLock<std::sync::Weak<dyn jobs::Expirations>>,
     /// The encryption settings of object buckets that have none of their own.
     default_encryption: BucketEncryption,
     /// What each background job has done since the drive opened.
@@ -278,6 +279,8 @@ struct Inner {
     lifecycles: cache::SettingCache<lifecycle::Lifecycle>,
     /// Buckets' notification rules, read once.
     notifications: cache::SettingCache<teifs_types::notify::NotificationConfig>,
+    /// Buckets' access logging, read once.
+    logging: cache::SettingCache<teifs_types::logging::LoggingConfig>,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
     day_ms: i64,
     /// How long each stage of reads and writes takes.
@@ -385,6 +388,7 @@ impl Store {
             snapshots: Mutex::new(()),
             lifecycles: cache::SettingCache::default(),
             notifications: cache::SettingCache::default(),
+            logging: cache::SettingCache::default(),
             stages: stages::new(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)
@@ -424,6 +428,12 @@ impl Store {
         self.inner.system_dir.join(format::EVENTS_DB)
     }
 
+    /// Where buckets' access log records wait to be delivered.
+    #[must_use]
+    pub fn access_log_dir(&self) -> PathBuf {
+        self.inner.system_dir.join(format::ACCESS_LOGS)
+    }
+
     /// The drive's system database, which IAM keeps its state in too.
     #[must_use]
     pub fn system_db(&self) -> PathBuf {
@@ -439,18 +449,23 @@ impl Store {
             .map_err(|_| StoreError::InvalidRequest("the store already has a KMS"))
     }
 
-    /// Tells `to` what the lifecycle job removes from now on. Fails if it's told
-    /// something else already.
-    pub fn tell_expirations(&self, to: Arc<dyn Expirations>) -> Result<()> {
+    /// Tells `to` what the lifecycle job removes from now on, for as long as the caller
+    /// keeps `to`. Fails if it's told something else already.
+    pub fn tell_expirations(&self, to: &Arc<dyn Expirations>) -> Result<()> {
         self.inner
             .expirations
-            .set(to)
+            .set(Arc::downgrade(to))
             .map_err(|_| StoreError::InvalidRequest("the store already tells expirations"))
     }
 
     /// Tells whoever wants to know that the lifecycle job removed something.
     async fn expired(&self, bucket: &str, key: &str, version_id: Option<String>, marker: bool) {
-        if let Some(to) = self.inner.expirations.get() {
+        if let Some(to) = self
+            .inner
+            .expirations
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
             to.expired(bucket, key, version_id, marker).await;
         }
     }

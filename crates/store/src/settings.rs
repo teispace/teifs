@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
-use teifs_types::{Acl, SseMode, notify::NotificationConfig};
+use teifs_types::{Acl, SseMode, logging::LoggingConfig, notify::NotificationConfig};
 
 use crate::{
     Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lifecycle::Lifecycle,
@@ -46,6 +46,9 @@ pub(crate) struct BucketConfig {
     /// Its notification rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notifications: Option<NotificationConfig>,
+    /// Where its access log goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    logging: Option<LoggingConfig>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -88,6 +91,9 @@ pub struct BucketSettings {
     /// Its notification rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationConfig>,
+    /// Where its access log goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<LoggingConfig>,
 }
 
 /// How a bucket encrypts objects written without asking, and which encryption it
@@ -363,6 +369,7 @@ impl Store {
             object_lock: config.object_lock,
             lifecycle: config.lifecycle,
             notifications: config.notifications,
+            logging: config.logging,
         })
     }
 
@@ -409,6 +416,43 @@ impl Store {
     ) -> Result<()> {
         let rules = rules.filter(|config| !config.is_empty());
         self.change_config(bucket, move |config| config.notifications = rules)
+            .await
+    }
+
+    /// Where a bucket's access log goes, if anywhere; from memory once read.
+    pub async fn bucket_logging(&self, bucket: &str) -> Result<Option<Arc<LoggingConfig>>> {
+        if let Some(found) = self.inner.logging.cached(bucket) {
+            return Ok(found);
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            inner.logging.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.logging)
+            })
+        })
+        .await
+    }
+
+    /// Whether any bucket logs its requests (reads every bucket's settings: for a start).
+    pub async fn any_bucket_logging(&self) -> Result<bool> {
+        for bucket in self.list_buckets().await? {
+            match self.bucket_logging(&bucket.name).await {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) | Err(StoreError::NoSuchBucket) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Replaces where a bucket's access log goes (checked by the caller); `None` stops it.
+    pub async fn set_bucket_logging(
+        &self,
+        bucket: &str,
+        logging: Option<LoggingConfig>,
+    ) -> Result<()> {
+        self.change_config(bucket, move |config| config.logging = logging)
             .await
     }
 
@@ -664,6 +708,7 @@ impl Inner {
     pub(crate) fn settings_changed(&self) {
         self.lifecycles.clear();
         self.notifications.clear();
+        self.logging.clear();
     }
 
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.

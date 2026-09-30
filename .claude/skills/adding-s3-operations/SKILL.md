@@ -55,6 +55,11 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    is acted on (PostObject names its key in the form body), read it in `cors::Service`
    before s3s runs, pass it as a request extension (as `post_form::Form`), and refuse the
    operation in `Access` when the extension is missing.
+
+   **Access logs**: an operation on a subresource needs its record name (`REST.GET.ACL`)
+   in `SUBRESOURCES` (`crates/s3/src/access_log/record.rs`); one that also acts on
+   another object than its path's adds an `access_log::Also` for it, as copies do in
+   `Access::check` and multi-object deletes in `delete_objects`.
 5. **Tests**:
    - store behaviour in `crates/store/src/tests.rs`, or for a larger feature a module of
      its own beside it (as `versioning_tests.rs`);

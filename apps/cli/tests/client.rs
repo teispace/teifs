@@ -1715,3 +1715,87 @@ async fn event_rules_name_aws_destinations_and_eventbridge() {
     assert_eq!(read.topic_configurations().len(), 1, "rules kept");
     cli.fails(&event("eventbridge", "t/aws", "maybe"), 2).await;
 }
+
+#[tokio::test]
+async fn access_logs_are_set_shown_delivered_and_removed() {
+    let server = start_with(|config| {
+        config.access_log_interval = Some(std::time::Duration::from_secs(1));
+    })
+    .await;
+    let cli = Client::new(&server);
+    for bucket in ["t/app", "t/logs"] {
+        cli.ok(&["mb", bucket]).await;
+    }
+    let info = async || records(&cli.ok(&["--json", "logging", "info", "t/app"]).await).remove(0);
+    assert_eq!(info().await["targetBucket"], serde_json::Value::Null);
+    let text = cli.ok(&["logging", "set", "t/app", "t/logs/app/"]).await;
+    assert!(
+        text.contains("Access log of t/app: to t/logs/app/"),
+        "{text}"
+    );
+    let got = info().await;
+    assert_eq!(
+        (
+            &got["targetBucket"],
+            &got["targetPrefix"],
+            &got["keyFormat"]
+        ),
+        (&"logs".into(), &"app/".into(), &"simple".into())
+    );
+    // The target's policy now lets the logging service in, once however often it's set.
+    cli.ok(&[
+        "logging",
+        "set",
+        "t/app",
+        "t/logs/app/",
+        "--format",
+        "delivery-time",
+    ])
+    .await;
+    assert_eq!(info().await["keyFormat"], "partitioned by delivery time");
+    let s3 = client(&server, SECRET_KEY);
+    let policy = s3.get_bucket_policy().bucket("logs").send().await.unwrap();
+    assert_eq!(
+        policy
+            .policy()
+            .unwrap()
+            .matches("TeiFSAccessLogs-app")
+            .count(),
+        1
+    );
+    // Requests are delivered into it.
+    cli.ok(&["ls", "t/app"]).await;
+    let mut delivered = false;
+    for _ in 0..100 {
+        let listed = s3
+            .list_objects_v2()
+            .bucket("logs")
+            .prefix("app/")
+            .send()
+            .await
+            .unwrap();
+        if listed.key_count().unwrap_or(0) > 0 {
+            let key = listed.contents()[0].key().unwrap().to_owned();
+            let account = server.iam.account();
+            assert!(
+                key.starts_with(&format!("app/{account}/us-east-1/app/")),
+                "{key}"
+            );
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(delivered, "no log object was delivered");
+    let text = cli.ok(&["logging", "rm", "t/app"]).await;
+    assert!(text.contains("Access log of t/app: off"), "{text}");
+    assert_eq!(info().await["targetBucket"], serde_json::Value::Null);
+    // Without the policy, a target that doesn't let the service in is refused.
+    cli.ok(&["mb", "t/closed"]).await;
+    let err = cli
+        .fails(&["logging", "set", "t/app", "t/closed", "--no-policy"], 1)
+        .await;
+    assert!(err.contains("can't set the access log of t/app"), "{err}");
+    cli.fails(&["logging", "set", "t/app", "other/logs"], 2)
+        .await;
+}

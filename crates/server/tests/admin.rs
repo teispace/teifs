@@ -608,11 +608,38 @@ fn items(report: &BucketsImportReport) -> Vec<(&str, &str)> {
 
 #[tokio::test]
 async fn buckets_move_to_another_drive_with_their_settings() {
+    use aws_sdk_s3::types::{BucketLoggingStatus, LoggingEnabled};
+
     let from = start().await;
     configured(&from, "logs").await;
-    client(&from, SECRET_KEY)
-        .create_bucket()
+    let s3 = client(&from, SECRET_KEY);
+    s3.create_bucket().bucket("plain").send().await.unwrap();
+    // `logs` logs to `plain`, which comes after it: an import sets logging once every
+    // bucket (and the target's policy) is there.
+    s3.put_bucket_policy()
         .bucket("plain")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Principal":{"Service":"logging.s3.amazonaws.com"},"Action":"s3:PutObject",
+            "Resource":"arn:aws:s3:::plain/access/*",
+            "Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:s3:::logs"}}}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_logging()
+        .bucket("logs")
+        .bucket_logging_status(
+            BucketLoggingStatus::builder()
+                .logging_enabled(
+                    LoggingEnabled::builder()
+                        .target_bucket("plain")
+                        .target_prefix("access/")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -650,6 +677,7 @@ async fn buckets_move_to_another_drive_with_their_settings() {
     );
     assert!(items(&report).contains(&("bucket", "created")));
     assert!(items(&report).contains(&("lifecycle", "applied")));
+    assert!(items(&report).contains(&("logging", "applied")));
     // The other drive now exports the same.
     let (_, again) = get(&to, ROOT, ADMIN_BUCKETS).await;
     let again: BucketsExport = serde_json::from_str(&again).unwrap();

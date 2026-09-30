@@ -18,21 +18,24 @@ use teifs_types::{
     admin::{
         BUCKETS_EXPORT_FORMAT, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
     },
+    logging::LoggingConfig,
     notify::NotificationConfig,
 };
 
 use crate::{
+    access_log::AccessLog,
     acl, admin,
     bucket_access::{Rules, parse_policy, public_policy_blocked},
     cors,
     errors::StoreResultExt,
-    lifecycle, object_lock,
+    lifecycle, logging, object_lock,
     routes::{s3_refusal, signed_body},
     tagging,
 };
 
 /// The settings an import knows, in the order it applies them: Block Public Access
-/// before what it refuses, Object Ownership with the ACL, tags before ABAC.
+/// before what it refuses, Object Ownership with the ACL, tags before ABAC. Logging goes
+/// last, once every bucket is there: its target may come later in the export.
 const SETTINGS: &[&str] = &[
     "objectLock",
     "publicAccessBlock",
@@ -45,6 +48,7 @@ const SETTINGS: &[&str] = &[
     "lifecycle",
     "encryption",
     "notifications",
+    "logging",
 ];
 
 /// `GET buckets`: every bucket, or `?bucket=NAME`'s alone.
@@ -110,6 +114,7 @@ pub(crate) async fn import(
     store: &Store,
     rules: &Rules,
     notifier: &Notifier,
+    (account, access_log): (&str, &AccessLog),
     mut req: S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
     let body = signed_body(&mut req, admin::MAX_IMPORT_BYTES)
@@ -133,7 +138,7 @@ pub(crate) async fn import(
         ));
     }
     let mut report = BucketsImportReport::default();
-    for bucket in export.buckets {
+    for bucket in &export.buckets {
         let mut import = Import {
             store,
             rules,
@@ -141,8 +146,25 @@ pub(crate) async fn import(
             bucket: &bucket.name,
             items: &mut report.items,
         };
-        import.bucket(&bucket).await;
+        import.bucket(bucket).await;
         rules.forget(&bucket.name);
+    }
+    for bucket in &export.buckets {
+        let Some(value) = bucket.settings.get("logging") else {
+            continue;
+        };
+        let mut import = Import {
+            store,
+            rules,
+            notifier,
+            bucket: &bucket.name,
+            items: &mut report.items,
+        };
+        let result = import.logging(value, account).await;
+        if result.is_ok() {
+            access_log.turn_on();
+        }
+        import.report("logging", result.map(|()| APPLIED));
     }
     tracing::info!(
         items = report.items.len(),
@@ -460,6 +482,16 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Checked as `PutBucketLogging` checks it.
+    async fn logging(&self, value: &Value, account: &str) -> S3Result<()> {
+        let config: LoggingConfig = parse("logging", value)?;
+        logging::check(self.store, self.rules, Some(account), self.bucket, &config).await?;
+        self.store
+            .set_bucket_logging(self.bucket, Some(config))
+            .await
+            .s3()
+    }
+
     async fn encryption(&self, value: &Value) -> S3Result<()> {
         let encryption: BucketEncryption = parse("encryption", value)?;
         self.store
@@ -556,6 +588,12 @@ mod tests {
             object_lock: Some(ObjectLock::default()),
             lifecycle: Some(Lifecycle::default()),
             notifications: Some(NotificationConfig::default()),
+            logging: Some(LoggingConfig {
+                target_bucket: String::new(),
+                target_prefix: String::new(),
+                key_format: None,
+                grants: Vec::new(),
+            }),
         };
         let Value::Object(given) = serde_json::to_value(all).unwrap() else {
             unreachable!()

@@ -84,8 +84,8 @@ enum PrincipalEntry {
     /// `{"Federated": "…"}`: the identity provider (an OpenID Connect provider's ARN)
     /// whose web identities may assume the role.
     Federated(Box<str>),
-    /// An AWS service or identity provider: never a TeiFS caller.
-    Never,
+    /// `{"Service": "…"}`: a service acting for an account (S3's log delivery).
+    Service(Box<str>),
 }
 
 /// `Action` (or, `negated`, `NotAction`).
@@ -577,16 +577,23 @@ impl PrincipalEntry {
             "CanonicalUser" if !value.is_empty() && value != "*" => {
                 Ok(Self::Canonical(value.into()))
             }
-            "Federated" if !value.is_empty() => {
+            "Federated" | "Service" if !value.is_empty() => {
+                let federated = kind == "Federated";
                 if value.contains(['*', '?']) {
-                    return Err(Error::new(format!(
-                        "`{value}`: a Federated principal names one identity provider, \
-                         without wildcards"
-                    )));
+                    let names = if federated {
+                        "a Federated principal names one identity provider"
+                    } else {
+                        "a Service principal names one service"
+                    };
+                    return Err(Error::new(format!("`{value}`: {names}, without wildcards")));
                 }
-                Ok(Self::Federated(value.into()))
+                let value = value.into();
+                Ok(if federated {
+                    Self::Federated(value)
+                } else {
+                    Self::Service(value)
+                })
             }
-            "Service" if !value.is_empty() => Ok(Self::Never),
             "CanonicalUser" | "Service" | "Federated" => Err(bad()),
             other => Err(Error::new(format!(
                 "`{other}` isn't a kind of principal (AWS, CanonicalUser, Service, Federated)"
@@ -614,7 +621,7 @@ impl PrincipalEntry {
             Self::Federated(provider) => {
                 (principal.web_identity_provider() == Some(provider)).then_some(Grant::Named)
             }
-            Self::Never => None,
+            Self::Service(name) => (principal.service_name() == Some(name)).then_some(Grant::Named),
         }
     }
 
@@ -633,7 +640,7 @@ impl PrincipalEntry {
             }
             Self::Canonical(id) => principal.canonical_id() == Some(id),
             Self::Federated(provider) => principal.web_identity_provider() == Some(provider),
-            Self::Never => false,
+            Self::Service(name) => principal.service_name() == Some(name),
         }
     }
 }
@@ -1204,6 +1211,121 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn service_principals_are_named_by_the_service() {
+        let policy = Policy::parse(
+            &statement(
+                r#""Effect": "Allow", "Action": "s3:PutObject",
+                   "Resource": "arn:aws:s3:::logs/*",
+                   "Principal": {"Service": "logging.s3.amazonaws.com"},
+                   "Condition": {
+                     "ArnLike": {"aws:SourceArn": "arn:aws:s3:::src*"},
+                     "StringEquals": {"aws:SourceAccount": "123456789012",
+                                      "aws:PrincipalServiceName": "logging.s3.amazonaws.com"},
+                     "Bool": {"aws:PrincipalIsAWSService": "true"},
+                     "Null": {"aws:PrincipalType": "true"}
+                   }"#,
+            ),
+            Kind::Resource,
+        )
+        .unwrap();
+        let at = crate::Date::from_unix_seconds(0);
+        let grant = |principal: Principal, source: Option<(&str, &str)>| {
+            let mut context = crate::Context::new(principal, at);
+            if let Some((arn, account)) = source {
+                context = context.with_source(arn, account);
+            }
+            policy.grant(&Request {
+                action: "s3:PutObject",
+                resource: "arn:aws:s3:::logs/a",
+                context: &context,
+            })
+        };
+        let logging = || Principal::service("logging.s3.amazonaws.com");
+        let source = Some(("arn:aws:s3:::src", "123456789012"));
+        assert_eq!(grant(logging(), source), Some(Grant::Named));
+        assert_eq!(grant(logging(), None), None, "no source, no match");
+        assert_eq!(
+            grant(logging(), Some(("arn:aws:s3:::other", "123456789012"))),
+            None
+        );
+        assert_eq!(
+            grant(logging(), Some(("arn:aws:s3:::src", "210987654321"))),
+            None
+        );
+        assert_eq!(
+            grant(Principal::service("cloudtrail.amazonaws.com"), source),
+            None
+        );
+        assert_eq!(
+            grant(Principal::root("123456789012"), source),
+            None,
+            "an account isn't the service"
+        );
+        assert_eq!(grant(Principal::anonymous(), source), None);
+        // Without conditions: the name alone decides, and NotPrincipal spares the service.
+        let request = |context: &crate::Context| {
+            let bare = Policy::parse(
+                &statement(
+                    r#""Effect": "Allow", "Action": "s3:PutObject", "Resource": "*",
+                       "Principal": {"Service": "logging.s3.amazonaws.com"}"#,
+                ),
+                Kind::Resource,
+            )
+            .unwrap();
+            let spared = Policy::parse(
+                &statement(
+                    r#""Effect": "Deny", "Action": "s3:PutObject", "Resource": "*",
+                       "NotPrincipal": {"Service": "logging.s3.amazonaws.com"}"#,
+                ),
+                Kind::Resource,
+            )
+            .unwrap();
+            let people = Policy::parse(
+                &statement(
+                    r#""Effect": "Allow", "Action": "s3:PutObject", "Resource": "*", "Principal": "*",
+                       "Condition": {"Bool": {"aws:PrincipalIsAWSService": "false"}}"#,
+                ),
+                Kind::Resource,
+            )
+            .unwrap();
+            let request = Request {
+                action: "s3:PutObject",
+                resource: "arn:aws:s3:::logs/a",
+                context,
+            };
+            (
+                bare.grant(&request),
+                spared.denies(&request),
+                people.grant(&request).is_some(),
+            )
+        };
+        let context = |principal| crate::Context::new(principal, at);
+        assert_eq!(
+            request(&context(logging())),
+            (Some(Grant::Named), false, false)
+        );
+        assert_eq!(
+            request(&context(Principal::service("cloudtrail.amazonaws.com"))),
+            (None, true, false),
+            "another service is neither named nor spared"
+        );
+        assert_eq!(
+            request(&context(Principal::root("123456789012"))),
+            (None, true, true),
+            "an account isn't a service"
+        );
+        for wildcard in [r#"{"Service": "*"}"#, r#"{"Service": "logging.*"}"#] {
+            let body = format!(
+                r#""Effect": "Allow", "Action": "s3:PutObject", "Resource": "*", "Principal": {wildcard}"#
+            );
+            assert!(
+                refused(&statement(&body), Kind::Resource).contains("without wildcards"),
+                "{wildcard}"
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub enum PrincipalKind {
     WebIdentityUser,
     /// An unsigned request.
     Anonymous,
+    /// A service acting for the account, such as S3's log delivery
+    /// (`logging.s3.amazonaws.com`); AWS gives it no `aws:PrincipalType`.
+    Service,
 }
 
 impl PrincipalKind {
@@ -38,6 +41,7 @@ impl PrincipalKind {
             Self::FederatedUser => "FederatedUser",
             Self::WebIdentityUser => "WebIdentityUser",
             Self::Anonymous => "Anonymous",
+            Self::Service => "Service",
         }
     }
 }
@@ -60,6 +64,8 @@ pub struct Principal {
     /// The identity provider that vouched for it (`aws:FederatedProvider`): the web
     /// identity itself, or a role session it started.
     federated_provider: Option<String>,
+    /// The service it is (`aws:PrincipalServiceName`), for a service.
+    service: Option<String>,
     /// Whether a policy naming the principal's ARN (or a session's role) means this
     /// principal; see [`Self::unbound`].
     bound: bool,
@@ -79,6 +85,7 @@ impl Principal {
             session_name: None,
             canonical_id: None,
             federated_provider: None,
+            service: None,
             bound: true,
         }
     }
@@ -97,6 +104,7 @@ impl Principal {
             session_name: None,
             canonical_id: None,
             federated_provider: None,
+            service: None,
             bound: true,
         }
     }
@@ -122,6 +130,7 @@ impl Principal {
             session_name: Some(session_name.to_owned()),
             canonical_id: None,
             federated_provider: None,
+            service: None,
             bound: true,
         }
     }
@@ -139,6 +148,7 @@ impl Principal {
             session_name: None,
             canonical_id: None,
             federated_provider: None,
+            service: None,
             bound: true,
         }
     }
@@ -158,6 +168,7 @@ impl Principal {
             session_name: None,
             canonical_id: None,
             federated_provider: Some(provider.to_owned()),
+            service: None,
             bound: true,
         }
     }
@@ -192,6 +203,27 @@ impl Principal {
             session_name: None,
             canonical_id: None,
             federated_provider: None,
+            service: None,
+            bound: true,
+        }
+    }
+
+    /// The service `name` (`logging.s3.amazonaws.com`), acting for a resource's owner:
+    /// whom a `Service` principal names. Say what it acts for with
+    /// [`Context::with_source`].
+    #[must_use]
+    pub fn service(name: &str) -> Self {
+        Self {
+            kind: PrincipalKind::Service,
+            arn: None,
+            account: None,
+            user_id: name.to_owned(),
+            username: None,
+            role_arn: None,
+            session_name: None,
+            canonical_id: None,
+            federated_provider: None,
+            service: Some(name.to_owned()),
             bound: true,
         }
     }
@@ -252,6 +284,12 @@ impl Principal {
 
     pub(crate) fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()
+    }
+
+    /// The service it is, if it's one.
+    #[must_use]
+    pub fn service_name(&self) -> Option<&str> {
+        self.service.as_deref()
     }
 
     /// The identity provider a web identity comes from, if this is one (not a session
@@ -373,6 +411,8 @@ pub struct Context {
     resource_account: Option<String>,
     token_issue_time: Option<Date>,
     source_identity: Option<String>,
+    /// `aws:SourceArn` and `aws:SourceAccount`: what a service acts for.
+    source: Option<(String, String)>,
     s3: Vec<(S3Key, Value)>,
     iam: Vec<(IamKey, Value)>,
     sts: Vec<(StsKey, Value)>,
@@ -403,6 +443,7 @@ impl Context {
             resource_account: None,
             token_issue_time: None,
             source_identity: None,
+            source: None,
             s3: Vec::new(),
             iam: Vec::new(),
             sts: Vec::new(),
@@ -479,6 +520,14 @@ impl Context {
     #[must_use]
     pub fn with_source_identity(mut self, identity: &str) -> Self {
         self.source_identity = Some(identity.to_owned());
+        self
+    }
+
+    /// `aws:SourceArn` and `aws:SourceAccount`: the resource (`arn:aws:s3:::logged`) and
+    /// account a service acts for.
+    #[must_use]
+    pub fn with_source(mut self, arn: &str, account: &str) -> Self {
+        self.source = Some((arn.to_owned(), account.to_owned()));
         self
     }
 
@@ -587,13 +636,20 @@ impl Context {
             GlobalKey::PrincipalArn => {
                 Values::text(principal.role_arn.as_deref().or(principal.arn.as_deref()))
             }
+            GlobalKey::PrincipalType if principal.kind == PrincipalKind::Service => Values::None,
             GlobalKey::PrincipalType => Values::One(Item::Str(principal.kind.name())),
             GlobalKey::UserId => Values::One(Item::Str(&principal.user_id)),
             GlobalKey::Username => Values::text(principal.username.as_deref()),
             GlobalKey::RoleSessionName => Values::text(principal.session_name.as_deref()),
             GlobalKey::SourceIdentity => Values::text(self.source_identity.as_deref()),
-            GlobalKey::PrincipalIsAwsService | GlobalKey::ViaAwsService => {
-                Values::One(Item::Bool(false))
+            GlobalKey::PrincipalIsAwsService => {
+                Values::One(Item::Bool(principal.service.is_some()))
+            }
+            GlobalKey::ViaAwsService => Values::One(Item::Bool(false)),
+            GlobalKey::PrincipalServiceName => Values::text(principal.service.as_deref()),
+            GlobalKey::SourceArn => Values::text(self.source.as_ref().map(|(arn, _)| arn.as_str())),
+            GlobalKey::SourceAccount => {
+                Values::text(self.source.as_ref().map(|(_, account)| account.as_str()))
             }
             GlobalKey::TagKeys => Values::Many(&self.request_tag_keys),
             GlobalKey::FederatedProvider => Values::text(principal.federated_provider.as_deref()),
@@ -604,12 +660,9 @@ impl Context {
             | GlobalKey::MultiFactorAuthPresent
             | GlobalKey::PrincipalOrgId
             | GlobalKey::PrincipalOrgPaths
-            | GlobalKey::PrincipalServiceName
             | GlobalKey::PrincipalServiceNamesList
             | GlobalKey::ResourceOrgId
             | GlobalKey::ResourceOrgPaths
-            | GlobalKey::SourceAccount
-            | GlobalKey::SourceArn
             | GlobalKey::SourceOrgId
             | GlobalKey::SourceOrgPaths
             | GlobalKey::SourceOwner

@@ -383,6 +383,8 @@ pub(crate) struct Routes {
     pub(crate) tracers: Arc<Tracers>,
     /// Where events go: the server's notification targets and its listeners.
     pub(crate) events: Events,
+    /// Where requests' access log records go, turned on when an import makes a bucket log.
+    pub(crate) access_log: Arc<crate::access_log::AccessLog>,
 }
 
 #[async_trait::async_trait]
@@ -536,7 +538,14 @@ impl Routes {
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
             Handler::ImportBuckets => {
-                bucket_export::import(&self.store, &self.rules, self.events.notifier(), req).await
+                bucket_export::import(
+                    &self.store,
+                    &self.rules,
+                    self.events.notifier(),
+                    (&self.iam.account(), &self.access_log),
+                    req,
+                )
+                .await
             }
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),

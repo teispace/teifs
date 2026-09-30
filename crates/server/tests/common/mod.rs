@@ -38,6 +38,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
         notify: Vec::new(),
+        access_log_interval: None,
         credentials: Some(DriveCredentials {
             access_key: ACCESS_KEY.into(),
             secret_key: SECRET_KEY.into(),
@@ -91,10 +92,15 @@ pub fn client(server: &Server, secret: &str) -> Client {
 
 /// A client signing with another access key (an IAM user's).
 pub fn client_as(server: &Server, access_key: &str, secret: &str) -> Client {
+    client_at(&server.endpoint, access_key, secret)
+}
+
+/// A client of the server at `endpoint`.
+pub fn client_at(endpoint: &str, access_key: &str, secret: &str) -> Client {
     let config = aws_sdk_s3::Config::builder()
         .behavior_version_latest()
         .region(Region::new("us-east-1"))
-        .endpoint_url(&server.endpoint)
+        .endpoint_url(endpoint)
         .credentials_provider(Credentials::new(access_key, secret, None, None, "tests"))
         .force_path_style(true)
         .build();

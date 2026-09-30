@@ -5,12 +5,13 @@ mod acl;
 pub mod admin;
 pub mod audit;
 pub mod caps;
+pub mod logging;
 mod names;
 pub mod notify;
 mod object;
 pub mod verify;
 
-pub use acl::{Acl, AclGrant, Grantee, OWNER_ID, Permission};
+pub use acl::{Acl, AclCaller, AclGrant, Grantee, OWNER_ID, Permission};
 pub use names::{
     BUCKET_STAGING, MAX_KEY_LEN, MAX_SEGMENT_LEN, NameError, ObjectKey, check_bucket,
     check_folder_bucket, check_object_key,

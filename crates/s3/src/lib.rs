@@ -2,6 +2,7 @@
 //! restic, boto3, …) reads and writes the drive's folders as buckets.
 
 mod access;
+mod access_log;
 mod acl;
 mod admin;
 mod audit;
@@ -22,6 +23,7 @@ mod lifecycle;
 mod limits;
 mod lines;
 mod listen;
+mod logging;
 mod metrics;
 mod notification;
 mod object_lock;
@@ -45,6 +47,7 @@ use teifs_iam::Iam;
 use teifs_store::{Layout, Store};
 
 pub use access::Client;
+pub use access_log::{DEFAULT_INTERVAL as DEFAULT_ACCESS_LOG_INTERVAL, Worker as AccessLogWorker};
 pub use admin::RootKeyStore;
 pub use audit::{AuditSink, REDACTED};
 pub use cors::Service;
@@ -97,6 +100,12 @@ pub struct Options {
     pub audit: Option<Arc<dyn AuditSink>>,
     /// The targets bucket notifications are sent to; none has no targets.
     pub notifier: Option<Arc<teifs_notify::Notifier>>,
+    /// Whether some bucket logs its requests as the server starts (see
+    /// [`Store::any_bucket_logging`]): requests are watched from the first.
+    pub access_logging: bool,
+    /// How often each bucket's access log records are delivered as a log object; `None`
+    /// is every five minutes.
+    pub access_log_interval: Option<std::time::Duration>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -104,15 +113,33 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let notifier = options
         .notifier
         .unwrap_or_else(|| Arc::new(teifs_notify::Notifier::none()));
+    let metrics = metrics::Metrics::new(&store, Arc::clone(&notifier));
+    let (access_log, records) =
+        access_log::AccessLog::new(options.access_logging, metrics.access_log());
     let drive = Drive::new(
         store.clone(),
         options.default_layout,
         options.legacy_bucket_defaults,
         Arc::clone(&notifier),
+        options.iam.as_ref().map(|iam| iam.account()).as_deref(),
+    )
+    .with_access_log(Arc::clone(&access_log));
+    let worker = AccessLogWorker::new(
+        records,
+        Arc::clone(&access_log),
+        drive.clone(),
+        store.clone(),
+        options
+            .access_log_interval
+            .unwrap_or(access_log::DEFAULT_INTERVAL),
     );
     let events = drive.events();
     // A store serves one service: a second is told nothing new.
-    let _ = store.tell_expirations(Arc::new(events.clone()));
+    let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
+        events: events.clone(),
+        log: Arc::clone(&access_log),
+    });
+    let _ = store.tell_expirations(&expirations);
     let rules = drive.rules();
     let scrapers = match &options.iam {
         Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
@@ -120,11 +147,12 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     };
     let tracers = Arc::new(trace::Tracers::new());
     let watch = observe::Watch::new(
-        metrics::Metrics::new(&store, Arc::clone(&notifier)),
+        metrics,
         scrapers,
         options.audit,
         Arc::clone(&tracers),
         store.format().drive.clone(),
+        Arc::clone(&access_log),
     );
     let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
@@ -154,6 +182,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             root_keys: options.root_keys,
             tracers,
             events,
+            access_log,
         });
     }
     let host = if options.domains.is_empty() {
@@ -170,5 +199,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.plain_http_is_secure,
         options.trusted_proxies,
         watch,
-    ))
+    )
+    .with_access_log(worker, expirations))
 }

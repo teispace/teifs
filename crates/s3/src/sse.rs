@@ -39,6 +39,7 @@ pub(crate) fn customer_key(
 }
 
 /// What a write asks for.
+#[derive(Default)]
 pub(crate) struct WriteRequest<'a> {
     pub sse: Option<&'a dto::ServerSideEncryption>,
     pub kms_key: Option<&'a str>,

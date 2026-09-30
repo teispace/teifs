@@ -9,6 +9,7 @@ mod event;
 mod ilm;
 mod listing;
 mod lock;
+mod logging;
 mod sse;
 mod target;
 mod transfer;
@@ -152,6 +153,12 @@ pub enum Command {
         #[command(subcommand)]
         action: EncryptAction,
     },
+    /// Deliver a record of every request on a bucket, in S3's server access log format,
+    /// into another bucket (or itself), or show where they go.
+    Logging {
+        #[command(subcommand)]
+        action: LoggingAction,
+    },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
         /// `ALIAS/BUCKET/KEY`.
@@ -270,6 +277,50 @@ pub enum LegalHoldAction {
         #[arg(long)]
         version_id: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum LoggingAction {
+    /// Log `ALIAS/BUCKET`'s requests into `ALIAS/TARGET[/PREFIX]`, letting the logging
+    /// service into the target with a statement in its bucket policy (as the S3 console
+    /// does).
+    Set {
+        /// `ALIAS/BUCKET`: the bucket whose requests are logged.
+        source: String,
+        /// `ALIAS/TARGET[/PREFIX]`: where log objects go, their keys starting with PREFIX
+        /// (end it with `/` for a folder).
+        target: String,
+        /// How log objects are named: `simple` (`PREFIX` + date and time), or
+        /// partitioned by account, region, bucket and the records' day (`event-time`)
+        /// or the delivery's (`delivery-time`).
+        #[arg(long, value_enum, default_value = "simple")]
+        format: LoggingFormat,
+        /// Leave the target's bucket policy alone (it lets the service in already, or
+        /// its ACL grants the log delivery group WRITE).
+        #[arg(long)]
+        no_policy: bool,
+    },
+    /// Show where a bucket's access log goes.
+    Info {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+    /// Stop logging a bucket's requests.
+    Rm {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+    },
+}
+
+/// How access log objects are named.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LoggingFormat {
+    /// `PREFIX` + `YYYY-MM-DD-hh-mm-ss-UNIQUE`.
+    Simple,
+    /// `PREFIX` + `ACCOUNT/REGION/BUCKET/YYYY/MM/DD/`, by the day of the records.
+    EventTime,
+    /// The same, by the day of the delivery.
+    DeliveryTime,
 }
 
 #[derive(Subcommand)]
