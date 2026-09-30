@@ -458,3 +458,25 @@ async fn info_tells_what_scrubs_found() {
         run.stderr
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshots_from_the_command_line() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let out = cli.ok(&["admin", "snapshot", "take", "t"]).await;
+    assert!(
+        out.contains("Snapshotted the drive's metadata as "),
+        "{out}"
+    );
+    let taken = records(&cli.ok(&["--json", "admin", "snapshot", "take", "t"]).await);
+    assert_eq!(taken[0]["type"], "snapshot");
+    let listed = records(&cli.ok(&["--json", "admin", "snapshot", "ls", "t"]).await);
+    assert!(listed.iter().any(|r| r["name"] == taken[0]["name"]));
+    let out = cli.ok(&["admin", "snapshot", "ls", "t"]).await;
+    assert!(out.contains("NAME") && out.contains("TAKEN"), "{out}");
+    let out = cli.ok(&["admin", "config", "t"]).await;
+    assert!(
+        out.contains("Snapshots kept") && out.contains("3, one a day"),
+        "{out}"
+    );
+}

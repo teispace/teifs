@@ -114,13 +114,15 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
         upload_expiry: Some(Duration::ZERO),
         pace: 0.0,
         scrub_every: Some(Duration::from_millis(20)),
+        snapshots: 1,
     });
     // The upload goes during the step; the step's result is recorded right after.
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         let status = jobs.status();
         let scrubbed = store.scrub_report().await.unwrap().last.is_some();
-        if status.get("expire-uploads").is_some_and(|s| s.items == 1) && scrubbed {
+        let snapshotted = !store.snapshots().await.unwrap().is_empty();
+        if status.get("expire-uploads").is_some_and(|s| s.items == 1) && scrubbed && snapshotted {
             break status;
         }
         assert!(
@@ -144,10 +146,11 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
 }
 
 #[test]
-fn defaults_expire_uploads_after_a_week_and_scrub_monthly_at_half_a_core() {
+fn defaults_expire_uploads_after_a_week_scrub_monthly_and_keep_three_snapshots() {
     let options = JobOptions::default();
     assert_eq!(options.upload_expiry, Some(7 * DAY));
     assert_eq!(options.scrub_every, Some(30 * DAY));
+    assert_eq!(options.snapshots, 3);
     assert!((options.pace - 1.0).abs() < f64::EPSILON);
 }
 
@@ -284,4 +287,53 @@ async fn an_empty_drives_scrub_counts_as_progress() {
     assert_eq!(job.run(&at(now + HOUR)).await.unwrap(), 1);
     let last = store.scrub_report().await.unwrap().last.unwrap();
     assert_eq!((last.versions, last.bytes), (0, 0));
+}
+
+#[tokio::test]
+async fn metadata_is_snapshotted_daily_and_the_newest_kept() {
+    let (dir, store) = store().await;
+    store.create_bucket("obj", Layout::Object).await.unwrap();
+    let mut job = TakeSnapshots {
+        every: DAY,
+        keep: 2,
+    };
+    let now = SystemTime::now();
+    assert_eq!(job.step(&store.inner, &at(now)).unwrap(), 1);
+    assert_eq!(job.step(&store.inner, &at(now + HOUR)).unwrap(), 0);
+    // A snapshot left half-written by a crash goes at the next prune.
+    let auto = dir.path().join(".teifs/backups/auto");
+    let partial = auto.join(".20260101T000000.000Z.partial");
+    fs::create_dir(&partial).unwrap();
+    let first = &store.snapshots().await.unwrap()[0];
+    fs::copy(
+        auto.join(&first.name).join("snapshot.json"),
+        partial.join("snapshot.json"),
+    )
+    .unwrap();
+    assert_eq!(store.snapshots().await.unwrap().len(), 1);
+    assert_eq!(job.step(&store.inner, &at(now + DAY)).unwrap(), 1);
+    assert_eq!(job.step(&store.inner, &at(now + 2 * DAY)).unwrap(), 1);
+    let snapshots = store.snapshots().await.unwrap();
+    assert_eq!(
+        snapshots.iter().map(|s| s.created_ms).collect::<Vec<_>>(),
+        [millis(now + DAY), millis(now + 2 * DAY)]
+    );
+    assert_eq!(fs::read_dir(&auto).unwrap().count(), 2);
+    let newest = &snapshots[1];
+    assert_eq!(newest.drive, store.format().drive);
+    assert!(newest.bytes > 0);
+    // Each is a working copy of both databases.
+    let copy = auto.join(&newest.name);
+    let system = teifs_meta::System::open(&copy.join("system.db")).unwrap();
+    assert!(system.bucket("obj").unwrap().is_some());
+    assert!(teifs_meta::intact(&copy.join("index.db")).unwrap());
+}
+
+#[tokio::test]
+async fn a_snapshot_can_be_asked_for_at_any_time() {
+    let (_dir, store) = store().await;
+    let first = store.take_snapshot().await.unwrap();
+    let second = store.take_snapshot().await.unwrap();
+    assert!(first.name < second.name || first.created_ms == second.created_ms);
+    assert_eq!(store.snapshots().await.unwrap().len(), 2);
 }

@@ -146,7 +146,8 @@ A key that's deactivated or deleted stops working at the next request.
 
 ### 4. Credentials can't be escalated (*built for IAM users, roles and temporary credentials*)
 IAM access keys' secrets are stored sealed (AES-256-GCM, each bound to its access key
-id) under an IAM key the drive's KMS seals, so `system.db` alone doesn't reveal them;
+id) under an IAM key the drive's KMS seals, so `system.db` alone (or a snapshot of it in
+`.teifs/backups/`) doesn't reveal them;
 they're never logged, and shown once, when the key is created.
 Changing IAM is itself an IAM permission: every action of the IAM API is authorized
 before it runs, as on AWS, so a user can manage only what its policies grant, and

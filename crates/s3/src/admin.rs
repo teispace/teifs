@@ -213,6 +213,25 @@ pub(crate) async fn import(iam: &Arc<Iam>, mut req: S3Request<Body>) -> S3Result
     Ok(json(&report))
 }
 
+/// `GET snapshots`.
+pub(crate) async fn snapshots(store: &Store) -> S3Result<S3Response<Body>> {
+    let snapshots = store.snapshots().await.map_err(crate::errors::from_store)?;
+    Ok(json(&snapshots))
+}
+
+/// `POST snapshots`.
+pub(crate) async fn take_snapshot(store: &Store) -> S3Result<S3Response<Body>> {
+    let snapshot = store
+        .take_snapshot()
+        .await
+        .map_err(crate::errors::from_store)?;
+    tracing::info!(
+        name = snapshot.name,
+        "the drive's metadata was snapshotted on request"
+    );
+    Ok(json(&snapshot))
+}
+
 /// `POST root-key`: never cached, since the answer holds the new secret.
 pub(crate) async fn rotate_root_key(
     iam: &Arc<Iam>,

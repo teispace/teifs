@@ -47,7 +47,7 @@ impl Inner {
     }
 }
 
-fn fits(dir: &Path, len: u64) -> Result<()> {
+pub(crate) fn fits(dir: &Path, len: u64) -> Result<()> {
     let stats = fs4::statvfs(dir)?;
     if has_room(stats.available_space(), stats.total_space(), len) {
         Ok(())

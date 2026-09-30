@@ -210,6 +210,10 @@ pub(crate) struct ServeArgs {
     /// go at the background jobs' pace and carry on after a restart.
     #[arg(long, default_value = "30d", value_parser = parse_expiry, env = "TEIFS_SCRUB_EVERY")]
     scrub_every: Expiry,
+    /// How many daily snapshots of the drive's metadata (its buckets, settings, IAM and
+    /// object index) to keep in `.teifs/backups/auto/`; 0 takes none.
+    #[arg(long, default_value_t = 3, env = "TEIFS_SNAPSHOTS")]
+    snapshots: usize,
     /// How hard writes are made to survive a power cut: `strict` (nothing
     /// acknowledged is lost), `relaxed` (file data synced; the last moments' writes
     /// may be lost) or `none` (scratch data). None of them can corrupt the drive.
@@ -569,6 +573,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,
             scrub_every: args.scrub_every.0,
+            snapshots: args.snapshots,
             ..JobOptions::default()
         },
         durability: args.durability.into(),

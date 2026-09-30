@@ -19,7 +19,7 @@ use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX, ADMIN_ROOT_KEY,
-    ServerConfig,
+    ADMIN_SNAPSHOTS, ServerConfig,
 };
 
 use crate::{
@@ -89,6 +89,8 @@ enum Handler {
     ExportIamSecrets,
     ImportIam,
     RotateRootKey,
+    Snapshots,
+    TakeSnapshot,
 }
 
 /// One endpoint.
@@ -183,6 +185,22 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("teifs:GetServerConfig", ANY),
         handler: Handler::Config,
         about: "How the server was started, without secrets: `ServerConfig`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_SNAPSHOTS,
+        needs: Needs::Action("teifs:ListSnapshots", ANY),
+        handler: Handler::Snapshots,
+        about: "The drive's metadata snapshots, oldest first: `Snapshot`s",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Post,
+        path: ADMIN_SNAPSHOTS,
+        needs: Needs::Action("teifs:TakeSnapshot", ANY),
+        handler: Handler::TakeSnapshot,
+        about: "Snapshots the drive's metadata now (both databases, kept with the daily ones): `Snapshot`",
     },
     Endpoint {
         api: Api::Admin,
@@ -414,6 +432,8 @@ impl Routes {
             Handler::RotateRootKey => {
                 admin::rotate_root_key(&self.iam, self.root_keys.as_ref()).await
             }
+            Handler::Snapshots => admin::snapshots(&self.store).await,
+            Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

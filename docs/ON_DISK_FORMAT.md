@@ -14,8 +14,9 @@ it against a drive written by each released format.
 │   ├── lock                  held by the one process that has the drive open
 │   ├── index.db              the object index (SQLite, WAL mode)
 │   ├── system.db             bucket settings (SQLite, WAL mode)
-│   ├── backups/              copies made before upgrades
-│   │   └── pre-format-<n>/
+│   ├── backups/              copies of the databases
+│   │   ├── pre-format-<n>/   made before an upgrade
+│   │   └── auto/<UTC time>/  daily snapshots (`serve --snapshots`): index.db, system.db, snapshot.json
 │   ├── buckets/<bucket id>/  object buckets' data files
 │   │   └── <aa>/<bb>/<object id>
 │   ├── tmp/                  bytes being written (emptied at every start)
@@ -212,6 +213,23 @@ remove.
 
 Format 0 is what TeiFS wrote before formats were recorded: a `.teifs/meta.db` and no
 `format.json`.
+
+### Snapshots
+
+A running server copies both databases every day (and when asked, `teifs admin snapshot
+take`) into `.teifs/backups/auto/<UTC time>/`, named like `20260930T045501.123Z`, with
+SQLite's `VACUUM INTO`, which is consistent while the drive is in use. Each is written
+to a hidden `.<name>.partial` folder, checked (`PRAGMA quick_check`), synced and renamed,
+so a listed snapshot is complete; leftovers of an interrupted one are removed. Its
+`snapshot.json` records `name`, `createdMs`, the `drive` id and its `format`. The newest
+`--snapshots` (3 by default) are kept. A snapshot that would eat into the room kept free
+is skipped and retried an hour later.
+
+To put a snapshot back, stop TeiFS and copy its `index.db` and `system.db` into
+`.teifs/`, removing `index.db-wal`, `index.db-shm`, `system.db-wal` and `system.db-shm`
+first. Objects written after the snapshot keep their bytes but not rows: folder
+buckets' files are indexed again, while object buckets' data files are only adopted
+back by a repair.
 
 To go back to an older release after an upgrade, restore the matching backup: stop
 TeiFS, copy the databases from `.teifs/backups/pre-format-<n>/` back into `.teifs/`, and

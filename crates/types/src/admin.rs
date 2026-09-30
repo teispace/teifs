@@ -30,6 +30,27 @@ pub const ADMIN_IAM_SECRETS: &str = "/.teifs/admin/v1/iam/secrets";
 /// through the environment, a flag or a file is changed there.
 pub const ADMIN_ROOT_KEY: &str = "/.teifs/admin/v1/root-key";
 
+/// `GET`: the drive's metadata snapshots, oldest first (`Vec<Snapshot>`); `POST`: takes
+/// one now and answers it.
+pub const ADMIN_SNAPSHOTS: &str = "/.teifs/admin/v1/snapshots";
+
+/// A snapshot of the drive's metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    /// Its name: when it was taken, UTC (`20260930T045501.123Z`).
+    pub name: String,
+    /// When it was taken, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+    /// The drive it's of.
+    pub drive: String,
+    /// The drive's format when it was taken.
+    pub format: u32,
+    /// Its size in bytes.
+    #[serde(default)]
+    pub bytes: u64,
+}
+
 /// The root user's new access key, shown only in this answer and the drive's
 /// credentials file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +348,9 @@ pub struct ServerConfig {
     /// How often every stored version is read back and checked; none if never.
     #[serde(default)]
     pub scrub_every_seconds: Option<u64>,
+    /// How many daily snapshots of the drive's metadata are kept; 0 if none.
+    #[serde(default)]
+    pub snapshots: usize,
     /// The background jobs' pause after a busy step, as a multiple of its duration.
     pub job_pace: f64,
     /// How long a client has to send a request's headers.

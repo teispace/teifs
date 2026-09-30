@@ -47,6 +47,13 @@ pub fn backup(path: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether the database at `path` passes SQLite's quick check.
+pub fn intact(path: &Path) -> Result<bool> {
+    let conn = Connection::open(path)?;
+    let answer: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    Ok(answer == "ok")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

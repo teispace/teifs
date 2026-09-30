@@ -44,6 +44,11 @@ pub enum AdminAction {
         #[command(subcommand)]
         action: IamAction,
     },
+    /// List a TeiFS server's snapshots of its drive's metadata, or take one now.
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
     /// Replace the root key a TeiFS server's drive generated.
     RootKey {
         #[command(subcommand)]
@@ -97,6 +102,20 @@ pub enum IamAction {
 }
 
 #[derive(Subcommand)]
+pub enum SnapshotAction {
+    /// List the snapshots kept (in the drive's `.teifs/backups/auto/`), oldest first.
+    Ls {
+        /// The server's alias.
+        alias: String,
+    },
+    /// Snapshot the drive's metadata (its buckets, settings, IAM and object index) now.
+    Take {
+        /// The server's alias.
+        alias: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum RootKeyAction {
     /// Replace it: the old key stops working at once, the server's drive keeps the new
     /// one, and the alias is updated to use it.
@@ -136,6 +155,12 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
                     adopt_account,
                 },
         } => import(&client(&aliases, &alias)?, &file, adopt_account).await,
+        AdminAction::Snapshot {
+            action: SnapshotAction::Ls { alias },
+        } => snapshots(&client(&aliases, &alias)?).await,
+        AdminAction::Snapshot {
+            action: SnapshotAction::Take { alias },
+        } => take_snapshot(&client(&aliases, &alias)?).await,
         AdminAction::RootKey {
             action: RootKeyAction::Rotate { alias },
         } => rotate(aliases, &alias).await,
@@ -287,6 +312,41 @@ fn scrub_details(report: &teifs_types::verify::ScrubReport) -> Vec<(&'static str
     fields
 }
 
+async fn snapshots(client: &Client) -> Result<(), Error> {
+    let snapshots = client
+        .snapshots()
+        .await
+        .map_err(|e| Error::admin("can't list the server's snapshots", &e))?;
+    let mut table = ui::Table::new(&["NAME", "TAKEN", ">SIZE"]);
+    let mut records = Vec::new();
+    for snapshot in &snapshots {
+        table.row(vec![
+            snapshot.name.clone(),
+            rfc3339(from_ms(snapshot.created_ms)),
+            crate::units::size(snapshot.bytes),
+        ]);
+        records.push(record("snapshot", snapshot));
+    }
+    ui::rows(&table, &records, "No snapshots yet.");
+    Ok(())
+}
+
+async fn take_snapshot(client: &Client) -> Result<(), Error> {
+    let snapshot = client
+        .take_snapshot()
+        .await
+        .map_err(|e| Error::admin("can't take a snapshot", &e))?;
+    ui::done(
+        format!(
+            "Snapshotted the drive's metadata as {} ({})",
+            snapshot.name,
+            crate::units::size(snapshot.bytes)
+        ),
+        || record("snapshot", &snapshot),
+    );
+    Ok(())
+}
+
 async fn config(client: &Client) -> Result<(), Error> {
     let config = client
         .config()
@@ -336,6 +396,13 @@ async fn config(client: &Client) -> Result<(), Error> {
                 config
                     .upload_expiry_seconds
                     .map_or_else(|| "never".to_owned(), |s| uptime(Duration::from_secs(s))),
+            ),
+            (
+                "Snapshots kept",
+                match config.snapshots {
+                    0 => "none".to_owned(),
+                    n => format!("{n}, one a day"),
+                },
             ),
             (
                 "Scrub every",

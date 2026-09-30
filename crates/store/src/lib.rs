@@ -25,6 +25,7 @@ mod objects;
 mod reconcile;
 mod rewrap;
 mod settings;
+mod snapshots;
 mod space;
 mod sse;
 mod staged;
@@ -65,6 +66,7 @@ pub use teifs_crypto::{
     CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
 };
 pub use teifs_meta::{Layout, Part, Upload, Versioning};
+pub use teifs_types::admin::Snapshot;
 use teifs_types::check_folder_bucket;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,

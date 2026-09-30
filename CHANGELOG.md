@@ -94,6 +94,12 @@ behaviour; the on-disk format is always upgraded automatically.
   object. Objects stored before keep reading as they did.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
+- Metadata snapshots: a running server copies its drive's databases (buckets,
+  settings, IAM and the object index) every day into `.teifs/backups/auto/`, keeping
+  the newest three (`--snapshots N`, 0 for none), consistently while it serves and
+  checked before they're kept. `teifs admin snapshot take|ls ALIAS` (admin API
+  `POST|GET snapshots`, `teifs:TakeSnapshot` and `teifs:ListSnapshots`) takes one now or
+  lists them.
 - Integrity scrubs: a running server reads every stored version back every 30 days
   (`--scrub-every`, or `never`) and checks it against what was recorded when it was
   written, its checksums (each part's too) and its ETag, with encrypted objects

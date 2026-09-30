@@ -18,7 +18,7 @@ mod index;
 mod system;
 mod versions;
 
-pub use db::backup;
+pub use db::{backup, intact};
 pub use iam::{
     AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, OidcProviderRow, PolicyRow,
     PolicyVersionRow, RoleRow, UserRow,

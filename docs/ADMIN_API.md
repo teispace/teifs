@@ -48,6 +48,8 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 |---|---|---|---|
 | `GET` | `/.teifs/admin/v1/info` | Version, drive, account, uptime, background jobs and what scrubs found: `ServerInfo` | `teifs:GetServerInfo` |
 | `GET` | `/.teifs/admin/v1/config` | How the server was started, without secrets: `ServerConfig` | `teifs:GetServerConfig` |
+| `GET` | `/.teifs/admin/v1/snapshots` | The drive's metadata snapshots, oldest first: `Snapshot`s | `teifs:ListSnapshots` |
+| `POST` | `/.teifs/admin/v1/snapshots` | Snapshots the drive's metadata now (both databases, kept with the daily ones): `Snapshot` | `teifs:TakeSnapshot` |
 | `GET` | `/.teifs/admin/v1/iam` | The account's IAM, access keys without their secrets: `IamExport` | `teifs:ExportIAM` |
 | `GET` | `/.teifs/admin/v1/iam/secrets` | The account's IAM with access keys' secrets, to move it to another drive | root user |
 | `PUT` | `/.teifs/admin/v1/iam` | Imports an `IamExport` into an empty IAM, all or nothing: `ImportReport`; `?account=adopt` also takes its account id | root user |

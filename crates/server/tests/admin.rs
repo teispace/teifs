@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use aws_sdk_s3::primitives::ByteStream;
 use teifs_types::admin::{
-    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY, AdminError, IamExport,
-    ImportReport, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
+    ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
+    AdminError, IamExport, ImportReport, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo,
+    Snapshot,
 };
 
 mod common;
@@ -77,6 +78,7 @@ async fn config_reports_how_the_server_started_without_secrets() {
         config.legacy_bucket_defaults = true;
         config.jobs.upload_expiry = None;
         config.jobs.scrub_every = Some(std::time::Duration::from_hours(24));
+        config.jobs.snapshots = 0;
     })
     .await;
     let (status, answer) = get(&server, ROOT, ADMIN_CONFIG).await;
@@ -98,6 +100,7 @@ async fn config_reports_how_the_server_started_without_secrets() {
     assert!(config.plain_http_is_secure);
     assert_eq!(config.upload_expiry_seconds, None);
     assert_eq!(config.scrub_every_seconds, Some(86_400));
+    assert_eq!(config.snapshots, 0);
     assert_eq!(config.listen, server.endpoint.trim_start_matches("http://"));
     assert!(
         matches!(config.kms, KmsConfig::Keyring { ref path } if path.ends_with("keyring.json"))
@@ -469,4 +472,34 @@ async fn role_sessions_manage_the_drive_and_other_sessions_do_not() {
         .await;
         assert_eq!(status, 403, "{}", key.0);
     }
+}
+
+#[tokio::test]
+async fn snapshots_are_taken_on_request_and_listed() {
+    let server = start().await;
+    let (status, answer) = signed(&server, ROOT, "POST", ADMIN_SNAPSHOTS, &[], b"").await;
+    assert_eq!(status, 200, "{answer}");
+    let taken: Snapshot = serde_json::from_str(&answer).unwrap();
+    assert!(taken.bytes > 0);
+    let copy = server
+        .dir
+        .path()
+        .join(".teifs/backups/auto")
+        .join(&taken.name);
+    assert!(copy.join("system.db").is_file() && copy.join("index.db").is_file());
+    let (status, answer) = get(&server, ROOT, ADMIN_SNAPSHOTS).await;
+    assert_eq!(status, 200, "{answer}");
+    let listed: Vec<Snapshot> = serde_json::from_str(&answer).unwrap();
+    assert!(listed.contains(&taken), "{answer}");
+    // Listing and taking are separate permissions.
+    let list_only = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"teifs:ListSnapshots","Resource":"*"}}"#;
+    user(&server, "auditor", Some(list_only));
+    let auditor = server.iam.create_access_key("auditor").unwrap();
+    let auditor = (auditor.info.id.as_str(), auditor.secret.as_str());
+    assert_eq!(get(&server, auditor, ADMIN_SNAPSHOTS).await.0, 200);
+    let (status, answer) = signed(&server, auditor, "POST", ADMIN_SNAPSHOTS, &[], b"").await;
+    assert_eq!(
+        (status, error(&answer).code.as_str()),
+        (403, "AccessDenied")
+    );
 }

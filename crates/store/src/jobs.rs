@@ -45,6 +45,8 @@ pub struct JobOptions {
     /// How often every stored version is read back and checked (a pass starts this
     /// long after the last one started); `None` never scrubs.
     pub scrub_every: Option<Duration>,
+    /// How many daily snapshots of the drive's metadata to keep; 0 takes none.
+    pub snapshots: usize,
 }
 
 impl Default for JobOptions {
@@ -53,6 +55,7 @@ impl Default for JobOptions {
             upload_expiry: Some(Duration::from_hours(7 * 24)),
             pace: 1.0,
             scrub_every: Some(Duration::from_hours(30 * 24)),
+            snapshots: 3,
         }
     }
 }
@@ -173,6 +176,42 @@ fn sweep_idle_files(dir: &Path, now: SystemTime) -> Result<usize> {
     Ok(swept)
 }
 
+/// How often the metadata is snapshotted.
+const SNAPSHOT_EVERY: Duration = Duration::from_hours(24);
+
+/// Snapshots the drive's metadata once `every`, keeping the newest `keep`.
+pub(crate) struct TakeSnapshots {
+    pub every: Duration,
+    pub keep: usize,
+}
+
+impl Job for TakeSnapshots {
+    fn name(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn step(&mut self, inner: &Inner, step: &Step) -> Result<usize> {
+        let now = millis(step.now);
+        let newest = inner.list_snapshots()?.last().map(|s| s.created_ms);
+        if newest.is_some_and(|at| now < at.saturating_add(millis_of(self.every))) {
+            return Ok(0);
+        }
+        let snapshot = inner.take_snapshot(now)?;
+        let pruned = inner.prune_snapshots(self.keep)?;
+        tracing::info!(
+            name = snapshot.name,
+            bytes = snapshot.bytes,
+            pruned,
+            "snapshotted the drive's metadata"
+        );
+        Ok(1)
+    }
+
+    fn idle(&self) -> Duration {
+        self.every.min(Duration::from_hours(1))
+    }
+}
+
 /// Retries the garbage queue and forgets answers kept for retries once they're too old.
 pub(crate) struct Housekeeping;
 
@@ -258,6 +297,12 @@ impl Store {
         ];
         if let Some(after) = options.upload_expiry {
             jobs.push(Box::new(ExpireUploads { after }));
+        }
+        if options.snapshots > 0 {
+            jobs.push(Box::new(TakeSnapshots {
+                every: SNAPSHOT_EVERY,
+                keep: options.snapshots,
+            }));
         }
         if let Some(every) = options.scrub_every {
             jobs.push(Box::new(scrub::Scrub::new(self.clone(), every)));
