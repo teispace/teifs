@@ -283,15 +283,25 @@ async fn role_arn(sts: &Client, role: &str) -> Result<String, Error> {
     if role.starts_with("arn:") {
         return Ok(role.to_owned());
     }
+    let account = caller_account(sts).await?;
+    Ok(format!("arn:aws:iam::{account}:role/{role}"))
+}
+
+/// The account the alias's keys belong to.
+pub(crate) async fn account(alias: &Alias) -> Result<String, Error> {
+    caller_account(&client(alias, true)).await
+}
+
+async fn caller_account(sts: &Client) -> Result<String, Error> {
     let caller = sts
         .get_caller_identity()
         .send()
         .await
         .map_err(|e| Error::s3("can't tell the alias's account", &e))?;
-    let account = caller
+    caller
         .account()
-        .ok_or_else(|| Error::general("the server didn't say the alias's account"))?;
-    Ok(format!("arn:aws:iam::{account}:role/{role}"))
+        .map(str::to_owned)
+        .ok_or_else(|| Error::general("the server didn't say the alias's account"))
 }
 
 impl SessionArgs {

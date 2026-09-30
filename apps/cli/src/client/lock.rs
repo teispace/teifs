@@ -16,7 +16,7 @@ use serde_json::json;
 use teifs_store::RetentionPeriod;
 
 use super::{
-    Error, HoldArgs, Kind, LegalHoldAction, LockModeArg, RetentionAction,
+    Error, Kind, LegalHoldAction, LockModeArg, ObjectArgs, RetentionAction,
     alias::Aliases,
     commands::{keys_under, plural},
     target::{Remote, Target},
@@ -86,8 +86,7 @@ pub(super) async fn retention(action: RetentionAction, aliases: &Aliases) -> Res
             change_objects(
                 &remote,
                 &lock.objects,
-                "retention",
-                &what,
+                RETENTION.to(&what),
                 move |client, bucket, key, version| {
                     let retention = retention.clone();
                     async move {
@@ -114,8 +113,7 @@ pub(super) async fn retention(action: RetentionAction, aliases: &Aliases) -> Res
             change_objects(
                 &remote,
                 &lock.objects,
-                "retention",
-                "cleared",
+                RETENTION.to("cleared"),
                 move |client, bucket, key, version| async move {
                     client
                         .put_object_retention()
@@ -165,8 +163,12 @@ pub(super) async fn legal_hold(action: LegalHoldAction, aliases: &Aliases) -> Re
     change_objects(
         &remote,
         &objects,
-        "legal hold",
-        what,
+        Change {
+            noun: "legal hold",
+            title: "Legal hold",
+            record: "legalHold",
+            what,
+        },
         move |client, bucket, key, version| {
             let hold = ObjectLockLegalHold::builder()
                 .status(status.clone())
@@ -187,13 +189,39 @@ pub(super) async fn legal_hold(action: LegalHoldAction, aliases: &Aliases) -> Re
     .await
 }
 
+/// What [`change_objects`] changes, for its messages and records.
+#[derive(Clone, Copy)]
+pub(super) struct Change<'a> {
+    /// In a sentence: `legal hold`.
+    pub noun: &'a str,
+    /// At the start of one: `Legal hold`.
+    pub title: &'a str,
+    /// The record's `type`: `legalHold`.
+    pub record: &'a str,
+    /// The new state: `placed`.
+    pub what: &'a str,
+}
+
+impl<'a> Change<'a> {
+    /// The same change, to `what`.
+    pub(super) const fn to(self, what: &'a str) -> Self {
+        Self { what, ..self }
+    }
+}
+
+const RETENTION: Change<'static> = Change {
+    noun: "retention",
+    title: "Retention",
+    record: "retention",
+    what: "",
+};
+
 /// Applies `change` to the object `objects` names (a version of it with
 /// `--version-id`), or with `-r` to every object under it, and reports each.
-async fn change_objects<F, Fut, E>(
+pub(super) async fn change_objects<F, Fut, E>(
     remote: &Remote,
-    objects: &HoldArgs,
-    kind: &str,
-    what: &str,
+    objects: &ObjectArgs,
+    kind: Change<'_>,
     change: F,
 ) -> Result<(), Error>
 where
@@ -213,7 +241,7 @@ where
     } else {
         if remote.key.is_empty() {
             return Err(Error::usage(format!(
-                "give a key, like {name}/KEY (or -r for every object, or --default for the bucket's default)"
+                "give a key, like {name}/KEY (or -r for every object under a prefix)"
             )));
         }
         vec![remote.key.clone()]
@@ -226,12 +254,15 @@ where
             let version = objects.version_id.clone();
             let fut = change(client, bucket, key, version.clone());
             async move {
-                fut.await
-                    .map_err(|e| Error::s3(format!("can't change the {kind} of {shown}"), &e))?;
-                let (title, record) = match kind {
-                    "retention" => ("Retention", "retention"),
-                    _ => ("Legal hold", "legalHold"),
-                };
+                fut.await.map_err(|e| {
+                    Error::s3(format!("can't change the {} of {shown}", kind.noun), &e)
+                })?;
+                let Change {
+                    title,
+                    record,
+                    what,
+                    ..
+                } = kind;
                 ui::done(
                     format!("{title} of {shown}: {what}"),
                     || json!({"type": record, "key": shown, "versionId": version, "status": what}),

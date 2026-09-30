@@ -89,6 +89,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Retention { action } => super::lock::retention(action, &aliases).await,
         Command::Legalhold { action } => super::lock::legal_hold(action, &aliases).await,
         Command::Ilm { action } => super::ilm::ilm(action, &aliases).await,
+        Command::Encrypt { action } => super::encrypt::encrypt(action, &aliases).await,
         Command::Presign {
             target,
             expires,
@@ -749,12 +750,19 @@ async fn stat(remote: Remote, version_id: Option<&str>) -> Result<(), Error> {
         // A service without versioning just doesn't say.
         let versioning = super::versions::status(&client, bucket).await.ok();
         let lock = super::lock::bucket_lock(&client, bucket).await;
+        // Nor does one without default encryption.
+        let encryption = super::encrypt::bucket_default(&client, bucket, &name)
+            .await
+            .ok()
+            .flatten()
+            .map(|d| d.text());
         let mut fields = vec![("Bucket", name.clone()), ("Region", region.clone())];
         fields.extend(versioning.map(|v| ("Versioning", v.to_owned())));
         fields.extend(lock.clone().map(|l| ("Object Lock", l)));
+        fields.extend(encryption.clone().map(|e| ("Encryption", e)));
         ui::details(
             &fields,
-            || json!({"type": "bucket", "name": name, "region": region, "versioning": versioning, "objectLock": lock}),
+            || json!({"type": "bucket", "name": name, "region": region, "versioning": versioning, "objectLock": lock, "encryption": encryption}),
         );
         return Ok(());
     }
@@ -820,6 +828,13 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
         ("Storage", text(storage)),
         ("Encryption", text(encryption)),
         ("KMS key", text(out.ssekms_key_id())),
+        (
+            "Bucket key",
+            text(
+                out.bucket_key_enabled()
+                    .map(|on| if on { "on" } else { "off" }),
+            ),
+        ),
         ("CRC32", text(out.checksum_crc32())),
         ("CRC32C", text(out.checksum_crc32_c())),
         ("CRC64NVME", text(out.checksum_crc64_nvme())),
@@ -854,6 +869,7 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
             "storageClass": storage,
             "encryption": encryption,
             "kmsKeyId": out.ssekms_key_id(),
+            "bucketKey": out.bucket_key_enabled(),
             "checksums": {
                 "crc32": out.checksum_crc32(),
                 "crc32c": out.checksum_crc32_c(),

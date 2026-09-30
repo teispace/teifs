@@ -4,6 +4,7 @@
 pub(crate) mod alias;
 mod commands;
 mod copy;
+mod encrypt;
 mod ilm;
 mod listing;
 mod lock;
@@ -138,6 +139,12 @@ pub enum Command {
         #[command(subcommand)]
         action: IlmAction,
     },
+    /// Choose how a bucket encrypts new objects (SSE-S3 or SSE-KMS) and whether it takes
+    /// customer keys (SSE-C), or move objects to a KMS key in place.
+    Encrypt {
+        #[command(subcommand)]
+        action: EncryptAction,
+    },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
         /// `ALIAS/BUCKET/KEY`.
@@ -230,12 +237,12 @@ pub enum LegalHoldAction {
     /// Place a legal hold: nobody may remove the object until it's lifted.
     Set {
         #[command(flatten)]
-        objects: HoldArgs,
+        objects: ObjectArgs,
     },
     /// Lift a legal hold.
     Clear {
         #[command(flatten)]
-        objects: HoldArgs,
+        objects: ObjectArgs,
     },
     /// Show whether an object is under a legal hold.
     Info {
@@ -245,6 +252,58 @@ pub enum LegalHoldAction {
         #[arg(long)]
         version_id: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EncryptAction {
+    /// Set how a bucket encrypts new objects: `sse-s3 ALIAS/BUCKET`, or
+    /// `sse-kms KEY ALIAS/BUCKET` for a KMS key.
+    Set {
+        /// `sse-s3` (keys the server keeps) or `sse-kms` (a KMS key).
+        #[arg(value_enum)]
+        mode: SseArg,
+        /// The KMS key (for `sse-kms` only), then `ALIAS/BUCKET`.
+        #[arg(required = true, num_args = 1..=2, value_name = "[KEY] ALIAS/BUCKET")]
+        args: Vec<String>,
+        /// Seal SSE-KMS objects' keys with an S3 Bucket Key.
+        #[arg(long)]
+        bucket_key: bool,
+        /// Refuse writes with customer-provided keys (SSE-C).
+        #[arg(long, conflicts_with = "allow_sse_c")]
+        block_sse_c: bool,
+        /// Take writes with customer-provided keys (SSE-C) again.
+        #[arg(long)]
+        allow_sse_c: bool,
+    },
+    /// Go back to the default: SSE-S3.
+    Clear {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Show how a bucket encrypts new objects.
+    Info {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Move objects the server encrypts (SSE-S3 or SSE-KMS) to a KMS key, in place:
+    /// their data, `ETag` and dates stay as they are.
+    Update {
+        #[command(flatten)]
+        objects: ObjectArgs,
+        /// The KMS key: its name, or its ARN.
+        #[arg(long, value_name = "KEY")]
+        kms_key: String,
+        /// Seal the objects' keys with an S3 Bucket Key.
+        #[arg(long)]
+        bucket_key: bool,
+    },
+}
+
+/// Server-side encryption a bucket can apply by default.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SseArg {
+    SseS3,
+    SseKms,
 }
 
 #[derive(Subcommand)]
@@ -385,9 +444,9 @@ pub enum LockModeArg {
     Compliance,
 }
 
-/// The objects a lock command changes.
+/// The objects a command changes, one by one.
 #[derive(Args)]
-pub struct HoldArgs {
+pub struct ObjectArgs {
     /// `ALIAS/BUCKET/KEY` (with `-r`, a prefix).
     target: String,
     /// A version of the object instead of the current one.
@@ -402,7 +461,7 @@ pub struct HoldArgs {
 #[derive(Args)]
 pub struct RetentionArgs {
     #[command(flatten)]
-    objects: HoldArgs,
+    objects: ObjectArgs,
     /// The bucket's default retention instead (give `ALIAS/BUCKET`).
     #[arg(long, conflicts_with_all = ["version_id", "recursive", "bypass"])]
     default: bool,

@@ -215,7 +215,7 @@ impl TrustArgs {
         };
         Ok(match (kind, rest) {
             ("account", "") => {
-                let account = account(server).await?;
+                let account = crate::sts::account(server).await?;
                 (
                     "the account".to_owned(),
                     aws(&format!("arn:aws:iam::{account}:root")),
@@ -302,19 +302,6 @@ fn web_trust(provider: &str, host: &str, sub: &str, aud: &str) -> String {
         &json!("sts:AssumeRoleWithWebIdentity"),
         Some(condition),
     )
-}
-
-/// The account the alias's server has.
-async fn account(server: &Alias) -> Result<String, Error> {
-    let caller = crate::sts::client(server, true)
-        .get_caller_identity()
-        .send()
-        .await
-        .map_err(|e| Error::s3("can't tell the account", &e))?;
-    caller
-        .account()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::general("the server didn't say its account"))
 }
 
 /// The ARN of the account's OpenID Connect provider for `host`.

@@ -61,6 +61,12 @@ behaviour; the on-disk format is always upgraded automatically.
   `--abort-uploads-days`, transitions), `edit --id` (what's given changes, the rest
   stays), `ls`, `rm --id|--all`, and `export` and `import` in the JSON AWS uses, so a
   configuration moves between `teifs` and the AWS CLI either way.
+- Encryption from the command line, with mc's names: `teifs encrypt set sse-s3|sse-kms`
+  (with `--bucket-key`, and `--block-sse-c` or `--allow-sse-c`), `clear` and `info` for a
+  bucket's default, and `teifs encrypt update --kms-key KEY` to move one object, a
+  version (`--version-id`) or everything under a prefix (`-r`) to a KMS key in place; a
+  key's name is enough, its ARN is made from the alias's region and account. `stat`
+  shows a bucket's default encryption and an object's Bucket Key.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

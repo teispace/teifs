@@ -1101,3 +1101,176 @@ async fn rules_are_removed_and_imported_back(cli: &Client, bucket: &str, exporte
     assert_eq!(run.code, 2, "{}", run.stderr);
     cli.fails(&ilm("ls", &format!("{bucket}/key"), ""), 2).await;
 }
+
+#[tokio::test]
+async fn buckets_encrypt_by_default_and_objects_move_to_kms_keys() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    fs::write(cli.path("one.txt"), "one").unwrap();
+    cli.ok(&["mb", "t/enc", "--layout", "object"]).await;
+    // New buckets use SSE-S3; this server takes customer keys.
+    let got = encrypt_info(&cli).await;
+    assert_eq!(got["algorithm"], "AES256");
+    assert_eq!(got["sseCBlocked"], false);
+    cli.ok(&["cp", "one.txt", "t/enc/a.txt"]).await;
+    let before = records(&cli.ok(&["--json", "stat", "t/enc/a.txt"]).await).remove(0);
+    assert_eq!(before["encryption"], "AES256");
+
+    // A KMS key and a Bucket Key for new objects; customer keys refused.
+    let out = cli
+        .ok(&[
+            "encrypt",
+            "set",
+            "sse-kms",
+            "teifs-default",
+            "t/enc",
+            "--bucket-key",
+            "--block-sse-c",
+        ])
+        .await;
+    assert!(
+        out.contains("t/enc: SSE-KMS, key teifs-default, bucket key on, SSE-C blocked"),
+        "{out}"
+    );
+    let got = encrypt_info(&cli).await;
+    assert_eq!(got["algorithm"], "aws:kms");
+    assert_eq!(got["kmsKeyId"], "teifs-default");
+    assert_eq!(got["bucketKey"], true);
+    assert_eq!(got["sseCBlocked"], true);
+    let text = cli.ok(&["encrypt", "info", "t/enc"]).await;
+    assert!(
+        text.contains("Bucket key:") && text.contains("blocked"),
+        "{text}"
+    );
+    cli.ok(&["cp", "one.txt", "t/enc/docs/b.txt"]).await;
+    let b = records(&cli.ok(&["--json", "stat", "t/enc/docs/b.txt"]).await).remove(0);
+    assert_eq!(b["encryption"], "aws:kms");
+    assert_eq!(b["bucketKey"], true);
+    let bucket = records(&cli.ok(&["--json", "stat", "t/enc"]).await).remove(0);
+    assert_eq!(
+        bucket["encryption"],
+        "SSE-KMS, key teifs-default, bucket key on, SSE-C blocked"
+    );
+
+    // An SSE-S3 object moves to the key by name, in place.
+    let out = cli
+        .ok(&[
+            "encrypt",
+            "update",
+            "--kms-key",
+            "teifs-default",
+            "t/enc/a.txt",
+        ])
+        .await;
+    assert!(
+        out.contains("Encryption of t/enc/a.txt: SSE-KMS, key teifs-default"),
+        "{out}"
+    );
+    let after = records(&cli.ok(&["--json", "stat", "t/enc/a.txt"]).await).remove(0);
+    assert_eq!(after["encryption"], "aws:kms");
+    assert_eq!(after["kmsKeyId"], "teifs-default");
+    assert_eq!(after["etag"], before["etag"]);
+    assert_eq!(after["modified"], before["modified"]);
+    assert_eq!(cli.ok(&["cat", "t/enc/a.txt"]).await, "one");
+
+    // Every object under a prefix, by the key's ARN, with a Bucket Key.
+    cli.ok(&["cp", "one.txt", "t/enc/docs/c.txt"]).await;
+    let arn = "arn:aws:kms:us-east-1:000000000000:key/teifs-default";
+    let out = cli
+        .ok(&[
+            "encrypt",
+            "update",
+            "-r",
+            "--kms-key",
+            arn,
+            "--bucket-key",
+            "t/enc/docs/",
+        ])
+        .await;
+    assert!(
+        out.contains("docs/b.txt") && out.contains("docs/c.txt"),
+        "{out}"
+    );
+    let c = records(&cli.ok(&["--json", "stat", "t/enc/docs/c.txt"]).await).remove(0);
+    assert_eq!(c["bucketKey"], true);
+
+    encryption_mistakes_are_refused(&cli).await;
+
+    encryption_is_cleared_and_customer_keys_switched(&cli).await;
+}
+
+async fn encryption_is_cleared_and_customer_keys_switched(cli: &Client) {
+    // Back to the default.
+    let out = cli.ok(&["encrypt", "clear", "t/enc"]).await;
+    assert!(out.contains("SSE-S3, the default"), "{out}");
+    let got = encrypt_info(cli).await;
+    assert_eq!(got["algorithm"], "AES256");
+    assert_eq!(got["bucketKey"], false);
+    assert_eq!(got["sseCBlocked"], false);
+    cli.ok(&["encrypt", "set", "sse-s3", "t/enc", "--block-sse-c"])
+        .await;
+    assert_eq!(encrypt_info(cli).await["sseCBlocked"], true);
+    cli.ok(&["encrypt", "set", "sse-s3", "t/enc"]).await;
+    assert_eq!(encrypt_info(cli).await["sseCBlocked"], true);
+    cli.ok(&["encrypt", "set", "sse-s3", "t/enc", "--allow-sse-c"])
+        .await;
+    assert_eq!(encrypt_info(cli).await["sseCBlocked"], false);
+
+    // A folder bucket stores plain files.
+    cli.ok(&["mb", "t/plain", "--layout", "folder"]).await;
+    let text = cli.ok(&["encrypt", "info", "t/plain"]).await;
+    assert!(text.contains("none"), "{text}");
+    let bucket = records(&cli.ok(&["--json", "stat", "t/plain"]).await).remove(0);
+    assert_eq!(bucket["encryption"], serde_json::Value::Null);
+}
+
+/// `teifs encrypt info t/enc`'s record.
+async fn encrypt_info(cli: &Client) -> serde_json::Value {
+    records(&cli.ok(&["--json", "encrypt", "info", "t/enc"]).await).remove(0)
+}
+
+async fn encryption_mistakes_are_refused(cli: &Client) {
+    let err = cli.fails(&["encrypt", "set", "sse-kms", "t/enc"], 2).await;
+    assert!(err.contains("sse-kms KEY ALIAS/BUCKET"), "{err}");
+    cli.fails(&["encrypt", "set", "sse-s3", "k", "t/enc"], 2)
+        .await;
+    cli.fails(&["encrypt", "set", "sse-s3", "--bucket-key", "t/enc"], 2)
+        .await;
+    cli.fails(
+        &[
+            "encrypt",
+            "set",
+            "sse-s3",
+            "--block-sse-c",
+            "--allow-sse-c",
+            "t/enc",
+        ],
+        2,
+    )
+    .await;
+    let err = cli
+        .fails(&["encrypt", "update", "--kms-key", "k", "t/enc"], 2)
+        .await;
+    assert!(err.contains("give a key"), "{err}");
+    let err = cli
+        .fails(
+            &["encrypt", "update", "--kms-key", "nope", "t/enc/a.txt"],
+            1,
+        )
+        .await;
+    assert!(
+        err.contains("can't change the encryption of t/enc/a.txt"),
+        "{err}"
+    );
+    cli.fails(
+        &[
+            "encrypt",
+            "update",
+            "--kms-key",
+            "teifs-default",
+            "t/enc/none",
+        ],
+        5,
+    )
+    .await;
+}
