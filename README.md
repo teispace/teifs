@@ -206,6 +206,7 @@ location / {
 | `teifs version enable\|suspend\|info ALIAS/BUCKET` | Turn a bucket's versioning on, suspend it, or show it |
 | `teifs retention set governance\|compliance 30d\|1y TARGET` \| `clear\|info TARGET` | Keep objects from deletion for a time (`-r` for a prefix, `--version-id`, `--bypass` to shorten governance), or with `--default` set a bucket's default retention |
 | `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
+| `teifs ilm rule add\|edit\|ls\|rm\|export\|import ALIAS/BUCKET` | Lifecycle rules: expire objects (`--expire-days 30 --prefix logs/`), older versions and lone delete markers, abort old uploads; `export`/`import` in AWS's JSON |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME` | Manage the KMS keys that encrypt objects |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |

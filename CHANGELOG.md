@@ -46,6 +46,12 @@ behaviour; the on-disk format is always upgraded automatically.
   the rules through the same checks as requests, so an object written again meanwhile
   and a version Object Lock protects stay. Transitions to other storage classes are
   refused (`InvalidStorageClass`). 20 more tests of the s3-tests suite pass.
+- Lifecycle rules from the command line, with mc's options: `teifs ilm rule add`
+  (`--prefix`, `--tags`, `--size-gt`, `--size-lt`, `--expire-days`, `--expire-date`,
+  `--expire-delete-marker`, `--noncurrent-expire-days`, `--noncurrent-expire-newer`,
+  `--abort-uploads-days`, transitions), `edit --id` (what's given changes, the rest
+  stays), `ls`, `rm --id|--all`, and `export` and `import` in the JSON AWS uses, so a
+  configuration moves between `teifs` and the AWS CLI either way.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

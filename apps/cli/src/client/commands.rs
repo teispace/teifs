@@ -88,6 +88,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Version { action } => super::versions::versioning(action, &aliases).await,
         Command::Retention { action } => super::lock::retention(action, &aliases).await,
         Command::Legalhold { action } => super::lock::legal_hold(action, &aliases).await,
+        Command::Ilm { action } => super::ilm::ilm(action, &aliases).await,
         Command::Presign {
             target,
             expires,

@@ -994,3 +994,110 @@ async fn default_retention_is_set_shown_and_cleared(cli: &Client, bucket: &str, 
     assert_eq!(info[0]["mode"], "GOVERNANCE", "{layout}");
     cli.ok(&["retention", "clear", "--default", bucket]).await;
 }
+
+/// `teifs ilm rule ACTION BUCKET` and the options in `rest`.
+fn ilm<'a>(action: &'a str, bucket: &'a str, rest: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["ilm", "rule", action, bucket];
+    args.extend(rest.split_whitespace());
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_rules_are_added_changed_exported_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    for layout in ["object", "folder"] {
+        let bucket = format!("t/ilm-{layout}");
+        cli.ok(&["mb", &bucket, "--layout", layout]).await;
+        let run = cli.run_with(&ilm("ls", &bucket, ""), "").await;
+        assert!(
+            run.stdout.is_empty() && run.stderr.contains("no lifecycle rules"),
+            "{}",
+            run.stderr
+        );
+        cli.fails(&ilm("export", &bucket, ""), 5).await;
+        cli.fails(&ilm("rm", &bucket, "--all --force"), 5).await;
+
+        // Added with and without a name; a rule that does nothing is refused.
+        cli.fails(&ilm("add", &bucket, "--prefix a/"), 2).await;
+        let logs = "--id logs --prefix logs/ --expire-days 30 --abort-uploads-days 2";
+        cli.ok(&ilm("add", &bucket, logs)).await;
+        let tagged = "--tags tmp=yes --size-gt 1KiB --noncurrent-expire-days 7 \
+                      --noncurrent-expire-newer 3 --disable";
+        let added = records(
+            &cli.ok(&[&["--json"][..], &ilm("add", &bucket, tagged)].concat())
+                .await,
+        );
+        let made = added[0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(made.len(), 20);
+        cli.fails(&ilm("add", &bucket, "--id logs --expire-days 1"), 6)
+            .await;
+        // The server's own checks come through.
+        let cold = "--id cold --transition-days 30 --transition-tier GLACIER";
+        cli.fails(&ilm("add", &bucket, cold), 1).await;
+        cli.fails(&ilm("add", &bucket, "--expire-days 0"), 2).await;
+        cli.fails(&ilm("add", &bucket, "--expire-date 2026-02-30"), 2)
+            .await;
+
+        let listed = records(
+            &cli.ok(&[&["--json"][..], &ilm("ls", &bucket, "")].concat())
+                .await,
+        );
+        assert_eq!(listed.len(), 2, "{layout}");
+        assert_eq!(
+            listed[0]["rule"],
+            serde_json::json!({
+                "ID": "logs", "Status": "Enabled", "Filter": {"Prefix": "logs/"},
+                "Expiration": {"Days": 30},
+                "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2}
+            })
+        );
+        assert_eq!(
+            listed[1]["rule"]["Filter"],
+            serde_json::json!({"And": {"Tags": [{"Key": "tmp", "Value": "yes"}], "ObjectSizeGreaterThan": 1024}})
+        );
+        assert_eq!(listed[1]["rule"]["Status"], "Disabled");
+        let table = cli.ok(&ilm("ls", &bucket, "")).await;
+        assert!(
+            table.contains("logs/*") && table.contains("expire after 30d; abort uploads after 2d"),
+            "{table}"
+        );
+
+        // Edited: what's given changes, the rest stays.
+        let change = format!("--id {made} --enable --prefix tmp/ --expire-date 2030-01-01");
+        cli.ok(&ilm("edit", &bucket, &change)).await;
+        cli.fails(&ilm("edit", &bucket, "--id nope --enable"), 5)
+            .await;
+        let exported = cli.ok(&ilm("export", &bucket, "")).await;
+        let config: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let edited = &config["Rules"][1];
+        assert_eq!(edited["Status"], "Enabled");
+        assert_eq!(edited["Filter"]["And"]["Prefix"], "tmp/");
+        assert_eq!(edited["Filter"]["And"]["ObjectSizeGreaterThan"], 1024);
+        assert_eq!(edited["Expiration"]["Date"], "2030-01-01T00:00:00Z");
+        assert_eq!(
+            edited["NoncurrentVersionExpiration"]["NewerNoncurrentVersions"],
+            3
+        );
+
+        rules_are_removed_and_imported_back(&cli, &bucket, &exported).await;
+    }
+}
+
+async fn rules_are_removed_and_imported_back(cli: &Client, bucket: &str, exported: &str) {
+    // Removed one by one, then all, then imported back as they were.
+    cli.ok(&ilm("rm", bucket, "--id logs")).await;
+    cli.fails(&ilm("rm", bucket, "--id logs"), 5).await;
+    cli.fails(&ilm("rm", bucket, ""), 2).await;
+    cli.fails(&ilm("rm", bucket, "--all"), 2).await;
+    cli.ok(&ilm("rm", bucket, "--all --force")).await;
+    cli.fails(&ilm("export", bucket, ""), 5).await;
+    let run = cli.run_with(&ilm("import", bucket, ""), exported).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(cli.ok(&ilm("export", bucket, "")).await, exported);
+    let run = cli
+        .run_with(&ilm("import", bucket, ""), r#"{"Rules": []}"#)
+        .await;
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    cli.fails(&ilm("ls", &format!("{bucket}/key"), ""), 2).await;
+}

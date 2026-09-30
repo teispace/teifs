@@ -110,6 +110,31 @@ pub fn datetime_ms(at: &toml::value::Datetime) -> Option<i64> {
     Some(seconds * 1000 + i64::from(time.nanosecond.unwrap_or(0) / 1_000_000))
 }
 
+/// A day, `YYYY-MM-DD`, as its midnight UTC in milliseconds since the Unix epoch.
+pub fn parse_day(text: &str) -> Result<i64, String> {
+    let bad = || format!("`{text}` isn't a date: write it like 2026-10-01");
+    let mut parts = text.split('-');
+    let (Some(y), Some(m), Some(d), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(bad());
+    };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return Err(bad());
+    }
+    let (y, m, d): (i64, u32, u32) = (
+        y.parse().map_err(|_| bad())?,
+        m.parse().map_err(|_| bad())?,
+        d.parse().map_err(|_| bad())?,
+    );
+    let days = days_from_civil(y, m, d);
+    // Only real dates: one that doesn't come back the same (2026-02-30) isn't.
+    if !(1..=12).contains(&m) || civil_from_days(days) != (y, m, d) {
+        return Err(bad());
+    }
+    Ok(days * 86_400_000)
+}
+
 /// A calendar date to days since 1970-01-01 (Howard Hinnant's algorithm).
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -221,6 +246,23 @@ mod tests {
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
         assert_eq!(date(t), "2026-09-21 14:13:20");
         assert_eq!(rfc3339(t), "2026-09-21T14:13:20Z");
+        assert_eq!(parse_day("1970-01-01"), Ok(0));
+        assert_eq!(
+            parse_day("2026-09-21").map(from_ms).map(date).as_deref(),
+            Ok("2026-09-21 00:00:00")
+        );
+        assert_eq!(parse_day("2024-02-29"), Ok(19_782 * 86_400_000));
+        for bad in [
+            "2026-02-30",
+            "2026-13-01",
+            "2026-00-10",
+            "26-01-01",
+            "2026-1-01",
+            "2026-01-01-",
+            "tomorrow",
+        ] {
+            assert!(parse_day(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

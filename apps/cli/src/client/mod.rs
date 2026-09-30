@@ -4,6 +4,7 @@
 pub(crate) mod alias;
 mod commands;
 mod copy;
+mod ilm;
 mod listing;
 mod lock;
 mod target;
@@ -17,7 +18,10 @@ use clap::{Args, Subcommand};
 
 pub use crate::error::{Error, Kind};
 
-use crate::{LayoutArg, units::parse_duration};
+use crate::{
+    LayoutArg,
+    units::{parse_day, parse_duration, parse_size},
+};
 
 /// The client's commands, at the top level of `teifs`.
 #[derive(Subcommand)]
@@ -128,6 +132,12 @@ pub enum Command {
         #[command(subcommand)]
         action: LegalHoldAction,
     },
+    /// Expire objects and old versions, and abort old uploads, by a bucket's lifecycle
+    /// rules.
+    Ilm {
+        #[command(subcommand)]
+        action: IlmAction,
+    },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {
         /// `ALIAS/BUCKET/KEY`.
@@ -235,6 +245,137 @@ pub enum LegalHoldAction {
         #[arg(long)]
         version_id: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum IlmAction {
+    /// Add, change, list, remove, export or import a bucket's lifecycle rules.
+    Rule {
+        #[command(subcommand)]
+        action: RuleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RuleAction {
+    /// Add a rule.
+    Add {
+        /// `ALIAS/BUCKET`.
+        target: String,
+        /// The rule's name (made up when not given).
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        rule: RuleArgs,
+        /// Add it turned off.
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Change a rule: what's given replaces what it had, the rest stays.
+    Edit {
+        /// `ALIAS/BUCKET`.
+        target: String,
+        /// The rule to change.
+        #[arg(long)]
+        id: String,
+        #[command(flatten)]
+        rule: RuleArgs,
+        /// Turn it on.
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Turn it off.
+        #[arg(long)]
+        disable: bool,
+    },
+    /// List a bucket's rules.
+    Ls {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Remove a rule, or all of them.
+    Rm {
+        /// `ALIAS/BUCKET`.
+        target: String,
+        /// The rule to remove.
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        /// Every rule of the bucket.
+        #[arg(long)]
+        all: bool,
+        /// Remove them all without asking.
+        #[arg(long, requires = "all")]
+        force: bool,
+    },
+    /// Print a bucket's rules as JSON, as AWS gives them.
+    Export {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+    /// Replace a bucket's rules with JSON read from standard input (as `export`
+    /// prints it).
+    Import {
+        /// `ALIAS/BUCKET`.
+        target: String,
+    },
+}
+
+/// What a lifecycle rule applies to and does.
+#[derive(Args, Default)]
+pub struct RuleArgs {
+    /// Only keys starting with this.
+    #[arg(long)]
+    prefix: Option<String>,
+    /// Only objects with these tags: `key=value&key2=value2`.
+    #[arg(long)]
+    tags: Option<String>,
+    /// Only objects larger than this (bytes, or with KiB, MiB or GiB).
+    #[arg(long, value_parser = parse_size)]
+    size_gt: Option<u64>,
+    /// Only objects smaller than this.
+    #[arg(long, value_parser = parse_size)]
+    size_lt: Option<u64>,
+    /// Expire objects this many days after they're written.
+    #[arg(long, value_parser = days(), conflicts_with_all = ["expire_date", "expire_delete_marker"])]
+    expire_days: Option<i32>,
+    /// Expire objects from this day on (`YYYY-MM-DD`, UTC).
+    #[arg(long, value_parser = parse_day, conflicts_with = "expire_delete_marker")]
+    expire_date: Option<i64>,
+    /// Remove delete markers left with no versions behind them.
+    #[arg(long)]
+    expire_delete_marker: bool,
+    /// Remove versions this many days after they stop being current.
+    #[arg(long, value_parser = days())]
+    noncurrent_expire_days: Option<i32>,
+    /// Keep this many of the newest noncurrent versions of each object (1 to 100).
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=100))]
+    noncurrent_expire_newer: Option<i32>,
+    /// Abort uploads this many days after they start.
+    #[arg(long, value_parser = days())]
+    abort_uploads_days: Option<i32>,
+    /// Move objects to `--transition-tier` this many days after they're written.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(0..), conflicts_with = "transition_date")]
+    transition_days: Option<i32>,
+    /// Move objects to `--transition-tier` from this day on.
+    #[arg(long, value_parser = parse_day)]
+    transition_date: Option<i64>,
+    /// The storage class objects move to.
+    #[arg(long)]
+    transition_tier: Option<String>,
+    /// Move versions to `--noncurrent-transition-tier` this many days after they stop
+    /// being current.
+    #[arg(long, value_parser = days())]
+    noncurrent_transition_days: Option<i32>,
+    /// Leave this many of the newest noncurrent versions where they are.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=100))]
+    noncurrent_transition_newer: Option<i32>,
+    /// The storage class noncurrent versions move to.
+    #[arg(long)]
+    noncurrent_transition_tier: Option<String>,
+}
+
+/// A number of days: 1 or more.
+fn days() -> clap::builder::RangedI64ValueParser<i32> {
+    clap::value_parser!(i32).range(1..)
 }
 
 /// An Object Lock retention mode.
