@@ -122,3 +122,107 @@ fn targets_are_named_as_arns_can_name_them() {
     }
     assert!(Notifier::none().is_empty());
 }
+
+/// An event as the server queues it: `name` on `BUCKET/KEY`.
+pub(crate) fn message(name: &str, key: &str) -> Vec<u8> {
+    let (bucket, object) = key.split_once('/').unwrap();
+    serde_json::to_vec(&serde_json::json!({
+        "EventName": name, "Key": key,
+        "Records": [{
+            "eventVersion": "2.6", "eventSource": "aws:s3", "awsRegion": "us-east-1",
+            "eventTime": "2026-09-30T12:00:00.000Z",
+            "eventName": name.trim_start_matches("s3:"),
+            "userIdentity": {"principalId": "key"},
+            "requestParameters": {"sourceIPAddress": "127.0.0.1"},
+            "responseElements": {"x-amz-request-id": "1", "x-amz-id-2": "drive"},
+            "s3": {
+                "s3SchemaVersion": "1.0", "configurationId": "rule",
+                "bucket": {"name": bucket, "ownerIdentity": {"principalId": "o"},
+                           "arn": format!("arn:aws:s3:::{bucket}")},
+                "object": {"key": object, "sequencer": "1"}
+            }
+        }]
+    }))
+    .unwrap()
+}
+
+/// Elasticsearch targets: the index is made when missing, and each event is a document,
+/// one per object (removed with it) or one per event.
+#[tokio::test]
+async fn elasticsearch_keeps_a_document_per_object_or_per_event() {
+    let receiver = Receiver::start(0).await;
+    let base = receiver.url().to_owned();
+    let mut objects = Elasticsearch::new(&base, "objects", Format::Namespace).unwrap();
+    objects.api_key = Some(Zeroizing::new("k3y".into()));
+    let mut log = Elasticsearch::new(&base, "log", Format::Access).unwrap();
+    log.username = Some("elastic".into());
+    log.password = Some(Zeroizing::new("pw".into()));
+    receiver.missing("/hook/objects");
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(
+        &dir.path().join("events.db"),
+        vec![
+            TargetConfig::new("objects", TargetKind::Elasticsearch(objects)).unwrap(),
+            TargetConfig::new("log", TargetKind::Elasticsearch(log)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let (objects, log) = (
+        TargetArn::parse("arn:teifs:sqs::objects:elasticsearch").unwrap(),
+        TargetArn::parse("arn:teifs:sqs::log:elasticsearch").unwrap(),
+    );
+    notifier.send_now(&objects, b"test".to_vec()).await.unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a b.jpg");
+    let delete = message("s3:ObjectRemoved:Delete", "photos/a b.jpg");
+    notifier
+        .queue(vec![
+            (objects.clone(), put.clone()),
+            (objects, delete),
+            (log.clone(), put),
+        ])
+        .await
+        .unwrap();
+    let taken = receiver.posts(5).await;
+    let id = elasticsearch::document_id("photos/a b.jpg");
+    let requests: Vec<(String, String)> = taken
+        .iter()
+        .map(|p| (p.method.clone(), p.path.clone()))
+        .collect();
+    let objects_requests: Vec<_> = requests
+        .iter()
+        .filter(|(_, p)| p.contains("/objects"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        objects_requests,
+        [
+            ("PUT".to_owned(), "/hook/objects".to_owned()),
+            ("PUT".to_owned(), format!("/hook/objects/_doc/{id}")),
+            ("DELETE".to_owned(), format!("/hook/objects/_doc/{id}")),
+        ],
+        "made, written, removed"
+    );
+    let log_requests: Vec<_> = taken.iter().filter(|p| p.path.contains("/log")).collect();
+    assert_eq!(
+        log_requests
+            .iter()
+            .map(|p| (p.method.as_str(), p.path.as_str()))
+            .collect::<Vec<_>>(),
+        [("HEAD", "/hook/log"), ("POST", "/hook/log/_doc")]
+    );
+    let document: serde_json::Value = serde_json::from_str(&log_requests[1].body).unwrap();
+    assert_eq!(document["Records"][0]["s3"]["object"]["key"], "a b.jpg");
+    assert_eq!(document.as_object().unwrap().len(), 1, "only Records");
+    assert_eq!(log_requests[1].authorization, "Basic ZWxhc3RpYzpwdw==");
+    assert!(
+        taken
+            .iter()
+            .filter(|p| p.path.contains("/objects"))
+            .all(|p| p.authorization == "ApiKey k3y")
+    );
+    assert!(
+        !taken.iter().any(|p| p.body == "test"),
+        "no test document is written"
+    );
+    notifier.stop().await;
+}

@@ -1,5 +1,5 @@
-//! Bucket notifications' delivery. The server's targets (webhooks, for now) are named
-//! by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! Bucket notifications' delivery. The server's targets (webhooks and Elasticsearch
+//! indexes) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod tests;
 
+mod elasticsearch;
 mod queue;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -23,6 +24,7 @@ use std::{
     time::Duration,
 };
 
+pub use elasticsearch::Elasticsearch;
 use teifs_types::notify::TargetArn;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -49,6 +51,41 @@ pub struct TargetConfig {
 pub enum TargetKind {
     /// A webhook, sent each event as JSON.
     Webhook(Webhook),
+    /// An Elasticsearch index, each event a document.
+    Elasticsearch(Elasticsearch),
+}
+
+/// How a target that keeps documents keeps events (`MinIO`'s formats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// One entry per object, replaced by each event, removed with the object.
+    Namespace,
+    /// One entry per event, added in order.
+    Access,
+}
+
+impl Format {
+    /// Reads `namespace` or `access`.
+    ///
+    /// # Errors
+    ///
+    /// When it's neither.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.to_ascii_lowercase().as_str() {
+            "namespace" => Ok(Self::Namespace),
+            "access" => Ok(Self::Access),
+            _ => Err(format!("`{text}` isn't a format: give namespace or access")),
+        }
+    }
+
+    /// Its name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Namespace => "namespace",
+            Self::Access => "access",
+        }
+    }
 }
 
 impl TargetConfig {
@@ -85,6 +122,7 @@ impl TargetConfig {
     pub fn shown(&self) -> String {
         match &self.kind {
             TargetKind::Webhook(hook) => hook.shown(),
+            TargetKind::Elasticsearch(es) => es.shown(),
         }
     }
 }
@@ -95,6 +133,7 @@ impl TargetKind {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Webhook(_) => "webhook",
+            Self::Elasticsearch(_) => "elasticsearch",
         }
     }
 }
@@ -148,9 +187,20 @@ struct Target {
 }
 
 impl Target {
+    /// Sends one queued event.
     async fn send(&self, client: &reqwest::Client, body: Vec<u8>) -> Result<(), String> {
         match &self.config.kind {
             TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
+            TargetKind::Elasticsearch(es) => es.send(client, &body).await,
+        }
+    }
+
+    /// Checks it takes events: a webhook is sent the test event `body`; a target that
+    /// keeps documents is checked without writing one.
+    async fn test(&self, client: &reqwest::Client, body: Vec<u8>) -> Result<(), String> {
+        match &self.config.kind {
+            TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
+            TargetKind::Elasticsearch(es) => es.test(client).await,
         }
     }
 }
@@ -320,8 +370,8 @@ impl Notifier {
         pushed
     }
 
-    /// Sends `body` to `arn`'s target straight away, not queued: the test event a new
-    /// rule's target gets.
+    /// Tests `arn`'s target straight away, not queued, as a new rule's target is: a
+    /// webhook is sent the test event `body`, and others are checked without it.
     ///
     /// # Errors
     ///
@@ -331,7 +381,7 @@ impl Notifier {
             .targets
             .get(arn)
             .ok_or_else(|| format!("no target {arn}"))?;
-        target.send(&self.client, body).await
+        target.test(&self.client, body).await
     }
 
     /// How each target is doing.

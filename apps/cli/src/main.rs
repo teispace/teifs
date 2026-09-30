@@ -3,6 +3,7 @@
 #![allow(clippy::print_stdout, reason = "a command line prints its results")]
 
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -24,9 +25,9 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    AuditTarget, Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits,
-    ProxyHeader, Server, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, Webhook,
-    credentials,
+    AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
+    KmsLocation, Limits, ProxyHeader, Server, TargetConfig, TargetKind, TlsSource, Transit,
+    TrustedProxies, Webhook, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -240,7 +241,22 @@ pub(crate) struct ServeArgs {
         value_delimiter = ' ',
         env = "TEIFS_NOTIFY_WEBHOOK"
     )]
-    notify_webhooks: Vec<(String, Webhook)>,
+    notify_webhooks: Vec<TargetConfig>,
+    /// An Elasticsearch index buckets' notification rules can send events to, as
+    /// ID=URL,index=NAME, with format=namespace (a document per object, replaced
+    /// by each event and removed with it: the default) or format=access (a document per
+    /// event), and user=NAME (repeat for more; in the environment, separated by spaces).
+    /// Rules name it `arn:teifs:sqs::ID:elasticsearch`; the index is created when
+    /// missing. Its password, `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID`, or API key,
+    /// `TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID`, is read only from the environment.
+    #[arg(
+        long = "notify-elasticsearch",
+        value_name = "ID=URL,index=NAME",
+        value_parser = parse_notify_elasticsearch,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_ELASTICSEARCH"
+    )]
+    notify_elasticsearch: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -602,40 +618,101 @@ fn audit_targets(
         .collect()
 }
 
+/// A notification target as the command line gives it: `ID=ADDRESS`, then its options
+/// as `,NAME=VALUE`, each one of `options`.
+fn target_spec<'a>(
+    text: &'a str,
+    form: &str,
+    options: &[&str],
+) -> Result<(&'a str, &'a str, BTreeMap<&'a str, &'a str>), String> {
+    let (id, rest) = text
+        .split_once('=')
+        .ok_or_else(|| format!("give it as {form}"))?;
+    let mut parts = rest.split(',');
+    let address = parts.next().unwrap_or_default().trim();
+    let mut given = BTreeMap::new();
+    for part in parts {
+        let (name, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("`{part}` isn't NAME=VALUE: give it as {form}"))?;
+        let name = name.trim();
+        if !options.contains(&name) {
+            return Err(format!(
+                "`{name}` isn't an option here: give {}",
+                options.join(", ")
+            ));
+        }
+        if given.insert(name, value.trim()).is_some() {
+            return Err(format!("`{name}` is given twice"));
+        }
+    }
+    Ok((id.trim(), address, given))
+}
+
 /// A notification webhook, `ID=URL`; its token comes from the environment later.
-fn parse_notify_webhook(text: &str) -> Result<(String, Webhook), String> {
+fn parse_notify_webhook(text: &str) -> Result<TargetConfig, String> {
     let (id, url) = text
         .split_once('=')
         .ok_or_else(|| "give the webhook as ID=URL".to_owned())?;
-    let hook = Webhook::new(url, None)?;
-    TargetConfig::new(id.trim(), TargetKind::Webhook(hook.clone()))?;
-    Ok((id.trim().to_owned(), hook))
+    TargetConfig::new(id.trim(), TargetKind::Webhook(Webhook::new(url, None)?))
 }
 
-/// The notification targets: each webhook with its token,
-/// `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`.
+/// An Elasticsearch index, `ID=URL,index=NAME[,format=F][,user=U]`; its password or API
+/// key comes from the environment later.
+fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
+    let (id, url, options) = target_spec(text, "ID=URL,index=NAME", &["index", "format", "user"])?;
+    let index = options
+        .get("index")
+        .ok_or_else(|| "name the index: ID=URL,index=NAME".to_owned())?;
+    let format = options
+        .get("format")
+        .map_or(Ok(Format::Namespace), |f| Format::parse(f))?;
+    let mut es = Elasticsearch::new(url, index, format)?;
+    es.username = options.get("user").map(|&u| u.to_owned());
+    TargetConfig::new(id, TargetKind::Elasticsearch(es))
+}
+
+/// The notification targets, each with its secrets from the environment
+/// (`TEIFS_NOTIFY_KIND_SECRET_ID`, the ID in capitals and `-` as `_`).
 fn notify_targets(
-    webhooks: Vec<(String, Webhook)>,
+    targets: impl IntoIterator<Item = TargetConfig>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<TargetConfig>, String> {
-    let mut targets: Vec<TargetConfig> = Vec::new();
-    for (id, hook) in webhooks {
-        if targets.iter().any(|t| t.id == id) {
-            return Err(format!("two notification webhooks are named `{id}`"));
+    let mut out: Vec<TargetConfig> = Vec::new();
+    for mut target in targets {
+        let arn = target.arn();
+        if out.iter().any(|t| t.arn() == arn) {
+            return Err(format!(
+                "two notification targets are named `{}` ({})",
+                arn.id, arn.kind
+            ));
         }
-        let name = format!(
-            "TEIFS_NOTIFY_WEBHOOK_TOKEN_{}",
-            id.to_ascii_uppercase().replace('-', "_")
-        );
-        let hook = Webhook {
-            token: env(&name)
-                .filter(|t| !t.trim().is_empty())
-                .map(Zeroizing::new),
-            ..hook
+        let secret = |what: &str| {
+            let name = format!(
+                "TEIFS_NOTIFY_{}_{what}_{}",
+                arn.kind.to_ascii_uppercase(),
+                arn.id.to_ascii_uppercase().replace('-', "_")
+            );
+            env(&name)
+                .filter(|s| !s.trim().is_empty())
+                .map(Zeroizing::new)
         };
-        targets.push(TargetConfig::new(&id, TargetKind::Webhook(hook))?);
+        match &mut target.kind {
+            TargetKind::Webhook(hook) => hook.token = secret("TOKEN"),
+            TargetKind::Elasticsearch(es) => {
+                es.password = secret("PASSWORD");
+                es.api_key = secret("API_KEY");
+                if es.password.is_some() && es.username.is_none() {
+                    return Err(format!(
+                        "the Elasticsearch target `{}` has a password: give its user=NAME",
+                        arn.id
+                    ));
+                }
+            }
+        }
+        out.push(target);
     }
-    Ok(targets)
+    Ok(out)
 }
 
 /// Checks a trusted proxy's address or network.
@@ -686,7 +763,12 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         audit: audit_targets(args.audit_log, args.audit_webhook, |name| {
             std::env::var(name).ok()
         }),
-        notify: notify_targets(args.notify_webhooks, |name| std::env::var(name).ok())?,
+        notify: notify_targets(
+            args.notify_webhooks
+                .into_iter()
+                .chain(args.notify_elasticsearch),
+            |name| std::env::var(name).ok(),
+        )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
@@ -1073,7 +1155,15 @@ mod tests {
         ] {
             assert!(parse_notify_webhook(bad).is_err(), "{bad}");
         }
-        let env = |name: &str| (name == "TEIFS_NOTIFY_WEBHOOK_TOKEN_ORDERS_1").then(|| "t".into());
+        let env = |name: &str| {
+            [
+                ("TEIFS_NOTIFY_WEBHOOK_TOKEN_ORDERS_1", "t"),
+                ("TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_LOG", "pw"),
+            ]
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| (*v).to_owned())
+        };
         let targets = notify_targets(
             vec![
                 hook("orders-1=https://a.example/in"),
@@ -1090,11 +1180,51 @@ mod tests {
             .iter()
             .map(|t| match &t.kind {
                 TargetKind::Webhook(hook) => hook.token.as_deref().cloned(),
+                TargetKind::Elasticsearch(_) => unreachable!(),
             })
             .collect();
         assert_eq!(tokens, [Some("t".to_owned()), None]);
         let twice = vec![hook("a=https://a.example"), hook("a=https://b.example")];
         assert!(notify_targets(twice, env).is_err());
+        // The same id for two kinds is two targets.
+        let es = parse_notify_elasticsearch("a=https://es.example,index=events").unwrap();
+        assert!(notify_targets(vec![hook("a=https://a.example"), es], env).is_ok());
+    }
+
+    #[test]
+    fn elasticsearch_targets_take_options_and_their_password_from_the_environment() {
+        let env =
+            |name: &str| (name == "TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_LOG").then(|| "pw".into());
+        let es = |text| parse_notify_elasticsearch(text).unwrap();
+        let log = es("log=https://es.example:9200,index=events,format=access,user=elastic");
+        assert_eq!(log.arn().to_string(), "arn:teifs:sqs::log:elasticsearch");
+        let targets = notify_targets(vec![log], env).unwrap();
+        let TargetKind::Elasticsearch(log) = &targets[0].kind else {
+            panic!("not Elasticsearch")
+        };
+        assert_eq!(
+            (log.index.as_str(), log.format, log.username.as_deref()),
+            ("events", Format::Access, Some("elastic"))
+        );
+        assert_eq!(log.password.as_deref().map(String::as_str), Some("pw"));
+        let objects = es("objects=http://es.example,index=objects");
+        let TargetKind::Elasticsearch(objects) = &objects.kind else {
+            panic!("not Elasticsearch")
+        };
+        assert_eq!(objects.format, Format::Namespace, "the default");
+        for bad in [
+            "x=https://es.example",
+            "x=https://es.example,index=Upper",
+            "x=https://es.example,index=a,format=csv",
+            "x=https://es.example,index=a,colour=red",
+            "x=https://es.example,index=a,index=b",
+            "x=https://es.example,index",
+        ] {
+            assert!(parse_notify_elasticsearch(bad).is_err(), "{bad}");
+        }
+        // A password needs its user.
+        let nameless = es("log=https://es.example,index=events");
+        assert!(notify_targets(vec![nameless], env).is_err());
     }
 
     #[test]

@@ -240,6 +240,22 @@ that names its scheme (`Basic …`) is sent as given. A target's ARN is
 `arn:teifs:sqs::ID:webhook`; MinIO's `arn:minio:sqs::ID:webhook` names it too, so `mc
 event add` works unchanged. `teifs admin config` lists the targets, without secrets.
 
+```sh
+teifs serve --notify-elasticsearch objects=https://es.example:9200,index=objects \
+            --notify-elasticsearch log=https://es.example:9200,index=s3-log,format=access,user=teifs
+export TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_LOG=…   # or TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID
+```
+
+An Elasticsearch (or OpenSearch) target, `arn:teifs:sqs::ID:elasticsearch`, keeps events
+in an index it creates when missing, each as a document `{"Records":[record]}`: with
+`format=namespace` (the default) one per object, its id a hash of `BUCKET/KEY`, replaced
+by each event and removed when the object is (`s3:ObjectRemoved:Delete`,
+`s3:LifecycleExpiration:Delete`), so the index mirrors the bucket; with `format=access`
+one per event. Basic authentication takes `user=NAME` and the password from
+`TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID`; an API key comes from
+`TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID`. A rule that starts naming it checks that the
+cluster answers and the index exists, without writing a test document.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -352,4 +368,4 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch).
+Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, NSQ, databases).

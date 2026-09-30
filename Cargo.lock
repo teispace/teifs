@@ -3133,11 +3133,14 @@ dependencies = [
 name = "teifs-notify"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "http-body-util",
  "hyper",
  "hyper-util",
  "reqwest",
  "rusqlite",
+ "serde_json",
+ "sha2",
  "teifs-notify",
  "teifs-types",
  "tempfile",

@@ -1,5 +1,6 @@
 //! A webhook receiver on this machine, for tests (the `testing` feature): it takes
-//! `POST`s, or fails as many as it's told to first.
+//! requests (`POST`s, and the others an Elasticsearch target makes), or fails as many as
+//! it's told to first.
 
 use std::{
     convert::Infallible,
@@ -12,9 +13,13 @@ use std::{
 
 use http_body_util::BodyExt;
 
-/// One `POST` taken.
+/// One request taken.
 #[derive(Debug, Clone)]
 pub struct Post {
+    /// Its method.
+    pub method: String,
+    /// Its path.
+    pub path: String,
     /// Its `Authorization`, or empty.
     pub authorization: String,
     /// Its `Content-Type`, or empty.
@@ -28,6 +33,8 @@ struct State {
     failing: AtomicUsize,
     tries: AtomicUsize,
     posts: Mutex<Vec<Post>>,
+    /// Paths answered with `404` until something is `PUT` there.
+    missing: Mutex<Vec<String>>,
 }
 
 /// The receiver.
@@ -71,6 +78,15 @@ impl Receiver {
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Answers `404` for `path` until something is `PUT` there.
+    pub fn missing(&self, path: &str) {
+        self.state
+            .missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.to_owned());
     }
 
     /// Fails the next `count` `POST`s.
@@ -123,6 +139,19 @@ async fn take(
             .to_owned()
     };
     let (authorization, content_type) = (header("authorization"), header("content-type"));
+    let (method, path) = (req.method().to_string(), req.uri().path().to_owned());
+    {
+        let mut missing = state.missing.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = missing.iter().position(|p| *p == path) {
+            if method != "PUT" {
+                return Ok(hyper::Response::builder()
+                    .status(404)
+                    .body(http_body_util::Empty::new())
+                    .expect("a valid response"));
+            }
+            missing.remove(i);
+        }
+    }
     let body = req
         .into_body()
         .collect()
@@ -142,6 +171,8 @@ async fn take(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Post {
+                method,
+                path,
                 authorization,
                 content_type,
                 body,

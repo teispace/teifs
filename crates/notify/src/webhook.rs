@@ -81,7 +81,7 @@ impl Webhook {
 
 /// What went wrong, with its causes (`error sending request: … connection refused`),
 /// without the URL.
-fn described(err: reqwest::Error) -> String {
+pub(crate) fn described(err: reqwest::Error) -> String {
     let err = err.without_url();
     let mut text = err.to_string();
     let mut cause = std::error::Error::source(&err);
