@@ -251,7 +251,11 @@ set, and when a bucket export is imported), so whoever may `s3:PutBucketNotifica
 chooses what's sent where, not what the server calls. Events carry what a request did
 (keys, sizes, ETags, the signing access key and the client's address), never object
 data, metadata or secrets, and the queue on the drive (`.teifs/events.db`) sits with the
-rest of the drive's metadata.
+rest of the drive's metadata. Watching a bucket's events as they happen (MinIO's listen
+API) is decided as any bucket request, with the caller's policies and the bucket's:
+it needs `s3:ListenBucketNotification` on the bucket, and every bucket's events
+`s3:ListenNotification`, which only identity policies grant. Block Public Access applies
+to a policy that lets anyone listen.
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,

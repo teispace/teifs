@@ -317,5 +317,32 @@ events waiting drops new ones (`teifs_notify_dropped_total`). Redirects aren't f
 Events waiting for a target the server no longer has stay on the drive until it's
 configured again.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch),
-MinIO's listen API (`mc watch`), and `teifs event` commands.
+### Watching events
+
+`teifs watch ALIAS/BUCKET[/PREFIX]` shows a bucket's events as they happen, until Ctrl-C
+(as `mc watch` shows MinIO's); `teifs watch ALIAS` shows every bucket's:
+
+```text
+$ teifs watch local/photos/images/ --events put,delete
+12:00:00.123 ObjectCreated:Put photos/images/my cat.jpg 51.2 KiB
+12:00:04.518 ObjectRemoved:Delete photos/images/my cat.jpg
+```
+
+`--events` takes `put`, `delete`, `get`, `ilm` (lifecycle expirations), `bucket` (buckets
+created and removed) or S3's names, comma-separated (`put,delete,get` by default), and
+`--suffix .jpg` narrows it further. With `--json` each event is S3's record. Watching
+needs no target and no rule: it gets every event the bucket has, whatever its rules. It
+needs MinIO's `s3:ListenBucketNotification` on the bucket, which a bucket policy may grant
+(to anyone, even, with Block Public Access off), or `s3:ListenNotification` for every
+bucket's.
+
+A watch is MinIO's listen API, `GET /BUCKET?events=s3:ObjectCreated:*&prefix=…&suffix=…&ping=10`
+(or `GET /?events=…`), so `mc watch` and minio-go's `ListenBucketNotification` work too.
+Its answer is one `{"Records":[record]}` line per event, as long as the caller reads, with
+`{"Records":[]}` every `ping` seconds (10 by default) so proxies keep a quiet one open.
+Events are made only while the server has targets or someone watches; a watcher that
+reads too slowly skips events rather than slow requests down, and every watch ends when
+the server stops.
+
+Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch)
+and `teifs event` commands.

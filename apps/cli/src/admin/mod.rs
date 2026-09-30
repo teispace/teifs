@@ -200,7 +200,7 @@ fn alias<'a>(aliases: &'a Aliases, name: &str) -> Result<(&'a Alias, Origin), Er
     Ok(found)
 }
 
-fn client_for(alias: &Alias) -> Result<Client, Error> {
+pub(crate) fn client_for(alias: &Alias) -> Result<Client, Error> {
     Client::new(
         &alias.url,
         &alias.access_key,
@@ -236,7 +236,7 @@ fn client(aliases: &Aliases, name: &str) -> Result<Client, Error> {
 }
 
 /// A record for `--json`: `value`'s fields with a `type`.
-fn record(kind: &str, value: &impl serde::Serialize) -> Value {
+pub(crate) fn record(kind: &str, value: &impl serde::Serialize) -> Value {
     let mut record = serde_json::to_value(value).unwrap_or(Value::Null);
     if let Value::Object(fields) = &mut record {
         fields.insert("type".into(), kind.into());

@@ -294,7 +294,8 @@ The server's sink (`crates/server/src/audit.rs`) gives each target (a file, stan
 output, a webhook) a bounded queue and a writer task of its own: a file's reopens on
 `SIGHUP`, a webhook's sends batches of JSON lines and retries each until it's taken.
 Live traces (`trace.rs`) get the same entries from a broadcast channel, each watcher
-through a task that applies its filter and feeds its answer's body; entries are made
+through a task (`lines.rs`, shared with listeners) that applies its filter and feeds its
+answer's body; entries are made
 while a sink exists or anyone watches, and `Service::stopping` ends every trace when the
 server stops, so shutdown doesn't wait on them.
 Bucket notifications: a bucket's rules (`teifs_types::notify`: event names, the
@@ -306,7 +307,10 @@ in MinIO's envelope) is queued by `teifs-notify` in one SQLite transaction befor
 request is answered. Each target's sender reads its events in order and deletes them once
 taken, retrying with the audit webhook's backoff. The store's lifecycle job reports what
 it removes through the `Expirations` hook, which `events.rs` implements, so expirations
-are queued the same way before the job goes on.
+are queued the same way before the job goes on. While someone listens (`listen.rs`,
+MinIO's `GET /BUCKET?events=…`, claimed by the custom route before s3s reads the path),
+`events.rs` also broadcasts each event, and buckets' creations and removals, as
+ready-made lines that each listener's task filters.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

@@ -5,7 +5,7 @@
 //! stored, never skipped when it's evaluated. A policy TeiFS accepts means what it says.
 
 use crate::{
-    ACTIONS, Error,
+    ACTIONS, Error, MINIO_ACTIONS,
     condition::{self, Condition},
     context::Principal,
     evaluate::Request,
@@ -210,7 +210,7 @@ impl Policy {
     }
 
     /// Checks what S3 checks of a bucket policy beyond the language: every action is an
-    /// S3 action (a pattern must match at least one), and every `s3:` condition key is
+    /// S3 action or one of `MinIO`'s (a pattern must match at least one), and every `s3:` condition key is
     /// one S3 defines.
     pub fn check_s3(&self) -> Result<(), Error> {
         for (i, statement) in self.statements.iter().enumerate() {
@@ -218,6 +218,7 @@ impl Policy {
             for pattern in &statement.actions.patterns {
                 let known = ACTIONS
                     .iter()
+                    .chain(MINIO_ACTIONS)
                     .any(|(action, _)| pattern::matches(pattern, action, true));
                 if !known {
                     let text: String = pattern
@@ -1180,6 +1181,10 @@ mod tests {
         );
         assert!(check("s3:Nothing*", none).is_err());
         assert!(check("iam:CreateUser", none).is_err());
+        assert!(
+            check("s3:ListenBucketNotification", none).is_ok(),
+            "MinIO's actions are known too"
+        );
         assert!(check("s3:GetObject", r#"{"StringEquals": {"s3:prefix": "a"}}"#).is_ok());
         assert!(
             check("s3:GetObject", r#"{"StringEquals": {"aws:madeUp": "a"}}"#).is_ok(),

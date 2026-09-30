@@ -13,6 +13,7 @@ mod target;
 mod transfer;
 pub(crate) mod trust;
 mod versions;
+mod watch;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -183,6 +184,9 @@ pub enum Command {
         #[command(flatten)]
         enc: EncArgs,
     },
+    /// Show a bucket's events (or, for an alias, every bucket's) as they happen: objects
+    /// written, read and deleted, until Ctrl-C.
+    Watch(watch::WatchArgs),
 }
 
 #[derive(Subcommand)]

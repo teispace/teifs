@@ -1,6 +1,7 @@
 //! Bucket notifications' events: what a request did to objects, as S3 describes it,
 //! sent to the targets a bucket's rules pick (queued on the drive before the request is
-//! answered, see `teifs_notify`). Nothing is built unless the server has targets.
+//! answered, see `teifs_notify`) and to whoever listens ([`crate::listen`]). Nothing is
+//! built unless the server has targets or someone listens.
 
 use std::{
     future::Future,
@@ -17,7 +18,15 @@ use teifs_types::notify::{
 };
 use time::OffsetDateTime;
 
-use crate::{access::Client, drive::REGION, observe::Seen};
+use crate::{
+    access::Client,
+    drive::REGION,
+    listen::{Heard, Listeners},
+    observe::Seen,
+};
+
+/// The `configurationId` of listeners' events, which no rule sends (`MinIO`'s).
+const LISTENED: &str = "Config";
 
 /// What happened to one object.
 #[derive(Debug, Clone, Default)]
@@ -76,20 +85,40 @@ impl Request {
     }
 }
 
-/// Sends a drive's events to the server's targets.
+/// Sends a drive's events to the server's targets and its listeners.
 #[derive(Debug, Clone)]
 pub(crate) struct Events {
     store: Store,
     notifier: Arc<Notifier>,
+    listeners: Arc<Listeners>,
 }
 
 impl Events {
-    pub(crate) const fn new(store: Store, notifier: Arc<Notifier>) -> Self {
-        Self { store, notifier }
+    pub(crate) fn new(store: Store, notifier: Arc<Notifier>) -> Self {
+        Self {
+            store,
+            notifier,
+            listeners: Arc::new(Listeners::new()),
+        }
     }
 
     pub(crate) fn notifier(&self) -> &Notifier {
         &self.notifier
+    }
+
+    pub(crate) fn listeners(&self) -> &Listeners {
+        &self.listeners
+    }
+
+    /// Tells listeners that the request with these extensions did `name`
+    /// (`BucketCreated:*`) to `bucket`: bucket events aren't sent to targets.
+    pub(crate) fn bucket(&self, extensions: &http::Extensions, name: &str, bucket: &str) {
+        if self.listeners.listened() {
+            let request = Request::of(extensions);
+            let record = self.record(&request, name, bucket, LISTENED, &Happened::default());
+            self.listeners
+                .tell(Heard::new(bucket, &format!("s3:{name}"), "", &record));
+        }
     }
 
     /// Records that the request with these extensions did `name` (`ObjectCreated:Put`)
@@ -102,7 +131,20 @@ impl Events {
         bucket: &str,
         objects: Vec<Happened>,
     ) {
-        if self.notifier.is_empty() || objects.is_empty() {
+        let listened = self.listeners.listened();
+        if (self.notifier.is_empty() && !listened) || objects.is_empty() {
+            return;
+        }
+        let event = format!("s3:{name}");
+        let request = Request::of(extensions);
+        if listened {
+            for object in &objects {
+                let record = self.record(&request, name, bucket, LISTENED, object);
+                self.listeners
+                    .tell(Heard::new(bucket, &event, &object.key, &record));
+            }
+        }
+        if self.notifier.is_empty() {
             return;
         }
         let config = match self.store.bucket_notifications(bucket).await {
@@ -113,19 +155,16 @@ impl Events {
                 return;
             }
         };
-        let event = format!("s3:{name}");
-        let mut request = None;
         let mut queued = Vec::new();
         for object in &objects {
             for rule in config.matching(&event, &object.key) {
                 let Some(arn) = rule.target() else {
                     continue;
                 };
-                let request = request.get_or_insert_with(|| Request::of(extensions));
                 let message = EventMessage {
                     event_name: event.clone(),
                     key: format!("{bucket}/{}", object.key),
-                    records: vec![self.record(request, name, bucket, &rule.id, object)],
+                    records: vec![self.record(&request, name, bucket, &rule.id, object)],
                 };
                 let body = serde_json::to_vec(&message).expect("an event serializes");
                 queued.push((arn, body));

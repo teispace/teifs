@@ -129,6 +129,11 @@ impl Drive {
         }
     }
 
+    /// Where its events go, shared with the routes and the lifecycle job.
+    pub(crate) fn events(&self) -> Events {
+        self.events.clone()
+    }
+
     /// The rules requests are decided with, shared with [`crate::access::Access`].
     pub(crate) fn rules(&self) -> Arc<Rules> {
         Arc::clone(&self.rules)
@@ -1108,6 +1113,8 @@ impl S3 for Drive {
             .await
             .s3()?;
         self.rules.forget(&input.bucket);
+        self.events
+            .bucket(&req.extensions, "BucketCreated:*", &input.bucket);
         Ok(S3Response::new(dto::CreateBucketOutput {
             location: Some(format!("/{}", req.input.bucket)),
             ..Default::default()
@@ -1128,6 +1135,8 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::DeleteBucketOutput>> {
         self.store.delete_bucket(&req.input.bucket).await.s3()?;
         self.rules.forget(&req.input.bucket);
+        self.events
+            .bucket(&req.extensions, "BucketRemoved:*", &req.input.bucket);
         Ok(S3Response::new(dto::DeleteBucketOutput::default()))
     }
 

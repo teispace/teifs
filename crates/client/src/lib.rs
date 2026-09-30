@@ -1,8 +1,8 @@
 //! A typed client for TeiFS's admin API (`/.teifs/admin/v1/`): server info and
-//! configuration, IAM export and import, and root key rotation. Requests are signed
-//! with Signature V4 as S3 requests are, with the messages the server itself uses
-//! ([`teifs_types::admin`]). Users, keys, groups and policies are AWS's IAM API, which
-//! any AWS SDK calls.
+//! configuration, IAM export and import, root key rotation and live traces; and for
+//! listening for events (`MinIO`'s listen API). Requests are signed with Signature V4
+//! as S3 requests are, with the messages the server itself uses ([`teifs_types::admin`]).
+//! Users, keys, groups and policies are AWS's IAM API, which any AWS SDK calls.
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), teifs_client::ClientError> {
@@ -40,6 +40,7 @@ pub use teifs_types::admin::{
     ImportReport, JobInfo, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
+pub use teifs_types::notify::{EventRecord, ListenFilter, event_key_decoded};
 
 /// The region requests are signed for when none is given (TeiFS accepts any).
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -268,8 +269,29 @@ impl Client {
             return Err(api_error(status, &response.bytes().await?));
         }
         Ok(Trace {
-            response,
-            pending: Vec::new(),
+            lines: JsonLines::new(response),
+        })
+    }
+
+    /// The events on `bucket` (none: every bucket) that `filter` asks for, from now on
+    /// (`MinIO`'s listen API, with `s3:ListenBucketNotification` on the bucket or
+    /// `s3:ListenNotification`): read them with [`Listen::next`].
+    pub async fn listen(
+        &self,
+        bucket: Option<&str>,
+        filter: &ListenFilter,
+    ) -> Result<Listen, ClientError> {
+        let path = format!("/{}", bucket.unwrap_or_default());
+        let response = self
+            .send(Method::GET, &path, Some(&filter.to_query()), Vec::new())
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_error(status, &response.bytes().await?));
+        }
+        Ok(Listen {
+            lines: JsonLines::new(response),
+            records: std::collections::VecDeque::new(),
         })
     }
 
@@ -402,9 +424,7 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
 /// A live trace: the requests a server answers, as it answers them.
 #[derive(Debug)]
 pub struct Trace {
-    response: reqwest::Response,
-    /// What's been read of a line not yet whole.
-    pending: Vec<u8>,
+    lines: JsonLines,
 }
 
 impl Trace {
@@ -415,11 +435,67 @@ impl Trace {
     ///
     /// The connection failed, or a line isn't an entry.
     pub async fn next(&mut self) -> Result<Option<AuditEntry>, ClientError> {
+        self.lines.next().await
+    }
+}
+
+/// Events as they happen: see [`Client::listen`].
+#[derive(Debug)]
+pub struct Listen {
+    lines: JsonLines,
+    /// Those read and not yet returned.
+    records: std::collections::VecDeque<EventRecord>,
+}
+
+impl Listen {
+    /// The next event, waiting for one; `None` once the server ends the answer (it's
+    /// stopping).
+    ///
+    /// # Errors
+    ///
+    /// The connection failed, or a line isn't events.
+    pub async fn next(&mut self) -> Result<Option<EventRecord>, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct Line {
+            #[serde(rename = "Records", default)]
+            records: Option<Vec<EventRecord>>,
+        }
+        loop {
+            if let Some(record) = self.records.pop_front() {
+                return Ok(Some(record));
+            }
+            // A line without events is a heartbeat.
+            match self.lines.next::<Line>().await? {
+                Some(line) => self.records.extend(line.records.unwrap_or_default()),
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+/// An answer of JSON lines, read one at a time.
+#[derive(Debug)]
+struct JsonLines {
+    response: reqwest::Response,
+    /// What's been read of a line not yet whole.
+    pending: Vec<u8>,
+}
+
+impl JsonLines {
+    const fn new(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            pending: Vec::new(),
+        }
+    }
+
+    /// The next line, waiting for one; `None` once the answer ends.
+    async fn next<T: DeserializeOwned>(&mut self) -> Result<Option<T>, ClientError> {
         loop {
             if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = self.pending.drain(..=end).collect();
                 let line = line.trim_ascii();
-                // Empty lines keep a quiet trace open through proxies.
+                // Empty lines keep a quiet answer open through proxies.
                 if line.is_empty() {
                     continue;
                 }

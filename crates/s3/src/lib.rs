@@ -20,6 +20,8 @@ mod health;
 mod iam_api;
 mod lifecycle;
 mod limits;
+mod lines;
+mod listen;
 mod metrics;
 mod notification;
 mod object_lock;
@@ -102,17 +104,15 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let notifier = options
         .notifier
         .unwrap_or_else(|| Arc::new(teifs_notify::Notifier::none()));
-    if !notifier.is_empty() {
-        let events = events::Events::new(store.clone(), Arc::clone(&notifier));
-        // A store serves one service: a second is told nothing new.
-        let _ = store.tell_expirations(Arc::new(events));
-    }
     let drive = Drive::new(
         store.clone(),
         options.default_layout,
         options.legacy_bucket_defaults,
         Arc::clone(&notifier),
     );
+    let events = drive.events();
+    // A store serves one service: a second is told nothing new.
+    let _ = store.tell_expirations(Arc::new(events.clone()));
     let rules = drive.rules();
     let scrapers = match &options.iam {
         Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
@@ -153,7 +153,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             config: options.config.map(Arc::new),
             root_keys: options.root_keys,
             tracers,
-            notifier,
+            events,
         });
     }
     let host = if options.domains.is_empty() {

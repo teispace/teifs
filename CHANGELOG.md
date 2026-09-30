@@ -142,6 +142,12 @@ behaviour; the on-disk format is always upgraded automatically.
   a target that's down or a restart loses nothing. `teifs admin config` lists the targets,
   and the metrics count each target's events sent, failed, dropped and waiting. Bucket
   exports carry the rules.
+- Listening for events, as MinIO's API: `GET /BUCKET?events=…` (or `GET /?events=…` for
+  every bucket) answers with each event as it happens, filtered by event, prefix and
+  suffix, whatever the bucket's rules, with buckets created and removed too; `mc watch`
+  works, and `teifs watch ALIAS[/BUCKET[/PREFIX]]` shows them. It needs MinIO's
+  `s3:ListenBucketNotification` (which bucket policies may grant, anonymous listeners
+  included) or `s3:ListenNotification`.
 - A client uploading to a server that refuses the upload (access denied, say) reads
   the refusal: a small body is read before the answer, where it used to be left unread
   and the connection closed, which could fail the client's write with a broken pipe.

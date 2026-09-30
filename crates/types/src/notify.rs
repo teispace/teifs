@@ -256,6 +256,92 @@ fn decoded_or_empty(value: Option<&str>) -> String {
     value.map(decoded).unwrap_or_default()
 }
 
+/// The events only listeners get (`MinIO`'s): a bucket was created or removed. Their
+/// records name the bucket and no object.
+pub const BUCKET_EVENTS: &[&str] = &["s3:BucketCreated:*", "s3:BucketRemoved:*"];
+
+/// What someone listening for events asks for (`MinIO`'s listen API, `mc watch`):
+/// events or groups, on keys with a prefix and a suffix (as they are, not URL-encoded).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListenFilter {
+    /// The events: names, groups' `*`, or [`BUCKET_EVENTS`].
+    pub events: Vec<String>,
+    /// Only keys starting with this.
+    pub prefix: String,
+    /// Only keys ending with this.
+    pub suffix: String,
+}
+
+impl ListenFilter {
+    /// Checks it as `MinIO` does.
+    ///
+    /// # Errors
+    ///
+    /// No events, an unknown one, or a prefix or suffix longer than a key can be.
+    pub fn check(&self) -> Result<(), NotifyError> {
+        if self.events.is_empty() {
+            return Err(NotifyError::NothingToListenFor);
+        }
+        if let Some(event) = self
+            .events
+            .iter()
+            .find(|e| !is_event(e) && !BUCKET_EVENTS.contains(&e.as_str()))
+        {
+            return Err(NotifyError::UnknownEvent(event.clone()));
+        }
+        if self.prefix.len() > MAX_FILTER_VALUE || self.suffix.len() > MAX_FILTER_VALUE {
+            return Err(NotifyError::FilterTooLong);
+        }
+        Ok(())
+    }
+
+    /// The query that asks for it: `events=…&prefix=…&suffix=…`, encoded as Signature
+    /// V4 signs it (everything but letters, digits and `-._~`). No events still names
+    /// `events`, so it's refused rather than read as another request.
+    #[must_use]
+    pub fn to_query(&self) -> String {
+        let mut pairs: Vec<(&str, &str)> =
+            self.events.iter().map(|e| ("events", e.as_str())).collect();
+        if pairs.is_empty() {
+            pairs.push(("events", ""));
+        }
+        for (name, value) in [("prefix", &self.prefix), ("suffix", &self.suffix)] {
+            if !value.is_empty() {
+                pairs.push((name, value));
+            }
+        }
+        // Sorted as signatures sort them, so a server that keeps repeated names' order
+        // (as `MinIO`'s clients sign) computes the same signature.
+        let mut encoded: Vec<String> = pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={}", uri_encoded(value)))
+            .collect();
+        encoded.sort();
+        encoded.join("&")
+    }
+
+    /// Whether the listener wants `event` for `key`.
+    #[must_use]
+    pub fn matches(&self, event: &str, key: &str) -> bool {
+        self.events.iter().any(|pattern| covers(pattern, event))
+            && key.starts_with(&self.prefix)
+            && key.ends_with(&self.suffix)
+    }
+}
+
+/// `value` with every byte but letters, digits and `-._~` percent-encoded.
+fn uri_encoded(value: &str) -> String {
+    use std::fmt::Write as _;
+    value.bytes().fold(String::new(), |mut out, b| {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+        out
+    })
+}
+
 /// A target's ARN: `arn:teifs:sqs::ID:TYPE` (or `MinIO`'s `arn:minio:sqs::ID:TYPE`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TargetArn {
@@ -433,6 +519,12 @@ pub fn event_key(key: &str) -> String {
         .join("/")
 }
 
+/// The key an event's record carries ([`event_key`]), decoded.
+#[must_use]
+pub fn event_key_decoded(key: &str) -> String {
+    decoded(key)
+}
+
 /// What a target is sent to check it when a rule starts sending to it (S3's
 /// `s3:TestEvent`), unless the request says to skip it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +574,9 @@ pub enum NotifyError {
     /// More rules than a bucket may have.
     #[error("A bucket may have at most 100 notification rules")]
     TooManyRules,
+    /// A listener that asks for no events.
+    #[error("Name the events to listen for with `events`")]
+    NothingToListenFor,
 }
 
 #[cfg(test)]
@@ -654,7 +749,58 @@ mod tests {
     }
 
     #[test]
+    fn listeners_get_the_events_they_ask_for() {
+        let filter = ListenFilter {
+            events: vec!["s3:ObjectCreated:*".into(), "s3:BucketCreated:*".into()],
+            prefix: "photos/".into(),
+            suffix: ".jpg".into(),
+        };
+        assert_eq!(filter.check(), Ok(()));
+        assert!(filter.matches("s3:ObjectCreated:Put", "photos/a.jpg"));
+        assert!(!filter.matches("s3:ObjectCreated:Put", "photos/a.png"));
+        assert!(!filter.matches("s3:ObjectCreated:Put", "videos/a.jpg"));
+        assert!(!filter.matches("s3:ObjectRemoved:Delete", "photos/a.jpg"));
+        let buckets = ListenFilter {
+            events: vec!["s3:BucketCreated:*".into()],
+            ..ListenFilter::default()
+        };
+        assert!(buckets.matches("s3:BucketCreated:*", ""));
+        assert!(!buckets.matches("s3:BucketRemoved:*", ""));
+        assert_eq!(
+            filter.to_query(),
+            "events=s3%3ABucketCreated%3A%2A&events=s3%3AObjectCreated%3A%2A\
+             &prefix=photos%2F&suffix=.jpg"
+        );
+        let spaced = ListenFilter {
+            prefix: "a b+ü".into(),
+            ..buckets.clone()
+        };
+        assert_eq!(
+            spaced.to_query(),
+            "events=s3%3ABucketCreated%3A%2A&prefix=a%20b%2B%C3%BC"
+        );
+        assert_eq!(ListenFilter::default().to_query(), "events=");
+        assert_eq!(
+            ListenFilter::default().check(),
+            Err(NotifyError::NothingToListenFor)
+        );
+        let unknown = ListenFilter {
+            events: vec!["s3:ObjectMoved:*".into()],
+            ..ListenFilter::default()
+        };
+        assert!(matches!(unknown.check(), Err(NotifyError::UnknownEvent(_))));
+        let long = ListenFilter {
+            suffix: "x".repeat(MAX_FILTER_VALUE + 1),
+            ..buckets
+        };
+        assert_eq!(long.check(), Err(NotifyError::FilterTooLong));
+    }
+
+    #[test]
     fn keys_are_encoded_as_s3_sends_them() {
+        for key in ["a b/c+d/é?.txt", "plain", "x/ y/"] {
+            assert_eq!(event_key_decoded(&event_key(key)), key);
+        }
         assert_eq!(
             event_key("photos/my cat+dog=1.jpg"),
             "photos/my+cat%2Bdog%3D1.jpg"

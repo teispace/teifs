@@ -92,12 +92,10 @@ pub(crate) fn not_found() -> S3Error {
     err
 }
 
-/// Whether `headers` name a virtual-hosted-style host (`bucket.domain`) of one of
-/// `domains`: then the path is a key in that bucket, not the admin API.
-pub(crate) fn is_virtual_hosted(headers: &HeaderMap, domains: &[String]) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
-        return false;
-    };
+/// The bucket `headers` name when their host is virtual-hosted-style (`bucket.domain`)
+/// for one of `domains`: then the path is a key in that bucket, not the admin API.
+pub(crate) fn virtual_bucket<'a>(headers: &'a HeaderMap, domains: &[String]) -> Option<&'a str> {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok())?;
     // An IPv6 literal's colons aren't a port; no domain matches one anyway.
     let host = host.rsplit_once(':').map_or(host, |(name, port)| {
         if port.bytes().all(|b| b.is_ascii_digit()) && !name.ends_with(':') {
@@ -106,10 +104,10 @@ pub(crate) fn is_virtual_hosted(headers: &HeaderMap, domains: &[String]) -> bool
             host
         }
     });
-    domains.iter().any(|domain| {
-        host.len() > domain.len() + 1
-            && host.as_bytes()[host.len() - domain.len() - 1] == b'.'
-            && host[host.len() - domain.len()..].eq_ignore_ascii_case(domain)
+    domains.iter().find_map(|domain| {
+        let dot = host.len().checked_sub(domain.len() + 1)?;
+        (dot > 0 && host.as_bytes()[dot] == b'.' && host[dot + 1..].eq_ignore_ascii_case(domain))
+            .then(|| &host[..dot])
     })
 }
 
@@ -317,13 +315,13 @@ mod tests {
     #[test]
     fn virtual_hosted_requests_are_told_apart() {
         let domains = ["s3.example.com".to_owned(), "localhost".to_owned()];
-        for yes in [
-            "bucket.s3.example.com",
-            "bucket.S3.Example.com:9000",
-            "a.b.localhost:9000",
-            "bucket.localhost",
+        for (yes, bucket) in [
+            ("bucket.s3.example.com", "bucket"),
+            ("bucket.S3.Example.com:9000", "bucket"),
+            ("a.b.localhost:9000", "a.b"),
+            ("bucket.localhost", "bucket"),
         ] {
-            assert!(is_virtual_hosted(&host(yes), &domains), "{yes}");
+            assert_eq!(virtual_bucket(&host(yes), &domains), Some(bucket), "{yes}");
         }
         for no in [
             "s3.example.com",
@@ -335,10 +333,10 @@ mod tests {
             "[::1]:9000",
             "example.com",
         ] {
-            assert!(!is_virtual_hosted(&host(no), &domains), "{no}");
+            assert_eq!(virtual_bucket(&host(no), &domains), None, "{no}");
         }
-        assert!(!is_virtual_hosted(&HeaderMap::new(), &domains));
-        assert!(!is_virtual_hosted(&host("bucket.localhost"), &[]));
+        assert_eq!(virtual_bucket(&HeaderMap::new(), &domains), None);
+        assert_eq!(virtual_bucket(&host("bucket.localhost"), &[]), None);
     }
 
     #[test]

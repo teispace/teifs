@@ -425,6 +425,13 @@ fn target(action: &str) -> Target {
         .map_or(Target::Other, |i| ACTIONS[i].1)
 }
 
+/// `MinIO`'s actions that S3 doesn't have, for its APIs TeiFS serves too: policies
+/// written for `MinIO` may name them. Sorted, and none is an S3 action.
+pub const MINIO_ACTIONS: &[(&str, Target)] = &[
+    ("s3:ListenBucketNotification", Target::Bucket),
+    ("s3:ListenNotification", Target::Other),
+];
+
 /// Every S3 action, sorted, with what it applies to.
 pub const ACTIONS: &[(&str, Target)] = &[
     ("s3:AbortMultipartUpload", Target::Object),

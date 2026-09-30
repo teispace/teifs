@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use teifs_policy::{ACTIONS, Facts, S3Key, TagKind, Target, authorizations};
+use teifs_policy::{ACTIONS, Facts, MINIO_ACTIONS, S3Key, TagKind, Target, authorizations};
 
 fn reference() -> Value {
     serde_json::from_str(include_str!("fixtures/s3-reference.json")).expect("the fixture is JSON")
@@ -69,6 +69,9 @@ fn actions_are_exactly_the_references() {
         ACTIONS.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "sorted, for binary search"
     );
+    for (action, _) in MINIO_ACTIONS {
+        assert!(!ours.contains_key(*action), "{action} is S3's own");
+    }
 }
 
 /// Every combination of the facts that change what an operation needs.

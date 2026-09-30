@@ -1,5 +1,5 @@
-//! Every request that isn't an S3 operation: the IAM and STS Query APIs, S3 Control and
-//! TeiFS's admin API.
+//! Every request that isn't an S3 operation: the IAM and STS Query APIs, S3 Control,
+//! TeiFS's admin API, and `MinIO`'s listen API ([`crate::listen`]).
 //! s3s hands them to one custom route, [`Routes`], before it parses a path as a bucket
 //! and key, and after it has checked the signature.
 //!
@@ -26,7 +26,10 @@ use crate::{
     access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
-    bucket_export, control, iam_api,
+    bucket_export, control,
+    errors::StoreResultExt,
+    events::Events,
+    iam_api, listen,
     observe::{self, Seen},
     trace::Tracers,
 };
@@ -339,7 +342,7 @@ fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap, domains: &[String]) -
         Some(Api::Query)
     } else if headers.contains_key(control::ACCOUNT_HEADER) && path.starts_with(control::PREFIX) {
         Some(Api::Control)
-    } else if path.starts_with(ADMIN_PREFIX) && !admin::is_virtual_hosted(headers, domains) {
+    } else if path.starts_with(ADMIN_PREFIX) && admin::virtual_bucket(headers, domains).is_none() {
         Some(Api::Admin)
     } else {
         None
@@ -378,8 +381,8 @@ pub(crate) struct Routes {
     pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
     /// Whoever watches live traces.
     pub(crate) tracers: Arc<Tracers>,
-    /// The server's notification targets.
-    pub(crate) notifier: Arc<teifs_notify::Notifier>,
+    /// Where events go: the server's notification targets and its listeners.
+    pub(crate) events: Events,
 }
 
 #[async_trait::async_trait]
@@ -391,7 +394,8 @@ impl S3Route for Routes {
         headers: &HeaderMap,
         _: &mut http::Extensions,
     ) -> bool {
-        api_of(method, uri, headers, &self.domains).is_some()
+        listen::Request::of(method, uri, headers, &self.domains).is_some()
+            || api_of(method, uri, headers, &self.domains).is_some()
     }
 
     /// Everything is decided in [`Self::call`], where each API answers in its format.
@@ -400,6 +404,10 @@ impl S3Route for Routes {
     }
 
     async fn call(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
+        if let Some(scope) = listen::Request::of(&req.method, &req.uri, &req.headers, &self.domains)
+        {
+            return self.listen(scope, req).await;
+        }
         let api = api_of(&req.method, &req.uri, &req.headers, &self.domains)
             .expect("matched by is_match");
         let seen = req.extensions.get::<Arc<Seen>>().cloned();
@@ -528,11 +536,66 @@ impl Routes {
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
             Handler::ImportBuckets => {
-                bucket_export::import(&self.store, &self.rules, &self.notifier, req).await
+                bucket_export::import(&self.store, &self.rules, self.events.notifier(), req).await
             }
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
+    }
+
+    /// Listens for the events the request asks for: one bucket's, with
+    /// `s3:ListenBucketNotification` on it, or every bucket's, with `s3:ListenNotification`.
+    async fn listen(
+        &self,
+        scope: listen::Scope,
+        req: S3Request<Body>,
+    ) -> S3Result<S3Response<Body>> {
+        observe::name(
+            &req.extensions,
+            match scope {
+                listen::Scope::Bucket(_) => "ListenBucketNotification",
+                listen::Scope::Every => "ListenNotification",
+            },
+        );
+        if let (Some(seen), Some(credentials)) =
+            (req.extensions.get::<Arc<Seen>>(), &req.credentials)
+        {
+            seen.signed_by(&credentials.access_key);
+        }
+        // A bucket's policy may let anyone listen, as it may let anyone read.
+        let identity = match req.credentials {
+            Some(_) => self.authenticate(&req)?,
+            None => Arc::new(Identity::anonymous()),
+        };
+        let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+        let context = base_context(&identity, &req.headers, client, &self.iam.account());
+        let allowed = match &scope {
+            listen::Scope::Bucket(bucket) => {
+                let rules = self.rules.of(bucket).await?;
+                allows(
+                    &identity,
+                    &context,
+                    "s3:ListenBucketNotification",
+                    &teifs_policy::bucket_arn(bucket),
+                    Some(&rules),
+                )
+            }
+            listen::Scope::Every => identity
+                .decide(&context, "s3:ListenNotification", ANY, None)
+                .is_allowed(),
+        };
+        if !allowed {
+            return Err(denied());
+        }
+        if let listen::Scope::Bucket(bucket) = &scope {
+            self.store.head_bucket(bucket).await.s3()?;
+        }
+        let request = listen::Request::read(scope, req.uri.query().unwrap_or_default())?;
+        let body = self
+            .events
+            .listeners()
+            .follow(request, self.tracers.stopping());
+        Ok(listen::response(body))
     }
 
     /// Who signed a request: refused when unsigned, or signed with a key IAM doesn't

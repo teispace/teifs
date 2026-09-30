@@ -37,7 +37,9 @@ mod policy;
 mod template;
 mod value;
 
-pub use actions::{ACTIONS, Authorization, Authorizations, Facts, Target, authorizations};
+pub use actions::{
+    ACTIONS, Authorization, Authorizations, Facts, MINIO_ACTIONS, Target, authorizations,
+};
 pub use arn::{S3_ACCOUNT_RESOURCE, bucket_arn, object_arn};
 pub use context::{Context, Principal, PrincipalKind, Value};
 pub use evaluate::{Decision, Policies, Request, evaluate};
