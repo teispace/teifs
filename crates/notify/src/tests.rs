@@ -305,9 +305,8 @@ async fn redis_keeps_a_field_per_object_or_an_entry_per_event() {
     assert!(bad.test().await.unwrap_err().contains("WRONGPASS"));
 }
 
-/// A TLS terminator for `localhost` in front of `plain`, and the PEM of the CA that
-/// signed its certificate.
-async fn tls_in_front_of(plain: &str) -> (String, String) {
+/// A TLS acceptor for `localhost`, and the PEM of the CA that signed its certificate.
+fn test_tls() -> (tokio_rustls::TlsAcceptor, String) {
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
     };
@@ -335,7 +334,16 @@ async fn tls_in_front_of(plain: &str) -> (String, String) {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
     )
     .unwrap();
-    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    (
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
+        ca_pem,
+    )
+}
+
+/// A TLS terminator for `localhost` in front of `plain`, and the PEM of the CA that
+/// signed its certificate.
+async fn tls_in_front_of(plain: &str) -> (String, String) {
+    let (acceptor, ca_pem) = test_tls();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let plain = plain.to_owned();
@@ -418,4 +426,189 @@ async fn nsq_publishes_each_event() {
 
     let nowhere = Nsq::new("127.0.0.1:1", "t").unwrap();
     assert!(nowhere.test().await.unwrap_err().contains("can't connect"));
+}
+
+/// NATS targets: each event published to the subject, the server's `PONG` confirming
+/// it; the credentials sent; a connection the server closed is made again at once.
+#[tokio::test]
+async fn nats_publishes_each_event() {
+    use crate::testing::{NatsServer, NatsSetup};
+    let server = NatsServer::start(NatsSetup {
+        user: Some(("teifs".into(), "pw".into())),
+        ..NatsSetup::default()
+    })
+    .await;
+    let mut nats = Nats::new(server.address(), "s3.events").unwrap();
+    nats.user = Some("teifs".into());
+    nats.password = Some(Zeroizing::new("pw".into()));
+    assert!(!format!("{nats:?}").contains("pw"));
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(
+        &dir.path().join("events.db"),
+        vec![TargetConfig::new("bus", TargetKind::Nats(nats.clone())).unwrap()],
+    )
+    .unwrap();
+    let arn = TargetArn::parse("arn:teifs:sqs::bus:nats").unwrap();
+    notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    notifier
+        .queue(vec![(arn.clone(), put.clone()), (arn, put.clone())])
+        .await
+        .unwrap();
+    let published = server.published(2).await;
+    assert_eq!(published.len(), 2, "the test publishes nothing");
+    assert!(
+        published
+            .iter()
+            .all(|p| p.subject == "s3.events" && p.reply.is_none())
+    );
+    assert_eq!(published[0].body.as_bytes(), put);
+    let connect = &server.connects()[0];
+    assert_eq!(
+        (&connect["user"], &connect["name"], &connect["echo"]),
+        (&"teifs".into(), &"teifs".into(), &false.into())
+    );
+    notifier.stop().await;
+
+    // The server closes a connection kept idle; the next event makes another.
+    nats.send(b"{}").await.unwrap();
+    server.kick();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    nats.send(b"{\"after\":1}").await.unwrap();
+    assert_eq!(server.published(4).await[3].body, "{\"after\":1}");
+
+    // Events larger than the server takes, or a wrong password, fail.
+    let err = nats.send(&[b'x'; 5000]).await.unwrap_err();
+    assert!(
+        err.contains("larger than the server takes (4096 bytes)"),
+        "{err}"
+    );
+    nats.password = Some(Zeroizing::new("nope".into()));
+    let err = nats.test().await.unwrap_err();
+    assert!(err.contains("Authorization Violation"), "{err}");
+}
+
+/// NATS `JetStream`: each event acknowledged by the stream that takes the subject, an
+/// event sent again dropped as a duplicate by its id; a subject no stream takes, or no
+/// `JetStream`, fails its test.
+#[tokio::test]
+async fn nats_jetstream_acknowledges_each_event() {
+    use crate::testing::{NatsServer, NatsSetup};
+    let server = NatsServer::start(NatsSetup {
+        token: Some("t0ken".into()),
+        streams: Some(vec![("EVENTS".into(), "s3.events".into())]),
+        headers: true,
+        ..NatsSetup::default()
+    })
+    .await;
+    let mut nats = Nats::new(server.address(), "s3.events").unwrap();
+    nats.jetstream = true;
+    nats.token = Some(Zeroizing::new("t0ken".into()));
+    assert!(nats.shown().ends_with("(JetStream)"));
+    nats.test().await.unwrap();
+    nats.send(b"{\"n\":1}").await.unwrap();
+    nats.send(b"{\"n\":1}").await.unwrap();
+    let published = server.published(2).await;
+    assert!(
+        published[0]
+            .reply
+            .as_deref()
+            .is_some_and(|r| r.starts_with("_INBOX."))
+    );
+    assert!(published[0].id.is_some(), "{published:?}");
+    assert_eq!(
+        published[0].id, published[1].id,
+        "the same event, the same id"
+    );
+    assert_eq!(server.connects()[0]["auth_token"], "t0ken");
+    assert_eq!(server.connects()[0]["no_responders"], true);
+
+    let mut elsewhere = Nats::new(server.address(), "other").unwrap();
+    elsewhere.jetstream = true;
+    elsewhere.token = nats.token.clone();
+    let err = elsewhere.test().await.unwrap_err();
+    assert!(err.contains("no JetStream stream takes `other`"), "{err}");
+    let err = elsewhere.send(b"{}").await.unwrap_err();
+    assert!(err.contains("no JetStream stream takes `other`"), "{err}");
+
+    let plain = NatsServer::start(NatsSetup {
+        headers: true,
+        ..NatsSetup::default()
+    })
+    .await;
+    let mut nats = Nats::new(plain.address(), "s3.events").unwrap();
+    nats.jetstream = true;
+    let err = nats.test().await.unwrap_err();
+    assert!(err.contains("JetStream isn't enabled"), "{err}");
+}
+
+/// NATS nkeys: the server's nonce signed by the seed, sent with its public key, or
+/// with the user JWT of a `.creds` file; another user's key is refused.
+#[tokio::test]
+async fn nats_signs_its_nonce_with_nkeys() {
+    use crate::{
+        nkey::tests::{USER_BYTE, encode_seed},
+        testing::{
+            NKEY_JWT as JWT, NKEY_PUBLIC as PUBLIC, NKEY_SEED as SEED, NatsServer, NatsSetup, creds,
+        },
+    };
+    let server = NatsServer::start(NatsSetup {
+        nkeys: vec![PUBLIC.into()],
+        ..NatsSetup::default()
+    })
+    .await;
+    let mut nats = Nats::new(server.address(), "s3").unwrap();
+    nats.key = Some(Arc::new(UserKey::parse(SEED).unwrap()));
+    nats.test().await.unwrap();
+    nats.key = Some(Arc::new(UserKey::parse(&creds()).unwrap()));
+    nats.test().await.unwrap();
+    let connects = server.connects();
+    assert_eq!(
+        (connects[0]["nkey"].as_str(), connects[0].get("jwt")),
+        (Some(PUBLIC), None)
+    );
+    assert_eq!(
+        (connects[1]["jwt"].as_str(), connects[1].get("nkey")),
+        (Some(JWT), None)
+    );
+    assert!(connects.iter().all(|c| c["sig"].is_string()));
+
+    let other = UserKey::parse(&encode_seed(USER_BYTE, &[7; 32])).unwrap();
+    nats.key = Some(Arc::new(other));
+    let err = nats.test().await.unwrap_err();
+    assert!(err.contains("Authorization Violation"), "{err}");
+    // A server without nkeys sends no nonce to sign.
+    let plain = NatsServer::start(NatsSetup::default()).await;
+    let mut nats = Nats::new(plain.address(), "s3").unwrap();
+    nats.key = Some(Arc::new(UserKey::parse(SEED).unwrap()));
+    assert!(nats.test().await.unwrap_err().contains("no nonce"));
+}
+
+/// NATS over TLS: after `INFO` when the server requires it, or first; the server
+/// verified with the operator's CA.
+#[tokio::test]
+async fn nats_is_reached_over_tls() {
+    use crate::testing::{NatsServer, NatsSetup};
+    let (acceptor, ca_pem) = test_tls();
+    let tls = tls_config(Some(ca_pem.as_bytes())).unwrap();
+    for first in [false, true] {
+        let server = NatsServer::start(NatsSetup {
+            tls: Some((acceptor.clone(), first)),
+            ..NatsSetup::default()
+        })
+        .await;
+        let port = server.address().rsplit_once(':').unwrap().1;
+        let mut nats = Nats::new(&format!("localhost:{port}"), "s3").unwrap();
+        if !first {
+            let err = nats.test().await.unwrap_err();
+            assert!(err.contains("requires TLS"), "{err}");
+        }
+        nats.tls = Some(Arc::clone(&tls));
+        nats.tls_first = first;
+        assert!(nats.shown().starts_with("tls://"));
+        nats.test().await.unwrap();
+        nats.send(b"{}").await.unwrap();
+        assert_eq!(server.published(1).await[0].body, "{}");
+        assert_eq!(server.connects()[0]["tls_required"], true);
+    }
 }

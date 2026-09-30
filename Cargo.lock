@@ -3133,6 +3133,7 @@ dependencies = [
 name = "teifs-notify"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64",
  "http-body-util",
  "hyper",

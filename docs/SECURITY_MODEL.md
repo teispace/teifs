@@ -243,11 +243,15 @@ environment, is marked sensitive in the request that carries it, and is never sh
 the webhook's `Debug` and `teifs admin config` show its URL without the user, password,
 query or fragment. Redirects aren't followed, so entries go nowhere but the URL given. Notification
 targets' secrets are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`,
-`TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`),
-sent as sensitive headers or Redis's `AUTH`, and never shown; a URL with a user or password in it is refused.
-A Redis target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's certificate
-and name with the system's certificates or only the given CA, never skipping the check,
-before its password is sent.
+`TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`,
+`TEIFS_NOTIFY_NATS_PASSWORD_ID` or `_TOKEN_ID`), sent as sensitive headers, Redis's `AUTH`
+or NATS's `CONNECT` (built in memory that's wiped), and never shown; a URL with a user or password in it is refused.
+A Redis or NATS target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's
+certificate and name with the system's certificates or only the given CA, never skipping
+the check, before its password is sent; a NATS server that requires TLS gets it, or no
+credentials. A NATS nkey or `.creds` file is read from its path when the server starts,
+its seed kept only as the key that signs the server's nonce (a `.creds` file whose JWT is
+for another key is refused), and never shown.
 
 Bucket notifications can't reach anything the operator didn't name: a bucket's rules
 pick among the server's targets by ARN (an unknown one is refused when the rules are

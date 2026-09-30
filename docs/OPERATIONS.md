@@ -277,6 +277,25 @@ certificate stops the server from starting.
 topic, as a webhook is sent it, over nsqd's TCP protocol; rules name it
 `arn:teifs:sqs::ID:nsq`, and starting to name it checks that the nsqd answers.
 
+```sh
+teifs serve --notify-nats bus=nats.internal:4222,subject=s3.events,user=teifs \
+            --notify-nats stream=nats.internal:4222,subject=s3.stream,jetstream=true,creds=/etc/teifs/teifs.creds,tls=true
+export TEIFS_NOTIFY_NATS_PASSWORD_BUS=…   # or TEIFS_NOTIFY_NATS_TOKEN_ID for a token
+```
+
+A NATS target, `arn:teifs:sqs::ID:nats`, publishes each event to a subject, as a webhook
+is sent it; the server's answer to a `PING` after each one confirms it took it. With
+`jetstream=true` a JetStream stream that takes the subject must acknowledge each event,
+and each carries a `Nats-Msg-Id` made from its content, so an event sent again after a
+lost acknowledgement is dropped as a duplicate within the stream's duplicate window.
+It signs in with `user=NAME` and a password, a token, an nkey (`nkey=PATH`, a file holding
+a user seed) or a `.creds` file's user JWT (`creds=PATH`, as `nsc` writes it). `tls=true`
+or `ca=PATH` connects over TLS (a server that requires TLS asks for it), and
+`tls_first=true` starts TLS before the server's greeting, for a server set to
+`handshake_first`. Starting to name it checks that the server takes the credentials and,
+for JetStream, that a stream takes the subject, without publishing. A connection the
+server closed while idle is made again at once.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -389,4 +408,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, databases), and NSQ over TLS.
+Not yet: other kinds of targets (Kafka, AMQP, MQTT, databases), NSQ over TLS, and client
+certificates for TLS targets.

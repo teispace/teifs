@@ -156,6 +156,12 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- NATS notification targets, as MinIO's: `teifs serve --notify-nats
+  ID=HOST:PORT,subject=NAME` publishes each event to the subject, or with
+  `jetstream=true` to a JetStream stream that acknowledges it (duplicates dropped by
+  `Nats-Msg-Id`). It signs in with a user and password, a token (both from the
+  environment), an nkey (`nkey=PATH`) or a `.creds` file (`creds=PATH`), over TLS with
+  `tls=true` or `ca=PATH` (`tls_first=true` for `handshake_first` servers).
 - NSQ notification targets, as MinIO's: `teifs serve --notify-nsq
   ID=HOST:PORT,topic=NAME` publishes each event to the topic over nsqd's TCP protocol. `teifs event add|ls|rm`
   manages a bucket's notification rules, as `mc event` does. It needs MinIO's

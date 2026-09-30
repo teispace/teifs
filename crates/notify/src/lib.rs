@@ -1,5 +1,5 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes, Redis keys and NSQ topics) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! indexes, Redis keys, NSQ topics and NATS subjects) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -9,7 +9,9 @@
 mod tests;
 
 mod elasticsearch;
+mod nats;
 mod net;
+mod nkey;
 mod nsq;
 mod queue;
 mod redis;
@@ -28,7 +30,9 @@ use std::{
 };
 
 pub use elasticsearch::Elasticsearch;
+pub use nats::Nats;
 pub use net::tls_config;
+pub use nkey::UserKey;
 pub use nsq::Nsq;
 pub use redis::Redis;
 use teifs_types::notify::TargetArn;
@@ -63,6 +67,8 @@ pub enum TargetKind {
     Redis(Redis),
     /// An NSQ topic, published each event as JSON.
     Nsq(Nsq),
+    /// A NATS subject, published each event as JSON, or a `JetStream` stream.
+    Nats(Nats),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -135,6 +141,7 @@ impl TargetConfig {
             TargetKind::Elasticsearch(es) => es.shown(),
             TargetKind::Redis(redis) => redis.shown(),
             TargetKind::Nsq(nsq) => nsq.shown(),
+            TargetKind::Nats(nats) => nats.shown(),
         }
     }
 }
@@ -148,6 +155,7 @@ impl TargetKind {
             Self::Elasticsearch(_) => "elasticsearch",
             Self::Redis(_) => "redis",
             Self::Nsq(_) => "nsq",
+            Self::Nats(_) => "nats",
         }
     }
 }
@@ -208,6 +216,7 @@ impl Target {
             TargetKind::Elasticsearch(es) => es.send(client, &body).await,
             TargetKind::Redis(redis) => redis.send(&body).await,
             TargetKind::Nsq(nsq) => nsq.send(&body).await,
+            TargetKind::Nats(nats) => nats.send(&body).await,
         }
     }
 
@@ -219,6 +228,7 @@ impl Target {
             TargetKind::Elasticsearch(es) => es.test(client).await,
             TargetKind::Redis(redis) => redis.test().await,
             TargetKind::Nsq(nsq) => nsq.test().await,
+            TargetKind::Nats(nats) => nats.test().await,
         }
     }
 }

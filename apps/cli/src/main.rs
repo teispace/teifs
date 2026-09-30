@@ -26,8 +26,8 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
-    KmsLocation, Limits, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind, TlsSource,
-    Transit, TrustedProxies, Webhook, credentials, tls_config,
+    KmsLocation, Limits, Nats, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind,
+    TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -285,6 +285,22 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_NSQ"
     )]
     notify_nsq: Vec<TargetConfig>,
+    /// A NATS subject buckets' notification rules can send events to, as
+    /// ID=HOST:PORT,subject=NAME, with jetstream=true (a `JetStream` stream that takes the
+    /// subject acknowledges each event), user=NAME, creds=PATH (a `.creds` file's user
+    /// JWT and key) or nkey=PATH (a file holding a user seed), and tls=true or ca=PATH,
+    /// with `tls_first=true` for a server that starts TLS first (repeat for more; in the
+    /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:nats`. Its
+    /// password or token, `TEIFS_NOTIFY_NATS_PASSWORD_ID` or `TEIFS_NOTIFY_NATS_TOKEN_ID`,
+    /// is read only from the environment.
+    #[arg(
+        long = "notify-nats",
+        value_name = "ID=HOST:PORT,subject=NAME",
+        value_parser = parse_notify_nats,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_NATS"
+    )]
+    notify_nats: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -705,12 +721,7 @@ fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
 fn target_tls(
     options: &BTreeMap<&str, &str>,
 ) -> Result<Option<std::sync::Arc<rustls::ClientConfig>>, String> {
-    let tls = match options.get("tls").copied() {
-        None => None,
-        Some("true") => Some(true),
-        Some("false") => Some(false),
-        Some(other) => return Err(format!("tls is true or false, not `{other}`")),
-    };
+    let tls = target_flag(options, "tls")?;
     match (tls, options.get("ca")) {
         (Some(false), Some(_)) => Err("a CA file is for TLS: leave out tls=false".to_owned()),
         (_, Some(path)) => {
@@ -721,6 +732,16 @@ fn target_tls(
         }
         (Some(true), None) => tls_config(None).map(Some),
         (_, None) => Ok(None),
+    }
+}
+
+/// A target's option `name`, `true` or `false`, if given.
+fn target_flag(options: &BTreeMap<&str, &str>, name: &str) -> Result<Option<bool>, String> {
+    match options.get(name).copied() {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(other) => Err(format!("{name} is true or false, not `{other}`")),
     }
 }
 
@@ -758,6 +779,59 @@ fn parse_notify_nsq(text: &str) -> Result<TargetConfig, String> {
         .get("topic")
         .ok_or_else(|| "name the topic: ID=HOST:PORT,topic=NAME".to_owned())?;
     TargetConfig::new(id, TargetKind::Nsq(Nsq::new(address, topic)?))
+}
+
+/// A NATS subject, `ID=HOST:PORT,subject=NAME[,jetstream=true][,user=U][,creds=PATH]
+/// [,nkey=PATH][,tls=true][,ca=PATH][,tls_first=true]`; its password or token comes from
+/// the environment later.
+fn parse_notify_nats(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(
+        text,
+        "ID=HOST:PORT,subject=NAME",
+        &[
+            "subject",
+            "jetstream",
+            "user",
+            "creds",
+            "nkey",
+            "tls",
+            "ca",
+            "tls_first",
+        ],
+    )?;
+    let subject = options
+        .get("subject")
+        .ok_or_else(|| "name the subject: ID=HOST:PORT,subject=NAME".to_owned())?;
+    let mut nats = Nats::new(address, subject)?;
+    nats.jetstream = target_flag(&options, "jetstream")?.unwrap_or(false);
+    nats.user = options.get("user").map(|&u| u.to_owned());
+    let key = |path: &str, creds: bool| {
+        let text = Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|e| format!("can't read `{path}`: {e}"))?,
+        );
+        let key = UserKey::parse(&text).map_err(|e| format!("`{path}`: {e}"))?;
+        if creds && key.jwt.is_none() {
+            return Err(format!(
+                "`{path}` holds no user JWT: give a seed alone as nkey=PATH"
+            ));
+        }
+        Ok::<_, String>(std::sync::Arc::new(key))
+    };
+    nats.key = match (options.get("creds"), options.get("nkey")) {
+        (Some(_), Some(_)) => return Err("give creds=PATH or nkey=PATH, not both".to_owned()),
+        (Some(path), None) => Some(key(path, true)?),
+        (None, Some(path)) => Some(key(path, false)?),
+        (None, None) => None,
+    };
+    if nats.user.is_some() && nats.key.is_some() {
+        return Err("give user=NAME or a key (creds=PATH, nkey=PATH), not both".to_owned());
+    }
+    nats.tls = target_tls(&options)?;
+    nats.tls_first = target_flag(&options, "tls_first")?.unwrap_or(false);
+    if nats.tls_first && nats.tls.is_none() {
+        return Err("tls_first=true needs TLS: give tls=true or ca=PATH".to_owned());
+    }
+    TargetConfig::new(id, TargetKind::Nats(nats))
 }
 
 /// The notification targets, each with its secrets from the environment
@@ -798,6 +872,30 @@ fn notify_targets(
                 }
             }
             TargetKind::Nsq(_) => {}
+            TargetKind::Nats(nats) => {
+                nats.password = secret("PASSWORD");
+                nats.token = secret("TOKEN");
+                let variable = |what: &str| {
+                    format!(
+                        "TEIFS_NOTIFY_NATS_{what}_{}",
+                        arn.id.to_ascii_uppercase().replace('-', "_")
+                    )
+                };
+                if nats.user.is_some() != nats.password.is_some() {
+                    return Err(format!(
+                        "the NATS target `{}` needs both a user=NAME and its password in {}",
+                        arn.id,
+                        variable("PASSWORD")
+                    ));
+                }
+                if nats.token.is_some() && (nats.user.is_some() || nats.key.is_some()) {
+                    return Err(format!(
+                        "the NATS target `{}` has a token in {}: leave out its user and key",
+                        arn.id,
+                        variable("TOKEN")
+                    ));
+                }
+            }
             TargetKind::Redis(redis) => {
                 redis.password = secret("PASSWORD");
                 if redis.user.is_some() && redis.password.is_none() {
@@ -868,7 +966,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .into_iter()
                 .chain(args.notify_elasticsearch)
                 .chain(args.notify_redis)
-                .chain(args.notify_nsq),
+                .chain(args.notify_nsq)
+                .chain(args.notify_nats),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1339,6 +1438,78 @@ mod tests {
         // A user needs its password.
         let passwordless = redis("other=redis.local:6379,key=k,user=teifs");
         assert!(notify_targets(vec![passwordless], env).is_err());
+    }
+
+    #[test]
+    fn nats_targets_take_options_keys_and_secrets_from_the_environment() {
+        use teifs_notify::testing::{NKEY_PUBLIC, NKEY_SEED, creds};
+        let nats_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Nats(nats) => nats.clone(),
+            _ => panic!("not NATS"),
+        };
+        let bus =
+            parse_notify_nats("bus=nats.local:4222,subject=s3.events,jetstream=true,user=teifs")
+                .unwrap();
+        assert_eq!(bus.arn().to_string(), "arn:teifs:sqs::bus:nats");
+        let env = |name: &str| (name == "TEIFS_NOTIFY_NATS_PASSWORD_BUS").then(|| "pw".into());
+        let targets = notify_targets(vec![bus.clone()], env).unwrap();
+        let nats = nats_of(&targets[0]);
+        assert!(nats.jetstream && nats.tls.is_none() && !nats.tls_first);
+        assert_eq!(
+            (
+                nats.user.as_deref(),
+                nats.password.as_deref().map(String::as_str)
+            ),
+            (Some("teifs"), Some("pw"))
+        );
+        // A user needs its password, a password its user, and a token neither.
+        assert!(notify_targets(vec![bus], |_| None).is_err());
+        let plain = parse_notify_nats("t=nats.local:4222,subject=s").unwrap();
+        let password = |name: &str| (name == "TEIFS_NOTIFY_NATS_PASSWORD_T").then(|| "pw".into());
+        assert!(notify_targets(vec![plain.clone()], password).is_err());
+        let token = |name: &str| (name == "TEIFS_NOTIFY_NATS_TOKEN_T").then(|| "tk".into());
+        let targets = notify_targets(vec![plain], token).unwrap();
+        assert_eq!(
+            nats_of(&targets[0]).token.as_deref().map(String::as_str),
+            Some("tk")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (creds_file, seed_file) = (dir.path().join("user.creds"), dir.path().join("user.nk"));
+        std::fs::write(&creds_file, creds()).unwrap();
+        std::fs::write(&seed_file, format!("{NKEY_SEED}\n")).unwrap();
+        let with = |options: &str| parse_notify_nats(&format!("k=h:4222,subject=s,{options}"));
+        let key = nats_of(&with(&format!("creds={}", creds_file.display())).unwrap())
+            .key
+            .unwrap();
+        assert!(key.jwt.is_some() && key.public == NKEY_PUBLIC);
+        let key = nats_of(&with(&format!("nkey={}", seed_file.display())).unwrap())
+            .key
+            .unwrap();
+        assert!(key.jwt.is_none() && key.public == NKEY_PUBLIC);
+        let secure = nats_of(&with("tls=true,tls_first=true").unwrap());
+        assert!(secure.tls.is_some() && secure.tls_first);
+        for bad in [
+            format!("creds={}", seed_file.display()),
+            format!(
+                "creds={},nkey={}",
+                creds_file.display(),
+                seed_file.display()
+            ),
+            format!("user=u,nkey={}", seed_file.display()),
+            format!("nkey={}", dir.path().join("missing").display()),
+            "tls_first=true".to_owned(),
+            "jetstream=yes".to_owned(),
+            "stream=x".to_owned(),
+        ] {
+            assert!(with(&bad).is_err(), "{bad}");
+        }
+        for bad in ["k=h:4222", "k=h,subject=s", "k=h:4222,subject=a.*"] {
+            assert!(parse_notify_nats(bad).is_err(), "{bad}");
+        }
+        let key_and_token = with(&format!("nkey={}", seed_file.display())).unwrap();
+        let token = |name: &str| (name == "TEIFS_NOTIFY_NATS_TOKEN_K").then(|| "tk".into());
+        assert!(notify_targets(vec![key_and_token], token).is_err());
     }
 
     #[test]
