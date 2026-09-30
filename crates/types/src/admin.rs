@@ -411,6 +411,10 @@ pub struct ServerConfig {
     /// Where the audit log goes: a file, or standard output; none when none is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_log: Option<String>,
+    /// Where audit entries are sent (without a user, password or query); none when
+    /// they aren't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_webhook: Option<String>,
     /// How long an unfinished multipart upload is kept; none for ever.
     pub upload_expiry_seconds: Option<u64>,
     /// How often every stored version is read back and checked; none if never.

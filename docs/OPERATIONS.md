@@ -111,6 +111,24 @@ by its owner; after logrotate moves it, `SIGHUP` makes the server write a new on
 queued for the writer, so a slow disk never slows requests; any the queue can't take are
 counted in `teifs_audit_dropped_total`.
 
+To send the entries to a log collector (Vector, Fluent Bit, Logstash, Splunk's HTTP
+Event Collector), give a webhook, alone or with a file:
+
+```sh
+export TEIFS_AUDIT_WEBHOOK_TOKEN=…   # sent as Authorization: Bearer …
+teifs serve /srv/drive --audit-webhook https://logs.example.com/teifs
+```
+
+Entries are `POST`ed in batches of up to 100, as JSON lines (`application/x-ndjson`), and
+any `2xx` answer takes a batch. A batch that isn't taken (an error, another status, no
+answer in 10 seconds) is tried again after half a second, then twice as long each time up
+to 30 seconds, in order, so the collector gets every entry once it's back; entries
+arriving meanwhile wait in the webhook's own queue, and those it can't hold are counted as
+dropped. A server that's stopping tries a failing batch three more times. Redirects aren't
+followed. The token is read only from the environment, never a flag, so it's not in the
+process list; one that names its scheme (`Basic dXNlcjpwYXNz`, `Splunk …`) is sent as
+given. `teifs admin config` shows the URL without its user, password or query.
+
 ```json
 {"version":"1","deploymentid":"…","time":"2026-09-30T12:00:00.123456789Z","type":"S3",
  "trigger":"incoming","api":{"name":"PutObject","bucket":"photos","object":"a.jpg",

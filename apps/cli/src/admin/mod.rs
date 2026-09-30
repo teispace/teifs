@@ -415,6 +415,13 @@ async fn config(client: &Client) -> Result<(), Error> {
                     .unwrap_or_else(|| "none".to_owned()),
             ),
             (
+                "Audit webhook",
+                config
+                    .audit_webhook
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+            ),
+            (
                 "Upload expiry",
                 config
                     .upload_expiry_seconds

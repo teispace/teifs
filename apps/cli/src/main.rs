@@ -25,10 +25,11 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits,
-    ProxyHeader, Server, TlsSource, Transit, TrustedProxies, credentials,
+    ProxyHeader, Server, TlsSource, Transit, TrustedProxies, Webhook, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
+use zeroize::Zeroizing;
 
 // Measured faster than the system allocator on macOS (and musl's is far slower still).
 #[global_allocator]
@@ -219,6 +220,12 @@ pub(crate) struct ServeArgs {
     /// SIGHUP for logrotate), or `-` for standard output.
     #[arg(long, value_name = "FILE", value_parser = parse_audit_log, env = "TEIFS_AUDIT_LOG")]
     audit_log: Option<AuditTarget>,
+    /// Also POST the audit log's entries to this URL, in batches of JSON lines
+    /// (`application/x-ndjson`), each retried until it's taken. The webhook's token, sent
+    /// as `Authorization: Bearer TOKEN` (or as given when it names a scheme), is read
+    /// only from the environment: `TEIFS_AUDIT_WEBHOOK_TOKEN`.
+    #[arg(long, value_name = "URL", value_parser = parse_audit_webhook, env = "TEIFS_AUDIT_WEBHOOK")]
+    audit_webhook: Option<Webhook>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -557,6 +564,29 @@ fn parse_audit_log(text: &str) -> Result<AuditTarget, String> {
     }
 }
 
+/// An `http` or `https` URL; its token comes from the environment later.
+fn parse_audit_webhook(text: &str) -> Result<Webhook, String> {
+    Webhook::new(text, None)
+}
+
+/// Where the audit log goes: its file (or standard output) and its webhook, which takes
+/// `TEIFS_AUDIT_WEBHOOK_TOKEN` as its token.
+fn audit_targets(
+    log: Option<AuditTarget>,
+    webhook: Option<Webhook>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<AuditTarget> {
+    let webhook = webhook.map(|hook| Webhook {
+        token: env("TEIFS_AUDIT_WEBHOOK_TOKEN")
+            .filter(|t| !t.trim().is_empty())
+            .map(Zeroizing::new),
+        ..hook
+    });
+    log.into_iter()
+        .chain(webhook.map(AuditTarget::Webhook))
+        .collect()
+}
+
 /// Checks a trusted proxy's address or network.
 fn parse_network(text: &str) -> Result<String, String> {
     TrustedProxies::new(&[text], ProxyHeader::default())?;
@@ -602,7 +632,9 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         public_metrics: args.public_metrics,
-        audit: args.audit_log,
+        audit: audit_targets(args.audit_log, args.audit_webhook, |name| {
+            std::env::var(name).ok()
+        }),
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
@@ -956,6 +988,28 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_webhooks_take_their_token_from_the_environment_only() {
+        assert!(parse_audit_webhook("ftp://logs.example").is_err());
+        assert!(parse_audit_webhook("logs.example").is_err());
+        let hook = parse_audit_webhook("https://logs.example/in").unwrap();
+        let env = |token: &'static str| {
+            move |name: &str| (name == "TEIFS_AUDIT_WEBHOOK_TOKEN").then(|| token.to_owned())
+        };
+        let targets = audit_targets(Some(AuditTarget::Stdout), Some(hook.clone()), env("t0ken"));
+        assert!(matches!(targets[0], AuditTarget::Stdout));
+        let AuditTarget::Webhook(sent) = &targets[1] else {
+            panic!("no webhook")
+        };
+        assert_eq!(sent.token.as_deref().map(String::as_str), Some("t0ken"));
+        let targets = audit_targets(None, Some(hook), env(" "));
+        let AuditTarget::Webhook(sent) = &targets[0] else {
+            panic!("no webhook")
+        };
+        assert!(sent.token.is_none());
+        assert!(audit_targets(None, None, env("t0ken")).is_empty());
+    }
 
     #[test]
     fn expiries_parse_with_units_or_never() {

@@ -55,7 +55,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         allow_sig_v2: false,
         legacy_bucket_defaults: false,
         public_metrics: false,
-        audit: None,
+        audit: Vec::new(),
         limits: teifs_server::Limits::default(),
     }
 }

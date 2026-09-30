@@ -135,7 +135,9 @@ behaviour; the on-disk format is always upgraded automatically.
   (signatures, a link's signature, session tokens, cookies, SSE-C keys) are replaced by
   `REDACTED`. The file is created owner-only and reopened on `SIGHUP`; a queue keeps a
   slow disk from slowing requests, and entries it drops are counted in
-  `teifs_audit_dropped_total`.
+  `teifs_audit_dropped_total`. `--audit-webhook URL` also sends the entries to a log
+  collector, in batches of JSON lines retried until they're taken, with a token read only
+  from `TEIFS_AUDIT_WEBHOOK_TOKEN`.
 - Every answer has an `x-amz-request-id` (16 hex digits, as S3's), and S3 error bodies
   now name it in `<RequestId>`, as AWS's do; the admin, IAM and STS APIs use the same id.
 - Documents printed to standard output (IAM and bucket exports, credentials with

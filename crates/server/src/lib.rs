@@ -26,7 +26,7 @@ use teifs_store::{
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
-pub use audit::AuditTarget;
+pub use audit::{AuditTarget, Webhook};
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
@@ -85,8 +85,8 @@ pub struct Config {
     pub legacy_bucket_defaults: bool,
     /// Serve metrics to anyone who can reach the server, without a bearer token.
     pub public_metrics: bool,
-    /// Where to keep an audit log of every request; none keeps none.
-    pub audit: Option<AuditTarget>,
+    /// Where to keep an audit log of every request: each target gets every entry.
+    pub audit: Vec<AuditTarget>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
 }
@@ -199,8 +199,8 @@ pub struct Server {
     created_credentials: bool,
     kms: KmsLocation,
     tls: Option<Arc<Tls>>,
-    /// Writes the audit log until the service is gone.
-    audit_writer: Option<audit::Writer>,
+    /// Write the audit log until the service is gone.
+    audit_writers: Vec<audit::Writer>,
 }
 
 impl std::fmt::Debug for Server {
@@ -212,15 +212,17 @@ impl std::fmt::Debug for Server {
     }
 }
 
-/// Opens the audit log and starts its writer.
-fn start_audit(
-    target: &AuditTarget,
-) -> Result<(Arc<dyn teifs_s3::AuditSink>, audit::Writer), ServerError> {
-    let (log, writer) = audit::start(target).map_err(|source| ServerError::Audit {
-        target: target.clone(),
-        source,
-    })?;
-    Ok((log, writer))
+/// The audit log, if one is kept, and its writers.
+type Audit = (Option<Arc<dyn teifs_s3::AuditSink>>, Vec<audit::Writer>);
+
+/// Opens the audit log's targets and starts their writers; none without targets.
+fn start_audit(targets: &[AuditTarget]) -> Result<Audit, ServerError> {
+    if targets.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let (logs, writers) =
+        audit::start(targets).map_err(|(target, source)| ServerError::Audit { target, source })?;
+    Ok((Some(logs), writers))
 }
 
 /// Opens (or creates) the drive, with its KMS.
@@ -341,7 +343,16 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         allow_sig_v2: config.allow_sig_v2,
         legacy_bucket_defaults: config.legacy_bucket_defaults,
         public_metrics: config.public_metrics,
-        audit_log: config.audit.as_ref().map(ToString::to_string),
+        audit_log: config
+            .audit
+            .iter()
+            .find(|t| !matches!(t, AuditTarget::Webhook(_)))
+            .map(ToString::to_string),
+        audit_webhook: config
+            .audit
+            .iter()
+            .find(|t| matches!(t, AuditTarget::Webhook(_)))
+            .map(ToString::to_string),
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
         scrub_every_seconds: config.jobs.scrub_every.map(|d| d.as_secs()),
         snapshots: config.jobs.snapshots,
@@ -403,7 +414,7 @@ impl Server {
             .await
             .map_err(ServerError::Iam)?,
         );
-        let (audit, audit_writer) = config.audit.as_ref().map(start_audit).transpose()?.unzip();
+        let (audit, audit_writers) = start_audit(&config.audit)?;
         let service = teifs_s3::service(
             store.clone(),
             Options {
@@ -433,7 +444,7 @@ impl Server {
             created_credentials,
             kms: location,
             tls,
-            audit_writer,
+            audit_writers,
         })
     }
 
@@ -495,12 +506,13 @@ impl Server {
             reloads.abort();
         }
         jobs.stop().await;
-        // The service is gone with its connections, so the writer is finishing what's
+        // The service is gone with its connections, so the writers are finishing what's
         // queued.
-        if let Some(writer) = self.audit_writer
-            && tokio::time::timeout(DRAIN, writer).await.is_err()
-        {
-            tracing::warn!("the audit log's last entries weren't all written");
+        let deadline = tokio::time::Instant::now() + DRAIN;
+        for writer in self.audit_writers {
+            if tokio::time::timeout_at(deadline, writer).await.is_err() {
+                tracing::warn!("the audit log's last entries weren't all written");
+            }
         }
     }
 }

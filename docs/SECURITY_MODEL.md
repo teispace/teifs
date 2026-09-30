@@ -235,7 +235,10 @@ secrets, nor the signing keys they give, in the log
 replay a request (`Authorization`, `X-Amz-Signature` and V2's `Signature` in a link,
 session tokens, cookies, SSE-C keys) with `REDACTED` before an entry is made, and is
 created readable only by its owner; a test sends each of them and looks for none in the
-file (`crates/server/tests/audit.rs`).
+file (`crates/server/tests/audit.rs`). An audit webhook's token is read only from the
+environment, is marked sensitive in the request that carries it, and is never shown:
+the webhook's `Debug` and `teifs admin config` show its URL without the user, password,
+query or fragment. Redirects aren't followed, so entries go nowhere but the URL given.
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,

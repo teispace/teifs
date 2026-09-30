@@ -44,7 +44,7 @@ async fn audited() -> (tempfile::TempDir, std::path::PathBuf, common::Server) {
     let log = dir.path().join("audit.log");
     let target = AuditTarget::File(log.clone());
     let server = start_with(|config| {
-        config.audit = Some(target);
+        config.audit = vec![target];
         config.default_layout = teifs_store::Layout::Object;
     })
     .await;
@@ -165,7 +165,7 @@ async fn refused_and_admin_requests_are_logged_too() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
     let target = AuditTarget::File(log.clone());
-    let server = start_with(|config| config.audit = Some(target)).await;
+    let server = start_with(|config| config.audit = vec![target]).await;
     let wrong = client(&server, "not-the-secret");
     assert!(wrong.list_buckets().send().await.is_err());
     let admin = teifs_client::Client::new(
@@ -201,7 +201,7 @@ async fn a_hangup_reopens_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
     let target = AuditTarget::File(log.clone());
-    let server = start_with(|config| config.audit = Some(target)).await;
+    let server = start_with(|config| config.audit = vec![target]).await;
     let s3 = client(&server, SECRET_KEY);
     s3.list_buckets().send().await.unwrap();
     entries(&log, 1).await;
@@ -231,10 +231,170 @@ async fn a_hangup_reopens_the_file() {
 async fn a_log_that_cant_be_opened_stops_the_server_starting() {
     let (dir, keys) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut config = common::config(dir.path(), keys.path());
-    config.audit = Some(AuditTarget::File(dir.path().join("missing/audit.log")));
+    config.audit = vec![AuditTarget::File(dir.path().join("missing/audit.log"))];
     let err = teifs_server::Server::bind(config).await.unwrap_err();
     assert!(
         err.to_string().starts_with("can't open the audit log"),
         "{err}"
     );
+}
+
+/// A webhook receiver: what each request carried, answering `500` to the first `failing`.
+#[derive(Default)]
+struct Received {
+    failing: std::sync::atomic::AtomicUsize,
+    posts: std::sync::Mutex<Vec<(String, String, String)>>,
+}
+
+impl Received {
+    /// The entries taken, once there are at least `count`.
+    async fn entries(&self, count: usize) -> Vec<AuditEntry> {
+        for _ in 0..500 {
+            let entries: Vec<AuditEntry> = self
+                .posts
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|(_, _, body)| body.lines().map(|l| serde_json::from_str(l).unwrap()))
+                .collect::<Vec<_>>();
+            if entries.len() >= count {
+                return entries;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the webhook never had {count} entries");
+    }
+}
+
+/// A webhook receiver on this machine, and its URL.
+async fn receiver(failing: usize) -> (std::sync::Arc<Received>, String) {
+    use http_body_util::BodyExt;
+    let received = std::sync::Arc::new(Received::default());
+    received
+        .failing
+        .store(failing, std::sync::atomic::Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/audit", listener.local_addr().unwrap());
+    let state = received.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let state = state.clone();
+            let service =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let state = state.clone();
+                    async move {
+                        let header = |name| {
+                            req.headers()
+                                .get(name)
+                                .map(|v: &hyper::header::HeaderValue| {
+                                    v.to_str().unwrap().to_owned()
+                                })
+                                .unwrap_or_default()
+                        };
+                        let (auth, kind) = (header("authorization"), header("content-type"));
+                        let body = req.into_body().collect().await.unwrap().to_bytes();
+                        let fail = state
+                            .failing
+                            .fetch_update(
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                                |n| n.checked_sub(1),
+                            )
+                            .is_ok();
+                        let status = if fail {
+                            500
+                        } else {
+                            let body = String::from_utf8(body.to_vec()).unwrap();
+                            state.posts.lock().unwrap().push((auth, kind, body));
+                            200
+                        };
+                        let answer = hyper::Response::builder()
+                            .status(status)
+                            .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+                            .unwrap();
+                        Ok::<_, std::convert::Infallible>(answer)
+                    }
+                });
+            tokio::spawn(
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service),
+            );
+        }
+    });
+    (received, url)
+}
+
+/// A webhook that fails at first gets every entry once it takes them, as the file does,
+/// with its token; and the URL is shown without its query.
+#[tokio::test]
+async fn a_webhook_gets_every_entry_after_failing() {
+    let (received, url) = receiver(2).await;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let hook = teifs_server::Webhook::new(
+        &format!("{url}?key=secret"),
+        Some(teifs_client::Zeroizing::new("t0ken".to_owned())),
+    )
+    .unwrap();
+    let targets = vec![AuditTarget::File(log.clone()), AuditTarget::Webhook(hook)];
+    let server = start_with(|config| config.audit = targets).await;
+    let s3 = client(&server, SECRET_KEY);
+    for n in 0..5 {
+        s3.head_bucket()
+            .bucket(format!("none-{n}"))
+            .send()
+            .await
+            .unwrap_err();
+    }
+    let (_, written) = entries(&log, 5).await;
+    let sent = received.entries(5).await;
+    let ids = |entries: &[AuditEntry]| {
+        entries
+            .iter()
+            .map(|e| e.request_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(ids(&sent), ids(&written));
+    assert_eq!(
+        received.failing.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    for (auth, kind, _) in received.posts.lock().unwrap().iter() {
+        assert_eq!(
+            (auth.as_str(), kind.as_str()),
+            ("Bearer t0ken", "application/x-ndjson")
+        );
+    }
+    let admin = teifs_client::Client::new(
+        &server.endpoint,
+        ACCESS_KEY,
+        teifs_client::Zeroizing::new(SECRET_KEY.into()),
+    )
+    .unwrap();
+    let config = admin.config().await.unwrap();
+    assert_eq!(config.audit_webhook, Some(url));
+    assert_eq!(config.audit_log, Some(log.display().to_string()));
+}
+
+/// A token naming its scheme is sent as given.
+#[tokio::test]
+async fn a_webhook_token_with_a_scheme_is_sent_as_given() {
+    let (received, url) = receiver(0).await;
+    let hook = teifs_server::Webhook::new(
+        &url,
+        Some(teifs_client::Zeroizing::new(
+            "Basic dXNlcjpwYXNz".to_owned(),
+        )),
+    )
+    .unwrap();
+    let server = start_with(|config| config.audit = vec![AuditTarget::Webhook(hook)]).await;
+    client(&server, SECRET_KEY)
+        .list_buckets()
+        .send()
+        .await
+        .unwrap();
+    let sent = received.entries(1).await;
+    assert_eq!(sent[0].api.name, "ListBuckets");
+    assert_eq!(received.posts.lock().unwrap()[0].0, "Basic dXNlcjpwYXNz");
 }
