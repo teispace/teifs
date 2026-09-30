@@ -43,6 +43,9 @@ pub(crate) struct WriteRequest<'a> {
     pub sse: Option<&'a dto::ServerSideEncryption>,
     pub kms_key: Option<&'a str>,
     pub kms_context: Option<&'a str>,
+    /// `x-amz-server-side-encryption-bucket-key-enabled`: SSE-KMS only, over the
+    /// bucket's setting.
+    pub bucket_key: Option<bool>,
     pub customer: Option<CustomerKey>,
 }
 
@@ -100,6 +103,7 @@ pub(crate) fn for_write(
                 SseMode::Kms => Encryption::Kms {
                     key: b.default.kms_key.clone(),
                     context: BTreeMap::new(),
+                    bucket_key: request.bucket_key.unwrap_or(b.default.bucket_key),
                 },
                 _ => Encryption::S3,
             }))
@@ -116,6 +120,9 @@ pub(crate) fn for_write(
         Some(dto::ServerSideEncryption::AWS_KMS) => Ok(Encryption::Kms {
             key: request.kms_key.map(kms_key_name),
             context: kms_context(request.kms_context)?,
+            bucket_key: request
+                .bucket_key
+                .unwrap_or_else(|| bucket.is_some_and(|b| b.default.bucket_key)),
         }),
         Some(dto::ServerSideEncryption::AWS_KMS_DSSE) => Err(s3_error!(
             NotImplemented,
@@ -261,6 +268,7 @@ pub(crate) use set_sse;
 mod tests {
     use super::*;
     use md5::{Digest, Md5};
+    use teifs_store::DefaultEncryption;
 
     fn key() -> (String, String) {
         let raw = [9u8; 32];
@@ -272,6 +280,7 @@ mod tests {
             sse,
             kms_key: None,
             kms_context: None,
+            bucket_key: None,
             customer: None,
         }
     }
@@ -340,6 +349,53 @@ mod tests {
             for_write(with_key, Some(&default)).unwrap(),
             Encryption::Kms { key: Some(k), .. } if k == "photos"
         ));
+    }
+
+    #[test]
+    fn bucket_keys_follow_the_request_then_the_bucket() {
+        let bucket_key = |encryption| match encryption {
+            Encryption::Kms { bucket_key, .. } => Some(bucket_key),
+            _ => None,
+        };
+        let kms = dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AWS_KMS);
+        let asking = |sse, bucket_key| WriteRequest {
+            bucket_key,
+            ..request(sse)
+        };
+        let plain = BucketEncryption::aws_default();
+        let keyed = BucketEncryption {
+            default: DefaultEncryption {
+                mode: SseMode::Kms,
+                kms_key: None,
+                bucket_key: true,
+            },
+            ..BucketEncryption::aws_default()
+        };
+        let with_bucket_key = BucketEncryption {
+            default: DefaultEncryption {
+                mode: SseMode::S3,
+                ..keyed.default.clone()
+            },
+            ..BucketEncryption::aws_default()
+        };
+        let cases = [
+            // The bucket's default SSE-KMS with its setting, unless the request says.
+            (asking(None, None), &keyed, Some(true)),
+            (asking(None, Some(false)), &keyed, Some(false)),
+            // Asking for SSE-KMS: the request, else the bucket's setting.
+            (asking(Some(&kms), None), &plain, Some(false)),
+            (asking(Some(&kms), Some(true)), &plain, Some(true)),
+            (asking(Some(&kms), None), &with_bucket_key, Some(true)),
+            // SSE-S3 has none.
+            (asking(None, Some(true)), &plain, None),
+        ];
+        for (i, (request, bucket, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                bucket_key(for_write(request, Some(bucket)).unwrap()),
+                expected,
+                "{i}"
+            );
+        }
     }
 
     #[test]

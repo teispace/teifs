@@ -1345,6 +1345,7 @@ impl S3 for Drive {
                     sse: input.server_side_encryption.as_ref(),
                     kms_key: input.ssekms_key_id.as_deref(),
                     kms_context: input.ssekms_encryption_context.as_deref(),
+                    bucket_key: input.bucket_key_enabled,
                     customer,
                 },
             )
@@ -2400,6 +2401,7 @@ impl S3 for Drive {
                     sse: input.server_side_encryption.as_ref(),
                     kms_key: input.ssekms_key_id.as_deref(),
                     kms_context: input.ssekms_encryption_context.as_deref(),
+                    bucket_key: input.bucket_key_enabled,
                     customer,
                 },
             )
@@ -2708,6 +2710,7 @@ impl S3 for Drive {
                     sse: input.server_side_encryption.as_ref(),
                     kms_key: input.ssekms_key_id.as_deref(),
                     kms_context: input.ssekms_encryption_context.as_deref(),
+                    bucket_key: input.bucket_key_enabled,
                     customer,
                 },
             )
@@ -3094,6 +3097,7 @@ impl S3 for Drive {
         let headers = sse::headers(info.sse.as_ref());
         out.server_side_encryption = headers.sse;
         out.ssekms_key_id = headers.kms_key;
+        out.bucket_key_enabled = headers.bucket_key;
         Ok(S3Response::new(out))
     }
 

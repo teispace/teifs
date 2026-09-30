@@ -59,6 +59,15 @@ fn customer(byte: u8) -> CustomerKey {
     .unwrap()
 }
 
+/// SSE-KMS under the managed key.
+fn managed_kms() -> Encryption {
+    Encryption::Kms {
+        key: None,
+        context: BTreeMap::new(),
+        bucket_key: false,
+    }
+}
+
 async fn put(store: &Store, key: &str, bytes: &[u8], encryption: &Encryption) -> ObjectInfo {
     let mut staged = store.stage_for("vault", encryption).await.unwrap();
     staged.write(bytes).await.unwrap();
@@ -161,6 +170,7 @@ async fn sse_kms_uses_named_keys_and_seals_checksums() {
     let encryption = Encryption::Kms {
         key: Some("photos".into()),
         context: BTreeMap::from([("app".into(), "album".into())]),
+        bucket_key: false,
     };
     let mut staged = drive.store.stage_for("vault", &encryption).await.unwrap();
     staged.write(b"picture").await.unwrap();
@@ -183,6 +193,7 @@ async fn sse_kms_uses_named_keys_and_seals_checksums() {
     let missing = Encryption::Kms {
         key: Some("missing".into()),
         context: BTreeMap::new(),
+        bucket_key: false,
     };
     assert!(drive.store.stage_for("vault", &missing).await.is_err());
 }
@@ -473,11 +484,10 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
     let drive = drive().await;
     let part_sum = "PART-CHECKSUM-IN-THE-CLEAR";
     let whole_sum = "OBJECT-CHECKSUM-IN-THE-CLEAR-1";
-    let kms = Encryption::Kms {
-        key: None,
-        context: BTreeMap::new(),
-    };
-    for (name, encryption) in [("kms", kms), ("ssec", Encryption::Customer(customer(5)))] {
+    for (name, encryption) in [
+        ("kms", managed_kms()),
+        ("ssec", Encryption::Customer(customer(5))),
+    ] {
         let key = match &encryption {
             Encryption::Customer(k) => Some(k.clone()),
             _ => None,

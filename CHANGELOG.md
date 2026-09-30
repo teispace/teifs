@@ -46,6 +46,9 @@ behaviour; the on-disk format is always upgraded automatically.
   the rules through the same checks as requests, so an object written again meanwhile
   and a version Object Lock protects stay. Transitions to other storage classes are
   refused (`InvalidStorageClass`). 20 more tests of the s3-tests suite pass.
+- S3 Bucket Key settings per object: the `x-amz-server-side-encryption-bucket-key-enabled`
+  header on writes (else the bucket's setting) is recorded with SSE-KMS objects and
+  reported on writes, reads and uploads in parts, as AWS does.
 - UpdateObjectEncryption: an SSE-S3 or SSE-KMS object (or one version of it) moves to
   SSE-KMS under another key in place, by sealing its data key again: its data, ETag,
   Last-Modified and checksums stay. With AWS's rules: a full KMS key ARN, Signature V4,

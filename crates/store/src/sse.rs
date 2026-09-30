@@ -32,6 +32,8 @@ pub enum Encryption {
         key: Option<String>,
         /// Extra context pairs from `x-amz-server-side-encryption-context`.
         context: BTreeMap<String, String>,
+        /// Whether it's reported as using an S3 Bucket Key.
+        bucket_key: bool,
     },
     /// SSE-C: sealed by a key derived from the customer's key.
     Customer(CustomerKey),
@@ -102,22 +104,28 @@ pub(crate) async fn new_key(
     object_id: &str,
 ) -> Result<Option<Keyed>> {
     let base = Context::object(drive, bucket_id, object_id);
-    let (mode, context, keyed) = match encryption {
+    let (mode, context, bucket_key, keyed) = match encryption {
         Encryption::None => return Ok(None),
         Encryption::S3 => {
             let kms = kms.ok_or(StoreError::NoKms)?;
             (
                 SseMode::S3,
                 BTreeMap::new(),
+                false,
                 kms.generate(Some(DEFAULT_KEY), &base).await?,
             )
         }
-        Encryption::Kms { key, context } => {
+        Encryption::Kms {
+            key,
+            context,
+            bucket_key,
+        } => {
             let kms = kms.ok_or(StoreError::NoKms)?;
             let ctx = context.iter().fold(base, |c, (k, v)| c.with(k, v));
             (
                 SseMode::Kms,
                 context.clone(),
+                *bucket_key,
                 kms.generate(key.as_deref(), &ctx).await?,
             )
         }
@@ -153,7 +161,7 @@ pub(crate) async fn new_key(
             context,
             customer: None,
             checksums: None,
-            bucket_key: false,
+            bucket_key,
         },
     }))
 }
