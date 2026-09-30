@@ -3226,6 +3226,7 @@ dependencies = [
  "fs4",
  "futures",
  "md-5",
+ "prometheus-client",
  "serde",
  "serde_json",
  "sha1",

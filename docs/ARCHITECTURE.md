@@ -398,7 +398,9 @@ triggers on `object_versions` (by bucket id) and `objects` (a folder bucket's cu
 files, by name), in the same transactions as the rows (`crates/meta/src/usage.rs`, with
 a test that checks the counters against a recount after thousands of random writes).
 `Store::usage` (`crates/store/src/usage.rs`) joins them to the buckets; a scrape and
-`GET info` read them without scanning anything.
+`GET info` read them without scanning anything. The store also times the stages of its
+reads and writes (`crates/store/src/stages.rs`: histograms the server's metrics register
+as `teifs_store_stage_seconds`).
 
 ## Background jobs
 

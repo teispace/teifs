@@ -25,6 +25,7 @@ use crate::{
     now_ms,
     sse::Crypt,
     staged::{Publish, publish},
+    stages,
 };
 
 /// Where object buckets keep their data, inside `.teifs`.
@@ -434,22 +435,24 @@ impl Inner {
             .write(true)
             .open(tmp)?
             .set_len(stored_len)?;
-        append_footer(
-            tmp,
-            &Footer {
-                bucket: &bucket.id,
-                key,
-                object: &object_id,
-                size,
-                etag: &etag,
-                created_ms,
-                attrs: &attrs,
-                crypt: crypt.as_ref(),
-                parts: parts.as_ref(),
-                version: (version_id != NULL_VERSION).then_some(version_id.as_str()),
-            },
-            self.durability != Durability::None,
-        )?;
+        stages::time(&self.stages, "write", "sync", || {
+            append_footer(
+                tmp,
+                &Footer {
+                    bucket: &bucket.id,
+                    key,
+                    object: &object_id,
+                    size,
+                    etag: &etag,
+                    created_ms,
+                    attrs: &attrs,
+                    crypt: crypt.as_ref(),
+                    parts: parts.as_ref(),
+                    version: (version_id != NULL_VERSION).then_some(version_id.as_str()),
+                },
+                self.durability != Durability::None,
+            )
+        })?;
         let path = bucket.data_path(&object_id);
         let parent = path.parent().unwrap_or(&bucket.dir);
         fs::create_dir_all(parent)?;

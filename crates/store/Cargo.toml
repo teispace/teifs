@@ -10,6 +10,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+prometheus-client.workspace = true
 teifs-types.workspace = true
 teifs-meta.workspace = true
 teifs-crypto.workspace = true

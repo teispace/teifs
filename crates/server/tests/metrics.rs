@@ -323,3 +323,47 @@ async fn usage_is_in_the_metrics_and_by_bucket_when_asked() {
     );
     assert_eq!(by_bucket.matches("# EOF").count(), 1);
 }
+
+/// Where reads and writes spend their time: waiting for the KMS, the commit lock, the
+/// disk.
+#[tokio::test]
+async fn reads_and_writes_are_timed_by_stage() {
+    let server = start_with(|config| {
+        config.public_metrics = true;
+        config.default_layout = teifs_store::Layout::Object;
+    })
+    .await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("timed").send().await.unwrap();
+    s3.put_object()
+        .bucket("timed")
+        .key("a")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+    let got = s3
+        .get_object()
+        .bucket("timed")
+        .key("a")
+        .send()
+        .await
+        .unwrap();
+    got.body.collect().await.unwrap();
+    let (_, _, text) = scrape(&server, None).await;
+    // New objects are encrypted (SSE-S3), so both need a data key.
+    for (op, stage) in [
+        ("write", "key"),
+        ("write", "lock"),
+        ("write", "sync"),
+        ("write", "commit"),
+        ("read", "locate"),
+        ("read", "key"),
+    ] {
+        let series = format!("teifs_store_stage_seconds_count{{op=\"{op}\",stage=\"{stage}\"}}");
+        assert!(
+            value(&text, &series).is_some_and(|n| n >= 1.0),
+            "{series} in {text}"
+        );
+    }
+}

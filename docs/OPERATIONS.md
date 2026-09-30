@@ -85,6 +85,7 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_s3_duration_seconds` | histogram | `api` | Time until the answer's last byte was sent |
 | `teifs_s3_received_bytes_total` | counter | `api` | Request body bytes read |
 | `teifs_s3_sent_bytes_total` | counter | `api` | Answer body bytes sent |
+| `teifs_store_stage_seconds` | histogram | `op`, `stage` | Time in each stage of the store's writes (`key`: a data key from the KMS; `lock`: waiting for the commit lock; `sync`: making the data durable; `commit`: all of it under the lock) and reads (`locate`: finding the version and opening its file; `key`) |
 | `teifs_drive_total_bytes` | gauge | | The size of the disk the drive is on |
 | `teifs_drive_free_bytes` | gauge | | The space free on it for TeiFS |
 | `teifs_job_steps_total` | counter | `job` | Steps each background job has run since the server started |
@@ -110,7 +111,9 @@ holds is left out unless the scrape asks, as a drive can have many buckets:
 `teifs admin prometheus generate ALIAS --buckets` adds `params: {buckets: ["1"]}`.
 `teifs admin info` shows the totals.
 
-Histograms' buckets double from 1 ms to about a minute. Some queries to start with:
+Request histograms' buckets double from 1 ms to about a minute; the store's from 100 µs
+to about 52 s. A slow `sync` is the disk, a slow `key` the KMS (a transit engine's
+network), a slow `lock` many writes waiting their turn. Some queries to start with:
 
 ```promql
 sum by (api) (rate(teifs_s3_requests_total[5m]))                  # requests per second
@@ -119,6 +122,7 @@ histogram_quantile(0.99, sum by (le, api) (rate(teifs_s3_ttfb_seconds_bucket[5m]
 teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearly full
 max(teifs_job_failing) > 0                                          # a job keeps failing
 max(teifs_scrub_damaged_versions) > 0                               # damage on the disk
+histogram_quantile(0.99, sum by (le, stage) (rate(teifs_store_stage_seconds_bucket{op="write"}[5m])))
 topk(5, teifs_bucket_stored_bytes)                                  # the largest buckets
 ```
 

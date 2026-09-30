@@ -137,6 +137,12 @@ impl Metrics {
             Unit::Bytes,
             sent.clone(),
         );
+        registry.register_with_unit(
+            "store_stage",
+            "Time in each stage of the store's reads and writes (key, lock, sync, commit; locate, key)",
+            Unit::Seconds,
+            store.stage_times(),
+        );
         registry.register(
             "audit_dropped",
             "Audit entries lost because their destination couldn't keep up",

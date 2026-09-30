@@ -30,6 +30,7 @@ mod snapshots;
 mod space;
 mod sse;
 mod staged;
+mod stages;
 #[cfg(test)]
 mod test_util;
 mod usage;
@@ -66,6 +67,7 @@ pub use settings::{
 pub use snapshots::{Restored, restore};
 pub use sse::Encryption;
 pub use staged::Staged;
+pub use stages::{Stage, StageTimes};
 pub use teifs_crypto::{
     CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
 };
@@ -273,6 +275,8 @@ struct Inner {
     lifecycles: lifecycle::LifecycleCache,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
     day_ms: i64,
+    /// How long each stage of reads and writes takes.
+    stages: stages::StageTimes,
 }
 
 /// How hard a write is made to survive a power cut before it's acknowledged.
@@ -374,6 +378,7 @@ impl Store {
             jobs: jobs::StatusMap::default(),
             snapshots: Mutex::new(()),
             lifecycles: lifecycle::LifecycleCache::default(),
+            stages: stages::new(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)
             }),
@@ -583,6 +588,7 @@ impl Store {
             })
             .await?;
         let object_id = uuid::Uuid::now_v7().simple().to_string();
+        let since = std::time::Instant::now();
         let keyed = sse::new_key(
             self.kms(),
             encryption,
@@ -592,6 +598,7 @@ impl Store {
         )
         .await?
         .ok_or(StoreError::InvalidRequest("no encryption was asked for"))?;
+        stages::record(&self.inner.stages, "write", "key", since);
         Staged::create_sealed(
             &self.inner.tmp,
             keyed,
@@ -613,7 +620,10 @@ impl Store {
         staged.finish().await?;
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         self.blocking(move |inner| {
+            let waited = std::time::Instant::now();
             let conn = inner.lock();
+            stages::record(&inner.stages, "write", "lock", waited);
+            let since = std::time::Instant::now();
             let bucket = inner.bucket(&bucket)?;
             let md5 = staged.md5();
             let (etag, sealed, stored_len) = match staged.sealing() {
@@ -651,6 +661,7 @@ impl Store {
                 parts: None,
             };
             let info = inner.commit_to(&conn, &bucket, &key, finished, &precondition)?;
+            stages::record(&inner.stages, "write", "commit", since);
             staged.keep();
             Ok(info)
         })
@@ -733,7 +744,9 @@ impl Store {
         version_id: Option<&str>,
         customer: Option<&CustomerKey>,
     ) -> Result<(ObjectInfo, Option<ObjectBody>)> {
+        let since = std::time::Instant::now();
         let (mut info, file, sealed) = self.locate(bucket, key, version_id).await?;
+        stages::record(&self.inner.stages, "read", "locate", since);
         let Some((crypt, bucket_id, parts)) = sealed else {
             if customer.is_some() {
                 return Err(StoreError::CustomerKeyNotApplicable);
@@ -741,6 +754,7 @@ impl Store {
             let body = file.map(|file| ObjectBody::new(file, info.size, None));
             return Ok((info, body));
         };
+        let since = std::time::Instant::now();
         let data_key = sse::data_key(
             self.kms(),
             &crypt,
@@ -751,6 +765,7 @@ impl Store {
         .await?;
         let outer =
             sse::outer_key(self.kms(), &crypt, &self.inner.format.drive, &bucket_id).await?;
+        stages::record(&self.inner.stages, "read", "key", since);
         if let Some(sealed) = &crypt.checksums {
             info.attrs.checksums = sse::open_sums(&data_key, sealed)?;
         }
@@ -1162,7 +1177,7 @@ impl Inner {
         if self.durability == Durability::None {
             return Ok(());
         }
-        staged::sync_file(path)
+        stages::time(&self.stages, "write", "sync", || staged::sync_file(path))
     }
 
     /// Syncs a folder so a new entry in it survives a power cut, in strict mode.
