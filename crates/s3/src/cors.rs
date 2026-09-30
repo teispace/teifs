@@ -17,10 +17,11 @@ use s3s::{
 use teifs_store::{CorsRule, Store, StoreError};
 
 use crate::{
+    audit::Asked,
     health,
     limits::{StallTimeout, refusal},
-    metrics::{self, Metrics, Scrapers},
-    observe::{self, Received, Seen},
+    metrics,
+    observe::{self, Received, Seen, Watch},
 };
 
 /// How many rules a bucket's CORS configuration may have.
@@ -200,8 +201,7 @@ pub struct Service {
     proxies: Arc<crate::TrustedProxies>,
     /// The connection's peer.
     client: crate::Client,
-    metrics: Arc<Metrics>,
-    scrapers: Scrapers,
+    watch: Arc<Watch>,
 }
 
 impl std::fmt::Debug for Service {
@@ -218,10 +218,10 @@ impl Service {
         body_timeout: Option<Duration>,
         plain_http_is_secure: bool,
         proxies: crate::TrustedProxies,
-        scrapers: Scrapers,
+        watch: Watch,
     ) -> Self {
         Self {
-            metrics: Arc::new(Metrics::new(&store)),
+            watch: Arc::new(watch),
             s3,
             store,
             host: host.map(Arc::new),
@@ -229,7 +229,6 @@ impl Service {
             plain_http_is_secure,
             proxies: Arc::new(proxies),
             client: crate::Client::default(),
-            scrapers,
         }
     }
 
@@ -398,8 +397,8 @@ impl Service {
                 let client = self.proxies.client(self.client, req.headers());
                 let seen = Seen::new();
                 let response = metrics::scrape(
-                    &self.metrics,
-                    &self.scrapers,
+                    &self.watch.metrics,
+                    &self.watch.scrapers,
                     req.headers(),
                     client,
                     &seen.id,
@@ -408,7 +407,11 @@ impl Service {
             }
         }
         let seen = Arc::new(Seen::new());
-        let request = observe::Request::new(Arc::clone(&self.metrics), Arc::clone(&seen));
+        let asked = self.watch.audits().then(|| {
+            let client = self.proxies.client(self.client, req.headers());
+            Asked::of(&req, client.ip)
+        });
+        let request = observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked);
         let response = self.respond(req, &seen).await?;
         Ok(observe::finish(response, request))
     }

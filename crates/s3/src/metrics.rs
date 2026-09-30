@@ -32,7 +32,7 @@ use teifs_iam::{AuthError, Iam};
 use teifs_store::Store;
 use teifs_types::admin::METRICS_PATH;
 
-use crate::{access::Client, observe::Outcome};
+use crate::{access::Client, observe::Answer};
 
 /// The action a scrape's key needs.
 const ACTION: &str = "teifs:GetMetrics";
@@ -73,6 +73,7 @@ pub struct Metrics {
     duration: Family<Api, Histogram, fn() -> Histogram>,
     received: Family<Api, Counter>,
     sent: Family<Api, Counter>,
+    audit_dropped: Counter,
 }
 
 impl Metrics {
@@ -86,6 +87,7 @@ impl Metrics {
         let duration = Family::new_with_constructor(latency as fn() -> Histogram);
         let received = Family::default();
         let sent = Family::default();
+        let audit_dropped = Counter::default();
         registry.register(
             "s3_requests",
             "Requests answered, by operation and HTTP status",
@@ -130,6 +132,11 @@ impl Metrics {
             Unit::Bytes,
             sent.clone(),
         );
+        registry.register(
+            "audit_dropped",
+            "Audit entries lost because their destination couldn't keep up",
+            audit_dropped.clone(),
+        );
         registry.register_collector(Box::new(Server {
             store: store.clone(),
             started: SystemTime::now(),
@@ -144,6 +151,7 @@ impl Metrics {
             duration,
             received,
             sent,
+            audit_dropped,
         }
     }
 
@@ -158,11 +166,10 @@ impl Metrics {
         }
     }
 
-    pub(crate) fn record(&self, outcome: &Outcome) {
-        let api = outcome.request.seen.operation();
-        let code = outcome.status.as_u16();
+    pub(crate) fn record(&self, api: &'static str, answer: &Answer) {
+        let code = answer.status.as_u16();
         self.requests.get_or_create(&ApiStatus { api, code }).inc();
-        if let Some(error) = &outcome.error {
+        if let Some(error) = &answer.error {
             self.errors
                 .get_or_create(&ApiError {
                     api,
@@ -171,23 +178,28 @@ impl Metrics {
                 .inc();
         }
         let labels = Api { api };
-        if outcome.canceled {
+        if answer.canceled {
             self.canceled.get_or_create(&labels).inc();
         }
-        self.first_byte
-            .get_or_create(&labels)
-            .observe(outcome.first_byte.as_secs_f64());
+        if let Some(first_byte) = answer.first_byte {
+            self.first_byte
+                .get_or_create(&labels)
+                .observe(first_byte.as_secs_f64());
+        }
         self.duration
             .get_or_create(&labels)
-            .observe(outcome.duration.as_secs_f64());
-        self.received
-            .get_or_create(&labels)
-            .inc_by(outcome.received);
-        self.sent.get_or_create(&labels).inc_by(outcome.sent);
+            .observe(answer.duration.as_secs_f64());
+        self.received.get_or_create(&labels).inc_by(answer.received);
+        self.sent.get_or_create(&labels).inc_by(answer.sent);
+    }
+
+    /// Counts an audit entry its destination couldn't take.
+    pub(crate) fn audit_dropped(&self) {
+        self.audit_dropped.inc();
     }
 
     /// Everything, in the `OpenMetrics` text format.
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let mut text = String::new();
         prometheus_client::encoding::text::encode(&mut text, &self.registry)
             .expect("writing to a String can't fail");

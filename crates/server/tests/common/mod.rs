@@ -31,12 +31,10 @@ pub async fn start() -> Server {
     start_with(|_| {}).await
 }
 
-/// A server whose configuration `adjust` changes first.
-pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
-    let dir = tempfile::tempdir().unwrap();
-    let keys = tempfile::tempdir().unwrap();
-    let mut config = Config {
-        dir: dir.path().to_owned(),
+/// A server's configuration: its drive in `dir`, its keyring in `keys`.
+pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
+    Config {
+        dir: dir.to_owned(),
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
         credentials: Some(DriveCredentials {
@@ -44,7 +42,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
             secret_key: SECRET_KEY.into(),
         }),
         default_layout: teifs_store::Layout::Folder,
-        kms_keyring: Some(keys.path().join("keyring.json")),
+        kms_keyring: Some(keys.join("keyring.json")),
         kms_transit: None,
         allow_sse_c: true,
         plain_http_is_secure: None,
@@ -57,8 +55,16 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         allow_sig_v2: false,
         legacy_bucket_defaults: false,
         public_metrics: false,
+        audit: None,
         limits: teifs_server::Limits::default(),
-    };
+    }
+}
+
+/// A server whose configuration `adjust` changes first.
+pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), keys.path());
     adjust(&mut config);
     let server = TeiFS::bind(config).await.unwrap();
     let endpoint = format!("{}://{}", server.scheme(), server.local_addr().unwrap());

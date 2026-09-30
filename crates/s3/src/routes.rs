@@ -389,6 +389,17 @@ impl S3Route for Routes {
             .expect("matched by is_match");
         let seen = req.extensions.get::<Arc<Seen>>().cloned();
         let request_id = observe::request_id(&req.extensions);
+        if let Some(seen) = &seen {
+            seen.api(match api {
+                Api::Query if req.service.as_deref() == Some("iam") => "IAM",
+                Api::Query => "STS",
+                Api::Control => "Control",
+                Api::Admin => "Admin",
+            });
+            if let Some(credentials) = &req.credentials {
+                seen.signed_by(&credentials.access_key);
+            }
+        }
         // Each API answers errors in its own format.
         let response = match api {
             Api::Query => {

@@ -3,6 +3,7 @@
 
 mod acl;
 pub mod admin;
+pub mod audit;
 pub mod caps;
 mod names;
 mod object;

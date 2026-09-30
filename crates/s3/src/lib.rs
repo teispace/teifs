@@ -4,6 +4,7 @@
 mod access;
 mod acl;
 mod admin;
+mod audit;
 mod bucket_access;
 mod bucket_export;
 mod caps;
@@ -40,6 +41,7 @@ use teifs_store::{Layout, Store};
 
 pub use access::Client;
 pub use admin::RootKeyStore;
+pub use audit::{AuditSink, REDACTED};
 pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
@@ -86,6 +88,8 @@ pub struct Options {
     /// Serve metrics to anyone who can reach the server, not only to bearer tokens of
     /// keys that may `teifs:GetMetrics`: for a network only Prometheus shares.
     pub public_metrics: bool,
+    /// Where audit entries go, one per request; none keeps no audit log.
+    pub audit: Option<Arc<dyn AuditSink>>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
@@ -100,6 +104,12 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
         _ => metrics::Scrapers::Anyone,
     };
+    let watch = observe::Watch::new(
+        metrics::Metrics::new(&store),
+        scrapers,
+        options.audit,
+        store.format().drive.clone(),
+    );
     let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
@@ -141,6 +151,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.body_timeout,
         options.plain_http_is_secure,
         options.trusted_proxies,
-        scrapers,
+        watch,
     ))
 }

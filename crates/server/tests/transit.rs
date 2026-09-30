@@ -68,6 +68,7 @@ async fn objects_are_sealed_by_the_transit_engine() {
         allow_sig_v2: false,
         legacy_bucket_defaults: false,
         public_metrics: false,
+        audit: None,
         limits: teifs_server::Limits::default(),
     })
     .await

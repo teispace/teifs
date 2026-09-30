@@ -1,6 +1,7 @@
 # Operations
 
-Watching a TeiFS server: its request ids, Prometheus metrics and health check.
+Watching a TeiFS server: its request ids, health check, Prometheus metrics and audit
+log.
 
 ## Request ids
 
@@ -96,3 +97,48 @@ histogram_quantile(0.99, sum by (le, api) (rate(teifs_s3_ttfb_seconds_bucket[5m]
 teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearly full
 max(teifs_job_failing) > 0                                          # a job keeps failing
 ```
+
+## Audit log
+
+```sh
+teifs serve /srv/drive --audit-log /var/log/teifs/audit.log   # or - for standard output
+```
+
+One JSON object per request, on a line of its own, with MinIO's field names, so what
+reads MinIO's audit log reads TeiFS's. The file is appended to and created readable only
+by its owner; after logrotate moves it, `SIGHUP` makes the server write a new one
+(logrotate's `postrotate kill -HUP $(pidof teifs)`, or `copytruncate`). Entries are
+queued for the writer, so a slow disk never slows requests; any the queue can't take are
+counted in `teifs_audit_dropped_total`.
+
+```json
+{"version":"1","deploymentid":"…","time":"2026-09-30T12:00:00.123456789Z","type":"S3",
+ "trigger":"incoming","api":{"name":"PutObject","bucket":"photos","object":"a.jpg",
+ "status":"OK","statusCode":200,"rx":52431,"tx":0,"timeToFirstByte":"1834000ns",
+ "timeToResponse":"1901000ns","timeToResponseInNS":"1901000"},"remotehost":"10.0.0.7",
+ "requestID":"18DA16C11FC2F0D0","userAgent":"aws-cli/2.17 …","requestPath":"/photos/a.jpg",
+ "requestHost":"s3.example.com","requestHeader":{"authorization":"REDACTED","…":"…"},
+ "responseHeader":{"etag":"\"…\"","x-amz-request-id":"18DA16C11FC2F0D0"},
+ "accessKey":"TFABCDEF…"}
+```
+
+| Field | What |
+|---|---|
+| `time` | When the request arrived (RFC 3339, UTC) |
+| `type` | `S3`, `Admin`, `IAM`, `STS` or `Control` |
+| `api.name` | The operation, as in the metrics; `unknown` when refused before its signature was accepted |
+| `api.bucket`, `api.object` | What it was on |
+| `api.statusCode`, `api.status` | The answer's status; `499` (`Client Closed Request`) when the client left before it was answered |
+| `api.rx`, `api.tx` | Body bytes read and sent |
+| `api.timeToFirstByte`, `api.timeToResponse` | Until the answer's headers were ready, and until its last byte (nanoseconds) |
+| `remotehost` | The client's address (a trusted proxy's client, behind one) |
+| `requestID` | The answer's `x-amz-request-id` |
+| `accessKey` | The key it was signed with; none when unsigned |
+| `error` | The error code it was answered with (`NoSuchKey`, `AccessDenied`) |
+| `requestQuery`, `requestHeader`, `responseHeader` | The request's query and headers and the answer's headers |
+
+Secrets never reach it: `Authorization`, `Proxy-Authorization`, `Cookie`, session tokens
+(`X-Amz-Security-Token`, as a header or in a link), a link's signature (`X-Amz-Signature`,
+V2's `Signature`) and SSE-C keys (`…-customer-key`, the copy source's too) are replaced
+by `REDACTED`; a key's MD5 digest, which reveals nothing, is kept.
+`GET /.teifs/admin/v1/config` (`teifs admin config`) says where the log goes.

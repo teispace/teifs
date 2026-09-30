@@ -408,6 +408,9 @@ pub struct ServerConfig {
     /// Whether anyone who can reach the server may read its metrics.
     #[serde(default)]
     pub public_metrics: bool,
+    /// Where the audit log goes: a file, or standard output; none when none is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_log: Option<String>,
     /// How long an unfinished multipart upload is kept; none for ever.
     pub upload_expiry_seconds: Option<u64>,
     /// How often every stored version is read back and checked; none if never.

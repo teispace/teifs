@@ -282,7 +282,12 @@ request refused by the signature check stays `unknown`). The request body is cou
 it's read and the answer's body as it's sent; the request is recorded in `metrics.rs`
 when the answer's body is dropped, as canceled if that was before its end. On the way
 out, an S3 error body without `<RequestId>` gets the request's id, since s3s leaves it
-out. `GET /.teifs/metrics` is answered before s3s, like the health check, because a
+out. With an audit log, what the request asked (path, query and headers, secrets
+redacted in `audit.rs`) is kept from its arrival, and `Access::check` records the key
+and the bucket and key it's on; the entry goes to an `AuditSink` when the metrics
+record the request, and to the sink even when the client left before an answer (`499`).
+The server's sink (`crates/server/src/audit.rs`) is a bounded queue in front of one
+writer task, which reopens its file on `SIGHUP`. `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.
 

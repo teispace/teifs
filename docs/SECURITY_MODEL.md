@@ -75,6 +75,11 @@ applications that upload with public ACLs; it is off by default. The account's B
 Public Access settings (S3 Control) apply with every bucket's, each setting on where
 either has it, so one setting closes every bucket at once.
 
+Prometheus metrics (`/.teifs/metrics`) name operations, error codes and the disk's size,
+so they need a bearer token (a JWT signed with an access key's secret, checked against
+that key's current policies for `teifs:GetMetrics`) unless the operator serves them
+with `--public-metrics` (`crates/server/tests/metrics.rs`).
+
 ### 2. Every endpoint declares what it authorizes (*built for IAM, STS, S3 Control and the admin API*)
 Everything served besides S3's operations is one table (`crates/s3/src/routes.rs`) in
 which each endpoint states what it needs: an action on a resource, the root user only,
@@ -226,7 +231,11 @@ exports) are sent as bodies that log only their size. A test runs a full cycle a
 `TRACE`, with an SSE-C key, an IAM user's new key, a session and its token, an IAM
 export and import with secrets and a wrongly signed request, and finds none of the
 secrets, nor the signing keys they give, in the log
-(`crates/server/tests/security/logs.rs`).
+(`crates/server/tests/security/logs.rs`). The audit log replaces what could sign or
+replay a request (`Authorization`, `X-Amz-Signature` and V2's `Signature` in a link,
+session tokens, cookies, SSE-C keys) with `REDACTED` before an entry is made, and is
+created readable only by its owner; a test sends each of them and looks for none in the
+file (`crates/server/tests/audit.rs`).
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,

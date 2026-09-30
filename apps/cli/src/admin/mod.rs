@@ -408,6 +408,13 @@ async fn config(client: &Client) -> Result<(), Error> {
             ("Legacy buckets", yes_no(config.legacy_bucket_defaults)),
             ("Public metrics", yes_no(config.public_metrics)),
             (
+                "Audit log",
+                config
+                    .audit_log
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+            ),
+            (
                 "Upload expiry",
                 config
                     .upload_expiry_seconds

@@ -314,7 +314,7 @@ pub async fn watch(tls: Arc<Tls>) {
     let mut tick = tokio::time::interval(RELOAD_CHECK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
-    let mut hangups = Hangups::new();
+    let mut hangups = crate::signals::Hangups::new();
     loop {
         let force = tokio::select! {
             _ = tick.tick() => false,
@@ -330,32 +330,6 @@ pub async fn watch(tls: Arc<Tls>) {
             ),
             Err(err) => tracing::warn!(error = %err, "the TLS certificate reload failed"),
         }
-    }
-}
-
-/// `SIGHUP`s, where the system has them.
-struct Hangups {
-    #[cfg(unix)]
-    signal: Option<tokio::signal::unix::Signal>,
-}
-
-impl Hangups {
-    fn new() -> Self {
-        Self {
-            #[cfg(unix)]
-            signal: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok(),
-        }
-    }
-
-    /// The next one; never, without them.
-    async fn next(&mut self) {
-        #[cfg(unix)]
-        if let Some(signal) = &mut self.signal
-            && signal.recv().await.is_some()
-        {
-            return;
-        }
-        std::future::pending::<()>().await;
     }
 }
 

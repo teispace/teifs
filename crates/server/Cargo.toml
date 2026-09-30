@@ -16,7 +16,7 @@ teifs-types.workspace = true
 teifs-iam.workspace = true
 zeroize.workspace = true
 s3s.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

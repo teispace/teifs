@@ -128,6 +128,14 @@ behaviour; the on-disk format is always upgraded automatically.
   [--token-file F]` makes one, signed with the alias's key as `mc admin prometheus
   generate` does, and prints the scrape configuration. `teifs serve --public-metrics`
   serves them to anyone instead.
+- An audit log: `teifs serve --audit-log FILE` (or `-` for standard output) writes one
+  JSON line per request with MinIO's audit fields: the operation, bucket and key, access
+  key, client address, status and error code, bytes, time to first byte and to the last,
+  the request id, and the request's query and headers and the answer's headers. Secrets
+  (signatures, a link's signature, session tokens, cookies, SSE-C keys) are replaced by
+  `REDACTED`. The file is created owner-only and reopened on `SIGHUP`; a queue keeps a
+  slow disk from slowing requests, and entries it drops are counted in
+  `teifs_audit_dropped_total`.
 - Every answer has an `x-amz-request-id` (16 hex digits, as S3's), and S3 error bodies
   now name it in `<RequestId>`, as AWS's do; the admin, IAM and STS APIs use the same id.
 - Documents printed to standard output (IAM and bucket exports, credentials with

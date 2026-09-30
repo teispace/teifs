@@ -1,7 +1,8 @@
 //! What each request did, seen from around the whole service: an id for it (in
 //! `x-amz-request-id` and error bodies, as S3 answers), the operation it turned out to
-//! be, the bytes it moved and how long it took. The metrics record it once its answer is
-//! sent, or abandoned by the client.
+//! be, who asked it of what, the bytes it moved and how long it took. The metrics (and
+//! the audit log, if one is kept) record it once its answer is sent, or abandoned by the
+//! client.
 
 use std::{
     collections::BTreeSet,
@@ -15,11 +16,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, StatusCode, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
 use http_body::{Body, Frame, SizeHint};
 use s3s::{HttpResponse, StdError};
 
-use crate::metrics::Metrics;
+use crate::{
+    audit::{self, Asked, AuditSink},
+    metrics::{Metrics, Scrapers},
+};
 
 /// The operation of a request no hook saw: refused before its signature was accepted.
 pub(crate) const UNKNOWN: &str = "unknown";
@@ -30,6 +34,10 @@ pub(crate) struct Seen {
     /// Its id.
     pub(crate) id: String,
     operation: OnceLock<&'static str>,
+    kind: OnceLock<&'static str>,
+    access_key: OnceLock<String>,
+    /// The bucket and key it's on.
+    target: OnceLock<(String, String)>,
     received: AtomicU64,
 }
 
@@ -38,8 +46,44 @@ impl Seen {
         Self {
             id: next_id(),
             operation: OnceLock::new(),
+            kind: OnceLock::new(),
+            access_key: OnceLock::new(),
+            target: OnceLock::new(),
             received: AtomicU64::new(0),
         }
+    }
+
+    /// Says which API it's for, when not S3's: `Admin`, `IAM`, `STS` or `Control`.
+    pub(crate) fn api(&self, kind: &'static str) {
+        let _ = self.kind.set(kind);
+    }
+
+    /// Its API: `S3` unless said otherwise.
+    pub(crate) fn kind(&self) -> &'static str {
+        self.kind.get().copied().unwrap_or("S3")
+    }
+
+    /// Records the access key it was signed with.
+    pub(crate) fn signed_by(&self, access_key: &str) {
+        let _ = self.access_key.set(access_key.to_owned());
+    }
+
+    pub(crate) fn access_key(&self) -> Option<&str> {
+        self.access_key.get().map(String::as_str)
+    }
+
+    /// Records the bucket and key (empty for none) it's on.
+    pub(crate) fn on(&self, bucket: &str, key: &str) {
+        let _ = self.target.set((bucket.to_owned(), key.to_owned()));
+    }
+
+    pub(crate) fn target(&self) -> Option<(String, String)> {
+        self.target.get().cloned()
+    }
+
+    /// Request body bytes read so far.
+    pub(crate) fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
     }
 
     /// Names the operation; the first name given wins.
@@ -136,43 +180,101 @@ impl<B: Body<Data = Bytes> + Unpin> Body for Received<B> {
     }
 }
 
-/// A request being served: counted in flight until it's dropped, and as canceled if
-/// that's before its answer was done with.
+/// What watches requests: the metrics, and the audit log if one is kept.
+#[derive(Debug)]
+pub(crate) struct Watch {
+    pub(crate) metrics: Metrics,
+    /// Who may read the metrics.
+    pub(crate) scrapers: Scrapers,
+    audit: Option<Arc<dyn AuditSink>>,
+    /// The drive's id, which audit entries carry.
+    drive: String,
+}
+
+impl Watch {
+    pub(crate) fn new(
+        metrics: Metrics,
+        scrapers: Scrapers,
+        audit: Option<Arc<dyn AuditSink>>,
+        drive: String,
+    ) -> Self {
+        Self {
+            metrics,
+            scrapers,
+            audit,
+            drive,
+        }
+    }
+
+    /// Whether requests are audited, so what they asked is worth keeping.
+    pub(crate) const fn audits(&self) -> bool {
+        self.audit.is_some()
+    }
+
+    fn audit(&self, asked: Option<Asked>, seen: &Seen, answer: &Answer, headers: &HeaderMap) {
+        if let (Some(sink), Some(asked)) = (&self.audit, asked)
+            && !sink.log(audit::entry(&self.drive, asked, seen, answer, headers))
+        {
+            self.metrics.audit_dropped();
+        }
+    }
+}
+
+/// The status recorded for a request whose client left before it was answered (nginx's).
+pub(crate) const CLIENT_LEFT: u16 = 499;
+
+/// A request being served: counted in flight until it's dropped, and recorded then as
+/// the client's leaving if that's before it was answered.
 #[derive(Debug)]
 pub(crate) struct Request {
-    pub(crate) metrics: Arc<Metrics>,
+    watch: Arc<Watch>,
     pub(crate) seen: Arc<Seen>,
-    pub(crate) started: Instant,
-    done: bool,
+    started: Instant,
+    /// What it asked, while it's audited.
+    asked: Option<Asked>,
+    answered: bool,
 }
 
 impl Request {
-    pub(crate) fn new(metrics: Arc<Metrics>, seen: Arc<Seen>) -> Self {
-        metrics.begin();
+    pub(crate) fn new(watch: Arc<Watch>, seen: Arc<Seen>, asked: Option<Asked>) -> Self {
+        watch.metrics.begin();
         Self {
-            metrics,
+            watch,
             seen,
             started: Instant::now(),
-            done: false,
+            asked,
+            answered: false,
         }
     }
 }
 
 impl Drop for Request {
     fn drop(&mut self) {
-        self.metrics.end(self.seen.operation(), !self.done);
+        self.watch
+            .metrics
+            .end(self.seen.operation(), !self.answered);
+        if !self.answered {
+            let answer = Answer {
+                status: StatusCode::from_u16(CLIENT_LEFT).expect("a valid status"),
+                duration: self.started.elapsed(),
+                received: self.seen.received(),
+                canceled: true,
+                ..Answer::default()
+            };
+            self.watch
+                .audit(self.asked.take(), &self.seen, &answer, &HeaderMap::new());
+        }
     }
 }
 
-/// What a request came to, recorded when its answer's body is done with.
-#[derive(Debug)]
-pub(crate) struct Outcome {
-    pub(crate) request: Request,
+/// How a request was answered.
+#[derive(Debug, Default)]
+pub(crate) struct Answer {
     pub(crate) status: StatusCode,
     /// The S3 error code of an error answer, when its body names one.
     pub(crate) error: Option<String>,
-    /// Until the answer's headers were ready.
-    pub(crate) first_byte: Duration,
+    /// Until the answer's headers were ready; none when it never was.
+    pub(crate) first_byte: Option<Duration>,
     /// Until its body was done with.
     pub(crate) duration: Duration,
     pub(crate) received: u64,
@@ -185,7 +287,10 @@ pub(crate) struct Outcome {
 /// dropped: after its last byte, or early when the client goes away.
 struct Sent {
     body: s3s::Body,
-    outcome: Option<Outcome>,
+    request: Option<Request>,
+    answer: Answer,
+    /// The answer's headers, while the request is audited.
+    headers: HeaderMap,
     /// The body's length, when it's known up front.
     length: Option<u64>,
     /// Whether the body said it had nothing more.
@@ -203,10 +308,8 @@ impl Body for Sent {
         let poll = Pin::new(&mut self.body).poll_frame(cx);
         match &poll {
             Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref()
-                    && let Some(outcome) = &mut self.outcome
-                {
-                    outcome.sent += data.len() as u64;
+                if let Some(data) = frame.data_ref() {
+                    self.answer.sent += data.len() as u64;
                 }
             }
             Poll::Ready(None) => self.ended = true,
@@ -226,17 +329,20 @@ impl Body for Sent {
 
 impl Drop for Sent {
     fn drop(&mut self) {
-        if let Some(mut outcome) = self.outcome.take() {
-            outcome.request.done = true;
-            // A server that knows the length stops reading at it, before the body says
-            // it has ended.
-            let whole =
-                self.ended || self.body.is_end_stream() || self.length == Some(outcome.sent);
-            outcome.canceled = !whole;
-            outcome.duration = outcome.request.started.elapsed();
-            outcome.received = outcome.request.seen.received.load(Ordering::Relaxed);
-            outcome.request.metrics.record(&outcome);
-        }
+        let Some(mut request) = self.request.take() else {
+            return;
+        };
+        request.answered = true;
+        let answer = &mut self.answer;
+        // A server that knows the length stops reading at it, before the body says it
+        // has ended.
+        let whole = self.ended || self.body.is_end_stream() || self.length == Some(answer.sent);
+        answer.canceled = !whole;
+        answer.duration = request.started.elapsed();
+        answer.received = request.seen.received();
+        let watch = &request.watch;
+        watch.metrics.record(request.seen.operation(), answer);
+        watch.audit(request.asked.take(), &request.seen, answer, &self.headers);
     }
 }
 
@@ -254,15 +360,11 @@ pub(crate) fn finish(mut response: HttpResponse, request: Request) -> HttpRespon
             .entry("x-amz-request-id")
             .or_insert(id);
     }
-    let outcome = Outcome {
-        first_byte: request.started.elapsed(),
-        request,
+    let answer = Answer {
         status,
         error,
-        duration: Duration::ZERO,
-        received: 0,
-        sent: 0,
-        canceled: false,
+        first_byte: Some(request.started.elapsed()),
+        ..Answer::default()
     };
     let length = response.body().size_hint().exact().or_else(|| {
         response
@@ -273,10 +375,17 @@ pub(crate) fn finish(mut response: HttpResponse, request: Request) -> HttpRespon
             .parse()
             .ok()
     });
+    let headers = if request.asked.is_some() {
+        response.headers().clone()
+    } else {
+        HeaderMap::new()
+    };
     response.map(|body| {
         s3s::Body::http_body(Sent {
             body,
-            outcome: Some(outcome),
+            request: Some(request),
+            answer,
+            headers,
             length,
             ended: false,
         })
@@ -325,6 +434,88 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Keeps the entries it takes, or takes none.
+    #[derive(Debug, Default)]
+    struct Kept {
+        refuse: bool,
+        entries: Mutex<Vec<teifs_types::audit::AuditEntry>>,
+    }
+
+    impl AuditSink for Kept {
+        fn log(&self, entry: teifs_types::audit::AuditEntry) -> bool {
+            if !self.refuse {
+                self.entries.lock().unwrap().push(entry);
+            }
+            !self.refuse
+        }
+    }
+
+    fn watch(sink: &Arc<Kept>) -> (tempfile::TempDir, Arc<Watch>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = teifs_store::Store::open(dir.path()).unwrap();
+        let sink: Arc<dyn AuditSink> = Arc::clone(sink) as _;
+        let watch = Watch::new(
+            Metrics::new(&store),
+            Scrapers::Anyone,
+            Some(sink),
+            "drive".into(),
+        );
+        (dir, Arc::new(watch))
+    }
+
+    fn request(watch: &Arc<Watch>) -> Request {
+        let asked = Asked::of(&http::Request::new(()), None);
+        let seen = Arc::new(Seen::new());
+        seen.name("PutObject");
+        Request::new(Arc::clone(watch), seen, Some(asked))
+    }
+
+    #[tokio::test]
+    async fn answered_and_abandoned_requests_are_audited() {
+        use http_body_util::BodyExt;
+
+        let sink = Arc::new(Kept::default());
+        let (_dir, watch) = watch(&sink);
+        let response = finish(answer(StatusCode::OK, "abc"), request(&watch));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"abc");
+        // A request the client left before it was answered is the client's leaving.
+        drop(request(&watch));
+        let entries = sink.entries.lock().unwrap();
+        let [answered, left] = &entries[..] else {
+            panic!("{entries:?}")
+        };
+        assert_eq!((answered.api.status_code, answered.api.tx), (200, 3));
+        assert_eq!(answered.deployment_id, "drive");
+        assert_eq!(
+            answered.response_header["x-amz-request-id"],
+            answered.request_id
+        );
+        assert_eq!(
+            (left.api.status_code, left.api.status.as_str()),
+            (CLIENT_LEFT, "Client Closed Request")
+        );
+        assert!(left.api.time_to_first_byte.is_empty());
+        let text = watch.metrics.text();
+        assert!(
+            text.contains("teifs_s3_canceled_total{api=\"PutObject\"} 1"),
+            "{text}"
+        );
+        assert!(text.contains("teifs_audit_dropped_total 0"), "{text}");
+    }
+
+    #[test]
+    fn entries_a_destination_refuses_are_counted() {
+        let sink = Arc::new(Kept {
+            refuse: true,
+            ..Kept::default()
+        });
+        let (_dir, watch) = watch(&sink);
+        drop(request(&watch));
+        drop(request(&watch));
+        assert!(watch.metrics.text().contains("teifs_audit_dropped_total 2"));
+    }
 
     #[test]
     fn request_ids_are_unique_and_shaped_as_s3s() {

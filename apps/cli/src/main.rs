@@ -24,8 +24,8 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits, ProxyHeader,
-    Server, TlsSource, Transit, TrustedProxies, credentials,
+    AuditTarget, Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits,
+    ProxyHeader, Server, TlsSource, Transit, TrustedProxies, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -214,6 +214,11 @@ pub(crate) struct ServeArgs {
     /// Metrics name operations and the drive's size: only on a network you trust.
     #[arg(long, env = "TEIFS_PUBLIC_METRICS")]
     public_metrics: bool,
+    /// Keep an audit log: one JSON line per request (who asked what, the answer, bytes
+    /// and time; never secrets), appended to this file (created owner-only, reopened on
+    /// SIGHUP for logrotate), or `-` for standard output.
+    #[arg(long, value_name = "FILE", value_parser = parse_audit_log, env = "TEIFS_AUDIT_LOG")]
+    audit_log: Option<AuditTarget>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -543,6 +548,15 @@ fn parse_expiry(text: &str) -> Result<Expiry, String> {
         .map_err(|e| format!("{e} (or say never)"))
 }
 
+/// `-` for standard output, or a file.
+fn parse_audit_log(text: &str) -> Result<AuditTarget, String> {
+    match text.trim() {
+        "" => Err("name a file, or `-` for standard output".to_owned()),
+        "-" => Ok(AuditTarget::Stdout),
+        path => Ok(AuditTarget::File(PathBuf::from(path))),
+    }
+}
+
 /// Checks a trusted proxy's address or network.
 fn parse_network(text: &str) -> Result<String, String> {
     TrustedProxies::new(&[text], ProxyHeader::default())?;
@@ -588,6 +602,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         public_metrics: args.public_metrics,
+        audit: args.audit_log,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,

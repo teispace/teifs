@@ -2,8 +2,10 @@
 //! S3 until told to stop. The `teifs` command is a thin layer over this crate, and
 //! anything that embeds TeiFS (such as Teitunnel) starts it the same way.
 
+mod audit;
 pub mod credentials;
 mod serve;
+mod signals;
 pub mod tls;
 
 use std::{
@@ -24,6 +26,7 @@ use teifs_store::{
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
+pub use audit::AuditTarget;
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
@@ -82,6 +85,8 @@ pub struct Config {
     pub legacy_bucket_defaults: bool,
     /// Serve metrics to anyone who can reach the server, without a bearer token.
     pub public_metrics: bool,
+    /// Where to keep an audit log of every request; none keeps none.
+    pub audit: Option<AuditTarget>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
 }
@@ -150,6 +155,14 @@ pub enum ServerError {
         /// Why.
         source: teifs_store::CryptoError,
     },
+    /// The audit log couldn't be opened.
+    #[error("can't open the audit log {target}: {source}")]
+    Audit {
+        /// Where it goes.
+        target: AuditTarget,
+        /// Why.
+        source: io::Error,
+    },
     /// A transit engine was asked for without a token.
     #[error("set VAULT_TOKEN (or BAO_TOKEN) to use the transit engine at {0}")]
     NoTransitToken(String),
@@ -186,6 +199,8 @@ pub struct Server {
     created_credentials: bool,
     kms: KmsLocation,
     tls: Option<Arc<Tls>>,
+    /// Writes the audit log until the service is gone.
+    audit_writer: Option<audit::Writer>,
 }
 
 impl std::fmt::Debug for Server {
@@ -195,6 +210,57 @@ impl std::fmt::Debug for Server {
             .field("access_key", &self.access_key)
             .finish_non_exhaustive()
     }
+}
+
+/// Opens the audit log and starts its writer.
+fn start_audit(
+    target: &AuditTarget,
+) -> Result<(Arc<dyn teifs_s3::AuditSink>, audit::Writer), ServerError> {
+    let (log, writer) = audit::start(target).map_err(|source| ServerError::Audit {
+        target: target.clone(),
+        source,
+    })?;
+    Ok((log, writer))
+}
+
+/// Opens (or creates) the drive, with its KMS.
+fn open_drive(
+    config: &Config,
+) -> Result<(Store, Arc<dyn teifs_store::Kms>, KmsLocation), ServerError> {
+    std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
+        path: config.dir.clone(),
+        source,
+    })?;
+    let default_encryption = config.allow_sse_c.then(|| BucketEncryption {
+        block_customer_keys: false,
+        ..BucketEncryption::aws_default()
+    });
+    let store = Store::open_with(
+        &config.dir,
+        StoreOptions {
+            kms: None,
+            default_encryption,
+            durability: config.durability,
+            key_rules: config.key_rules,
+            lifecycle_day: config.lifecycle_day,
+        },
+    )
+    .map_err(|source| ServerError::Open {
+        path: config.dir.clone(),
+        source,
+    })?;
+    let (kms, location) = open_kms(
+        config.kms_transit.clone(),
+        config.kms_keyring.clone(),
+        &store.format().drive,
+    )?;
+    store
+        .attach_kms(kms.clone())
+        .map_err(|source| ServerError::Open {
+            path: config.dir.clone(),
+            source,
+        })?;
+    Ok((store, kms, location))
 }
 
 /// The KMS: a transit engine when one is given, else the keyring (the drive's default one
@@ -275,6 +341,7 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         allow_sig_v2: config.allow_sig_v2,
         legacy_bucket_defaults: config.legacy_bucket_defaults,
         public_metrics: config.public_metrics,
+        audit_log: config.audit.as_ref().map(ToString::to_string),
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
         scrub_every_seconds: config.jobs.scrub_every.map(|d| d.as_secs()),
         snapshots: config.jobs.snapshots,
@@ -308,39 +375,7 @@ impl Server {
             .transpose()
             .map_err(ServerError::Tls)?
             .map(Arc::new);
-        std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
-            path: config.dir.clone(),
-            source,
-        })?;
-        let default_encryption = config.allow_sse_c.then(|| BucketEncryption {
-            block_customer_keys: false,
-            ..BucketEncryption::aws_default()
-        });
-        let store = Store::open_with(
-            &config.dir,
-            StoreOptions {
-                kms: None,
-                default_encryption,
-                durability: config.durability,
-                key_rules: config.key_rules,
-                lifecycle_day: config.lifecycle_day,
-            },
-        )
-        .map_err(|source| ServerError::Open {
-            path: config.dir.clone(),
-            source,
-        })?;
-        let (kms, location) = open_kms(
-            config.kms_transit.clone(),
-            config.kms_keyring.clone(),
-            &store.format().drive,
-        )?;
-        store
-            .attach_kms(kms.clone())
-            .map_err(|source| ServerError::Open {
-                path: config.dir.clone(),
-                source,
-            })?;
+        let (store, kms, location) = open_drive(&config)?;
         let (listener, listen) = listen(config.listen).await?;
         let admin_config = admin_config(&config, &location, listen);
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
@@ -368,6 +403,7 @@ impl Server {
             .await
             .map_err(ServerError::Iam)?,
         );
+        let (audit, audit_writer) = config.audit.as_ref().map(start_audit).transpose()?.unzip();
         let service = teifs_s3::service(
             store.clone(),
             Options {
@@ -380,6 +416,7 @@ impl Server {
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
                 public_metrics: config.public_metrics,
+                audit,
                 config: Some(admin_config),
                 root_keys,
             },
@@ -396,6 +433,7 @@ impl Server {
             created_credentials,
             kms: location,
             tls,
+            audit_writer,
         })
     }
 
@@ -457,5 +495,12 @@ impl Server {
             reloads.abort();
         }
         jobs.stop().await;
+        // The service is gone with its connections, so the writer is finishing what's
+        // queued.
+        if let Some(writer) = self.audit_writer
+            && tokio::time::timeout(DRAIN, writer).await.is_err()
+        {
+            tracing::warn!("the audit log's last entries weren't all written");
+        }
     }
 }

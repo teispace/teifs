@@ -34,6 +34,7 @@ use crate::{
     caps::Caps,
     drive::REGION,
     errors::from_store,
+    observe::Seen,
     post_form::{self, Form},
     tagging,
 };
@@ -389,11 +390,30 @@ fn denied() -> s3s::S3Error {
     s3_error!(AccessDenied, "Access Denied")
 }
 
+/// Tells the request's observer the operation and who signed it.
+fn observed(cx: &mut S3AccessContext<'_>, operation: &'static str) -> Option<Arc<Seen>> {
+    let seen = cx.extensions_mut().get::<Arc<Seen>>().cloned()?;
+    seen.name(operation);
+    if let Some(credentials) = cx.credentials() {
+        seen.signed_by(&credentials.access_key);
+    }
+    Some(seen)
+}
+
+/// Tells the request's observer the bucket and key it's on.
+fn on_path(seen: &Seen, path: &S3Path) {
+    match path {
+        S3Path::Bucket { bucket } => seen.on(bucket, ""),
+        S3Path::Object { bucket, key } => seen.on(bucket, key),
+        S3Path::Root => {}
+    }
+}
+
 #[async_trait::async_trait]
 impl S3Access for Access {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
         let operation = crate::observe::intern(cx.s3_op().name());
-        crate::observe::name(cx.extensions_mut(), operation);
+        let seen = observed(cx, operation);
         let client = cx
             .extensions_mut()
             .get::<Client>()
@@ -420,6 +440,9 @@ impl S3Access for Access {
             ));
         }
         let path = posted.as_ref().unwrap_or_else(|| cx.s3_path());
+        if let Some(seen) = &seen {
+            on_path(seen, path);
+        }
         let source = source(operation, cx)?;
         let bucket_name = match path {
             S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
