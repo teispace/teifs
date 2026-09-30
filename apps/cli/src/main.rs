@@ -26,8 +26,8 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
-    KmsLocation, Limits, ProxyHeader, Redis, Server, TargetConfig, TargetKind, TlsSource, Transit,
-    TrustedProxies, Webhook, credentials,
+    KmsLocation, Limits, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind, TlsSource,
+    Transit, TrustedProxies, Webhook, credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -271,6 +271,18 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_REDIS"
     )]
     notify_redis: Vec<TargetConfig>,
+    /// An NSQ topic buckets' notification rules can send events to, as
+    /// ID=HOST:PORT,topic=NAME, the nsqd's TCP address (repeat for more; in the
+    /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:nsq`; each
+    /// event is published as a webhook is sent it.
+    #[arg(
+        long = "notify-nsq",
+        value_name = "ID=HOST:PORT,topic=NAME",
+        value_parser = parse_notify_nsq,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_NSQ"
+    )]
+    notify_nsq: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -712,6 +724,15 @@ fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Redis(redis))
 }
 
+/// An NSQ topic, `ID=HOST:PORT,topic=NAME`.
+fn parse_notify_nsq(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(text, "ID=HOST:PORT,topic=NAME", &["topic"])?;
+    let topic = options
+        .get("topic")
+        .ok_or_else(|| "name the topic: ID=HOST:PORT,topic=NAME".to_owned())?;
+    TargetConfig::new(id, TargetKind::Nsq(Nsq::new(address, topic)?))
+}
+
 /// The notification targets, each with its secrets from the environment
 /// (`TEIFS_NOTIFY_KIND_SECRET_ID`, the ID in capitals and `-` as `_`).
 fn notify_targets(
@@ -749,6 +770,7 @@ fn notify_targets(
                     ));
                 }
             }
+            TargetKind::Nsq(_) => {}
             TargetKind::Redis(redis) => {
                 redis.password = secret("PASSWORD");
                 if redis.user.is_some() && redis.password.is_none() {
@@ -818,7 +840,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             args.notify_webhooks
                 .into_iter()
                 .chain(args.notify_elasticsearch)
-                .chain(args.notify_redis),
+                .chain(args.notify_redis)
+                .chain(args.notify_nsq),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1232,7 +1255,7 @@ mod tests {
             .iter()
             .map(|t| match &t.kind {
                 TargetKind::Webhook(hook) => hook.token.as_deref().cloned(),
-                TargetKind::Elasticsearch(_) | TargetKind::Redis(_) => unreachable!(),
+                _ => unreachable!(),
             })
             .collect();
         assert_eq!(tokens, [Some("t".to_owned()), None]);
@@ -1241,6 +1264,21 @@ mod tests {
         // The same id for two kinds is two targets.
         let es = parse_notify_elasticsearch("a=https://es.example,index=events").unwrap();
         assert!(notify_targets(vec![hook("a=https://a.example"), es], env).is_ok());
+    }
+
+    #[test]
+    fn nsq_targets_name_their_topic() {
+        let queue = parse_notify_nsq("queue=nsqd.local:4150,topic=s3").unwrap();
+        assert_eq!(queue.arn().to_string(), "arn:teifs:sqs::queue:nsq");
+        assert_eq!(queue.shown(), "nsq://nsqd.local:4150 topic s3");
+        for bad in [
+            "q=nsqd.local:4150",
+            "q=nsqd.local,topic=s3",
+            "q=nsqd.local:4150,topic=a b",
+            "q=nsqd.local:4150,topic=s3,key=k",
+        ] {
+            assert!(parse_notify_nsq(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

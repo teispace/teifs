@@ -298,3 +298,122 @@ impl RedisServer {
         panic!("the Redis server never took {count} commands");
     }
 }
+
+/// An `nsqd` on this machine, for tests: it takes `IDENTIFY` and `PUB`, sends a
+/// heartbeat before each answer (which a client must answer with `NOP`), and keeps what's
+/// published.
+#[derive(Debug, Clone)]
+pub struct NsqServer {
+    address: String,
+    published: Arc<Mutex<Vec<(String, String)>>>,
+    nops: Arc<AtomicUsize>,
+}
+
+impl NsqServer {
+    /// Starts one.
+    ///
+    /// # Panics
+    ///
+    /// When it can't listen.
+    pub async fn start() -> Self {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let address = listener.local_addr().expect("a bound address").to_string();
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let nops = Arc::new(AtomicUsize::new(0));
+        let (kept, counted) = (Arc::clone(&published), Arc::clone(&nops));
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (kept, counted) = (Arc::clone(&kept), Arc::clone(&counted));
+                tokio::spawn(async move {
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let mut magic = [0; 4];
+                    if stream.read_exact(&mut magic).await.is_err() || magic != *crate::nsq::MAGIC {
+                        return;
+                    }
+                    let frame = |kind: u32, data: &[u8]| {
+                        let mut out = (u32::try_from(data.len()).expect("short") + 4)
+                            .to_be_bytes()
+                            .to_vec();
+                        out.extend_from_slice(&kind.to_be_bytes());
+                        out.extend_from_slice(data);
+                        out
+                    };
+                    loop {
+                        let mut line = String::new();
+                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end().to_owned();
+                        if line == "NOP" {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        let Ok(size) = stream.read_u32().await else {
+                            return;
+                        };
+                        let mut body = vec![0; size as usize];
+                        if stream.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        let reply = match line.split_once(' ') {
+                            Some(("PUB", topic)) => {
+                                kept.lock().unwrap_or_else(PoisonError::into_inner).push((
+                                    topic.to_owned(),
+                                    String::from_utf8_lossy(&body).into_owned(),
+                                ));
+                                frame(0, b"OK")
+                            }
+                            None if line == "IDENTIFY" => frame(0, b"OK"),
+                            _ => frame(1, b"E_INVALID"),
+                        };
+                        let mut out = frame(0, crate::nsq::HEARTBEAT);
+                        out.extend_from_slice(&reply);
+                        if stream.get_mut().write_all(&out).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            address,
+            published,
+            nops,
+        }
+    }
+
+    /// Its `HOST:PORT`.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// How many heartbeats were answered.
+    #[must_use]
+    pub fn nops(&self) -> usize {
+        self.nops.load(Ordering::SeqCst)
+    }
+
+    /// What was published, as (topic, body), once there are at least `count`.
+    ///
+    /// # Panics
+    ///
+    /// When there aren't within ten seconds.
+    pub async fn published(&self, count: usize) -> Vec<(String, String)> {
+        for _ in 0..500 {
+            let taken = self
+                .published
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if taken.len() >= count {
+                return taken;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the nsqd never took {count} messages");
+    }
+}

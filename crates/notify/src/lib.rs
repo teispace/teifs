@@ -1,5 +1,5 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes and Redis keys) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! indexes, Redis keys and NSQ topics) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -9,6 +9,7 @@
 mod tests;
 
 mod elasticsearch;
+mod nsq;
 mod queue;
 mod redis;
 #[cfg(feature = "testing")]
@@ -26,6 +27,7 @@ use std::{
 };
 
 pub use elasticsearch::Elasticsearch;
+pub use nsq::Nsq;
 pub use redis::Redis;
 use teifs_types::notify::TargetArn;
 use tokio::{sync::Notify, task::JoinHandle};
@@ -57,6 +59,8 @@ pub enum TargetKind {
     Elasticsearch(Elasticsearch),
     /// A Redis key: a hash, a field per object, or a list, an entry per event.
     Redis(Redis),
+    /// An NSQ topic, published each event as JSON.
+    Nsq(Nsq),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -128,6 +132,7 @@ impl TargetConfig {
             TargetKind::Webhook(hook) => hook.shown(),
             TargetKind::Elasticsearch(es) => es.shown(),
             TargetKind::Redis(redis) => redis.shown(),
+            TargetKind::Nsq(nsq) => nsq.shown(),
         }
     }
 }
@@ -140,6 +145,7 @@ impl TargetKind {
             Self::Webhook(_) => "webhook",
             Self::Elasticsearch(_) => "elasticsearch",
             Self::Redis(_) => "redis",
+            Self::Nsq(_) => "nsq",
         }
     }
 }
@@ -199,6 +205,7 @@ impl Target {
             TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
             TargetKind::Elasticsearch(es) => es.send(client, &body).await,
             TargetKind::Redis(redis) => redis.send(&body).await,
+            TargetKind::Nsq(nsq) => nsq.send(&body).await,
         }
     }
 
@@ -209,6 +216,7 @@ impl Target {
             TargetKind::Webhook(hook) => hook.post(client, "application/json", body).await,
             TargetKind::Elasticsearch(es) => es.test(client).await,
             TargetKind::Redis(redis) => redis.test().await,
+            TargetKind::Nsq(nsq) => nsq.test().await,
         }
     }
 }

@@ -270,6 +270,10 @@ A Redis target, `arn:teifs:sqs::ID:redis`, keeps events under a key: with
 already holds another type is refused. Starting to name it checks that the server
 answers, takes the password and has a key of the right type, without writing to it.
 
+`--notify-nsq queue=nsqd.internal:4150,topic=s3-events` publishes each event to an NSQ
+topic, as a webhook is sent it, over nsqd's TCP protocol; rules name it
+`arn:teifs:sqs::ID:nsq`, and starting to name it checks that the nsqd answers.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -382,5 +386,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, NSQ, databases), and Redis over
-TLS.
+Not yet: other kinds of targets (NATS, Kafka, AMQP, MQTT, databases), and Redis or NSQ
+over TLS.

@@ -30,7 +30,7 @@ pub use audit::AuditTarget;
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 use teifs_notify::Notifier;
-pub use teifs_notify::{Elasticsearch, Format, Redis, TargetConfig, TargetKind, Webhook};
+pub use teifs_notify::{Elasticsearch, Format, Nsq, Redis, TargetConfig, TargetKind, Webhook};
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource};

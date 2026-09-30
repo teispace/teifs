@@ -304,3 +304,41 @@ async fn redis_keeps_a_field_per_object_or_an_entry_per_event() {
     bad.password = Some(Zeroizing::new("nope".into()));
     assert!(bad.test().await.unwrap_err().contains("WRONGPASS"));
 }
+
+/// NSQ targets: each event published to the topic as a webhook gets it, heartbeats
+/// answered.
+#[tokio::test]
+async fn nsq_publishes_each_event() {
+    use crate::testing::NsqServer;
+    let server = NsqServer::start().await;
+    let nsq = Nsq::new(server.address(), "s3-events").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(
+        &dir.path().join("events.db"),
+        vec![TargetConfig::new("queue", TargetKind::Nsq(nsq)).unwrap()],
+    )
+    .unwrap();
+    let arn = TargetArn::parse("arn:teifs:sqs::queue:nsq").unwrap();
+    notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    notifier
+        .queue(vec![(arn.clone(), put.clone()), (arn, put.clone())])
+        .await
+        .unwrap();
+    let published = server.published(2).await;
+    assert_eq!(published.len(), 2, "the test publishes nothing");
+    assert_eq!(published[0].0, "s3-events");
+    assert_eq!(published[0].1.as_bytes(), &put[..]);
+    // IDENTIFY's and each PUB's heartbeat, the last answered after its PUB was kept.
+    for _ in 0..100 {
+        if server.nops() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(server.nops(), 3);
+    notifier.stop().await;
+
+    let nowhere = Nsq::new("127.0.0.1:1", "t").unwrap();
+    assert!(nowhere.test().await.unwrap_err().contains("can't connect"));
+}
