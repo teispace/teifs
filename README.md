@@ -121,7 +121,8 @@ single run. Exit codes: 1 other, 2 usage, 3 network, 4 keys refused, 5 not found
 
 Every `serve` flag can live in a TOML file instead, under the flag's name. Flags and
 `TEIFS_*` environment variables win over it; relative paths in it are relative to the
-file. `teifs serve DIR` reads the drive's own `DIR/.teifs/settings.toml` (written by
+file, including a notification target's or the audit webhook's `ca=`, `client_cert=`,
+`client_key=`, `creds=`, `nkey=` and `server_public_key=`. `teifs serve DIR` reads the drive's own `DIR/.teifs/settings.toml` (written by
 `teifs init`) unless `--config` names another.
 
 ```toml
@@ -132,6 +133,7 @@ domains = ["s3.example.com"]
 access-key = "admin"
 secret-key-file = "/run/secrets/teifs"
 durability = "relaxed"
+notify-kafka = ["stream=k1.internal:9093,topic=s3-events,ca=certs/ca.pem"]
 ```
 
 `teifs config show --config teifs.toml` prints the settings `serve` would use and where

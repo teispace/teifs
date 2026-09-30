@@ -33,6 +33,17 @@ const PATHS: [&str; 6] = [
     "tls_key",
 ];
 
+/// Options of notification targets and the audit webhook (`,ca=PATH`) that are paths:
+/// relative ones in the settings file are relative to its folder too.
+const PATH_OPTIONS: [&str; 6] = [
+    "ca",
+    "client_cert",
+    "client_key",
+    "creds",
+    "nkey",
+    "server_public_key",
+];
+
 /// The subcommands that take `serve`'s settings, by their path from the top.
 const SERVE_COMMANDS: [&[&str]; 2] = [&["serve"], &["config", "show"]];
 
@@ -154,13 +165,20 @@ fn read_file(path: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
                     .ok_or_else(|| fail("must be a string, a number or true/false".into()))?,
             ],
         };
-        let values = if PATHS.contains(&arg.get_id().as_str()) {
-            let base = path.parent().unwrap_or(Path::new(""));
+        let base = path.parent().unwrap_or(Path::new(""));
+        let id = arg.get_id().as_str();
+        let values = if PATHS.contains(&id) {
             values
                 .into_iter()
                 .map(|value| base.join(value).into_os_string().into_string())
                 .collect::<Result<_, _>>()
                 .map_err(|_| fail("the settings file's folder must have a UTF-8 path".into()))?
+        } else if id.starts_with("notify_") || id == "audit_webhook" {
+            values
+                .iter()
+                .map(|value| with_paths_from(base, value))
+                .collect::<Option<_>>()
+                .ok_or_else(|| fail("the settings file's folder must have a UTF-8 path".into()))?
         } else {
             values
         };
@@ -169,6 +187,27 @@ fn read_file(path: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
         defaults.push((arg.get_id().to_string(), values));
     }
     Ok(defaults)
+}
+
+/// A target's `ADDRESS,NAME=VALUE,…` with each relative path option ([`PATH_OPTIONS`])
+/// made relative to `base`; none when a path isn't UTF-8.
+fn with_paths_from(base: &Path, target: &str) -> Option<String> {
+    let mut parts = target.split(',');
+    let mut out = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        out.push(',');
+        match part.split_once('=') {
+            Some((name, value))
+                if PATH_OPTIONS.contains(&name.trim()) && Path::new(value.trim()).is_relative() =>
+            {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(base.join(value.trim()).to_str()?);
+            }
+            _ => out.push_str(part),
+        }
+    }
+    Some(out)
 }
 
 /// Checks `values` as `arg`'s, by parsing `serve` with them as its only input.
@@ -427,6 +466,48 @@ mod tests {
         for id in PATHS {
             assert!(settings(&serve).any(|arg| arg.get_id() == id), "{id}");
         }
+    }
+
+    #[test]
+    fn target_paths_are_relative_to_the_settings_file() {
+        let base = Path::new("/etc/teifs");
+        let joined = |p: &str| base.join(p).display().to_string();
+        assert_eq!(
+            with_paths_from(
+                base,
+                "ca=k1:9093,topic=t,ca=ca.pem,client_cert=/abs/c.pem,user=ca"
+            ),
+            Some(format!(
+                "ca=k1:9093,topic=t,ca={},client_cert=/abs/c.pem,user=ca",
+                joined("ca.pem")
+            ))
+        );
+        assert_eq!(
+            with_paths_from(base, "https://h/in?a=1,b=2,client_key=k.pem"),
+            Some(format!(
+                "https://h/in?a=1,b=2,client_key={}",
+                joined("k.pem")
+            ))
+        );
+        assert_eq!(
+            with_paths_from(base, "bus=n:4222,creds=u.creds,nkey=../n.seed"),
+            Some(format!(
+                "bus=n:4222,creds={},nkey={}",
+                joined("u.creds"),
+                joined("../n.seed")
+            ))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("teifs.toml");
+        fs::write(
+            &file,
+            "notify-mqtt = [\"iot=b:8883,topic=t,ca=certs/ca.pem\"]\n\
+             audit-webhook = \"https://logs/in,ca=certs/ca.pem\"\n",
+        )
+        .unwrap();
+        let err = read_file(&file).unwrap_err();
+        let expected = dir.path().join("certs/ca.pem").display().to_string();
+        assert!(err.contains(&expected), "{err}");
     }
 
     #[test]
