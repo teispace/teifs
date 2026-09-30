@@ -13,7 +13,7 @@ AES-256-CTR, HKDF-SHA256 and HMAC-SHA256.
 ```
 KMS key (a named, versioned 256-bit key in the KMS; never leaves it)
   └─ seals ─▶ data key (random 256 bits, one per object)
-               └─ derives ─▶ part key (one per part: HKDF, info "teifs data v1" ‖ part)
+               └─ derives ─▶ part key (one per part: HKDF of the part number and salt)
                               └─ encrypts ─▶ 64 KiB packages of the object's bytes
 ```
 
@@ -78,9 +78,17 @@ data.
 
 | Field | Value |
 |---|---|
-| Key | Part key = HKDF-SHA256(ikm = data key, salt = none, info = `"teifs data v1"` ‖ part number as u32 big-endian); part 1 for a single-part object |
+| Key | Part key = HKDF-SHA256(ikm = data key, salt = none, info = `"teifs data v2"` ‖ part number as u32 big-endian ‖ part salt) for a part of a multipart upload; `"teifs data v1"` ‖ part number, with no part salt, for a single-part object (part 1) and for parts stored before format 2 |
 | Nonce | The package's index in its part as a 96-bit big-endian integer |
 | AAD | `"TFS1"` ‖ part number (u32 BE) ‖ package index (u64 BE) ‖ final flag (1 byte: 1 for the part's last package, else 0) |
+
+A part of a multipart upload gets a random 16-byte **part salt** when it's written, so
+a part number sent again (S3 allows it, and clients retry) is never encrypted under the
+same key and nonces as before. The salt is kept with the part (`parts.salt`) and, after
+Complete, in the object's parts record, with the number each part was uploaded as
+(`keys`: `number` and `salt` hex, in the object's part order), since Complete may
+list numbers with gaps. An encrypted multipart object without `keys` (stored before
+format 2) has parts numbered 1, 2, … with no salt.
 
 Because the position and the final flag are authenticated, packages can't be reordered,
 dropped, duplicated, moved between parts or objects, or cut off at the end without
@@ -97,7 +105,7 @@ sealed by the managed key `teifs-default` under the object's context plus the pa
 
 | Field | Value |
 |---|---|
-| Key | Outer part key = HKDF-SHA256(ikm = second data key, salt = none, info = `"teifs dsse v1"` ‖ part number as u32 big-endian) |
+| Key | Outer part key = HKDF-SHA256(ikm = second data key, salt = none, info = `"teifs dsse v1"` ‖ part number as u32 big-endian ‖ part salt, if the part has one) |
 | Initial counter block | The package's index as u64 big-endian, then 64 zero bits (a package is far fewer than 2^64 blocks) |
 
 Reading removes the outer layer, then opens the package as above. Sizes and offsets are
@@ -154,3 +162,4 @@ footer is written once and keeps the older version: the index is authoritative.
 | Version | Change |
 |---|---|
 | 1 | This document |
+| 2 | Parts of multipart uploads: a random salt in each part's key (`"teifs data v2"`), and each encrypted object's parts record lists the number and salt of every part |

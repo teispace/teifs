@@ -324,18 +324,23 @@ pub fn provisional_etag(stamp: Stamp) -> String {
     format!("{}-1", hex(&digest))
 }
 
+/// Parses exactly `2 × N` hex digits (either case).
+#[must_use]
+pub fn unhex<const N: usize>(hex: &str) -> Option<[u8; N]> {
+    if hex.len() != 2 * N || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (byte, pair) in out.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Parses an ETag's hex MD5 (a plain one, not a multipart one).
 #[must_use]
 pub fn md5_of_etag(etag: &str) -> Option<[u8; 16]> {
-    let etag = etag.trim_matches('"');
-    if etag.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 16];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(etag.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    unhex(etag.trim_matches('"'))
 }
 
 #[cfg(test)]
@@ -369,6 +374,24 @@ mod tests {
             md5_of_etag("\"d41d8cd98f00b204e9800998ecf8427e\""),
             Some(Md5::digest([]).into())
         );
+    }
+
+    #[test]
+    fn hex_round_trips_and_nothing_else_parses() {
+        let bytes = [0x00, 0xab, 0xff, 0x10];
+        assert_eq!(unhex::<4>(&hex(&bytes)), Some(bytes));
+        assert_eq!(unhex::<4>("00ABff10"), Some(bytes));
+        // A sign, the wrong length or a non-hex digit.
+        for bad in [
+            "+0abff10",
+            "00abff1",
+            "00abff100",
+            "00abfg10",
+            "",
+            "0é0abff1",
+        ] {
+            assert_eq!(unhex::<4>(bad), None, "{bad}");
+        }
     }
 
     #[test]

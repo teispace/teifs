@@ -70,6 +70,37 @@ fn counter(index: u64) -> FixedLength<16> {
     FixedLength::from(block)
 }
 
+/// Which part a cipher is for: its number (1 for a single-part object) and, for a part
+/// of a multipart upload, a random salt, so a part number sent again gets a key of its
+/// own (none for single-part objects, whose data key is used once, and for parts
+/// stored before salts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartId {
+    /// The part number.
+    pub number: u32,
+    /// The salt in the part's key.
+    pub salt: Option<[u8; 16]>,
+}
+
+impl PartId {
+    /// Part `number` with a new random salt.
+    #[must_use]
+    pub fn salted(number: u32) -> Self {
+        let mut salt = [0u8; 16];
+        crate::random(&mut salt);
+        Self {
+            number,
+            salt: Some(salt),
+        }
+    }
+}
+
+impl From<u32> for PartId {
+    fn from(number: u32) -> Self {
+        Self { number, salt: None }
+    }
+}
+
 /// The cipher of one part: encrypts it as a stream, or decrypts single packages.
 pub struct PartCipher {
     key: LessSafeKey,
@@ -90,13 +121,14 @@ impl std::fmt::Debug for PartCipher {
 impl PartCipher {
     /// The cipher of part `part` (1 for a single-part object) of an object.
     #[must_use]
-    pub fn new(data_key: &DataKey, part: u32) -> Self {
+    pub fn new(data_key: &DataKey, part: impl Into<PartId>) -> Self {
         Self::layered(data_key, None, part)
     }
 
     /// Like [`PartCipher::new`], with DSSE-KMS's second layer under `outer` when given.
     #[must_use]
-    pub fn layered(data_key: &DataKey, outer: Option<&DataKey>, part: u32) -> Self {
+    pub fn layered(data_key: &DataKey, outer: Option<&DataKey>, part: impl Into<PartId>) -> Self {
+        let part = part.into();
         Self {
             key: aead_key(&data_key.part_key(part)),
             outer: outer.map(|outer| {
@@ -104,7 +136,7 @@ impl PartCipher {
                     .expect("a 32-byte AES-256 key");
                 EncryptingKey::ctr(key).expect("AES-256-CTR is supported")
             }),
-            part,
+            part: part.number,
         }
     }
 
@@ -188,7 +220,7 @@ impl PartEncryptor {
 pub fn decrypt_part(
     data_key: &DataKey,
     outer: Option<&DataKey>,
-    part: u32,
+    part: impl Into<PartId>,
     sealed: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = PartCipher::layered(data_key, outer, part);

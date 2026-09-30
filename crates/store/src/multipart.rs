@@ -4,6 +4,7 @@
 use std::{collections::BTreeMap, fs, io, time::Duration, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
+use teifs_crypto::PartId;
 use teifs_meta::{CompletedUpload, Part, Upload};
 use teifs_types::{ChecksumType, PartInfo, UploadChecksum, md5_of_etag, multipart_etag};
 
@@ -13,7 +14,7 @@ use crate::{
     Bucket, CustomerKey, Encryption, Inner, ObjectInfo, Precondition, Staged, Store, StoreError,
     error::Result,
     now_ms,
-    objects::Finished,
+    objects::{Finished, PartKey, PartsRecord},
     sse::{self, Crypt, Keyed},
     staged::TmpFile,
 };
@@ -165,7 +166,8 @@ impl Store {
             outer,
             crypt,
         };
-        Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, number).await
+        // A salt of its own, so a part number sent again never reuses a key.
+        Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, PartId::salted(number)).await
     }
 
     /// How many bytes part `number` of an upload may have: what its size cap leaves
@@ -232,7 +234,7 @@ impl Store {
                 (Some(json), Some(sealing)) => {
                     let crypt: Crypt =
                         serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata)?;
-                    if sealing.keyed.crypt.object != crypt.object || sealing.part != number {
+                    if sealing.keyed.crypt.object != crypt.object || sealing.part.number != number {
                         return Err(StoreError::InvalidRequest(
                             "the part was encrypted for another upload or part",
                         ));
@@ -259,6 +261,10 @@ impl Store {
             {
                 return Err(StoreError::EntityTooLarge);
             }
+            let salt = staged
+                .sealing()
+                .and_then(|s| s.part.salt)
+                .map(|salt| teifs_types::hex(&salt));
             // An acknowledged part must survive a power cut.
             inner.sync_file(staged.path())?;
             fs::rename(staged.path(), dir.join(number.to_string()))?;
@@ -270,6 +276,7 @@ impl Store {
                 etag,
                 checksums,
                 modified_ms: now_ms(),
+                salt,
             };
             conn.put_part(&id, &part)?;
             Ok(part)
@@ -407,7 +414,10 @@ impl Store {
             if listed.windows(2).any(|w| w[0].0 >= w[1].0) {
                 return Err(StoreError::InvalidPartOrder);
             }
-            let (tmp, parts, md5s) = inner.join_parts(&id, &upload.bucket, &listed)?;
+            let (tmp, mut parts, md5s) = inner.join_parts(&id, &upload.bucket, &listed)?;
+            if upload.crypt.is_none() {
+                parts.keys.clear();
+            }
 
             let conn = inner.lock();
             // Aborted while the parts were being joined: the upload no longer exists.
@@ -416,7 +426,7 @@ impl Store {
             }
             let bucket = inner.bucket(&upload.bucket)?;
             let stored_len = fs::metadata(&tmp.path)?.len();
-            let size: u64 = parts.iter().map(|p| p.size).sum();
+            let size: u64 = parts.sizes.iter().sum();
             if upload.max_size.is_some_and(|max| size > max) {
                 return Err(StoreError::EntityTooLarge);
             }
@@ -500,15 +510,15 @@ impl Store {
 }
 
 impl Inner {
-    /// Joins an upload's listed parts, in order, into one staged file: it, the parts, and
-    /// their MD5s (for the multipart ETag). Checks each part is there with its ETag and,
+    /// Joins an upload's listed parts, in order, into one staged file: it, the parts'
+    /// record (with each one's key), and their MD5s (for the multipart ETag). Checks each part is there with its ETag and,
     /// but for the last, big enough, and that the object fits on the disk.
     fn join_parts(
         &self,
         id: &str,
         bucket: &str,
         listed: &[(u32, String)],
-    ) -> Result<(TmpFile, Vec<PartInfo>, Vec<[u8; 16]>)> {
+    ) -> Result<(TmpFile, PartsRecord, Vec<[u8; 16]>)> {
         let stored: BTreeMap<u32, Part> = self
             .lock()
             .list_parts(id, 0, usize::MAX)?
@@ -527,6 +537,7 @@ impl Inner {
         let mut out = fs::File::create(&tmp.path)?;
         let mut md5s = Vec::with_capacity(listed.len());
         let mut parts = Vec::with_capacity(listed.len());
+        let mut keys = Vec::with_capacity(listed.len());
         for (index, (number, etag)) in listed.iter().enumerate() {
             let part = stored
                 .get(number)
@@ -540,6 +551,10 @@ impl Inner {
                 size: part.size,
                 checksums: part.checksums.clone(),
             });
+            keys.push(PartKey {
+                number: *number,
+                salt: part.salt.clone(),
+            });
             let mut source =
                 fs::File::open(dir.join(number.to_string())).map_err(|e| match e.kind() {
                     io::ErrorKind::NotFound => StoreError::InvalidPart,
@@ -547,7 +562,11 @@ impl Inner {
                 })?;
             io::copy(&mut source, &mut out)?;
         }
-        Ok((tmp, parts, md5s))
+        let record = PartsRecord {
+            keys,
+            ..PartsRecord::new(&parts)
+        };
+        Ok((tmp, record, md5s))
     }
 
     /// Forgets an upload, then removes its parts.

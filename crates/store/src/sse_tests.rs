@@ -837,6 +837,21 @@ async fn crypt(store: &Store, key: &str) -> Crypt {
         .unwrap()
 }
 
+/// The parts record (JSON) of `key`'s current version.
+async fn parts_record(store: &Store, key: &str) -> String {
+    let key = key.to_owned();
+    store
+        .blocking(move |inner| {
+            let Bucket::Object(bucket) = inner.bucket("vault")? else {
+                unreachable!("vault is an object bucket")
+            };
+            let row = Inner::version_row(&inner.lock(), &bucket, &key, None)?;
+            Ok(row.parts.unwrap())
+        })
+        .await
+        .unwrap()
+}
+
 /// The KMS key and version that seal the data key of `key`'s current version.
 async fn sealed_by(store: &Store, key: &str) -> (String, u32) {
     let sealed = crypt(store, key).await.sealed;
@@ -1192,4 +1207,144 @@ async fn rewrap_reseals_dsse_kms_outer_keys_with_the_managed_key() {
         .unwrap();
     assert_eq!(get(store, "up", None).await.unwrap(), bytes);
     assert_eq!(outer_sealed_by(store, "up").await, (DEFAULT_KEY.into(), 2));
+}
+
+#[tokio::test]
+async fn parts_sent_again_or_skipped_keep_keys_of_their_own() {
+    let drive = drive().await;
+    let store = &drive.store;
+    let size = usize::try_from(MIN_PART_SIZE).unwrap();
+    let (a, b, c) = (pattern(size), vec![1u8; size], pattern(70_000));
+    for (key, encryption) in [
+        ("plain", Encryption::None),
+        ("s3", Encryption::S3),
+        ("dsse", dsse(DEFAULT_KEY)),
+        ("c", Encryption::Customer(customer(9))),
+    ] {
+        let customer = match &encryption {
+            Encryption::Customer(k) => Some(k.clone()),
+            _ => None,
+        };
+        let upload = store
+            .create_upload(
+                "vault",
+                key,
+                ObjectAttrs::default(),
+                None,
+                &encryption,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let send = |number: u32, bytes: Vec<u8>| {
+            let (id, customer) = (upload.id.clone(), customer.clone());
+            async move {
+                let mut staged = store
+                    .stage_part(&id, number, customer.as_ref())
+                    .await
+                    .unwrap();
+                staged.write(&bytes).await.unwrap();
+                store
+                    .put_part(&id, number, staged, BTreeMap::new())
+                    .await
+                    .unwrap()
+                    .etag
+            }
+        };
+        // The same bytes sent twice as part 1 are stored under different keys.
+        let file = store.inner.uploads.join(&upload.id).join("1");
+        send(1, a.clone()).await;
+        let first = fs::read(&file).unwrap();
+        let one = send(1, a.clone()).await;
+        let plain = matches!(encryption, Encryption::None);
+        assert_eq!(fs::read(&file).unwrap() == first, plain, "{key}");
+        // Part numbers with gaps: 1, 3 and 7.
+        let three = send(3, b.clone()).await;
+        let seven = send(7, c.clone()).await;
+        send(5, a.clone()).await;
+        store
+            .complete(
+                &upload.id,
+                vec![(1, one), (3, three), (7, seven)],
+                Precondition::default(),
+                CompleteWith::default(),
+            )
+            .await
+            .unwrap();
+        let whole = [a.clone(), b.clone(), c.clone()].concat();
+        assert_eq!(
+            get(store, key, customer.as_ref()).await.unwrap(),
+            whole,
+            "{key}"
+        );
+        // Only encrypted objects record their parts' keys.
+        assert_eq!(
+            parts_record(store, key).await.contains("keys"),
+            !plain,
+            "{key}"
+        );
+        if customer.is_none() {
+            let start = 2 * size as u64 - 5;
+            let from = usize::try_from(start).unwrap();
+            assert_eq!(
+                get_range(store, key, start, 20).await,
+                &whole[from..from + 20],
+                "{key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn part_keys_come_from_the_record_or_count_from_one() {
+    use crate::objects::sealed_parts;
+    let row = |parts: Option<&str>| teifs_meta::VersionRow {
+        bucket_id: "b".into(),
+        key: "k".into(),
+        version_id: "null".into(),
+        delete_marker: false,
+        object_id: None,
+        size: 9,
+        etag: String::new(),
+        modified_ms: 0,
+        attrs: ObjectAttrs::default(),
+        crypt: None,
+        parts: parts.map(str::to_owned),
+        inline: None,
+        seq: 0,
+        latest: true,
+    };
+    let ids = |parts: Option<&str>| sealed_parts(&row(parts));
+    assert_eq!(ids(None).unwrap(), [(9, teifs_crypto::PartId::from(1))]);
+    // Stored before part keys were recorded: numbered 1, 2, … without salts.
+    assert_eq!(
+        ids(Some(r#"{"sizes":[5,4]}"#)).unwrap(),
+        [(5, 1.into()), (4, 2.into())]
+    );
+    let salt = "000102030405060708090a0b0c0d0e0f";
+    let keyed =
+        format!(r#"{{"sizes":[5,4],"keys":[{{"number":2}},{{"number":9,"salt":"{salt}"}}]}}"#);
+    assert_eq!(
+        ids(Some(&keyed)).unwrap(),
+        [
+            (5, 2.into()),
+            (
+                4,
+                teifs_crypto::PartId {
+                    number: 9,
+                    salt: teifs_types::unhex(salt),
+                }
+            )
+        ]
+    );
+    for bad in [
+        r#"{"sizes":[5,4],"keys":[{"number":2}]}"#.to_owned(),
+        keyed.replace(salt, "00"),
+    ] {
+        assert!(
+            matches!(ids(Some(&bad)), Err(StoreError::CorruptMetadata)),
+            "{bad}"
+        );
+    }
 }

@@ -5,7 +5,9 @@
 use std::io::{self, SeekFrom};
 
 use bytes::Bytes;
-use teifs_crypto::{DataKey, PACKAGE_SIZE, PartCipher, TAG_LEN, ciphertext_len, packages_for};
+use teifs_crypto::{
+    DataKey, PACKAGE_SIZE, PartCipher, PartId, TAG_LEN, ciphertext_len, packages_for,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 
 use crate::error::Result;
@@ -20,12 +22,12 @@ pub struct ObjectBody {
 }
 
 /// How to decrypt an encrypted object: its data key (and DSSE-KMS's second one) and its
-/// parts' plaintext sizes (part numbers 1, 2, …).
+/// parts, in order: each one's plaintext size and which key encrypts it.
 #[derive(Debug)]
 pub(crate) struct Decrypt {
     pub key: DataKey,
     pub outer: Option<DataKey>,
-    pub parts: Vec<u64>,
+    pub parts: Vec<(u64, PartId)>,
 }
 
 /// A reader of an object's bytes.
@@ -90,18 +92,17 @@ async fn decrypting(
 ) -> Result<BodyReader> {
     // The part, then the package, holding `start`, and where its ciphertext begins.
     let (mut plain_before, mut cipher_before, mut part) = (0, 0, 0);
-    while part + 1 < decrypt.parts.len() && start >= plain_before + decrypt.parts[part] {
-        plain_before += decrypt.parts[part];
-        cipher_before += ciphertext_len(decrypt.parts[part]);
+    while part + 1 < decrypt.parts.len() && start >= plain_before + decrypt.parts[part].0 {
+        plain_before += decrypt.parts[part].0;
+        cipher_before += ciphertext_len(decrypt.parts[part].0);
         part += 1;
     }
     let offset = start - plain_before;
     let package = offset / PACKAGE_SIZE as u64;
     file.seek(SeekFrom::Start(cipher_before + package * SEALED_PACKAGE))
         .await?;
-    let number = u32::try_from(part + 1).map_err(io::Error::other)?;
     let position = Position {
-        cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), number),
+        cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), decrypt.parts[part].1),
         file,
         decrypt,
         part,
@@ -119,7 +120,7 @@ async fn next_chunk(mut at: Position) -> io::Result<Option<(Bytes, Position)>> {
     if at.remaining == 0 {
         return Ok(None);
     }
-    let part_size = at.decrypt.parts[at.part];
+    let part_size = at.decrypt.parts[at.part].0;
     let last = at.package + 1 == packages_for(part_size);
     let sealed_len = if last {
         ciphertext_len(part_size) - at.package * SEALED_PACKAGE
@@ -143,8 +144,8 @@ async fn next_chunk(mut at: Position) -> io::Result<Option<(Bytes, Position)>> {
     if last && at.part + 1 < at.decrypt.parts.len() {
         at.part += 1;
         at.package = 0;
-        let number = u32::try_from(at.part + 1).map_err(io::Error::other)?;
-        at.cipher = PartCipher::layered(&at.decrypt.key, at.decrypt.outer.as_ref(), number);
+        let id = at.decrypt.parts[at.part].1;
+        at.cipher = PartCipher::layered(&at.decrypt.key, at.decrypt.outer.as_ref(), id);
     }
     Ok(Some((chunk, at)))
 }

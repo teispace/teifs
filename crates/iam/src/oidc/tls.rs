@@ -40,14 +40,7 @@ pub(crate) fn config(thumbprints: &[String]) -> Result<ClientConfig, String> {
 
 /// A thumbprint's 20 bytes; none if it isn't 40 hex digits (IAM refuses those).
 fn parse(hex: &str) -> Option<[u8; 20]> {
-    let mut bytes = [0; 20];
-    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(bytes)
+    teifs_types::unhex(hex)
 }
 
 /// The system's verifier, and the provider's thumbprints when it refuses.

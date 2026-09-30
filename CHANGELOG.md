@@ -87,6 +87,11 @@ behaviour; the on-disk format is always upgraded automatically.
   Bucket Keys, sealed checksums, and UpdateObjectEncryption refuses it, as on AWS.
   `teifs key rewrap` covers both keys. From the command line: `teifs encrypt set
   dsse-kms KEY ALIAS/BUCKET` and `--enc-dsse PREFIX=KEY` on `cp`, `mv` and `mirror`.
+- Encrypted uploads in parts: a part number sent again was encrypted under the same
+  key and nonces as the first time; each part now has a random salt in its key
+  (encryption format 2). And an encrypted object completed from part numbers with gaps
+  (1, 3, 7) couldn't be read; each part's number and key are now recorded with the
+  object. Objects stored before keep reading as they did.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

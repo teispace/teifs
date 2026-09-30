@@ -971,7 +971,8 @@ async fn multipart_uploads_are_encrypted_too() {
     let first = vec![3u8; 5 * 1024 * 1024 + 1];
     let second = b"the end".to_vec();
     let mut parts = Vec::new();
-    for (number, bytes) in [(1, first.clone()), (2, second.clone())] {
+    // Part numbers needn't follow one another.
+    for (number, bytes) in [(2, first.clone()), (5, second.clone())] {
         let part = s3
             .upload_part()
             .bucket("bigsecure")

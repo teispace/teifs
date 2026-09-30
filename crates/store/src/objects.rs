@@ -16,6 +16,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use teifs_crypto::PartId;
 use teifs_meta::{Index, NULL_VERSION, VersionRow, Versioning};
 
 use crate::{
@@ -82,6 +83,21 @@ pub(crate) struct PartsRecord {
     /// Each part's checksums, in the same order; empty when no part had any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checksums: Vec<BTreeMap<String, String>>,
+    /// An encrypted object's parts' keys, in the same order: the number each was
+    /// uploaded as and the salt in its key. Empty for plain objects, and for encrypted
+    /// ones stored before salts (their parts are numbered 1, 2, … then).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<PartKey>,
+}
+
+/// Which key encrypts a part of an object (see [`PartsRecord::keys`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PartKey {
+    /// The number it was uploaded as.
+    pub number: u32,
+    /// The salt in its key, hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt: Option<String>,
 }
 
 impl PartsRecord {
@@ -94,6 +110,7 @@ impl PartsRecord {
         Self {
             sizes: parts.iter().map(|p| p.size).collect(),
             checksums,
+            keys: Vec::new(),
         }
     }
 
@@ -134,7 +151,7 @@ pub(crate) struct Finished<'a> {
     /// When encrypted: the object id its data key is bound to, and the record.
     pub sealed: Option<(String, Crypt)>,
     /// When uploaded in parts: the parts.
-    pub parts: Option<Vec<PartInfo>>,
+    pub parts: Option<PartsRecord>,
 }
 
 impl<'a> Finished<'a> {
@@ -226,12 +243,41 @@ pub(crate) fn crypt_of(row: &VersionRow) -> Result<Option<Crypt>> {
         .transpose()
 }
 
-/// The sizes of an object's parts (one part unless it was uploaded in parts).
-pub(crate) fn part_sizes(row: &VersionRow) -> Result<Vec<u64>> {
-    match row.parts.as_deref() {
-        None => Ok(vec![row.size]),
-        Some(json) => PartsRecord::parse(json).map(|p| p.sizes),
+/// An encrypted object's parts: each one's size and which key encrypts it (one part
+/// unless it was uploaded in parts).
+pub(crate) fn sealed_parts(row: &VersionRow) -> Result<Vec<(u64, PartId)>> {
+    let Some(json) = row.parts.as_deref() else {
+        return Ok(vec![(row.size, PartId::from(1))]);
+    };
+    let record = PartsRecord::parse(json)?;
+    if record.keys.is_empty() {
+        return Ok(record
+            .sizes
+            .into_iter()
+            .zip((1..).map(PartId::from))
+            .collect());
     }
+    if record.keys.len() != record.sizes.len() {
+        return Err(StoreError::CorruptMetadata);
+    }
+    record
+        .sizes
+        .into_iter()
+        .zip(record.keys)
+        .map(|(size, key)| {
+            let salt = key
+                .salt
+                .map(|hex| teifs_types::unhex(&hex).ok_or(StoreError::CorruptMetadata))
+                .transpose()?;
+            Ok((
+                size,
+                PartId {
+                    number: key.number,
+                    salt,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Appends the footer: JSON, its length (u32 BE), the footer version, and the magic.
@@ -313,7 +359,6 @@ impl Inner {
             Some((object_id, crypt)) => (object_id, Some(crypt)),
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
         };
-        let parts = parts.as_deref().map(PartsRecord::new);
         let created_ms = now_ms();
         // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()

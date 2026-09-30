@@ -3,7 +3,7 @@
 use aws_lc_rs::aead::{Aad, Nonce};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{CryptoError, Result, aead_key, hkdf, random};
+use crate::{CryptoError, PartId, Result, aead_key, hkdf, random};
 
 /// An object's random 256-bit data key. Wiped from memory when dropped; never printed.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -41,15 +41,21 @@ impl DataKey {
         &self.0
     }
 
-    /// The key that encrypts part `part` (1 for a single-part object).
-    pub(crate) fn part_key(&self, part: u32) -> zeroize::Zeroizing<[u8; 32]> {
-        hkdf(&self.0, &[], &[b"teifs data v1", &part.to_be_bytes()])
+    /// The key that encrypts the part `part`.
+    pub(crate) fn part_key(&self, part: PartId) -> zeroize::Zeroizing<[u8; 32]> {
+        let number = part.number.to_be_bytes();
+        match &part.salt {
+            None => hkdf(&self.0, &[], &[b"teifs data v1", &number]),
+            Some(salt) => hkdf(&self.0, &[], &[b"teifs data v2", &number, salt]),
+        }
     }
 
-    /// The key of DSSE-KMS's outer layer over part `part`, when this is the object's
+    /// The key of DSSE-KMS's outer layer over the part `part`, when this is the object's
     /// second data key.
-    pub(crate) fn outer_part_key(&self, part: u32) -> zeroize::Zeroizing<[u8; 32]> {
-        hkdf(&self.0, &[], &[b"teifs dsse v1", &part.to_be_bytes()])
+    pub(crate) fn outer_part_key(&self, part: PartId) -> zeroize::Zeroizing<[u8; 32]> {
+        let (number, salt) = (part.number.to_be_bytes(), part.salt.unwrap_or_default());
+        let salt = if part.salt.is_some() { &salt[..] } else { &[] };
+        hkdf(&self.0, &[], &[b"teifs dsse v1", &number, salt])
     }
 
     /// The ETag of an SSE-C or SSE-KMS object: a keyed hash of its MD5, so it's stable
@@ -179,8 +185,16 @@ mod tests {
     fn keys_are_random_and_parts_differ() {
         let key = DataKey::generate();
         assert_ne!(key, DataKey::generate());
-        assert_ne!(*key.part_key(1), *key.part_key(2));
-        assert_eq!(*key.part_key(1), *key.part_key(1));
+        let [one, two] = [1, 2].map(PartId::from);
+        assert_ne!(*key.part_key(one), *key.part_key(two));
+        assert_eq!(*key.part_key(one), *key.part_key(one));
+        // A part sent again gets a key of its own.
+        let (a, b) = (PartId::salted(1), PartId::salted(1));
+        assert_ne!(a, b);
+        assert_ne!(*key.part_key(a), *key.part_key(b));
+        assert_ne!(*key.part_key(a), *key.part_key(one));
+        assert_ne!(*key.outer_part_key(a), *key.outer_part_key(b));
+        assert_ne!(*key.outer_part_key(a), *key.outer_part_key(one));
         assert_eq!(format!("{key:?}"), "DataKey(…)");
     }
 

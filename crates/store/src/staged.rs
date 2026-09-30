@@ -10,7 +10,7 @@ use std::{
 use md5::{Digest, Md5};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use teifs_crypto::{PartCipher, PartEncryptor};
+use teifs_crypto::{PartCipher, PartEncryptor, PartId};
 
 use crate::{error::Result, sse::Keyed};
 
@@ -36,7 +36,7 @@ pub(crate) struct Sealing {
     /// The object bucket the data key is bound to.
     pub bucket_id: String,
     /// The part the bytes are encrypted as (1 for a single-part object).
-    pub part: u32,
+    pub part: PartId,
     encryptor: Option<PartEncryptor>,
     scratch: Vec<u8>,
 }
@@ -60,7 +60,7 @@ impl Staged {
         dir: &Path,
         keyed: Keyed,
         bucket_id: String,
-        part: u32,
+        part: PartId,
     ) -> Result<Self> {
         let mut staged = Self::create(dir).await?;
         let encryptor =

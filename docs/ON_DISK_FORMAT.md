@@ -104,7 +104,7 @@ size before encryption), then a footer:
 | Part | Bytes |
 |---|---|
 | The object's bytes | `size` |
-| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, DSSE-KMS's second sealed key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS, DSSE-KMS and SSE-C), for a version other than `null` `version` (its id) | variable |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, DSSE-KMS's second sealed key, SSE-C check), for multipart objects `parts` (part sizes, part checksums except under SSE-KMS, DSSE-KMS and SSE-C, and for encrypted ones each part's `keys`: the number it was uploaded as and its key's `salt`), for a version other than `null` `version` (its id) | variable |
 | Footer JSON length | 4, big-endian |
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
@@ -133,7 +133,7 @@ garbage is removed at the next start.
 | `uploads`, `parts` | Multipart uploads in progress and their parts; an encrypted upload keeps its sealed data key in `uploads.crypt`, and every upload the checksum its object gets in `uploads.checksum` (JSON: `algorithm`, `type` `FULL_OBJECT` or `COMPOSITE`, `requested`); an upload created with a size cap keeps it in `uploads.max_size` (bytes, all parts together; `NULL` without one) |
 | `completed_uploads` | What each completed upload answered (ETag, size, checksums), kept 24 hours so a retried Complete gets the same answer |
 | `uploads` | Multipart uploads in progress: id, bucket, key, owner, attributes, start time |
-| `parts` | Their parts: number, size, ETag, checksums, upload time |
+| `parts` | Their parts: number, size, ETag, checksums, upload time, and for an encrypted part the salt in its key (hex) |
 
 A row describes a file only while the file's **size and modification time** match what
 the row recorded. The inode is recorded but not compared, so a drive copied or restored

@@ -122,6 +122,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE uploads ADD COLUMN max_size INTEGER;",
     // 8: the version id of a folder bucket's current file (NULL: `null`).
     "ALTER TABLE objects ADD COLUMN version_id TEXT;",
+    // 9: the salt in an encrypted part's key (hex; NULL for plain parts and older ones).
+    "ALTER TABLE parts ADD COLUMN salt TEXT;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -213,6 +215,8 @@ pub struct Part {
     pub checksums: std::collections::BTreeMap<String, String>,
     /// When it was uploaded, in milliseconds since the Unix epoch.
     pub modified_ms: i64,
+    /// For an encrypted part, the salt in its key (hex).
+    pub salt: Option<String>,
 }
 
 /// A row from `size, mtime_ns, ino, etag, attrs, parts, version_id` (the first seven
@@ -584,20 +588,23 @@ impl Index {
 
     /// Records an uploaded part, replacing one with the same number.
     pub fn put_part(&self, upload_id: &str, part: &Part) -> Result<()> {
-        self.conn.prepare_cached(
-            "INSERT INTO parts (upload_id, part, size, etag, checksums, modified_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        self.conn
+            .prepare_cached(
+                "INSERT INTO parts (upload_id, part, size, etag, checksums, modified_ms, salt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (upload_id, part) DO UPDATE SET
                size = excluded.size, etag = excluded.etag, checksums = excluded.checksums,
-               modified_ms = excluded.modified_ms",
-        )?
-        .execute(params![
-            upload_id,
-            part.number,
-            to_db(part.size),
-            part.etag,
-            serde_json::to_string(&part.checksums).expect("checksums serialize"),
-            part.modified_ms,
-        ])?;
+               modified_ms = excluded.modified_ms, salt = excluded.salt",
+            )?
+            .execute(params![
+                upload_id,
+                part.number,
+                to_db(part.size),
+                part.etag,
+                serde_json::to_string(&part.checksums).expect("checksums serialize"),
+                part.modified_ms,
+                part.salt,
+            ])?;
         Ok(())
     }
 
@@ -615,7 +622,7 @@ impl Index {
     /// Parts of an upload with numbers above `after`, in order.
     pub fn list_parts(&self, upload_id: &str, after: u32, limit: usize) -> Result<Vec<Part>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT part, size, etag, checksums, modified_ms FROM parts
+            "SELECT part, size, etag, checksums, modified_ms, salt FROM parts
              WHERE upload_id = ?1 AND part > ?2 ORDER BY part LIMIT ?3",
         )?;
         let rows = stmt.query_map(
@@ -627,6 +634,7 @@ impl Index {
                     etag: r.get(2)?,
                     checksums: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
                     modified_ms: r.get(4)?,
+                    salt: r.get(5)?,
                 })
             },
         )?;
@@ -797,9 +805,17 @@ mod tests {
                 etag: String::new(),
                 checksums: std::collections::BTreeMap::new(),
                 modified_ms: 1,
+                salt: (number == 2).then(|| "00ff".to_owned()),
             };
             index.put_part("capped", &part).unwrap();
         }
+        let salts: Vec<_> = index
+            .list_parts("capped", 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.salt)
+            .collect();
+        assert_eq!(salts, [None, Some("00ff".to_owned()), None]);
         assert_eq!(index.parts_size("capped", 0).unwrap(), 23);
         assert_eq!(index.parts_size("capped", 2).unwrap(), 16);
         assert_eq!(index.parts_size("open", 0).unwrap(), 0);

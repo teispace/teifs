@@ -80,11 +80,11 @@ use staged::{TmpFile, sync_dir};
 pub const SYSTEM_DIR: &str = ".teifs";
 
 /// An object found for reading: what's known, its file (`None` for a folder), and for an
-/// encrypted one how, its bucket's id and its part sizes.
+/// encrypted one how, its bucket's id and its parts (sizes and keys).
 type Located = (
     ObjectInfo,
     Option<fs::File>,
-    Option<(sse::Crypt, String, Vec<u64>)>,
+    Option<(sse::Crypt, String, Vec<(u64, teifs_crypto::PartId)>)>,
 );
 
 /// A bucket.
@@ -576,7 +576,13 @@ impl Store {
         )
         .await?
         .ok_or(StoreError::InvalidRequest("no encryption was asked for"))?;
-        Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, 1).await
+        Staged::create_sealed(
+            &self.inner.tmp,
+            keyed,
+            bucket_id,
+            teifs_crypto::PartId::from(1),
+        )
+        .await
     }
 
     /// Puts staged bytes in place as `bucket`/`key`, replacing what was there.
@@ -687,7 +693,7 @@ impl Store {
                 let (row, file) =
                     Inner::open_object(&inner.lock(), &bucket, &key, version_id.as_deref())?;
                 let sealed = match objects::crypt_of(&row)? {
-                    Some(crypt) => Some((crypt, bucket.id.clone(), objects::part_sizes(&row)?)),
+                    Some(crypt) => Some((crypt, bucket.id.clone(), objects::sealed_parts(&row)?)),
                     None => None,
                 };
                 Ok((bucket.info(&row), file, sealed))
@@ -1287,10 +1293,7 @@ impl Inner {
                     .write(true)
                     .open(finished.tmp)?
                     .set_len(finished.stored_len)?;
-                let parts = finished
-                    .parts
-                    .as_deref()
-                    .map(|p| objects::PartsRecord::new(p).to_json());
+                let parts = finished.parts.as_ref().map(objects::PartsRecord::to_json);
                 self.commit_file(
                     conn,
                     bucket,
