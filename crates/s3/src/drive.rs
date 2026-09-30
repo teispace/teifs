@@ -1163,7 +1163,8 @@ impl S3 for Drive {
         };
         let algorithm = match config.default.mode {
             SseMode::Kms => dto::ServerSideEncryption::AWS_KMS,
-            _ => dto::ServerSideEncryption::AES256,
+            SseMode::Dsse => dto::ServerSideEncryption::AWS_KMS_DSSE,
+            SseMode::S3 | SseMode::Customer => dto::ServerSideEncryption::AES256,
         };
         let blocked = if config.block_customer_keys {
             dto::EncryptionType::SSE_C
@@ -1216,20 +1217,15 @@ impl S3 for Drive {
                     dto::ServerSideEncryption::AES256 => {
                         return Err(s3_error!(
                             InvalidArgument,
-                            "a KMS key can only be given with aws:kms"
+                            "a KMS key can only be given with aws:kms or aws:kms:dsse"
                         ));
                     }
                     dto::ServerSideEncryption::AWS_KMS => SseMode::Kms,
-                    dto::ServerSideEncryption::AWS_KMS_DSSE => {
-                        return Err(s3_error!(
-                            NotImplemented,
-                            "dual-layer encryption (aws:kms:dsse) isn't supported"
-                        ));
-                    }
+                    dto::ServerSideEncryption::AWS_KMS_DSSE => SseMode::Dsse,
                     _ => {
                         return Err(s3_error!(
                             InvalidArgument,
-                            "the algorithm must be AES256 or aws:kms"
+                            "the algorithm must be AES256, aws:kms or aws:kms:dsse"
                         ));
                     }
                 };

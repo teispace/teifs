@@ -461,14 +461,16 @@ impl Index {
             .optional()?)
     }
 
-    /// Uploads whose data key is sealed by a version of the KMS key `kms_key` older than
-    /// `newest`.
+    /// Uploads whose data key (or DSSE-KMS outer key, `outer`) is sealed by a version of
+    /// the KMS key `kms_key` older than `newest`.
     pub fn uploads_sealed_before(&self, kms_key: &str, newest: u32) -> Result<Vec<Upload>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads
              WHERE crypt IS NOT NULL
-               AND json_extract(crypt, '$.sealed.kmsKey') = ?1
-               AND json_extract(crypt, '$.sealed.kmsVersion') < ?2
+               AND ((json_extract(crypt, '$.sealed.kmsKey') = ?1
+                     AND json_extract(crypt, '$.sealed.kmsVersion') < ?2)
+                 OR (json_extract(crypt, '$.outer.kmsKey') = ?1
+                     AND json_extract(crypt, '$.outer.kmsVersion') < ?2))
              ORDER BY id",
         )?;
         let rows = stmt.query_map(params![kms_key, newest], upload_from_row)?;
@@ -720,6 +722,13 @@ mod tests {
             ("old", Some(sealed(1))),
             ("new", Some(sealed(2))),
             ("plain", None),
+            (
+                "dual",
+                Some(
+                    r#"{"sealed":{"kmsKey":"j","kmsVersion":1},"outer":{"kmsKey":"k","kmsVersion":1}}"#
+                        .to_owned(),
+                ),
+            ),
         ] {
             index
                 .insert_upload(&Upload {
@@ -736,7 +745,11 @@ mod tests {
                 .unwrap();
         }
         let ids = |uploads: Vec<Upload>| uploads.into_iter().map(|u| u.id).collect::<Vec<_>>();
-        assert_eq!(ids(index.uploads_sealed_before("k", 2).unwrap()), ["old"]);
+        assert_eq!(
+            ids(index.uploads_sealed_before("k", 2).unwrap()),
+            ["dual", "old"]
+        );
+        assert_eq!(ids(index.uploads_sealed_before("j", 2).unwrap()), ["dual"]);
         assert!(
             !index
                 .replace_upload_crypt("old", &sealed(2), &sealed(3))
@@ -747,7 +760,7 @@ mod tests {
                 .replace_upload_crypt("old", &sealed(1), &sealed(2))
                 .unwrap()
         );
-        assert!(index.uploads_sealed_before("k", 2).unwrap().is_empty());
+        assert_eq!(ids(index.uploads_sealed_before("k", 2).unwrap()), ["dual"]);
         assert_eq!(
             index.get_upload("old").unwrap().unwrap().crypt,
             Some(sealed(2))

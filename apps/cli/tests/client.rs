@@ -1200,6 +1200,38 @@ async fn buckets_encrypt_by_default_and_objects_move_to_kms_keys() {
 }
 
 async fn encryption_is_cleared_and_customer_keys_switched(cli: &Client) {
+    // Two layers (DSSE-KMS), by default and by prefix; resumable uploads check SHA-256.
+    let out = cli
+        .ok(&["encrypt", "set", "dsse-kms", "teifs-default", "t/enc"])
+        .await;
+    assert!(out.contains("t/enc: DSSE-KMS, key teifs-default"), "{out}");
+    assert_eq!(encrypt_info(cli).await["algorithm"], "aws:kms:dsse");
+    cli.ok(&["cp", "one.txt", "t/enc/dual.txt"]).await;
+    let dual = records(&cli.ok(&["--json", "stat", "t/enc/dual.txt"]).await).remove(0);
+    assert_eq!(
+        (&dual["encryption"], &dual["kmsKeyId"]),
+        (&"aws:kms:dsse".into(), &"teifs-default".into())
+    );
+    cli.ok(&["encrypt", "set", "sse-s3", "t/enc"]).await;
+    cli.ok(&[
+        "cp",
+        "--enc-dsse",
+        "t/enc/two/=teifs-default",
+        "one.txt",
+        "t/enc/two/one.txt",
+    ])
+    .await;
+    let two = records(&cli.ok(&["--json", "stat", "t/enc/two/one.txt"]).await).remove(0);
+    assert_eq!(two["encryption"], "aws:kms:dsse");
+    assert_eq!(cli.ok(&["cat", "t/enc/two/one.txt"]).await, "one");
+    let err = cli
+        .fails(
+            &["encrypt", "set", "dsse-kms", "k", "t/enc", "--bucket-key"],
+            2,
+        )
+        .await;
+    assert!(err.contains("DSSE-KMS"), "{err}");
+
     // Back to the default.
     let out = cli.ok(&["encrypt", "clear", "t/enc"]).await;
     assert!(out.contains("SSE-S3, the default"), "{out}");

@@ -28,6 +28,14 @@ impl Context {
         ]))
     }
 
+    /// The context of DSSE-KMS's second data key: this one, marked as the outer layer's,
+    /// so neither sealed key opens as the other.
+    #[must_use]
+    pub fn outer(mut self) -> Self {
+        self.0.insert("teifs:layer".to_owned(), "outer".to_owned());
+        self
+    }
+
     /// Adds a pair (a client's SSE-KMS context). TeiFS's own pairs can't be replaced.
     #[must_use]
     pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -78,5 +86,10 @@ mod tests {
     fn own_pairs_cant_be_overridden() {
         let ctx = Context::object("d", "b", "o").with("teifs:object", "other");
         assert_eq!(ctx.pairs()["teifs:object"], "o");
+        let outer = Context::object("d", "b", "o")
+            .outer()
+            .with("teifs:layer", "inner");
+        assert_eq!(outer.pairs()["teifs:layer"], "outer");
+        assert_ne!(outer, Context::object("d", "b", "o"));
     }
 }

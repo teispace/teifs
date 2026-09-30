@@ -6,7 +6,7 @@ changing it means a new version, and every release reads every version before it
 `crates/crypto` implements it.
 
 All primitives come from [aws-lc-rs](https://github.com/aws/aws-lc-rs): AES-256-GCM,
-HKDF-SHA256 and HMAC-SHA256.
+AES-256-CTR, HKDF-SHA256 and HMAC-SHA256.
 
 ## Key hierarchy
 
@@ -21,6 +21,7 @@ KMS key (a named, versioned 256-bit key in the KMS; never leaves it)
 |---|---|
 | SSE-S3 | The drive's managed KMS key, `teifs-default` |
 | SSE-KMS | The KMS key the request or the bucket names (`teifs-default` if none) |
+| DSSE-KMS | As SSE-KMS; a second data key, for the outer layer, is sealed by `teifs-default` |
 | SSE-C | A key derived from the customer's key; TeiFS never stores the customer's key |
 
 ## Sealing a data key
@@ -87,15 +88,31 @@ decryption failing.
 
 A range read decrypts only the packages that hold the range.
 
+### DSSE-KMS's second layer
+
+A DSSE-KMS object has a second random 256-bit data key, independent of the first and
+sealed by the managed key `teifs-default` under the object's context plus the pair
+`teifs:layer` = `outer` (so neither sealed key opens as the other). Each stored package
+(ciphertext and tag, as above) is encrypted again with AES-256-CTR:
+
+| Field | Value |
+|---|---|
+| Key | Outer part key = HKDF-SHA256(ikm = second data key, salt = none, info = `"teifs dsse v1"` ‖ part number as u32 big-endian) |
+| Initial counter block | The package's index as u64 big-endian, then 64 zero bits (a package is far fewer than 2^64 blocks) |
+
+Reading removes the outer layer, then opens the package as above. Sizes and offsets are
+the same as a single layer's. The second sealed key is `outer` in the record, beside
+`sealed`.
+
 ## ETags and checksums
 
 | Mode | ETag | Stored checksums |
 |---|---|---|
 | SSE-S3 | MD5 of the plaintext (as AWS) | In the clear |
-| SSE-KMS, SSE-C | `HMAC-SHA256(data key, "teifs etag v1" ‖ MD5 of the plaintext)`, first 16 bytes, hex (not the MD5, as AWS) | Sealed with the data key |
+| SSE-KMS, DSSE-KMS, SSE-C | `HMAC-SHA256(data key, "teifs etag v1" ‖ MD5 of the plaintext)`, first 16 bytes, hex (not the MD5, as AWS) | Sealed with the data key |
 
 Multipart objects follow the same rule per part, then the usual `-N` multipart ETag.
-Under SSE-KMS and SSE-C each part's checksums are sealed too, from the moment the part
+Under SSE-KMS, DSSE-KMS and SSE-C each part's checksums are sealed too, from the moment the part
 is stored: the checksum map then holds a single `sealed` entry (base64 of the sealed
 JSON map), in the upload's `parts` rows and, after Complete, in the object's `parts`.
 Listing parts opens them with the data key (SSE-C: only when the request carries the
@@ -115,7 +132,7 @@ packages, the ETag, the modification time and the checksums stay. Checksums an S
 object kept in the clear (the object's and its parts') are sealed with the data key, as
 SSE-KMS keeps them. The new record replaces the old one only if the version's record is
 still the one read (else the object was written again meanwhile, and the request fails
-with `409 OperationAborted`). SSE-C and unencrypted objects can't be changed this way. The
+with `409 OperationAborted`). DSSE-KMS, SSE-C and unencrypted objects can't be changed this way. The
 record is `crypt` in the index; `bucketKey: true` marks one reported as using an S3 Bucket
 Key.
 
@@ -124,7 +141,8 @@ Key.
 Rotating a KMS key (`teifs key rotate NAME`) adds a version that seals new data keys;
 the versions before it keep unsealing what they sealed (`sealed.kmsVersion` in each
 record). `teifs key rewrap NAME` seals again, under the newest version, every data key an
-older version of `NAME` sealed: object versions (Object Lock doesn't stop it, since only
+older version of `NAME` sealed (a DSSE-KMS object's second key too, when `NAME` is
+`teifs-default`): object versions (Object Lock doesn't stop it, since only
 the sealed key changes) and multipart uploads in progress. Each record keeps its mode,
 context, Bucket Key and checksums, and is replaced only if it's still the one read; one
 written again meanwhile is left for another run. It runs on a drive `teifs serve` isn't

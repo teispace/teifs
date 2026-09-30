@@ -199,7 +199,7 @@ location / {
 | `teifs alias set NAME URL\|ls\|rm NAME` | Name an S3 endpoint and its keys, and a CA to trust with `--ca-cert` (`TEIFS_ALIAS_NAME=https://KEY:SECRET[:TOKEN]@host` for one run) |
 | `teifs ls ALIAS[/BUCKET[/PREFIX]] [-r] [--versions]` | List buckets or objects; `--versions` shows every version and delete marker |
 | `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `mb --with-lock` for Object Lock, `rb --force`) |
-| `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output; `cp --version-id ID` copies an older version; `--enc-s3 PREFIX`, `--enc-kms PREFIX=KEY` and `--enc-c PREFIX=FILE` (or `TEIFS_ENC_C`) encrypt by key prefix |
+| `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output; `cp --version-id ID` copies an older version; `--enc-s3 PREFIX`, `--enc-kms PREFIX=KEY`, `--enc-dsse PREFIX=KEY` and `--enc-c PREFIX=FILE` (or `TEIFS_ENC_C`) encrypt by key prefix |
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way (with `cp`'s `--enc-*` options) |
 | `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`); `--version-id ID` removes one version for good, `--versions` all of a key's (asks first); `--bypass` removes governance-locked versions |
 | `teifs cat\|stat ALIAS/BUCKET/KEY [--version-id ID] [--enc-c PREFIX=FILE]` | Print an object, or show its details with its retention and legal hold (a bucket's too, with its versioning, Object Lock and default encryption) |
@@ -207,7 +207,7 @@ location / {
 | `teifs retention set governance\|compliance 30d\|1y TARGET` \| `clear\|info TARGET` | Keep objects from deletion for a time (`-r` for a prefix, `--version-id`, `--bypass` to shorten governance), or with `--default` set a bucket's default retention |
 | `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
 | `teifs ilm rule add\|edit\|ls\|rm\|export\|import ALIAS/BUCKET` | Lifecycle rules: expire objects (`--expire-days 30 --prefix logs/`), older versions and lone delete markers, abort old uploads; `export`/`import` in AWS's JSON |
-| `teifs encrypt set sse-s3\|sse-kms [KEY] ALIAS/BUCKET` \| `clear\|info ALIAS/BUCKET` | How a bucket encrypts new objects (`--bucket-key`), and whether it takes customer keys (`--block-sse-c`, `--allow-sse-c`) |
+| `teifs encrypt set sse-s3\|sse-kms\|dsse-kms [KEY] ALIAS/BUCKET` \| `clear\|info ALIAS/BUCKET` | How a bucket encrypts new objects (`--bucket-key`), and whether it takes customer keys (`--block-sse-c`, `--allow-sse-c`) |
 | `teifs encrypt update --kms-key KEY ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Move objects to a KMS key in place, without rewriting them (`--bucket-key`) |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME\|rewrap NAME` | Manage the KMS keys that encrypt objects; `rewrap` seals objects' keys again under a key's newest version (`--dry-run` counts) |
@@ -257,7 +257,7 @@ is changed there instead (`POST root-key` answers `409`). Aliases copy the key w
 they're set, so after a rotation set them again (`teifs alias set local URL --drive DIR`).
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
-keys, and SSE-C with your own keys. The keys live in a keyring outside the drive
+keys, DSSE-KMS (two layers: a named key's and the drive's), and SSE-C with your own keys. The keys live in a keyring outside the drive
 (`teifs key list|create|rotate`), or in a Vault or OpenBao transit engine
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.

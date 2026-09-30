@@ -1,8 +1,14 @@
 //! A part's bytes as 64 KiB authenticated packages (`docs/ENCRYPTION_FORMAT.md`):
 //! package `i` of part `p` is AES-256-GCM under the part key with nonce `i` and AAD
-//! `"TFS1" ‖ p ‖ i ‖ final`, stored as ciphertext then tag.
+//! `"TFS1" ‖ p ‖ i ‖ final`, stored as ciphertext then tag. Under DSSE-KMS each stored
+//! package (ciphertext and tag) is encrypted again with AES-256-CTR under a key from a
+//! second, independent data key, so sizes and offsets don't change.
 
-use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce};
+use aws_lc_rs::{
+    aead::{Aad, LessSafeKey, Nonce},
+    cipher::{AES_256, EncryptingKey, EncryptionContext, UnboundCipherKey},
+    iv::FixedLength,
+};
 
 use crate::{CryptoError, DataKey, Result, aead_key};
 
@@ -56,9 +62,19 @@ fn nonce(index: u64) -> Nonce {
     Nonce::assume_unique_for_key(bytes)
 }
 
+/// The initial counter block of package `index`'s outer layer: the index, then a 64-bit
+/// block counter from zero (a package is far fewer than 2^64 blocks).
+fn counter(index: u64) -> FixedLength<16> {
+    let mut block = [0u8; 16];
+    block[..8].copy_from_slice(&index.to_be_bytes());
+    FixedLength::from(block)
+}
+
 /// The cipher of one part: encrypts it as a stream, or decrypts single packages.
 pub struct PartCipher {
     key: LessSafeKey,
+    /// DSSE-KMS's outer layer.
+    outer: Option<EncryptingKey>,
     part: u32,
 }
 
@@ -66,6 +82,7 @@ impl std::fmt::Debug for PartCipher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartCipher")
             .field("part", &self.part)
+            .field("layers", &(1 + u8::from(self.outer.is_some())))
             .finish_non_exhaustive()
     }
 }
@@ -74,9 +91,29 @@ impl PartCipher {
     /// The cipher of part `part` (1 for a single-part object) of an object.
     #[must_use]
     pub fn new(data_key: &DataKey, part: u32) -> Self {
+        Self::layered(data_key, None, part)
+    }
+
+    /// Like [`PartCipher::new`], with DSSE-KMS's second layer under `outer` when given.
+    #[must_use]
+    pub fn layered(data_key: &DataKey, outer: Option<&DataKey>, part: u32) -> Self {
         Self {
             key: aead_key(&data_key.part_key(part)),
+            outer: outer.map(|outer| {
+                let key = UnboundCipherKey::new(&AES_256, outer.outer_part_key(part).as_ref())
+                    .expect("a 32-byte AES-256 key");
+                EncryptingKey::ctr(key).expect("AES-256-CTR is supported")
+            }),
             part,
+        }
+    }
+
+    /// Adds or removes the outer layer of package `index` (CTR is its own inverse).
+    fn outer_layer(&self, index: u64, package: &mut [u8]) {
+        if let Some(outer) = &self.outer {
+            outer
+                .less_safe_encrypt(package, EncryptionContext::Iv128(counter(index)))
+                .expect("CTR encrypts any length");
         }
     }
 
@@ -96,6 +133,7 @@ impl PartCipher {
         if sealed.len() < TAG_LEN || sealed.len() > PACKAGE_SIZE + TAG_LEN {
             return Err(CryptoError::Authentication);
         }
+        self.outer_layer(index, sealed);
         self.key
             .open_in_place(nonce(index), Aad::from(aad(self.part, index, last)), sealed)
             .map_err(|_| CryptoError::Authentication)
@@ -113,6 +151,7 @@ impl PartCipher {
             )
             .expect("sealing a buffer can't fail");
         out.extend_from_slice(tag.as_ref());
+        self.outer_layer(index, &mut out[start..]);
     }
 }
 
@@ -146,8 +185,13 @@ impl PartEncryptor {
 }
 
 /// Decrypts a whole part in memory (small objects and tests).
-pub fn decrypt_part(data_key: &DataKey, part: u32, sealed: &[u8]) -> Result<Vec<u8>> {
-    let cipher = PartCipher::new(data_key, part);
+pub fn decrypt_part(
+    data_key: &DataKey,
+    outer: Option<&DataKey>,
+    part: u32,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = PartCipher::layered(data_key, outer, part);
     let plain_len = plaintext_len(sealed.len() as u64)?;
     let packages = packages_for(plain_len);
     let mut out = Vec::with_capacity(usize::try_from(plain_len).unwrap_or(0));
@@ -163,7 +207,17 @@ mod tests {
     use super::*;
 
     fn encrypt(key: &DataKey, part: u32, data: &[u8], chunk: usize) -> Vec<u8> {
-        let mut enc = PartCipher::new(key, part).encryptor();
+        encrypt_layered(key, None, part, data, chunk)
+    }
+
+    fn encrypt_layered(
+        key: &DataKey,
+        outer: Option<&DataKey>,
+        part: u32,
+        data: &[u8],
+        chunk: usize,
+    ) -> Vec<u8> {
+        let mut enc = PartCipher::layered(key, outer, part).encryptor();
         let mut out = Vec::new();
         for piece in data.chunks(chunk.max(1)) {
             enc.update(piece, &mut out);
@@ -202,7 +256,7 @@ mod tests {
                 );
                 assert_eq!(plaintext_len(sealed.len() as u64).unwrap(), len as u64);
                 assert_eq!(
-                    decrypt_part(&key, 1, &sealed).unwrap(),
+                    decrypt_part(&key, None, 1, &sealed).unwrap(),
                     data,
                     "{len}/{chunk}"
                 );
@@ -229,25 +283,25 @@ mod tests {
 
         let mut flipped = sealed.clone();
         flipped[100] ^= 1;
-        assert!(decrypt_part(&key, 1, &flipped).is_err());
+        assert!(decrypt_part(&key, None, 1, &flipped).is_err());
 
         let mut swapped = sealed.clone();
         swapped[..p].copy_from_slice(&sealed[p..2 * p]);
         swapped[p..2 * p].copy_from_slice(&sealed[..p]);
-        assert!(decrypt_part(&key, 1, &swapped).is_err());
+        assert!(decrypt_part(&key, None, 1, &swapped).is_err());
 
         // Dropping the final package: what's left isn't a complete part.
-        assert!(decrypt_part(&key, 1, &sealed[..2 * p]).is_err());
+        assert!(decrypt_part(&key, None, 1, &sealed[..2 * p]).is_err());
 
         // The same bytes under another part number or key.
-        assert!(decrypt_part(&key, 2, &sealed).is_err());
-        assert!(decrypt_part(&DataKey::generate(), 1, &sealed).is_err());
+        assert!(decrypt_part(&key, None, 2, &sealed).is_err());
+        assert!(decrypt_part(&DataKey::generate(), None, 1, &sealed).is_err());
 
         // A package moved from another part with the same key.
         let other = encrypt(&key, 2, &data, 4096);
         let mut spliced = sealed.clone();
         spliced[p..2 * p].copy_from_slice(&other[p..2 * p]);
-        assert!(decrypt_part(&key, 1, &spliced).is_err());
+        assert!(decrypt_part(&key, None, 1, &spliced).is_err());
     }
 
     #[test]
@@ -270,6 +324,57 @@ mod tests {
         // The wrong finality fails.
         let mut last = sealed[2 * p..].to_vec();
         assert!(cipher.open(2, false, &mut last).is_err());
+    }
+
+    #[test]
+    fn dsse_adds_a_second_layer_that_needs_its_own_key() {
+        let (key, outer) = (DataKey::generate(), DataKey::generate());
+        let data = pattern(2 * PACKAGE_SIZE + 10);
+        let single = encrypt(&key, 1, &data, 5000);
+        let dual = encrypt_layered(&key, Some(&outer), 1, &data, 5000);
+        let p = SEALED_PACKAGE_LEN;
+        assert_eq!(dual.len(), single.len());
+        assert_eq!(decrypt_part(&key, Some(&outer), 1, &dual).unwrap(), data);
+        // The inner layer isn't visible: no stored package matches the single layer's.
+        for (a, b) in single.chunks(p).zip(dual.chunks(p)) {
+            assert_ne!(a, b);
+        }
+        // Each package, and each part, has a keystream of its own.
+        let stream = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x ^ y).collect::<Vec<_>>();
+        let same = vec![9u8; 2 * PACKAGE_SIZE];
+        let (plain1, dual1) = (
+            encrypt(&key, 1, &same, 5000),
+            encrypt_layered(&key, Some(&outer), 1, &same, 5000),
+        );
+        let (plain2, dual2) = (
+            encrypt(&key, 2, &same, 5000),
+            encrypt_layered(&key, Some(&outer), 2, &same, 5000),
+        );
+        let first = stream(&plain1[..p], &dual1[..p]);
+        assert_ne!(first, stream(&plain1[p..2 * p], &dual1[p..2 * p]));
+        assert_ne!(first, stream(&plain2[..p], &dual2[..p]));
+        // Either key alone, the layers swapped, or another outer key fails.
+        assert!(decrypt_part(&key, None, 1, &dual).is_err());
+        assert!(decrypt_part(&outer, None, 1, &dual).is_err());
+        assert!(decrypt_part(&outer, Some(&key), 1, &dual).is_err());
+        assert!(decrypt_part(&key, Some(&DataKey::generate()), 1, &dual).is_err());
+        assert!(decrypt_part(&key, Some(&outer), 2, &dual).is_err());
+        // Packages keep their places, and open one at a time for range reads.
+        let mut swapped = dual.clone();
+        swapped[..p].copy_from_slice(&dual[p..2 * p]);
+        swapped[p..2 * p].copy_from_slice(&dual[..p]);
+        assert!(decrypt_part(&key, Some(&outer), 1, &swapped).is_err());
+        let cipher = PartCipher::layered(&key, Some(&outer), 1);
+        let mut second = dual[p..2 * p].to_vec();
+        assert_eq!(
+            cipher.open(1, false, &mut second).unwrap(),
+            &data[PACKAGE_SIZE..2 * PACKAGE_SIZE]
+        );
+        let mut last = dual[2 * p..].to_vec();
+        assert_eq!(
+            cipher.open(2, true, &mut last).unwrap(),
+            &data[2 * PACKAGE_SIZE..]
+        );
     }
 
     #[test]

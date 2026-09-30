@@ -19,11 +19,12 @@ pub struct ObjectBody {
     decrypt: Option<Decrypt>,
 }
 
-/// How to decrypt an encrypted object: its data key and its parts' plaintext sizes
-/// (part numbers 1, 2, …).
+/// How to decrypt an encrypted object: its data key (and DSSE-KMS's second one) and its
+/// parts' plaintext sizes (part numbers 1, 2, …).
 #[derive(Debug)]
 pub(crate) struct Decrypt {
     pub key: DataKey,
+    pub outer: Option<DataKey>,
     pub parts: Vec<u64>,
 }
 
@@ -100,7 +101,7 @@ async fn decrypting(
         .await?;
     let number = u32::try_from(part + 1).map_err(io::Error::other)?;
     let position = Position {
-        cipher: PartCipher::new(&decrypt.key, number),
+        cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), number),
         file,
         decrypt,
         part,
@@ -143,7 +144,7 @@ async fn next_chunk(mut at: Position) -> io::Result<Option<(Bytes, Position)>> {
         at.part += 1;
         at.package = 0;
         let number = u32::try_from(at.part + 1).map_err(io::Error::other)?;
-        at.cipher = PartCipher::new(&at.decrypt.key, number);
+        at.cipher = PartCipher::layered(&at.decrypt.key, at.decrypt.outer.as_ref(), number);
     }
     Ok(Some((chunk, at)))
 }

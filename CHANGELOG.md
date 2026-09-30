@@ -80,6 +80,13 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs key rewrap NAME` seals again, under a KMS key's newest version, the data keys
   its older versions sealed (object versions, locked ones too, and uploads in progress),
   without touching the data; `--dry-run` counts them. Running it again carries on.
+- DSSE-KMS (`aws:kms:dsse`) on PutObject, POST forms, CopyObject, uploads in parts and
+  as a bucket's default, reported where AWS reports it: each object is encrypted twice,
+  under a data key sealed by the KMS key and another sealed by the drive's managed key
+  (AES-256-GCM packages, each then under AES-256-CTR), with no change in size. No S3
+  Bucket Keys, sealed checksums, and UpdateObjectEncryption refuses it, as on AWS.
+  `teifs key rewrap` covers both keys. From the command line: `teifs encrypt set
+  dsse-kms KEY ALIAS/BUCKET` and `--enc-dsse PREFIX=KEY` on `cp`, `mv` and `mirror`.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

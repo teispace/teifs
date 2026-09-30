@@ -1,12 +1,13 @@
 //! Rewrapping: sealing the data keys a KMS key's older versions sealed under its newest,
-//! so an old version can be retired. Only each record's sealed key changes: the data,
+//! so an old version can be retired (DSSE-KMS's second data key too, when it's the
+//! managed key being rewrapped). Only each record's sealed keys change: the data,
 //! ETags, dates and checksums stay, and so does each object's mode and Bucket Key.
 //! Objects under Object Lock are rewrapped too (nothing about them changes). Running it
 //! again carries on: what's done no longer matches.
 
 use std::collections::BTreeMap;
 
-use teifs_crypto::{CryptoError, Kms};
+use teifs_crypto::{Context, CryptoError, DataKey, Kms, SealedKey};
 use teifs_meta::VersionRow;
 
 use crate::{
@@ -69,7 +70,7 @@ impl Store {
                     done.versions += 1;
                     continue;
                 }
-                match self.rewrap_version(kms, kms_key, bucket, row).await {
+                match self.rewrap_version(kms, kms_key, newest, bucket, row).await {
                     Ok(()) => done.versions += 1,
                     Err(StoreError::ChangedMeanwhile | StoreError::NoSuchVersion) => {
                         done.changed_meanwhile += 1;
@@ -98,18 +99,18 @@ impl Store {
         &self,
         kms: &dyn Kms,
         kms_key: &str,
+        newest: u32,
         bucket: &str,
         row: VersionRow,
     ) -> Result<()> {
         let crypt = crypt_of(&row)?.ok_or(StoreError::CorruptMetadata)?;
         let context = crypt.context(&self.inner.format.drive, &row.bucket_id);
-        let data_key = kms.unseal(&crypt.sealed, &context).await?;
-        let sealed = kms.seal(Some(kms_key), &context, &data_key).await?;
+        let (crypt, data_key) = rewrapped(kms, kms_key, newest, crypt, &context).await?;
         let new = Resealed {
             mode: crypt.mode,
             bucket_key: crypt.bucket_key,
+            sealed: crypt.sealed.clone(),
             crypt,
-            sealed,
             data_key,
         };
         let key = row.key.clone();
@@ -140,9 +141,8 @@ impl Store {
             let crypt: Crypt =
                 serde_json::from_str(&old).map_err(|_| StoreError::CorruptMetadata)?;
             let context = crypt.context(&self.inner.format.drive, &bucket_id);
-            let data_key = kms.unseal(&crypt.sealed, &context).await?;
-            let sealed = kms.seal(Some(kms_key), &context, &data_key).await?;
-            let new = serde_json::to_string(&Crypt { sealed, ..crypt }).expect("crypt serializes");
+            let (crypt, _) = rewrapped(kms, kms_key, newest, crypt, &context).await?;
+            let new = serde_json::to_string(&crypt).expect("crypt serializes");
             let id = upload.id;
             let replaced = self
                 .blocking(move |inner| Ok(inner.lock().replace_upload_crypt(&id, &old, &new)?))
@@ -155,4 +155,26 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// `crypt` with each of its sealed keys that an older version of `kms_key` sealed sealed
+/// again under the newest, and its data key.
+async fn rewrapped(
+    kms: &dyn Kms,
+    kms_key: &str,
+    newest: u32,
+    mut crypt: Crypt,
+    context: &Context,
+) -> Result<(Crypt, DataKey)> {
+    let stale = |sealed: &SealedKey| sealed.kms_key == kms_key && sealed.kms_version < newest;
+    let data_key = kms.unseal(&crypt.sealed, context).await?;
+    if stale(&crypt.sealed) {
+        crypt.sealed = kms.seal(Some(kms_key), context, &data_key).await?;
+    }
+    if let Some(outer) = crypt.outer.as_ref().filter(|o| stale(o)) {
+        let context = context.clone().outer();
+        let key = kms.unseal(outer, &context).await?;
+        crypt.outer = Some(kms.seal(Some(kms_key), &context, &key).await?);
+    }
+    Ok((crypt, data_key))
 }

@@ -7,7 +7,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use md5::{Digest, Md5};
 use teifs_crypto::DEFAULT_KEY;
 
-use crate::{objects::crypt_of, sse::Resealed};
+use crate::{
+    objects::crypt_of,
+    sse::{Crypt, Resealed},
+};
 use teifs_types::{LockMode, SseMode};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
@@ -819,10 +822,30 @@ async fn an_object_written_meanwhile_keeps_its_own_key() {
     assert_eq!(get(store, "k", None).await.unwrap(), b"new");
 }
 
+/// The encryption record of `key`'s current version.
+async fn crypt(store: &Store, key: &str) -> Crypt {
+    let key = key.to_owned();
+    store
+        .blocking(move |inner| {
+            let Bucket::Object(bucket) = inner.bucket("vault")? else {
+                unreachable!("vault is an object bucket")
+            };
+            let row = Inner::version_row(&inner.lock(), &bucket, &key, None)?;
+            Ok(crypt_of(&row)?.unwrap())
+        })
+        .await
+        .unwrap()
+}
+
 /// The KMS key and version that seal the data key of `key`'s current version.
 async fn sealed_by(store: &Store, key: &str) -> (String, u32) {
-    let (_, row) = store.updatable_row("vault", key, None).await.unwrap();
-    let sealed = crypt_of(&row).unwrap().unwrap().sealed;
+    let sealed = crypt(store, key).await.sealed;
+    (sealed.kms_key, sealed.kms_version)
+}
+
+/// The KMS key and version that seal the DSSE-KMS outer key of `key`'s current version.
+async fn outer_sealed_by(store: &Store, key: &str) -> (String, u32) {
+    let sealed = crypt(store, key).await.outer.unwrap();
     (sealed.kms_key, sealed.kms_version)
 }
 
@@ -933,4 +956,240 @@ async fn rewrap_seals_old_key_versions_under_the_newest() {
         store.rewrap("nope", true).await,
         Err(StoreError::Crypto(teifs_crypto::CryptoError::NoSuchKey(_)))
     ));
+}
+
+fn dsse(key: &str) -> Encryption {
+    Encryption::Dsse {
+        key: Some(key.into()),
+        context: [("app".into(), "album".into())].into(),
+    }
+}
+
+#[tokio::test]
+async fn dsse_kms_encrypts_twice_under_independent_keys() {
+    let drive = drive().await;
+    let store = &drive.store;
+    drive.kms.create_key("photos").await.unwrap();
+    let data = pattern(3 * teifs_crypto::PACKAGE_SIZE + 5);
+    let mut staged = store.stage_for("vault", &dsse("photos")).await.unwrap();
+    staged.write(&data).await.unwrap();
+    let attrs = ObjectAttrs {
+        checksums: BTreeMap::from([("CRC32".into(), "abcd".into())]),
+        ..ObjectAttrs::default()
+    };
+    let info = store
+        .commit("vault", "d", staged, attrs, Precondition::default())
+        .await
+        .unwrap();
+    // Like SSE-KMS: no MD5 ETag, sealed checksums, the key reported, no Bucket Key.
+    assert_ne!(info.etag, teifs_types::hex(&Md5::digest(&data)));
+    assert!(info.attrs.checksums.is_empty());
+    let (read, _) = store.read("vault", "d").await.unwrap();
+    assert_eq!(read.attrs.checksums["CRC32"], "abcd");
+    let sse = read.sse.unwrap();
+    assert_eq!(
+        (sse.mode, sse.kms_key.as_deref(), sse.bucket_key),
+        (SseMode::Dsse, Some("photos"), false)
+    );
+    assert_eq!(get(store, "d", None).await.unwrap(), data);
+    let package = teifs_crypto::PACKAGE_SIZE as u64;
+    let got = get_range(store, "d", package - 3, 10).await;
+    let from = usize::try_from(package - 3).unwrap();
+    assert_eq!(got, &data[from..from + 10]);
+
+    // The data key alone doesn't open what's on disk: the second layer needs the second
+    // key, sealed by the managed key.
+    let crypt = crypt(store, "d").await;
+    assert_eq!(sealed_by(store, "d").await, ("photos".into(), 1));
+    assert_eq!(outer_sealed_by(store, "d").await, (DEFAULT_KEY.into(), 1));
+    let bucket_id = store.object_bucket_id("vault").await.unwrap();
+    let context = crypt.context(&store.inner.format.drive, &bucket_id);
+    let inner = drive.kms.unseal(&crypt.sealed, &context).await.unwrap();
+    let outer = drive
+        .kms
+        .unseal(crypt.outer.as_ref().unwrap(), &context.clone().outer())
+        .await
+        .unwrap();
+    // Each seal opens only under its own context.
+    assert!(
+        drive
+            .kms
+            .unseal(crypt.outer.as_ref().unwrap(), &context)
+            .await
+            .is_err()
+    );
+    let file = fs::read(data_files(&drive).pop().unwrap()).unwrap();
+    let stored = &file[..usize::try_from(teifs_crypto::ciphertext_len(data.len() as u64)).unwrap()];
+    assert!(teifs_crypto::decrypt_part(&inner, None, 1, stored).is_err());
+    assert_eq!(
+        teifs_crypto::decrypt_part(&inner, Some(&outer), 1, stored).unwrap(),
+        data
+    );
+
+    // A record with a missing or stray outer key is refused.
+    let kms: &dyn teifs_crypto::Kms = drive.kms.as_ref();
+    let drive_id = &store.inner.format.drive;
+    for broken in [
+        Crypt {
+            outer: None,
+            ..crypt.clone()
+        },
+        Crypt {
+            mode: SseMode::Kms,
+            ..crypt.clone()
+        },
+    ] {
+        assert!(matches!(
+            crate::sse::outer_key(Some(kms), &broken, drive_id, &bucket_id).await,
+            Err(StoreError::CorruptMetadata)
+        ));
+    }
+
+    // UpdateObjectEncryption refuses DSSE-KMS sources, as S3 does.
+    assert!(matches!(
+        store
+            .update_encryption("vault", "d", None, "photos", false)
+            .await,
+        Err(StoreError::InvalidRequest(m)) if m.contains("DSSE-KMS")
+    ));
+    assert!(store.stage_for("vault", &dsse("missing")).await.is_err());
+}
+
+#[tokio::test]
+async fn dsse_kms_uploads_and_copies_keep_both_layers() {
+    let drive = drive().await;
+    let store = &drive.store;
+    let upload = store
+        .create_upload(
+            "vault",
+            "big",
+            ObjectAttrs::default(),
+            None,
+            &Encryption::Dsse {
+                key: None,
+                context: BTreeMap::new(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let first = pattern(usize::try_from(MIN_PART_SIZE).unwrap() + 3);
+    let second = pattern(70_000);
+    let mut etags = Vec::new();
+    for (number, bytes) in [(1, &first), (2, &second)] {
+        let mut staged = store.stage_part(&upload.id, number, None).await.unwrap();
+        staged.write(bytes).await.unwrap();
+        let part = store
+            .put_part(&upload.id, number, staged, BTreeMap::new())
+            .await
+            .unwrap();
+        etags.push((number, part.etag));
+    }
+    let info = store
+        .complete(
+            &upload.id,
+            etags,
+            Precondition::default(),
+            CompleteWith::default(),
+        )
+        .await
+        .unwrap();
+    let sse = info.sse.unwrap();
+    assert_eq!(
+        (sse.mode, sse.kms_key.as_deref()),
+        (SseMode::Dsse, Some(DEFAULT_KEY))
+    );
+    let mut whole = first.clone();
+    whole.extend_from_slice(&second);
+    assert_eq!(get(store, "big", None).await.unwrap(), whole);
+    let start = first.len() as u64 - 10;
+    let from = usize::try_from(start).unwrap();
+    assert_eq!(
+        get_range(store, "big", start, 30).await,
+        &whole[from..from + 30]
+    );
+
+    // DSSE-KMS → SSE-S3 and back, each copy under keys of its own.
+    for (from, to, encryption, mode) in [
+        ("big", "s3", Encryption::S3, SseMode::S3),
+        ("s3", "again", dsse(DEFAULT_KEY), SseMode::Dsse),
+    ] {
+        let info = store
+            .copy_with(
+                ("vault", from, None),
+                ("vault", to),
+                None,
+                Precondition::default(),
+                None,
+                &encryption,
+            )
+            .await
+            .unwrap();
+        assert_eq!(info.sse.map(|s| s.mode), Some(mode));
+        assert_eq!(get(store, to, None).await.unwrap(), whole);
+    }
+    assert_ne!(
+        crypt(store, "again").await.outer,
+        crypt(store, "big").await.outer
+    );
+}
+
+#[tokio::test]
+async fn rewrap_reseals_dsse_kms_outer_keys_with_the_managed_key() {
+    let drive = drive().await;
+    let store = &drive.store;
+    drive.kms.create_key("photos").await.unwrap();
+    let bytes = pattern(70_000);
+    put(store, "d", &bytes, &dsse("photos")).await;
+    let upload = store
+        .create_upload(
+            "vault",
+            "up",
+            ObjectAttrs::default(),
+            None,
+            &dsse("photos"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut staged = store.stage_part(&upload.id, 1, None).await.unwrap();
+    staged.write(&bytes).await.unwrap();
+    let part = store
+        .put_part(&upload.id, 1, staged, BTreeMap::new())
+        .await
+        .unwrap();
+    drive.kms.rotate_key("photos").await.unwrap();
+    drive.kms.rotate_key(DEFAULT_KEY).await.unwrap();
+
+    // Each key rewraps only the seals it made.
+    let photos = store.rewrap("photos", false).await.unwrap();
+    assert_eq!((photos.versions, photos.uploads), (1, 1));
+    assert_eq!(sealed_by(store, "d").await, ("photos".into(), 2));
+    assert_eq!(outer_sealed_by(store, "d").await, (DEFAULT_KEY.into(), 1));
+    let managed = store.rewrap(DEFAULT_KEY, false).await.unwrap();
+    assert_eq!((managed.versions, managed.uploads), (1, 1));
+    assert_eq!(sealed_by(store, "d").await, ("photos".into(), 2));
+    assert_eq!(outer_sealed_by(store, "d").await, (DEFAULT_KEY.into(), 2));
+    let nothing = store.rewrap(DEFAULT_KEY, false).await.unwrap();
+    assert_eq!((nothing.versions, nothing.uploads), (0, 0));
+    assert_eq!(get(store, "d", None).await.unwrap(), bytes);
+    assert_eq!(
+        store.head("vault", "d").await.unwrap().sse.unwrap().mode,
+        SseMode::Dsse
+    );
+
+    // The upload finishes with both its keys resealed.
+    store
+        .complete(
+            &upload.id,
+            vec![(1, part.etag)],
+            Precondition::default(),
+            CompleteWith::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get(store, "up", None).await.unwrap(), bytes);
+    assert_eq!(outer_sealed_by(store, "up").await, (DEFAULT_KEY.into(), 2));
 }

@@ -46,6 +46,12 @@ impl DataKey {
         hkdf(&self.0, &[], &[b"teifs data v1", &part.to_be_bytes()])
     }
 
+    /// The key of DSSE-KMS's outer layer over part `part`, when this is the object's
+    /// second data key.
+    pub(crate) fn outer_part_key(&self, part: u32) -> zeroize::Zeroizing<[u8; 32]> {
+        hkdf(&self.0, &[], &[b"teifs dsse v1", &part.to_be_bytes()])
+    }
+
     /// The ETag of an SSE-C or SSE-KMS object: a keyed hash of its MD5, so it's stable
     /// but doesn't reveal the plaintext's MD5 to anyone without the key.
     #[must_use]

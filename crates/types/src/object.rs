@@ -146,6 +146,9 @@ pub enum SseMode {
     S3,
     /// SSE-KMS: with a named KMS key (`aws:kms`).
     Kms,
+    /// DSSE-KMS: two layers, one with a named KMS key and one with a key TeiFS manages
+    /// (`aws:kms:dsse`).
+    Dsse,
     /// SSE-C: with the customer's own key, sent with every request.
     Customer,
 }
@@ -155,7 +158,7 @@ pub enum SseMode {
 pub struct SseInfo {
     /// The kind.
     pub mode: SseMode,
-    /// The KMS key (SSE-KMS).
+    /// The KMS key (SSE-KMS and DSSE-KMS).
     pub kms_key: Option<String>,
     /// The base64 MD5 of the customer's key (SSE-C), as S3 echoes it.
     pub customer_key_md5: Option<String>,

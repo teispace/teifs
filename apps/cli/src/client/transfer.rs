@@ -819,7 +819,7 @@ impl Transfers {
 /// it), else CRC32.
 fn part_checksum(to: &Object) -> ChecksumAlgorithm {
     match to.sse() {
-        Some(Sse::Kms(_) | Sse::Customer(_)) => ChecksumAlgorithm::Sha256,
+        Some(Sse::Kms(_) | Sse::Dsse(_) | Sse::Customer(_)) => ChecksumAlgorithm::Sha256,
         _ => ChecksumAlgorithm::Crc32,
     }
 }

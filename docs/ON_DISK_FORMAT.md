@@ -104,7 +104,7 @@ size before encryption), then a footer:
 | Part | Bytes |
 |---|---|
 | The object's bytes | `size` |
-| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS and SSE-C), for a version other than `null` `version` (its id) | variable |
+| Footer JSON: `bucket` (id), `key`, `object` (id), `size`, `etag`, `createdMs`, `attrs`, and for encrypted objects `crypt` (mode, sealed data key, DSSE-KMS's second sealed key, SSE-C check), for multipart objects `parts` (part sizes, and part checksums except under SSE-KMS, DSSE-KMS and SSE-C), for a version other than `null` `version` (its id) | variable |
 | Footer JSON length | 4, big-endian |
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |

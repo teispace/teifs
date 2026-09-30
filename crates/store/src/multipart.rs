@@ -158,7 +158,13 @@ impl Store {
             customer,
         )
         .await?;
-        let keyed = Keyed { data_key, crypt };
+        let outer =
+            sse::outer_key(self.kms(), &crypt, &self.inner.format.drive, &bucket_id).await?;
+        let keyed = Keyed {
+            data_key,
+            outer,
+            crypt,
+        };
         Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, number).await
     }
 

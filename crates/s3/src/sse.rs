@@ -96,7 +96,7 @@ pub(crate) fn for_write(
             if request.kms_key.is_some() {
                 return Err(s3_error!(
                     InvalidArgument,
-                    "x-amz-server-side-encryption-aws-kms-key-id needs x-amz-server-side-encryption: aws:kms"
+                    "x-amz-server-side-encryption-aws-kms-key-id needs x-amz-server-side-encryption: aws:kms or aws:kms:dsse"
                 ));
             }
             Ok(bucket.map_or(Encryption::None, |b| match b.default.mode {
@@ -105,14 +105,18 @@ pub(crate) fn for_write(
                     context: BTreeMap::new(),
                     bucket_key: request.bucket_key.unwrap_or(b.default.bucket_key),
                 },
-                _ => Encryption::S3,
+                SseMode::Dsse => Encryption::Dsse {
+                    key: b.default.kms_key.clone(),
+                    context: BTreeMap::new(),
+                },
+                SseMode::S3 | SseMode::Customer => Encryption::S3,
             }))
         }
         Some(dto::ServerSideEncryption::AES256) => {
             if request.kms_key.is_some() {
                 return Err(s3_error!(
                     InvalidArgument,
-                    "A KMS key can only be given with aws:kms"
+                    "A KMS key can only be given with aws:kms or aws:kms:dsse"
                 ));
             }
             Ok(Encryption::S3)
@@ -124,13 +128,14 @@ pub(crate) fn for_write(
                 .bucket_key
                 .unwrap_or_else(|| bucket.is_some_and(|b| b.default.bucket_key)),
         }),
-        Some(dto::ServerSideEncryption::AWS_KMS_DSSE) => Err(s3_error!(
-            NotImplemented,
-            "dual-layer encryption (aws:kms:dsse) isn't supported"
-        )),
+        // S3 Bucket Keys don't apply to DSSE-KMS.
+        Some(dto::ServerSideEncryption::AWS_KMS_DSSE) => Ok(Encryption::Dsse {
+            key: request.kms_key.map(kms_key_name),
+            context: kms_context(request.kms_context)?,
+        }),
         Some(_) => Err(s3_error!(
             InvalidArgument,
-            "x-amz-server-side-encryption must be AES256 or aws:kms"
+            "x-amz-server-side-encryption must be AES256, aws:kms or aws:kms:dsse"
         )),
     }
 }
@@ -241,6 +246,15 @@ pub(crate) fn headers(info: Option<&SseInfo>) -> Headers {
             customer_key_md5: None,
             bucket_key: info.bucket_key.then_some(true),
         },
+        SseMode::Dsse => Headers {
+            sse: Some(dto::ServerSideEncryption::from_static(
+                dto::ServerSideEncryption::AWS_KMS_DSSE,
+            )),
+            kms_key: info.kms_key.clone(),
+            customer_algorithm: None,
+            customer_key_md5: None,
+            bucket_key: None,
+        },
         SseMode::Customer => Headers {
             sse: None,
             kms_key: None,
@@ -349,6 +363,54 @@ mod tests {
             for_write(with_key, Some(&default)).unwrap(),
             Encryption::Kms { key: Some(k), .. } if k == "photos"
         ));
+    }
+
+    #[test]
+    fn dual_layer_writes_follow_the_request_then_the_bucket() {
+        let dsse = dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AWS_KMS_DSSE);
+        let asked = WriteRequest {
+            kms_key: Some("arn:aws:kms:us-east-1:123:key/photos"),
+            bucket_key: Some(true),
+            ..request(Some(&dsse))
+        };
+        assert!(matches!(
+            for_write(asked, Some(&BucketEncryption::aws_default())).unwrap(),
+            Encryption::Dsse { key: Some(k), .. } if k == "photos"
+        ));
+        let by_default = BucketEncryption {
+            default: DefaultEncryption {
+                mode: SseMode::Dsse,
+                kms_key: Some("photos".into()),
+                bucket_key: true,
+            },
+            ..BucketEncryption::aws_default()
+        };
+        assert!(matches!(
+            for_write(request(None), Some(&by_default)).unwrap(),
+            Encryption::Dsse { key: Some(k), .. } if k == "photos"
+        ));
+        let aes = dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AES256);
+        let key_with_aes = WriteRequest {
+            kms_key: Some("photos"),
+            ..request(Some(&aes))
+        };
+        assert!(for_write(key_with_aes, None).is_err());
+        let other = dto::ServerSideEncryption::from_static("aws:kms:other");
+        assert!(for_write(request(Some(&other)), None).is_err());
+        let reported = headers(Some(&SseInfo {
+            mode: SseMode::Dsse,
+            kms_key: Some("photos".into()),
+            customer_key_md5: None,
+            bucket_key: true,
+        }));
+        assert_eq!(
+            (
+                reported.sse.as_ref().map(dto::ServerSideEncryption::as_str),
+                reported.kms_key.as_deref(),
+                reported.bucket_key
+            ),
+            (Some("aws:kms:dsse"), Some("photos"), None)
+        );
     }
 
     #[test]

@@ -369,8 +369,8 @@ impl Index {
         Ok(changed == 1)
     }
 
-    /// Versions (of every bucket) whose data key is sealed by a version of the KMS key
-    /// `kms_key` older than `newest`, after `after` (a bucket id, key and `seq`), in that
+    /// Versions (of every bucket) whose data key (or DSSE-KMS outer key, `outer`) is
+    /// sealed by a version of the KMS key `kms_key` older than `newest`, after `after` (a bucket id, key and `seq`), in that
     /// order; at most `limit`.
     pub fn sealed_before(
         &self,
@@ -383,8 +383,10 @@ impl Index {
         let sql = format!(
             "SELECT {READ} FROM object_versions
              WHERE crypt IS NOT NULL
-               AND json_extract(crypt, '$.sealed.kmsKey') = ?1
-               AND json_extract(crypt, '$.sealed.kmsVersion') < ?2
+               AND ((json_extract(crypt, '$.sealed.kmsKey') = ?1
+                     AND json_extract(crypt, '$.sealed.kmsVersion') < ?2)
+                 OR (json_extract(crypt, '$.outer.kmsKey') = ?1
+                     AND json_extract(crypt, '$.outer.kmsVersion') < ?2))
                AND (bucket_id, key, seq) > (?3, ?4, ?5)
              ORDER BY bucket_id, key, seq LIMIT ?6"
         );
@@ -729,6 +731,14 @@ mod tests {
             ("c", sealed("k", 1)),
             ("d", sealed("other", 1)),
             ("e", None),
+            // DSSE-KMS: found by its outer key's seal too.
+            (
+                "f",
+                Some(
+                    r#"{"mode":"dsse","sealed":{"kmsKey":"other","kmsVersion":1},"outer":{"kmsKey":"k","kmsVersion":1}}"#
+                        .to_owned(),
+                ),
+            ),
         ] {
             index
                 .put_version(
@@ -743,11 +753,11 @@ mod tests {
         let keys = |rows: Vec<VersionRow>| rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
         assert_eq!(
             keys(index.sealed_before("k", 2, None, 10).unwrap()),
-            ["a", "c"]
+            ["a", "c", "f"]
         );
         assert_eq!(
             keys(index.sealed_before("k", 3, None, 10).unwrap()),
-            ["a", "b", "c"]
+            ["a", "b", "c", "f"]
         );
         let first = index.sealed_before("k", 2, None, 1).unwrap();
         assert_eq!(keys(first.clone()), ["a"]);
@@ -758,7 +768,11 @@ mod tests {
         );
         assert_eq!(
             keys(index.sealed_before("k", 2, Some(after), 10).unwrap()),
-            ["c"]
+            ["c", "f"]
+        );
+        assert_eq!(
+            keys(index.sealed_before("other", 2, None, 10).unwrap()),
+            ["d", "f"]
         );
         assert!(index.sealed_before("k", 1, None, 10).unwrap().is_empty());
     }

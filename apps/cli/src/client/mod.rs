@@ -264,12 +264,13 @@ pub enum LegalHoldAction {
 #[derive(Subcommand)]
 pub enum EncryptAction {
     /// Set how a bucket encrypts new objects: `sse-s3 ALIAS/BUCKET`, or
-    /// `sse-kms KEY ALIAS/BUCKET` for a KMS key.
+    /// `sse-kms KEY ALIAS/BUCKET` for a KMS key (`dsse-kms` for two layers).
     Set {
-        /// `sse-s3` (keys the server keeps) or `sse-kms` (a KMS key).
+        /// `sse-s3` (keys the server keeps), `sse-kms` (a KMS key) or `dsse-kms` (two
+        /// layers: a KMS key's and the server's).
         #[arg(value_enum)]
         mode: SseArg,
-        /// The KMS key (for `sse-kms` only), then `ALIAS/BUCKET`.
+        /// The KMS key (for `sse-kms` and `dsse-kms` only), then `ALIAS/BUCKET`.
         #[arg(required = true, num_args = 1..=2, value_name = "[KEY] ALIAS/BUCKET")]
         args: Vec<String>,
         /// Seal SSE-KMS objects' keys with an S3 Bucket Key.
@@ -311,6 +312,7 @@ pub enum EncryptAction {
 pub enum SseArg {
     SseS3,
     SseKms,
+    DsseKms,
 }
 
 #[derive(Subcommand)]
@@ -551,6 +553,10 @@ pub struct EncArgs {
     /// Encrypt what's written under a prefix with a KMS key (repeatable).
     #[arg(long = "enc-kms", value_name = "PREFIX=KEY")]
     kms: Vec<String>,
+    /// Encrypt what's written under a prefix twice (DSSE-KMS), with a KMS key and a key
+    /// the server keeps (repeatable).
+    #[arg(long = "enc-dsse", value_name = "PREFIX=KEY")]
+    dsse: Vec<String>,
     /// Read and write objects under a prefix with a customer key (SSE-C) from a file:
     /// 32 bytes, or base64 or hex (repeatable). `TEIFS_ENC_C` takes `PREFIX=KEY,…`.
     #[arg(long = "enc-c", value_name = "PREFIX=FILE")]

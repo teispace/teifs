@@ -63,7 +63,8 @@ impl Staged {
         part: u32,
     ) -> Result<Self> {
         let mut staged = Self::create(dir).await?;
-        let encryptor = PartCipher::new(&keyed.data_key, part).encryptor();
+        let encryptor =
+            PartCipher::layered(&keyed.data_key, keyed.outer.as_ref(), part).encryptor();
         staged.sealing = Some(Sealing {
             keyed,
             bucket_id,

@@ -1,6 +1,7 @@
 //! SSE-KMS as the official AWS SDK sees it: `UpdateObjectEncryption` moves an SSE-S3
 //! object to a KMS key without its data, ETag, modification time or checksum changing
-//! (and refuses what S3 refuses), and S3 Bucket Key settings are recorded and reported.
+//! (and refuses what S3 refuses), S3 Bucket Key settings are recorded and reported, and
+//! DSSE-KMS is reported on every operation S3 reports it on.
 
 #![allow(
     clippy::unwrap_used,
@@ -307,4 +308,173 @@ async fn bucket_keys_are_recorded_and_reported() {
         .unwrap();
     assert_eq!(done.bucket_key_enabled(), Some(true));
     assert_eq!(head_bucket_key(&s3, "parts").await, Some(true));
+}
+
+fn dsse() -> ServerSideEncryption {
+    ServerSideEncryption::AwsKmsDsse
+}
+
+#[tokio::test]
+async fn dual_layer_encryption_is_reported_as_s3_reports_it() {
+    let server = start_with(|c| c.default_layout = teifs_store::Layout::Object).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("vault").send().await.unwrap();
+    let put = s3
+        .put_object()
+        .bucket("vault")
+        .key("d")
+        .server_side_encryption(dsse())
+        .ssekms_key_id(DEFAULT_ARN)
+        // S3 Bucket Keys don't apply to DSSE-KMS.
+        .bucket_key_enabled(true)
+        .body(ByteStream::from_static(b"two layers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            put.server_side_encryption(),
+            put.ssekms_key_id(),
+            put.bucket_key_enabled()
+        ),
+        (Some(&dsse()), Some("teifs-default"), None)
+    );
+    let got = s3
+        .get_object()
+        .bucket("vault")
+        .key("d")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.server_side_encryption(), Some(&dsse()));
+    let bytes = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&bytes[..], b"two layers");
+    let copy = s3
+        .copy_object()
+        .bucket("vault")
+        .key("copy")
+        .copy_source("vault/d")
+        .server_side_encryption(dsse())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(copy.server_side_encryption(), Some(&dsse()));
+    let head = s3
+        .head_object()
+        .bucket("vault")
+        .key("copy")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        (head.server_side_encryption(), head.ssekms_key_id()),
+        (Some(&dsse()), Some("teifs-default"))
+    );
+    // Only SSE-S3 and SSE-KMS objects move to another key in place.
+    assert_eq!(update(&s3, "d", DEFAULT_ARN, false).await, "InvalidRequest");
+
+    dual_layer_uploads_in_parts(&s3).await;
+    dual_layer_by_default(&s3).await;
+}
+
+async fn dual_layer_uploads_in_parts(s3: &Client) {
+    let create = s3
+        .create_multipart_upload()
+        .bucket("vault")
+        .key("big")
+        .server_side_encryption(dsse())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.server_side_encryption(), Some(&dsse()));
+    let id = create.upload_id().unwrap();
+    let part = s3
+        .upload_part()
+        .bucket("vault")
+        .key("big")
+        .upload_id(id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"one part"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(part.server_side_encryption(), Some(&dsse()));
+    let done = s3
+        .complete_multipart_upload()
+        .bucket("vault")
+        .key("big")
+        .upload_id(id)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .parts(
+                    CompletedPart::builder()
+                        .part_number(1)
+                        .e_tag(part.e_tag().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(done.server_side_encryption(), Some(&dsse()));
+}
+
+async fn dual_layer_by_default(s3: &Client) {
+    s3.put_bucket_encryption()
+        .bucket("vault")
+        .server_side_encryption_configuration(
+            ServerSideEncryptionConfiguration::builder()
+                .rules(
+                    ServerSideEncryptionRule::builder()
+                        .apply_server_side_encryption_by_default(
+                            ServerSideEncryptionByDefault::builder()
+                                .sse_algorithm(dsse())
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let config = s3
+        .get_bucket_encryption()
+        .bucket("vault")
+        .send()
+        .await
+        .unwrap();
+    let rule = &config
+        .server_side_encryption_configuration()
+        .unwrap()
+        .rules()[0];
+    assert_eq!(
+        rule.apply_server_side_encryption_by_default()
+            .unwrap()
+            .sse_algorithm(),
+        &dsse()
+    );
+    let put = s3
+        .put_object()
+        .bucket("vault")
+        .key("default")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.server_side_encryption(), Some(&dsse()));
+    // A KMS key goes only with aws:kms or aws:kms:dsse.
+    let refused = s3
+        .put_object()
+        .bucket("vault")
+        .key("x")
+        .server_side_encryption(ServerSideEncryption::Aes256)
+        .ssekms_key_id(DEFAULT_ARN)
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await;
+    assert_eq!(code(refused), "InvalidArgument");
 }

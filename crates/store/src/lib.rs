@@ -727,6 +727,8 @@ impl Store {
             customer,
         )
         .await?;
+        let outer =
+            sse::outer_key(self.kms(), &crypt, &self.inner.format.drive, &bucket_id).await?;
         if let Some(sealed) = &crypt.checksums {
             info.attrs.checksums = sse::open_sums(&data_key, sealed)?;
         }
@@ -741,6 +743,7 @@ impl Store {
                 info.size,
                 Some(body::Decrypt {
                     key: data_key,
+                    outer,
                     parts,
                 }),
             )

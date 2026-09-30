@@ -35,6 +35,14 @@ pub enum Encryption {
         /// Whether it's reported as using an S3 Bucket Key.
         bucket_key: bool,
     },
+    /// DSSE-KMS: encrypted twice, under a data key sealed by a named KMS key (the managed
+    /// key when `None`) and under a second one sealed by the managed key.
+    Dsse {
+        /// The KMS key's name.
+        key: Option<String>,
+        /// Extra context pairs from `x-amz-server-side-encryption-context`.
+        context: BTreeMap<String, String>,
+    },
     /// SSE-C: sealed by a key derived from the customer's key.
     Customer(CustomerKey),
 }
@@ -59,6 +67,10 @@ pub(crate) struct Crypt {
     /// SSE-KMS: whether it's reported as using an S3 Bucket Key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bucket_key: bool,
+    /// DSSE-KMS: the second data key, sealed by the managed key under the context
+    /// marked as the outer layer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer: Option<SealedKey>,
 }
 
 /// What recognizes an SSE-C key without storing it.
@@ -72,28 +84,44 @@ pub(crate) struct CustomerCheck {
 #[derive(Debug)]
 pub(crate) struct Keyed {
     pub data_key: DataKey,
+    /// DSSE-KMS's second data key.
+    pub outer: Option<DataKey>,
     pub crypt: Crypt,
 }
 
 impl Crypt {
     /// The context the data key is sealed under.
     pub fn context(&self, drive: &str, bucket_id: &str) -> Context {
-        self.context.iter().fold(
-            Context::object(drive, bucket_id, &self.object),
-            |ctx, (k, v)| ctx.with(k, v),
-        )
+        object_context(drive, bucket_id, &self.object, &self.context)
     }
 
     /// What S3 reports about it.
     pub fn info(&self, customer_key_md5: Option<String>) -> SseInfo {
         SseInfo {
             mode: self.mode,
-            kms_key: (self.mode == SseMode::Kms).then(|| self.sealed.kms_key.clone()),
+            kms_key: matches!(self.mode, SseMode::Kms | SseMode::Dsse)
+                .then(|| self.sealed.kms_key.clone()),
             customer_key_md5,
             bucket_key: self.bucket_key,
         }
     }
 }
+
+/// The context an object's data key is sealed under: its ids and the client's pairs.
+fn object_context(
+    drive: &str,
+    bucket_id: &str,
+    object_id: &str,
+    pairs: &BTreeMap<String, String>,
+) -> Context {
+    pairs.iter().fold(
+        Context::object(drive, bucket_id, object_id),
+        |ctx, (k, v)| ctx.with(k, v),
+    )
+}
+
+/// No extra context pairs.
+const NO_CONTEXT: &BTreeMap<String, String> = &BTreeMap::new();
 
 /// Creates the data key for a new object `object_id` in bucket `bucket_id`.
 pub(crate) async fn new_key(
@@ -103,67 +131,68 @@ pub(crate) async fn new_key(
     bucket_id: &str,
     object_id: &str,
 ) -> Result<Option<Keyed>> {
-    let base = Context::object(drive, bucket_id, object_id);
-    let (mode, context, bucket_key, keyed) = match encryption {
+    let (mode, key, context, bucket_key) = match encryption {
         Encryption::None => return Ok(None),
-        Encryption::S3 => {
-            let kms = kms.ok_or(StoreError::NoKms)?;
-            (
-                SseMode::S3,
-                BTreeMap::new(),
-                false,
-                kms.generate(Some(DEFAULT_KEY), &base).await?,
-            )
+        Encryption::Customer(key) => {
+            return Ok(Some(customer_keyed(key, drive, bucket_id, object_id)));
         }
+        Encryption::S3 => (SseMode::S3, Some(DEFAULT_KEY), NO_CONTEXT, false),
         Encryption::Kms {
             key,
             context,
             bucket_key,
-        } => {
-            let kms = kms.ok_or(StoreError::NoKms)?;
-            let ctx = context.iter().fold(base, |c, (k, v)| c.with(k, v));
-            (
-                SseMode::Kms,
-                context.clone(),
-                *bucket_key,
-                kms.generate(key.as_deref(), &ctx).await?,
-            )
-        }
-        Encryption::Customer(key) => {
-            let salt = teifs_crypto::random_salt();
-            let data_key = DataKey::generate();
-            let sealed = teifs_crypto::seal(&key.kek(&salt), &base, &data_key, "", 0);
-            let check = CustomerCheck {
-                salt: STANDARD.encode(salt),
-                hmac: STANDARD.encode(key.check(&salt)),
-            };
-            return Ok(Some(Keyed {
-                data_key,
-                crypt: Crypt {
-                    mode: SseMode::Customer,
-                    object: object_id.to_owned(),
-                    sealed,
-                    context: BTreeMap::new(),
-                    customer: Some(check),
-                    checksums: None,
-                    bucket_key: false,
-                },
-            }));
-        }
+        } => (SseMode::Kms, key.as_deref(), context, *bucket_key),
+        Encryption::Dsse { key, context } => (SseMode::Dsse, key.as_deref(), context, false),
     };
-    let (data_key, sealed) = keyed;
+    let kms = kms.ok_or(StoreError::NoKms)?;
+    let ctx = object_context(drive, bucket_id, object_id, context);
+    let (data_key, sealed) = kms.generate(key, &ctx).await?;
+    let (outer, outer_sealed) = if mode == SseMode::Dsse {
+        let (outer, sealed) = kms.generate(Some(DEFAULT_KEY), &ctx.outer()).await?;
+        (Some(outer), Some(sealed))
+    } else {
+        (None, None)
+    };
     Ok(Some(Keyed {
         data_key,
+        outer,
         crypt: Crypt {
             mode,
             object: object_id.to_owned(),
             sealed,
-            context,
+            context: context.clone(),
             customer: None,
             checksums: None,
             bucket_key,
+            outer: outer_sealed,
         },
     }))
+}
+
+/// A new SSE-C object's data key, sealed by a key derived from the customer's.
+fn customer_keyed(key: &CustomerKey, drive: &str, bucket_id: &str, object_id: &str) -> Keyed {
+    let salt = teifs_crypto::random_salt();
+    let data_key = DataKey::generate();
+    let base = Context::object(drive, bucket_id, object_id);
+    let sealed = teifs_crypto::seal(&key.kek(&salt), &base, &data_key, "", 0);
+    let check = CustomerCheck {
+        salt: STANDARD.encode(salt),
+        hmac: STANDARD.encode(key.check(&salt)),
+    };
+    Keyed {
+        data_key,
+        outer: None,
+        crypt: Crypt {
+            mode: SseMode::Customer,
+            object: object_id.to_owned(),
+            sealed,
+            context: BTreeMap::new(),
+            customer: Some(check),
+            checksums: None,
+            bucket_key: false,
+            outer: None,
+        },
+    }
 }
 
 /// Recovers the data key of a stored object. SSE-C needs the customer's key; the other
@@ -201,6 +230,24 @@ pub(crate) async fn data_key(
             let kms = kms.ok_or(StoreError::NoKms)?;
             Ok(kms.unseal(&crypt.sealed, &context).await?)
         }
+    }
+}
+
+/// Recovers a DSSE-KMS object's second data key (`None` for the other modes).
+pub(crate) async fn outer_key(
+    kms: Option<&dyn Kms>,
+    crypt: &Crypt,
+    drive: &str,
+    bucket_id: &str,
+) -> Result<Option<DataKey>> {
+    match (crypt.mode, &crypt.outer) {
+        (SseMode::Dsse, Some(sealed)) => {
+            let kms = kms.ok_or(StoreError::NoKms)?;
+            let context = crypt.context(drive, bucket_id).outer();
+            Ok(Some(kms.unseal(sealed, &context).await?))
+        }
+        (SseMode::Dsse, None) | (_, Some(_)) => Err(StoreError::CorruptMetadata),
+        _ => Ok(None),
     }
 }
 
@@ -293,7 +340,7 @@ impl Store {
             let row = Inner::version_row(&conn, &bucket, &key, version_id.as_deref())?;
             match crypt_of(&row)? {
                 None => return Err(StoreError::InvalidRequest(UNENCRYPTED)),
-                Some(crypt) if crypt.mode == SseMode::Customer => {
+                Some(crypt) if matches!(crypt.mode, SseMode::Customer | SseMode::Dsse) => {
                     return Err(StoreError::InvalidRequest(NOT_UPDATABLE));
                 }
                 Some(_) => {}

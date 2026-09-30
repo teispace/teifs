@@ -1,5 +1,6 @@
-//! Encryption on transfers, by key prefix as mc names it: `--enc-s3 PREFIX` and
-//! `--enc-kms PREFIX=KEY` encrypt what's written there, and `--enc-c PREFIX=FILE` (or
+//! Encryption on transfers, by key prefix as mc names it: `--enc-s3 PREFIX`,
+//! `--enc-kms PREFIX=KEY` and `--enc-dsse PREFIX=KEY` (DSSE-KMS, which mc lacks) encrypt
+//! what's written there, and `--enc-c PREFIX=FILE` (or
 //! `TEIFS_ENC_C`) reads and writes objects there with a customer key (SSE-C).
 //!
 //! A customer key never comes from the command line, where other users of the machine
@@ -28,6 +29,8 @@ pub enum Sse {
     S3,
     /// SSE-KMS with this key.
     Kms(String),
+    /// DSSE-KMS with this key.
+    Dsse(String),
     /// SSE-C with this key.
     Customer(CustomerKey),
 }
@@ -95,6 +98,7 @@ impl Sse {
         match sse? {
             Self::S3 => Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             Self::Kms(_) => Some(aws_sdk_s3::types::ServerSideEncryption::AwsKms),
+            Self::Dsse(_) => Some(aws_sdk_s3::types::ServerSideEncryption::AwsKmsDsse),
             Self::Customer(_) => None,
         }
     }
@@ -102,7 +106,7 @@ impl Sse {
     /// The KMS key a write names.
     pub fn kms_key(sse: Option<&Self>) -> Option<String> {
         match sse? {
-            Self::Kms(key) => Some(key.clone()),
+            Self::Kms(key) | Self::Dsse(key) => Some(key.clone()),
             _ => None,
         }
     }
@@ -189,6 +193,10 @@ impl Rules {
             let (prefix, key) = split(pair, "--enc-kms", "KEY")?;
             rules.add(prefix, Sse::Kms(key.to_owned()), &is_alias)?;
         }
+        for pair in &args.dsse {
+            let (prefix, key) = split(pair, "--enc-dsse", "KEY")?;
+            rules.add(prefix, Sse::Dsse(key.to_owned()), &is_alias)?;
+        }
         for pair in &args.customer {
             let (prefix, path) = split(pair, "--enc-c", "FILE")?;
             let bytes = Zeroizing::new(std::fs::read(path).map_err(|e| {
@@ -273,6 +281,7 @@ mod tests {
         EncArgs {
             s3: owned(s3),
             kms: owned(kms),
+            dsse: Vec::new(),
             customer: owned(c),
         }
     }
@@ -331,6 +340,21 @@ mod tests {
         let sse = got.find("s/b/d=1/x");
         assert_eq!(Sse::kms_key(sse.as_deref()).as_deref(), Some("k"));
         assert!(Sse::customer(sse.as_deref()).is_none());
+        let dual = rules(
+            &EncArgs {
+                dsse: vec!["s/b/two/=k2".into()],
+                ..args(&["s/b"], &[], &[])
+            },
+            None,
+        )
+        .unwrap();
+        let sse = dual.find("s/b/two/x");
+        assert_eq!(sse.as_deref(), Some(&Sse::Dsse("k2".into())));
+        assert_eq!(
+            Sse::mode(sse.as_deref()),
+            Some(aws_sdk_s3::types::ServerSideEncryption::AwsKmsDsse)
+        );
+        assert_eq!(Sse::kms_key(sse.as_deref()).as_deref(), Some("k2"));
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub(super) async fn encrypt(action: EncryptAction, aliases: &Aliases) -> Result<
             let (key, target) = set_args(mode, &args, bucket_key)?;
             let remote = Target::parse(target, aliases)?.remote("encrypt")?;
             let blocked = (block_sse_c || allow_sse_c).then_some(block_sse_c);
-            set(&remote, key, bucket_key, blocked).await
+            set(&remote, mode, key, bucket_key, blocked).await
         }
         EncryptAction::Clear { target } => {
             let remote = Target::parse(&target, aliases)?.remote("encrypt")?;
@@ -89,16 +89,22 @@ pub(super) async fn encrypt(action: EncryptAction, aliases: &Aliases) -> Result<
     }
 }
 
-/// `set`'s KMS key (for `sse-kms`) and target, from `[KEY] ALIAS/BUCKET`.
+/// `set`'s KMS key (for `sse-kms` and `dsse-kms`) and target, from `[KEY] ALIAS/BUCKET`.
 fn set_args(
     mode: SseArg,
     args: &[String],
     bucket_key: bool,
 ) -> Result<(Option<&str>, &str), Error> {
     match (mode, args) {
-        (SseArg::SseKms, [key, target]) => Ok((Some(key), target)),
+        (SseArg::DsseKms, _) if bucket_key => Err(Error::usage(
+            "--bucket-key is for SSE-KMS: S3 Bucket Keys don't apply to DSSE-KMS",
+        )),
+        (SseArg::SseKms | SseArg::DsseKms, [key, target]) => Ok((Some(key), target)),
         (SseArg::SseKms, _) => Err(Error::usage(
             "give the KMS key, then the bucket: sse-kms KEY ALIAS/BUCKET",
+        )),
+        (SseArg::DsseKms, _) => Err(Error::usage(
+            "give the KMS key, then the bucket: dsse-kms KEY ALIAS/BUCKET",
         )),
         (SseArg::SseS3, _) if bucket_key => Err(Error::usage(
             "--bucket-key is for SSE-KMS: SSE-S3 keys have no Bucket Key",
@@ -122,21 +128,22 @@ fn key_arn(region: &str, account: &str, key: &str) -> String {
     format!("arn:aws:kms:{region}:{account}:key/{key}")
 }
 
-/// Sets how the bucket encrypts new objects: with the KMS key `key`, or SSE-S3 without
-/// one. `blocked` refuses (`Some(true)`) or allows customer keys; `None` leaves that as
-/// it is.
+/// Sets how the bucket encrypts new objects: as `mode`, with the KMS key `key` for
+/// SSE-KMS and DSSE-KMS. `blocked` refuses (`Some(true)`) or allows customer keys; `None`
+/// leaves that as it is.
 async fn set(
     remote: &Remote,
+    mode: SseArg,
     key: Option<&str>,
     bucket_key: bool,
     blocked: Option<bool>,
 ) -> Result<(), Error> {
     let bucket = remote.bucket()?;
     let name = remote.display("");
-    let algorithm = if key.is_some() {
-        ServerSideEncryption::AwsKms
-    } else {
-        ServerSideEncryption::Aes256
+    let algorithm = match mode {
+        SseArg::SseS3 => ServerSideEncryption::Aes256,
+        SseArg::SseKms => ServerSideEncryption::AwsKms,
+        SseArg::DsseKms => ServerSideEncryption::AwsKmsDsse,
     };
     let by_default = ServerSideEncryptionByDefault::builder()
         .sse_algorithm(algorithm.clone())
@@ -154,7 +161,7 @@ async fn set(
     });
     let rule = ServerSideEncryptionRule::builder()
         .apply_server_side_encryption_by_default(by_default)
-        .set_bucket_key_enabled(key.map(|_| bucket_key))
+        .set_bucket_key_enabled((mode == SseArg::SseKms).then_some(bucket_key))
         .set_blocked_encryption_types(blocked_types)
         .build();
     let config = ServerSideEncryptionConfiguration::builder()
@@ -344,6 +351,12 @@ mod tests {
         assert!(set_args(SseArg::SseKms, &one, false).is_err());
         assert!(set_args(SseArg::SseS3, &kms, false).is_err());
         assert!(set_args(SseArg::SseS3, &one, true).is_err());
+        assert_eq!(
+            set_args(SseArg::DsseKms, &kms, false).unwrap(),
+            (Some("photos"), "t/b")
+        );
+        assert!(set_args(SseArg::DsseKms, &one, false).is_err());
+        assert!(set_args(SseArg::DsseKms, &kms, true).is_err());
     }
 
     #[test]
