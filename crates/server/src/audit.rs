@@ -82,7 +82,7 @@ pub(crate) type Writer = JoinHandle<()>;
 /// Opens every target and starts writing to it.
 pub(crate) fn start(
     targets: &[AuditTarget],
-) -> Result<(Arc<AuditLogs>, Vec<Writer>), (AuditTarget, std::io::Error)> {
+) -> Result<(Arc<AuditLogs>, Vec<Writer>), (String, std::io::Error)> {
     let mut logs = Vec::new();
     let mut writers = Vec::new();
     for target in targets {
@@ -90,11 +90,11 @@ pub(crate) fn start(
         let writer = match target {
             AuditTarget::Webhook(hook) => {
                 let client = teifs_notify::client()
-                    .map_err(|e| (target.clone(), std::io::Error::other(e)))?;
+                    .map_err(|e| (target.to_string(), std::io::Error::other(e)))?;
                 tokio::spawn(deliver(client, hook.clone(), entries))
             }
             AuditTarget::Stdout | AuditTarget::File(_) => {
-                let output = open(target).map_err(|e| (target.clone(), e))?;
+                let output = open(target).map_err(|e| (target.to_string(), e))?;
                 tokio::spawn(write(target.clone(), output, entries))
             }
         };

@@ -163,6 +163,14 @@ followed. The token is read only from the environment, never a flag, so it's not
 process list; one that names its scheme (`Basic dXNlcjpwYXNz`, `Splunk …`) is sent as
 given. `teifs admin config` shows the URL without its user, password or query.
 
+An https collector is verified with the system's certificates, or only a CA's with
+`,ca=PATH` after the URL; `,client_cert=PATH,client_key=PATH` are the certificate and key
+shown to a collector that asks for one (mutual TLS):
+
+```sh
+teifs serve /srv/drive --audit-webhook https://logs.internal/teifs,ca=/etc/teifs/ca.pem,client_cert=/etc/teifs/teifs.pem,client_key=/etc/teifs/teifs.key
+```
+
 ```json
 {"version":"1","deploymentid":"…","time":"2026-09-30T12:00:00.123456789Z","type":"S3",
  "trigger":"incoming","api":{"name":"PutObject","bucket":"photos","object":"a.jpg",
@@ -239,6 +247,10 @@ environment, `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID` (the ID in capitals, `-` as `_`), a
 that names its scheme (`Basic …`) is sent as given. A target's ARN is
 `arn:teifs:sqs::ID:webhook`; MinIO's `arn:minio:sqs::ID:webhook` names it too, so `mc
 event add` works unchanged. `teifs admin config` lists the targets, without secrets.
+An https webhook takes the audit webhook's `ca=PATH`, `client_cert=PATH` and
+`client_key=PATH` after its URL (`orders=https://hooks.internal/s3,ca=/etc/teifs/ca.pem`),
+as MinIO's `client_cert` and `client_key` do; options are taken from the URL's end, so a
+comma in the URL stays in it.
 
 ```sh
 teifs serve --notify-elasticsearch objects=https://es.example:9200,index=objects \
@@ -254,7 +266,9 @@ by each event and removed when the object is (`s3:ObjectRemoved:Delete`,
 one per event. Basic authentication takes `user=NAME` and the password from
 `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID`; an API key comes from
 `TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID`. A rule that starts naming it checks that the
-cluster answers and the index exists, without writing a test document.
+cluster answers and the index exists, without writing a test document. For an https
+cluster, `ca=PATH`, `client_cert=PATH` and `client_key=PATH` work as they do for a
+webhook.
 
 ```sh
 teifs serve --notify-redis objects=redis.internal:6379,key=s3:objects \
@@ -617,5 +631,4 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: Kafka's snappy, lz4 and zstd compression, and client certificates for webhooks
-and Elasticsearch.
+Not yet: Kafka's snappy, lz4 and zstd compression.

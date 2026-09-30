@@ -3,6 +3,7 @@
 
 use std::{fmt, time::Duration};
 
+use rustls::ClientConfig;
 use zeroize::Zeroizing;
 
 /// How long a webhook has to answer.
@@ -16,6 +17,8 @@ pub struct Webhook {
     /// Its `Authorization`: as given if it names a scheme (`Basic …`), else sent as
     /// `Bearer TOKEN`.
     pub token: Option<Zeroizing<String>>,
+    /// Its own client, for TLS of its own (see [`Webhook::with_tls`]).
+    client: Option<reqwest::Client>,
 }
 
 impl Webhook {
@@ -29,7 +32,22 @@ impl Webhook {
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             return Err("give an http or https URL".to_owned());
         }
-        Ok(Self { url, token })
+        Ok(Self {
+            url,
+            token,
+            client: None,
+        })
+    }
+
+    /// Sends over TLS as `tls` says: the server verified with its roots (the system's
+    /// certificates, or a CA's), and its certificate shown to a server that asks for one.
+    ///
+    /// # Errors
+    ///
+    /// When the URL isn't `https`, or `tls` can't be used.
+    pub fn with_tls(mut self, tls: &ClientConfig) -> Result<Self, String> {
+        self.client = Some(https_client(&self.url, tls)?);
+        Ok(self)
     }
 
     /// Its URL without what could be a secret in it: a user and password, or a query.
@@ -54,7 +72,10 @@ impl Webhook {
         content_type: &'static str,
         body: Vec<u8>,
     ) -> Result<(), String> {
-        let mut request = client
+        let mut request = self
+            .client
+            .as_ref()
+            .unwrap_or(client)
             .post(self.url.clone())
             .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(body);
@@ -108,10 +129,27 @@ impl fmt::Debug for Webhook {
 ///
 /// When TLS can't be set up.
 pub fn client() -> Result<reqwest::Client, reqwest::Error> {
+    builder().build()
+}
+
+fn builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// A client like [`client`]'s for the `https` `url`, with `tls`.
+pub(crate) fn https_client(
+    url: &reqwest::Url,
+    tls: &ClientConfig,
+) -> Result<reqwest::Client, String> {
+    if url.scheme() != "https" {
+        return Err("a CA or client certificate is for an https URL".to_owned());
+    }
+    builder()
+        .tls_backend_preconfigured(tls.clone())
         .build()
+        .map_err(|e| format!("its TLS can't be used: {}", described(e)))
 }
 
 /// The pauses between tries of something that failed: half a second, doubling to 30.

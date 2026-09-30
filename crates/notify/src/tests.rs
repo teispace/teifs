@@ -435,6 +435,11 @@ fn test_tls() -> (tokio_rustls::TlsAcceptor, String) {
 /// signed its certificate.
 async fn tls_in_front_of(plain: &str) -> (String, String) {
     let (acceptor, ca_pem) = test_tls();
+    (terminate(acceptor, plain).await, ca_pem)
+}
+
+/// A TLS terminator with `acceptor` in front of `plain`: its `localhost:PORT`.
+async fn terminate(acceptor: tokio_rustls::TlsAcceptor, plain: &str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let plain = plain.to_owned();
@@ -450,7 +455,78 @@ async fn tls_in_front_of(plain: &str) -> (String, String) {
             });
         }
     });
-    (format!("localhost:{port}"), ca_pem)
+    format!("localhost:{port}")
+}
+
+/// Webhooks and Elasticsearch with TLS of their own: the server verified with the
+/// operator's CA, and a client certificate shown to a server that asks for one.
+#[tokio::test]
+async fn webhooks_and_elasticsearch_show_a_client_certificate() {
+    let receiver = Receiver::start(0).await;
+    let plain = receiver.url()["http://".len()..]
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ca = TestCa::new();
+    let address = terminate(ca.acceptor(true), &plain).await;
+    let url = format!("https://{address}/hook");
+    let (cert, key) = ca.client_pem();
+    let identity = Some((cert.as_bytes(), key.as_bytes()));
+    let with_cert = tls_config(Some(ca.pem.as_bytes()), identity).unwrap();
+    let without = tls_config(Some(ca.pem.as_bytes()), None).unwrap();
+    let shared = crate::client().unwrap();
+    let post = |hook: Webhook| async move {
+        hook.post(
+            &crate::client().unwrap(),
+            "application/json",
+            b"{}".to_vec(),
+        )
+        .await
+    };
+
+    let hook = Webhook::new(&url, None).unwrap();
+    post(hook.clone().with_tls(&with_cert).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        post(hook.clone().with_tls(&without).unwrap())
+            .await
+            .is_err(),
+        "no certificate"
+    );
+    assert!(
+        post(hook).await.is_err(),
+        "the system's certificates don't know the CA"
+    );
+    let err = Webhook::new(receiver.url(), None)
+        .unwrap()
+        .with_tls(&with_cert)
+        .unwrap_err();
+    assert!(err.contains("https"), "{err}");
+
+    let es = Elasticsearch::new(&url, "log", Format::Access).unwrap();
+    let bare = es.clone().with_tls(&without).unwrap();
+    assert!(bare.test(&shared).await.is_err(), "no certificate");
+    let es = es.with_tls(&with_cert).unwrap();
+    es.test(&shared).await.unwrap();
+    es.send(&shared, &message("s3:ObjectCreated:Put", "logs/a.txt"))
+        .await
+        .unwrap();
+    let taken: Vec<_> = receiver
+        .posts(3)
+        .await
+        .into_iter()
+        .map(|p| (p.method, p.path))
+        .collect();
+    assert_eq!(
+        taken,
+        [
+            ("POST".to_owned(), "/hook".to_owned()),
+            ("HEAD".to_owned(), "/hook/log".to_owned()),
+            ("POST".to_owned(), "/hook/log/_doc".to_owned()),
+        ]
+    );
 }
 
 /// Redis over TLS: the server is verified with the operator's CA, and one the CA didn't

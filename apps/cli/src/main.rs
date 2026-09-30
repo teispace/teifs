@@ -225,13 +225,16 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "FILE", value_parser = parse_audit_log, env = "TEIFS_AUDIT_LOG")]
     audit_log: Option<AuditTarget>,
     /// Also POST the audit log's entries to this URL, in batches of JSON lines
-    /// (`application/x-ndjson`), each retried until it's taken. The webhook's token, sent
+    /// (`application/x-ndjson`), each retried until it's taken; for an https URL,
+    /// `,ca=PATH` verifies the server with a CA's PEM file, and `,client_cert=PATH` and
+    /// `,client_key=PATH` are shown to a server that asks. The webhook's token, sent
     /// as `Authorization: Bearer TOKEN` (or as given when it names a scheme), is read
     /// only from the environment: `TEIFS_AUDIT_WEBHOOK_TOKEN`.
     #[arg(long, value_name = "URL", value_parser = parse_audit_webhook, env = "TEIFS_AUDIT_WEBHOOK")]
     audit_webhook: Option<Webhook>,
-    /// A webhook buckets' notification rules can send events to, as ID=URL (repeat for
-    /// more; in the environment, separated by spaces). Rules name it by its ARN,
+    /// A webhook buckets' notification rules can send events to, as ID=URL, with
+    /// `ca=PATH`, `client_cert=PATH` and `client_key=PATH` for an https URL, as the audit
+    /// webhook's (repeat for more; in the environment, separated by spaces). Rules name it by its ARN,
     /// `arn:teifs:sqs::ID:webhook`; each event is sent as JSON, retried until it's
     /// taken, and waits on the drive meanwhile. Its token, sent as `Authorization:
     /// Bearer TOKEN` (or as given when it names a scheme), is read only from the
@@ -247,7 +250,8 @@ pub(crate) struct ServeArgs {
     /// An Elasticsearch index buckets' notification rules can send events to, as
     /// ID=URL,index=NAME, with format=namespace (a document per object, replaced
     /// by each event and removed with it: the default) or format=access (a document per
-    /// event), and user=NAME (repeat for more; in the environment, separated by spaces).
+    /// event), user=NAME, and for an https URL `ca=PATH`, `client_cert=PATH` and
+    /// `client_key=PATH` (repeat for more; in the environment, separated by spaces).
     /// Rules name it `arn:teifs:sqs::ID:elasticsearch`; the index is created when
     /// missing. Its password, `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID`, or API key,
     /// `TEIFS_NOTIFY_ELASTICSEARCH_API_KEY_ID`, is read only from the environment.
@@ -793,9 +797,43 @@ fn parse_audit_log(text: &str) -> Result<AuditTarget, String> {
     }
 }
 
-/// An `http` or `https` URL; its token comes from the environment later.
+/// An `http` or `https` URL, with TLS options; its token comes from the environment later.
 fn parse_audit_webhook(text: &str) -> Result<Webhook, String> {
-    Webhook::new(text, None)
+    webhook(text)
+}
+
+/// A webhook, `URL[,ca=PATH][,client_cert=PATH,client_key=PATH]`.
+fn webhook(text: &str) -> Result<Webhook, String> {
+    let (url, options) = url_spec(text, &["ca", "client_cert", "client_key"])?;
+    let hook = Webhook::new(url, None)?;
+    match target_tls(&options)? {
+        Some(tls) => hook.with_tls(&tls),
+        None => Ok(hook),
+    }
+}
+
+/// A URL and the `,NAME=VALUE` options after it, each one of `options`: taken from the
+/// end, so a comma in the URL stays in it.
+fn url_spec<'a>(
+    text: &'a str,
+    options: &[&str],
+) -> Result<(&'a str, BTreeMap<&'a str, &'a str>), String> {
+    let mut url = text;
+    let mut given = BTreeMap::new();
+    while let Some((rest, last)) = url.rsplit_once(',') {
+        let Some((name, value)) = last.split_once('=') else {
+            break;
+        };
+        let name = name.trim();
+        if !options.contains(&name) {
+            break;
+        }
+        if given.insert(name, value.trim()).is_some() {
+            return Err(format!("`{name}` is given twice"));
+        }
+        url = rest;
+    }
+    Ok((url.trim(), given))
 }
 
 /// Where the audit log goes: its file (or standard output) and its webhook, which takes
@@ -805,11 +843,11 @@ fn audit_targets(
     webhook: Option<Webhook>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Vec<AuditTarget> {
-    let webhook = webhook.map(|hook| Webhook {
-        token: env("TEIFS_AUDIT_WEBHOOK_TOKEN")
+    let webhook = webhook.map(|mut hook| {
+        hook.token = env("TEIFS_AUDIT_WEBHOOK_TOKEN")
             .filter(|t| !t.trim().is_empty())
-            .map(Zeroizing::new),
-        ..hook
+            .map(Zeroizing::new);
+        hook
     });
     log.into_iter()
         .chain(webhook.map(AuditTarget::Webhook))
@@ -852,13 +890,17 @@ fn parse_notify_webhook(text: &str) -> Result<TargetConfig, String> {
     let (id, url) = text
         .split_once('=')
         .ok_or_else(|| "give the webhook as ID=URL".to_owned())?;
-    TargetConfig::new(id.trim(), TargetKind::Webhook(Webhook::new(url, None)?))
+    TargetConfig::new(id.trim(), TargetKind::Webhook(webhook(url)?))
 }
 
 /// An Elasticsearch index, `ID=URL,index=NAME[,format=F][,user=U]`; its password or API
 /// key comes from the environment later.
 fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
-    let (id, url, options) = target_spec(text, "ID=URL,index=NAME", &["index", "format", "user"])?;
+    let (id, url, options) = target_spec(
+        text,
+        "ID=URL,index=NAME",
+        &["index", "format", "user", "ca", "client_cert", "client_key"],
+    )?;
     let index = options
         .get("index")
         .ok_or_else(|| "name the index: ID=URL,index=NAME".to_owned())?;
@@ -866,6 +908,9 @@ fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
         .get("format")
         .map_or(Ok(Format::Namespace), |f| Format::parse(f))?;
     let mut es = Elasticsearch::new(url, index, format)?;
+    if let Some(tls) = target_tls(&options)? {
+        es = es.with_tls(&tls)?;
+    }
     es.username = options.get("user").map(|&u| u.to_owned());
     TargetConfig::new(id, TargetKind::Elasticsearch(es))
 }
@@ -1920,6 +1965,59 @@ mod tests {
         };
         assert!(sent.token.is_none());
         assert!(audit_targets(None, None, env("t0ken")).is_empty());
+    }
+
+    /// A CA's PEM file, and a client certificate's and key's, in `dir`.
+    fn tls_files(dir: &std::path::Path) -> [String; 3] {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = params.self_signed(&ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let issuer = rcgen::Issuer::from_params(&params, &ca_key);
+        let cert = rcgen::CertificateParams::new(vec!["teifs".to_owned()])
+            .unwrap()
+            .signed_by(&key, &issuer)
+            .unwrap();
+        let files = [
+            ("ca.pem", ca.pem()),
+            ("client.pem", cert.pem()),
+            ("client.key", key.serialize_pem()),
+        ];
+        files.map(|(name, pem)| {
+            let path = dir.join(name);
+            std::fs::write(&path, pem).unwrap();
+            path.display().to_string()
+        })
+    }
+
+    #[test]
+    fn webhooks_and_elasticsearch_take_a_ca_and_a_client_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let [ca, cert, key] = tls_files(dir.path());
+        let tls = format!("ca={ca},client_cert={cert},client_key={key}");
+        // A comma in the URL stays in it; the options are taken from the end.
+        let hook = parse_audit_webhook(&format!("https://logs.example/in?a=1,2,{tls}")).unwrap();
+        assert_eq!(hook.url.as_str(), "https://logs.example/in?a=1,2");
+        let plain = parse_audit_webhook("https://logs.example/in?a=1,b=2").unwrap();
+        assert_eq!(plain.url.as_str(), "https://logs.example/in?a=1,b=2");
+        parse_notify_webhook(&format!("orders=https://a.example/in,ca={ca}")).unwrap();
+        parse_notify_elasticsearch(&format!("log=https://es.example,index=events,{tls}")).unwrap();
+        for bad in [
+            format!("x=http://a.example/in,ca={ca}"),
+            format!("x=https://a.example/in,client_cert={cert}"),
+            format!("x=https://a.example/in,ca={ca},ca={ca}"),
+            format!(
+                "x=https://a.example/in,ca={}",
+                dir.path().join("none").display()
+            ),
+            format!("x=https://a.example/in,ca={key}"),
+        ] {
+            assert!(parse_notify_webhook(&bad).is_err(), "{bad}");
+        }
+        assert!(
+            parse_notify_elasticsearch(&format!("x=http://es.example,index=e,ca={ca}")).is_err()
+        );
     }
 
     #[test]

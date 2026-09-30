@@ -166,8 +166,8 @@ pub enum ServerError {
     /// The audit log couldn't be opened.
     #[error("can't open the audit log {target}: {source}")]
     Audit {
-        /// Where it goes.
-        target: AuditTarget,
+        /// Where it goes, as shown.
+        target: String,
         /// Why.
         source: io::Error,
     },

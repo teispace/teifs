@@ -241,7 +241,11 @@ created readable only by its owner; a test sends each of them and looks for none
 file (`crates/server/tests/audit.rs`). An audit webhook's token is read only from the
 environment, is marked sensitive in the request that carries it, and is never shown:
 the webhook's `Debug` and `teifs admin config` show its URL without the user, password,
-query or fragment. Redirects aren't followed, so entries go nowhere but the URL given. Notification
+query or fragment. Redirects aren't followed, so entries go nowhere but the URL given. A
+webhook or Elasticsearch target given `ca=PATH` verifies its https server with only that
+CA, and one given `client_cert=PATH` and `client_key=PATH` shows that certificate to a
+server that asks, each with a client of its own; an http URL with either is refused.
+The files are read when the server starts. Notification
 targets' secrets are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`,
 `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`,
 `TEIFS_NOTIFY_NSQ_SECRET_ID`, `TEIFS_NOTIFY_NATS_PASSWORD_ID` or `_TOKEN_ID`,

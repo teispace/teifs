@@ -14,11 +14,15 @@ use std::{
 
 use base64::Engine as _;
 use reqwest::{Method, StatusCode, Url, header};
+use rustls::ClientConfig;
 use sha2::{Digest, Sha256};
 use teifs_types::notify::EventMessage;
 use zeroize::Zeroizing;
 
-use crate::{Format, webhook::described};
+use crate::{
+    Format,
+    webhook::{described, https_client},
+};
 
 /// An index events are written to.
 #[derive(Clone)]
@@ -37,6 +41,8 @@ pub struct Elasticsearch {
     pub api_key: Option<Zeroizing<String>>,
     /// Whether the index is known to exist.
     ready: Arc<AtomicBool>,
+    /// Its own client, for TLS of its own (see [`Elasticsearch::with_tls`]).
+    client: Option<reqwest::Client>,
 }
 
 impl Elasticsearch {
@@ -69,7 +75,19 @@ impl Elasticsearch {
             password: None,
             api_key: None,
             ready: Arc::new(AtomicBool::new(false)),
+            client: None,
         })
+    }
+
+    /// Connects over TLS as `tls` says: the cluster verified with its roots (the system's
+    /// certificates, or a CA's), and its certificate shown to a cluster that asks for one.
+    ///
+    /// # Errors
+    ///
+    /// When the URL isn't `https`, or `tls` can't be used.
+    pub fn with_tls(mut self, tls: &ClientConfig) -> Result<Self, String> {
+        self.client = Some(https_client(&self.url, tls)?);
+        Ok(self)
     }
 
     /// Its URL and index.
@@ -170,7 +188,7 @@ impl Elasticsearch {
         if let Ok(mut segments) = url.path_segments_mut() {
             segments.pop_if_empty().push(&self.index).extend(path);
         }
-        let request = client.request(method, url);
+        let request = self.client.as_ref().unwrap_or(client).request(method, url);
         if let Some(key) = &self.api_key {
             let mut value = header::HeaderValue::from_str(&format!("ApiKey {}", key.as_str()))
                 .unwrap_or_else(|_| header::HeaderValue::from_static(""));
