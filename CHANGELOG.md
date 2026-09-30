@@ -156,6 +156,10 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- MQTT notification targets, as MinIO's: `teifs serve --notify-mqtt
+  ID=HOST:PORT,topic=NAME[,qos=0|1|2][,user=NAME][,keepalive=SECONDS]` publishes each
+  event over MQTT 3.1.1, acknowledged as its quality of service asks (1 by default), with
+  the password from the environment and the same TLS options as Redis.
 - NATS notification targets, as MinIO's: `teifs serve --notify-nats
   ID=HOST:PORT,subject=NAME` publishes each event to the subject, or with
   `jetstream=true` to a JetStream stream that acknowledges it (duplicates dropped by
@@ -163,7 +167,7 @@ behaviour; the on-disk format is always upgraded automatically.
   environment), an nkey (`nkey=PATH`) or a `.creds` file (`creds=PATH`), over TLS with
   `tls=true` or `ca=PATH` (`tls_first=true` for `handshake_first` servers).
   Redis and NATS targets show a client certificate to a server that asks for one
-  (`client_cert=PATH,client_key=PATH`). Redis, NSQ and NATS targets keep a connection, and make one the server closed while
+  (`client_cert=PATH,client_key=PATH`). Redis, NSQ, NATS and MQTT targets keep a connection, and make one the server closed while
   idle again at once.
 - NSQ notification targets, as MinIO's: `teifs serve --notify-nsq
   ID=HOST:PORT,topic=NAME` publishes each event to the topic over nsqd's TCP protocol. `teifs event add|ls|rm`

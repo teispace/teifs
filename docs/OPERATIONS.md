@@ -297,9 +297,22 @@ or `ca=PATH` connects over TLS (a server that requires TLS asks for it), and
 `handshake_first`. Starting to name it checks that the server takes the credentials and,
 for JetStream, that a stream takes the subject, without publishing.
 
-Redis, NSQ and NATS targets each keep one connection. One the server closed while it
-was idle (nsqd does after missed heartbeats, NATS after missed pings, Redis with a
-`timeout` set) is made again at once, rather than failing the event and waiting to
+```sh
+teifs serve --notify-mqtt iot=broker.internal:8883,topic=s3/events,user=teifs,tls=true
+export TEIFS_NOTIFY_MQTT_PASSWORD_IOT=…
+```
+
+An MQTT target, `arn:teifs:sqs::ID:mqtt`, publishes each event to a topic over MQTT
+3.1.1, as a webhook is sent it, with a clean session and a random client id. `qos=1`
+(the default) waits for the broker's `PUBACK`, `qos=2` for its `PUBREC` and `PUBCOMP`,
+and `qos=0` for the answer to a ping sent after it; messages aren't retained.
+`keepalive=SECONDS` (60 by default) is how long the broker waits for a packet before it
+drops the connection. TLS takes the same options as Redis's. Starting to name it checks
+that the broker takes the connection and the user and password, without publishing.
+
+Redis, NSQ, NATS and MQTT targets each keep one connection. One the server closed while it
+was idle (nsqd does after missed heartbeats, NATS after missed pings, an MQTT broker
+after its keep alive, Redis with a `timeout` set) is made again at once, rather than failing the event and waiting to
 retry it.
 
 ### Rules
@@ -414,5 +427,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (Kafka, AMQP, MQTT, databases), NSQ over TLS, and client
+Not yet: other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
 certificates for webhooks and Elasticsearch.

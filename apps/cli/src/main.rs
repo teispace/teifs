@@ -26,7 +26,7 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
-    KmsLocation, Limits, Nats, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind,
+    KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind,
     TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
@@ -303,6 +303,20 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_NATS"
     )]
     notify_nats: Vec<TargetConfig>,
+    /// An MQTT topic buckets' notification rules can send events to, as
+    /// ID=HOST:PORT,topic=NAME, the broker's address, with qos=0, 1 (the default) or 2,
+    /// user=NAME, keepalive=SECONDS, and tls=true or ca=PATH with `client_cert=PATH` and
+    /// `client_key=PATH` (repeat for more; in the environment, separated by spaces).
+    /// Rules name it `arn:teifs:sqs::ID:mqtt`. Its password,
+    /// `TEIFS_NOTIFY_MQTT_PASSWORD_ID`, is read only from the environment.
+    #[arg(
+        long = "notify-mqtt",
+        value_name = "ID=HOST:PORT,topic=NAME",
+        value_parser = parse_notify_mqtt,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_MQTT"
+    )]
+    notify_mqtt: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -861,6 +875,41 @@ fn parse_notify_nats(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Nats(nats))
 }
 
+/// An MQTT topic, `ID=HOST:PORT,topic=NAME[,qos=N][,user=U][,keepalive=SECONDS]` and
+/// TLS options; its password comes from the environment later.
+fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(
+        text,
+        "ID=HOST:PORT,topic=NAME",
+        &[
+            "topic",
+            "qos",
+            "user",
+            "keepalive",
+            "tls",
+            "ca",
+            "client_cert",
+            "client_key",
+        ],
+    )?;
+    let topic = options
+        .get("topic")
+        .ok_or_else(|| "name the topic: ID=HOST:PORT,topic=NAME".to_owned())?;
+    let qos = options.get("qos").map_or(Ok(1), |q| {
+        q.parse::<u8>()
+            .map_err(|_| format!("qos is 0, 1 or 2, not `{q}`"))
+    })?;
+    let mut mqtt = Mqtt::new(address, topic, qos)?;
+    mqtt.user = options.get("user").map(|&u| u.to_owned());
+    if let Some(seconds) = options.get("keepalive") {
+        mqtt.keep_alive = seconds
+            .parse()
+            .map_err(|_| format!("keepalive is seconds up to 65535, not `{seconds}`"))?;
+    }
+    mqtt.tls = target_tls(&options)?;
+    TargetConfig::new(id, TargetKind::Mqtt(mqtt))
+}
+
 /// The notification targets, each with its secrets from the environment
 /// (`TEIFS_NOTIFY_KIND_SECRET_ID`, the ID in capitals and `-` as `_`).
 fn notify_targets(
@@ -899,6 +948,15 @@ fn notify_targets(
                 }
             }
             TargetKind::Nsq(_) => {}
+            TargetKind::Mqtt(mqtt) => {
+                mqtt.password = secret("PASSWORD");
+                if mqtt.password.is_some() && mqtt.user.is_none() {
+                    return Err(format!(
+                        "the MQTT target `{}` has a password: give its user=NAME",
+                        arn.id
+                    ));
+                }
+            }
             TargetKind::Nats(nats) => {
                 nats.password = secret("PASSWORD");
                 nats.token = secret("TOKEN");
@@ -994,7 +1052,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_elasticsearch)
                 .chain(args.notify_redis)
                 .chain(args.notify_nsq)
-                .chain(args.notify_nats),
+                .chain(args.notify_nats)
+                .chain(args.notify_mqtt),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1537,6 +1596,49 @@ mod tests {
         let key_and_token = with(&format!("nkey={}", seed_file.display())).unwrap();
         let token = |name: &str| (name == "TEIFS_NOTIFY_NATS_TOKEN_K").then(|| "tk".into());
         assert!(notify_targets(vec![key_and_token], token).is_err());
+    }
+
+    #[test]
+    fn mqtt_targets_take_options_and_their_password_from_the_environment() {
+        let mqtt_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Mqtt(mqtt) => mqtt.clone(),
+            _ => panic!("not MQTT"),
+        };
+        let bus = parse_notify_mqtt(
+            "bus=broker.local:8883,topic=s3/events,qos=2,user=teifs,keepalive=30,tls=true",
+        )
+        .unwrap();
+        assert_eq!(bus.arn().to_string(), "arn:teifs:sqs::bus:mqtt");
+        let env = |name: &str| (name == "TEIFS_NOTIFY_MQTT_PASSWORD_BUS").then(|| "pw".into());
+        let targets = notify_targets(vec![bus], env).unwrap();
+        let mqtt = mqtt_of(&targets[0]);
+        assert_eq!(
+            (
+                mqtt.qos,
+                mqtt.keep_alive,
+                mqtt.user.as_deref(),
+                mqtt.tls.is_some()
+            ),
+            (2, 30, Some("teifs"), true)
+        );
+        assert_eq!(mqtt.password.as_deref().map(String::as_str), Some("pw"));
+        let plain = mqtt_of(&parse_notify_mqtt("p=broker.local:1883,topic=t").unwrap());
+        assert_eq!((plain.qos, plain.keep_alive), (1, 60), "the defaults");
+        for bad in [
+            "x=broker.local:1883",
+            "x=broker.local,topic=t",
+            "x=broker.local:1883,topic=a/#",
+            "x=broker.local:1883,topic=t,qos=3",
+            "x=broker.local:1883,topic=t,qos=one",
+            "x=broker.local:1883,topic=t,keepalive=70000",
+            "x=broker.local:1883,topic=t,subject=s",
+        ] {
+            assert!(parse_notify_mqtt(bad).is_err(), "{bad}");
+        }
+        // A password needs its user.
+        let userless = parse_notify_mqtt("u=broker.local:1883,topic=t").unwrap();
+        let env = |name: &str| (name == "TEIFS_NOTIFY_MQTT_PASSWORD_U").then(|| "pw".into());
+        assert!(notify_targets(vec![userless], env).is_err());
     }
 
     #[test]

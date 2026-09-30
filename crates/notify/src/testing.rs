@@ -1,6 +1,6 @@
 //! Targets on this machine, for tests (the `testing` feature): a webhook receiver that
 //! takes requests (`POST`s, and the others an Elasticsearch target makes), or fails as
-//! many as it's told to first, and Redis, NSQ and NATS servers.
+//! many as it's told to first, and Redis, NSQ, NATS and MQTT servers.
 
 use std::{
     convert::Infallible,
@@ -748,4 +748,221 @@ pub fn creds() -> String {
          -----BEGIN USER NKEY SEED-----\n{NKEY_SEED}\n------END USER NKEY SEED------\n\n\
          *************************************************************\n"
     )
+}
+
+/// A message an [`MqttServer`] took.
+#[derive(Debug, Clone)]
+pub struct MqttMessage {
+    /// Its topic.
+    pub topic: String,
+    /// Its quality of service.
+    pub qos: u8,
+    /// Its body.
+    pub body: String,
+}
+
+/// A client's `CONNECT`, as an [`MqttServer`] read it.
+#[derive(Debug, Clone)]
+pub struct MqttConnect {
+    /// Its client id.
+    pub client_id: String,
+    /// Whether it asked for a clean session.
+    pub clean: bool,
+    /// Its keep alive, in seconds.
+    pub keep_alive: u16,
+    /// Its user.
+    pub user: Option<String>,
+}
+
+/// An MQTT 3.1.1 broker that takes a user and password, if set up with one, and keeps
+/// what's published, acknowledging each as its quality of service asks.
+pub struct MqttServer {
+    address: String,
+    published: Arc<Mutex<Vec<MqttMessage>>>,
+    connects: Arc<Mutex<Vec<MqttConnect>>>,
+    denied: Arc<Mutex<Vec<String>>>,
+}
+
+impl MqttServer {
+    /// Starts one that wants `login` (user, password), if any.
+    ///
+    /// # Panics
+    ///
+    /// When it can't listen.
+    pub async fn start(login: Option<(&str, &str)>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let server = Self {
+            address: listener.local_addr().expect("a bound address").to_string(),
+            published: Arc::new(Mutex::new(Vec::new())),
+            connects: Arc::new(Mutex::new(Vec::new())),
+            denied: Arc::new(Mutex::new(Vec::new())),
+        };
+        let login = login.map(|(u, p)| (u.to_owned(), p.to_owned()));
+        let (published, connects, denied) = (
+            Arc::clone(&server.published),
+            Arc::clone(&server.connects),
+            Arc::clone(&server.denied),
+        );
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (published, connects, denied, login) = (
+                    Arc::clone(&published),
+                    Arc::clone(&connects),
+                    Arc::clone(&denied),
+                    login.clone(),
+                );
+                tokio::spawn(async move {
+                    let _ = mqtt_serve(stream, login, &published, &connects, &denied).await;
+                });
+            }
+        });
+        server
+    }
+
+    /// Closes the connection of a client that publishes to `topic`, without taking it,
+    /// as a broker does a publish it doesn't allow.
+    pub fn deny(&self, topic: &str) {
+        self.denied
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(topic.to_owned());
+    }
+
+    /// Its `HOST:PORT`.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The `CONNECT`s taken.
+    #[must_use]
+    pub fn connects(&self) -> Vec<MqttConnect> {
+        self.connects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What was published, once there are at least `count`.
+    ///
+    /// # Panics
+    ///
+    /// When there aren't within ten seconds.
+    pub async fn published(&self, count: usize) -> Vec<MqttMessage> {
+        for _ in 0..500 {
+            let taken = self
+                .published
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if taken.len() >= count {
+                return taken;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the MQTT broker never took {count} messages");
+    }
+}
+
+async fn mqtt_serve(
+    stream: tokio::net::TcpStream,
+    login: Option<(String, String)>,
+    published: &Mutex<Vec<MqttMessage>>,
+    connects: &Mutex<Vec<MqttConnect>>,
+    denied: &Mutex<Vec<String>>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    use crate::mqtt::{packet, read_packet};
+    fn string(body: &[u8], at: &mut usize) -> Option<Vec<u8>> {
+        let size = usize::from(u16::from_be_bytes([*body.get(*at)?, *body.get(*at + 1)?]));
+        let out = body.get(*at + 2..*at + 2 + size)?.to_vec();
+        *at += 2 + size;
+        Some(out)
+    }
+    let mut stream = tokio::io::BufReader::new(stream);
+    let bad = || "a bad packet".to_owned();
+    let (first, body) = read_packet(&mut stream, 1 << 20).await?;
+    if first != packet::CONNECT << 4 || body.get(..7) != Some(b"\0\x04MQTT\x04") {
+        return Err(bad());
+    }
+    let flags = body[7];
+    let keep_alive = u16::from_be_bytes([body[8], body[9]]);
+    let mut at = 10;
+    let client_id = String::from_utf8_lossy(&string(&body, &mut at).ok_or_else(bad)?).into_owned();
+    let user = (flags & 0x80 != 0)
+        .then(|| string(&body, &mut at).map(|u| String::from_utf8_lossy(&u).into_owned()))
+        .flatten();
+    let password = (flags & 0x40 != 0)
+        .then(|| string(&body, &mut at).map(|p| String::from_utf8_lossy(&p).into_owned()))
+        .flatten();
+    connects
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(MqttConnect {
+            client_id,
+            clean: flags & 0x02 != 0,
+            keep_alive,
+            user: user.clone(),
+        });
+    let allowed =
+        login.is_none_or(|(u, p)| user.as_ref() == Some(&u) && password.as_ref() == Some(&p));
+    let code = if allowed { 0 } else { 4 };
+    let io = |e: std::io::Error| e.to_string();
+    stream
+        .get_mut()
+        .write_all(&[packet::CONNACK << 4, 2, 0, code])
+        .await
+        .map_err(io)?;
+    if !allowed {
+        return Ok(());
+    }
+    loop {
+        let (first, body) = read_packet(&mut stream, 1 << 20).await?;
+        let reply: Vec<u8> = match first >> 4 {
+            packet::PUBLISH => {
+                let qos = (first >> 1) & 3;
+                let mut at = 0;
+                let topic =
+                    String::from_utf8_lossy(&string(&body, &mut at).ok_or_else(bad)?).into_owned();
+                if denied
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&topic)
+                {
+                    return Ok(());
+                }
+                let id = if qos > 0 {
+                    let id = body.get(at..at + 2).ok_or_else(bad)?.to_vec();
+                    at += 2;
+                    id
+                } else {
+                    Vec::new()
+                };
+                published
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(MqttMessage {
+                        topic,
+                        qos,
+                        body: String::from_utf8_lossy(&body[at..]).into_owned(),
+                    });
+                match qos {
+                    0 => Vec::new(),
+                    1 => [&[packet::PUBACK << 4, 2][..], &id].concat(),
+                    _ => [&[packet::PUBREC << 4, 2][..], &id].concat(),
+                }
+            }
+            packet::PUBREL if first & 0x0f == 0b0010 => {
+                [&[packet::PUBCOMP << 4, 2][..], &body].concat()
+            }
+            packet::PINGREQ => vec![packet::PINGRESP << 4, 0],
+            _ => return Err(bad()),
+        };
+        if !reply.is_empty() {
+            stream.get_mut().write_all(&reply).await.map_err(io)?;
+        }
+    }
 }

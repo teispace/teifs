@@ -696,3 +696,80 @@ async fn targets_show_their_client_certificate() {
         assert!(tls_config(None, identity).is_err(), "{chain:.20} {key:.20}");
     }
 }
+
+/// MQTT targets: each event published to the topic with its quality of service and
+/// acknowledged as that asks, with a clean session and the user and password; over TLS.
+#[tokio::test]
+async fn mqtt_publishes_with_each_quality_of_service() {
+    use crate::testing::MqttServer;
+    let server = MqttServer::start(Some(("teifs", "pw"))).await;
+    let mut targets = Vec::new();
+    for qos in 0..=2 {
+        let mut mqtt = Mqtt::new(server.address(), &format!("s3/events/{qos}"), qos).unwrap();
+        mqtt.user = Some("teifs".into());
+        mqtt.password = Some(Zeroizing::new("pw".into()));
+        targets.push(TargetConfig::new(&format!("q{qos}"), TargetKind::Mqtt(mqtt)).unwrap());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), targets).unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    for qos in 0..=2 {
+        let arn = TargetArn::parse(&format!("arn:teifs:sqs::q{qos}:mqtt")).unwrap();
+        notifier.send_now(&arn, b"test".to_vec()).await.unwrap();
+        notifier
+            .queue(vec![(arn.clone(), put.clone()), (arn, put.clone())])
+            .await
+            .unwrap();
+    }
+    let mut published = server.published(6).await;
+    assert_eq!(published.len(), 6, "the tests publish nothing");
+    published.sort_by_key(|m| m.qos);
+    for (i, message) in published.iter().enumerate() {
+        let qos = u8::try_from(i / 2).unwrap();
+        assert_eq!(message.qos, qos);
+        assert_eq!(message.topic, format!("s3/events/{qos}"));
+        assert_eq!(message.body.as_bytes(), put);
+    }
+    let connects = server.connects();
+    assert!(connects.iter().all(|c| c.clean
+        && c.keep_alive == crate::mqtt::KEEP_ALIVE
+        && c.user.as_deref() == Some("teifs")
+        && c.client_id.starts_with("teifs")));
+    notifier.stop().await;
+
+    // A publish the broker doesn't take fails, whatever its quality of service.
+    server.deny("s3/denied");
+    for qos in 0..=2 {
+        let mut denied = Mqtt::new(server.address(), "s3/denied", qos).unwrap();
+        denied.user = Some("teifs".into());
+        denied.password = Some(Zeroizing::new("pw".into()));
+        denied.test().await.unwrap();
+        assert!(denied.send(b"{}").await.is_err(), "QoS {qos}");
+    }
+
+    let mut wrong = Mqtt::new(server.address(), "t", 1).unwrap();
+    wrong.user = Some("teifs".into());
+    wrong.password = Some(Zeroizing::new("nope".into()));
+    assert!(
+        wrong
+            .test()
+            .await
+            .unwrap_err()
+            .contains("refused the user or password")
+    );
+
+    let (address, ca_pem) = tls_in_front_of(server.address()).await;
+    let mut secure = Mqtt::new(&address, "s3/tls", 1).unwrap();
+    secure.user = Some("teifs".into());
+    secure.password = Some(Zeroizing::new("pw".into()));
+    secure.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert!(secure.shown().starts_with("mqtts://"));
+    secure.send(b"{}").await.unwrap();
+    assert!(
+        server
+            .published(7)
+            .await
+            .iter()
+            .any(|m| m.topic == "s3/tls")
+    );
+}

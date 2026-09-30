@@ -31,7 +31,8 @@ pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
 use teifs_notify::Notifier;
 pub use teifs_notify::{
-    Elasticsearch, Format, Nats, Nsq, Redis, TargetConfig, TargetKind, UserKey, Webhook, tls_config,
+    Elasticsearch, Format, Mqtt, Nats, Nsq, Redis, TargetConfig, TargetKind, UserKey, Webhook,
+    tls_config,
 };
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
