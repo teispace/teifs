@@ -162,7 +162,8 @@ behaviour; the on-disk format is always upgraded automatically.
   `Nats-Msg-Id`). It signs in with a user and password, a token (both from the
   environment), an nkey (`nkey=PATH`) or a `.creds` file (`creds=PATH`), over TLS with
   `tls=true` or `ca=PATH` (`tls_first=true` for `handshake_first` servers).
-  Redis, NSQ and NATS targets keep a connection, and make one the server closed while
+  Redis and NATS targets show a client certificate to a server that asks for one
+  (`client_cert=PATH,client_key=PATH`). Redis, NSQ and NATS targets keep a connection, and make one the server closed while
   idle again at once.
 - NSQ notification targets, as MinIO's: `teifs serve --notify-nsq
   ID=HOST:PORT,topic=NAME` publishes each event to the topic over nsqd's TCP protocol. `teifs event add|ls|rm`

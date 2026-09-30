@@ -271,7 +271,9 @@ already holds another type is refused. Starting to name it checks that the serve
 answers, takes the password and has a key of the right type, without writing to it.
 `tls=true` reaches it over TLS, the server verified with the system's certificates, and
 `ca=PATH` with a CA's PEM file instead (a managed Redis's or your own); a file with no
-certificate stops the server from starting.
+certificate stops the server from starting. For a server that wants a client
+certificate, `client_cert=PATH` and `client_key=PATH` give the PEM chain and key TeiFS
+shows it (NATS targets take them too).
 
 `--notify-nsq queue=nsqd.internal:4150,topic=s3-events` publishes each event to an NSQ
 topic, as a webhook is sent it, over nsqd's TCP protocol; rules name it
@@ -413,4 +415,4 @@ reads too slowly skips events rather than slow requests down, and every watch en
 the server stops.
 
 Not yet: other kinds of targets (Kafka, AMQP, MQTT, databases), NSQ over TLS, and client
-certificates for TLS targets.
+certificates for webhooks and Elasticsearch.

@@ -305,39 +305,84 @@ async fn redis_keeps_a_field_per_object_or_an_entry_per_event() {
     assert!(bad.test().await.unwrap_err().contains("WRONGPASS"));
 }
 
+/// A certificate authority for tests: servers for `localhost` and clients it signs.
+struct TestCa {
+    params: rcgen::CertificateParams,
+    key: rcgen::KeyPair,
+    pem: String,
+}
+
+impl TestCa {
+    fn new() -> Self {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "test CA");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let key = KeyPair::generate().unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        Self { params, key, pem }
+    }
+
+    /// A certificate it signs for `names` (a client's when `client`), and its key.
+    fn issue(&self, names: &[&str], client: bool) -> (rcgen::Certificate, rcgen::KeyPair) {
+        let mut params =
+            rcgen::CertificateParams::new(names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>())
+                .unwrap();
+        if client {
+            params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        }
+        let key = rcgen::KeyPair::generate().unwrap();
+        let issuer = rcgen::Issuer::from_params(&self.params, &self.key);
+        (params.signed_by(&key, &issuer).unwrap(), key)
+    }
+
+    /// A client's certificate and key, as PEM files hold them.
+    fn client_pem(&self) -> (String, String) {
+        let (cert, key) = self.issue(&["teifs"], true);
+        (cert.pem(), key.serialize_pem())
+    }
+
+    /// A TLS acceptor for `localhost`; with `clients`, it wants a certificate this CA
+    /// signed from each client.
+    fn acceptor(&self, clients: bool) -> tokio_rustls::TlsAcceptor {
+        use rustls::pki_types::{
+            CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject,
+        };
+        let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let (cert, key) = self.issue(&["localhost"], false);
+        let builder = rustls::ServerConfig::builder_with_provider(std::sync::Arc::clone(&provider))
+            .with_safe_default_protocol_versions()
+            .unwrap();
+        let builder = if clients {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(self.pem.as_bytes()).unwrap())
+                .unwrap();
+            let verifier =
+                rustls::server::WebPkiClientVerifier::builder_with_provider(roots.into(), provider)
+                    .build()
+                    .unwrap();
+            builder.with_client_cert_verifier(verifier)
+        } else {
+            builder.with_no_client_auth()
+        };
+        let config = builder
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
+    }
+}
+
 /// A TLS acceptor for `localhost`, and the PEM of the CA that signed its certificate.
 fn test_tls() -> (tokio_rustls::TlsAcceptor, String) {
-    use rcgen::{
-        BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
-    };
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-    ca.distinguished_name.push(DnType::CommonName, "test CA");
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-    let ca_key = KeyPair::generate().unwrap();
-    let ca_pem = ca.self_signed(&ca_key).unwrap().pem();
-    let key = KeyPair::generate().unwrap();
-    let issuer = Issuer::from_params(&ca, &ca_key);
-    let cert = CertificateParams::new(vec!["localhost".to_owned()])
-        .unwrap()
-        .signed_by(&key, &issuer)
-        .unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![cert.der().clone()],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-    )
-    .unwrap();
-    (
-        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
-        ca_pem,
-    )
+    let ca = TestCa::new();
+    (ca.acceptor(false), ca.pem)
 }
 
 /// A TLS terminator for `localhost` in front of `plain`, and the PEM of the CA that
@@ -370,7 +415,7 @@ async fn redis_is_reached_over_tls() {
     let server = RedisServer::start("none", None).await;
     let (address, ca_pem) = tls_in_front_of(server.address()).await;
     let mut redis = Redis::new(&address, "objects", Format::Namespace).unwrap();
-    redis.tls = Some(tls_config(Some(ca_pem.as_bytes())).unwrap());
+    redis.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
     assert!(redis.shown().starts_with("rediss://"), "{}", redis.shown());
     redis.test().await.unwrap();
     assert!(
@@ -381,12 +426,12 @@ async fn redis_is_reached_over_tls() {
     );
 
     // The system's trust store doesn't know the test CA.
-    redis.tls = Some(tls_config(None).unwrap());
+    redis.tls = Some(tls_config(None, None).unwrap());
     let err = redis.test().await.unwrap_err();
     assert!(err.contains("TLS failed"), "{err}");
     // Nor does the plain server speak TLS.
     let mut plain = Redis::new(server.address(), "objects", Format::Namespace).unwrap();
-    plain.tls = Some(tls_config(Some(ca_pem.as_bytes())).unwrap());
+    plain.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
     assert!(plain.test().await.is_err());
 }
 
@@ -590,7 +635,7 @@ async fn nats_signs_its_nonce_with_nkeys() {
 async fn nats_is_reached_over_tls() {
     use crate::testing::{NatsServer, NatsSetup};
     let (acceptor, ca_pem) = test_tls();
-    let tls = tls_config(Some(ca_pem.as_bytes())).unwrap();
+    let tls = tls_config(Some(ca_pem.as_bytes()), None).unwrap();
     for first in [false, true] {
         let server = NatsServer::start(NatsSetup {
             tls: Some((acceptor.clone(), first)),
@@ -610,5 +655,44 @@ async fn nats_is_reached_over_tls() {
         nats.send(b"{}").await.unwrap();
         assert_eq!(server.published(1).await[0].body, "{}");
         assert_eq!(server.connects()[0]["tls_required"], true);
+    }
+}
+
+/// Client certificates: a server that wants one gets the certificate and key given,
+/// and refuses a client without one.
+#[tokio::test]
+async fn targets_show_their_client_certificate() {
+    use crate::testing::{NatsServer, NatsSetup};
+    let ca = TestCa::new();
+    let server = NatsServer::start(NatsSetup {
+        tls: Some((ca.acceptor(true), false)),
+        ..NatsSetup::default()
+    })
+    .await;
+    let port = server.address().rsplit_once(':').unwrap().1;
+    let mut nats = Nats::new(&format!("localhost:{port}"), "s3").unwrap();
+    nats.tls = Some(tls_config(Some(ca.pem.as_bytes()), None).unwrap());
+    assert!(nats.test().await.is_err(), "no client certificate");
+    let (cert, key) = ca.client_pem();
+    nats.tls = Some(
+        tls_config(
+            Some(ca.pem.as_bytes()),
+            Some((cert.as_bytes(), key.as_bytes())),
+        )
+        .unwrap(),
+    );
+    nats.test().await.unwrap();
+    nats.send(b"{}").await.unwrap();
+    assert_eq!(server.published(1).await[0].body, "{}");
+
+    // Files that aren't a certificate and its key are refused.
+    let other = TestCa::new().client_pem();
+    for (chain, key) in [
+        ("", key.as_str()),
+        (cert.as_str(), ""),
+        (cert.as_str(), other.1.as_str()),
+    ] {
+        let identity = Some((chain.as_bytes(), key.as_bytes()));
+        assert!(tls_config(None, identity).is_err(), "{chain:.20} {key:.20}");
     }
 }

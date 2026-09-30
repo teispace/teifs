@@ -261,8 +261,9 @@ pub(crate) struct ServeArgs {
     /// ID=HOST:PORT,key=NAME, with format=namespace (a hash, a field per object, set by
     /// each event and removed with it: the default) or format=access (a list, an entry
     /// per event), db=N, user=NAME, and tls=true (the server verified with the system's
-    /// certificates) or ca=PATH (with a CA's PEM file) (repeat for more; in the
-    /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:redis`. Its
+    /// certificates) or ca=PATH (with a CA's PEM file), with `client_cert=PATH` and
+    /// `client_key=PATH` for a server that wants a client certificate (repeat for more; in
+    /// the environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:redis`. Its
     /// password,
     /// `TEIFS_NOTIFY_REDIS_PASSWORD_ID`, is read only from the environment.
     #[arg(
@@ -289,7 +290,8 @@ pub(crate) struct ServeArgs {
     /// ID=HOST:PORT,subject=NAME, with jetstream=true (a `JetStream` stream that takes the
     /// subject acknowledges each event), user=NAME, creds=PATH (a `.creds` file's user
     /// JWT and key) or nkey=PATH (a file holding a user seed), and tls=true or ca=PATH,
-    /// with `tls_first=true` for a server that starts TLS first (repeat for more; in the
+    /// `client_cert=PATH` and `client_key=PATH`, with `tls_first=true` for a server that
+    /// starts TLS first (repeat for more; in the
     /// environment, separated by spaces). Rules name it `arn:teifs:sqs::ID:nats`. Its
     /// password or token, `TEIFS_NOTIFY_NATS_PASSWORD_ID` or `TEIFS_NOTIFY_NATS_TOKEN_ID`,
     /// is read only from the environment.
@@ -717,22 +719,36 @@ fn parse_notify_elasticsearch(text: &str) -> Result<TargetConfig, String> {
 }
 
 /// A target's TLS from its options: `tls=true` verifies the server with the system's
-/// certificates, `ca=PATH` with a CA's PEM file; neither is a plain connection.
+/// certificates, `ca=PATH` with a CA's PEM file, and `client_cert=PATH` and
+/// `client_key=PATH` are what TeiFS shows a server that asks; none is a plain connection.
 fn target_tls(
     options: &BTreeMap<&str, &str>,
 ) -> Result<Option<std::sync::Arc<rustls::ClientConfig>>, String> {
-    let tls = target_flag(options, "tls")?;
-    match (tls, options.get("ca")) {
-        (Some(false), Some(_)) => Err("a CA file is for TLS: leave out tls=false".to_owned()),
-        (_, Some(path)) => {
-            let pem = std::fs::read(path).map_err(|e| format!("can't read `{path}`: {e}"))?;
-            tls_config(Some(&pem))
-                .map(Some)
-                .map_err(|e| format!("`{path}`: {e}"))
+    let read = |path: &str| {
+        std::fs::read(path)
+            .map(Zeroizing::new)
+            .map_err(|e| format!("can't read `{path}`: {e}"))
+    };
+    let identity = match (options.get("client_cert"), options.get("client_key")) {
+        (Some(cert), Some(key)) => Some((read(cert)?, read(key)?)),
+        (None, None) => None,
+        _ => return Err("give both client_cert=PATH and client_key=PATH".to_owned()),
+    };
+    let ca = options.get("ca").map(|path| read(path)).transpose()?;
+    match target_flag(options, "tls")? {
+        Some(false) if ca.is_some() || identity.is_some() => {
+            return Err("a CA or client certificate is for TLS: leave out tls=false".to_owned());
         }
-        (Some(true), None) => tls_config(None).map(Some),
-        (_, None) => Ok(None),
+        None if ca.is_none() && identity.is_none() => return Ok(None),
+        Some(false) => return Ok(None),
+        _ => {}
     }
+    let identity = identity
+        .as_ref()
+        .map(|(cert, key)| (cert.as_slice(), key.as_slice()));
+    tls_config(ca.as_ref().map(|ca| ca.as_slice()), identity)
+        .map(Some)
+        .map_err(|e| format!("its TLS files: {e}"))
 }
 
 /// A target's option `name`, `true` or `false`, if given.
@@ -751,7 +767,16 @@ fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
     let (id, address, options) = target_spec(
         text,
         "ID=HOST:PORT,key=NAME",
-        &["key", "format", "db", "user", "tls", "ca"],
+        &[
+            "key",
+            "format",
+            "db",
+            "user",
+            "tls",
+            "ca",
+            "client_cert",
+            "client_key",
+        ],
     )?;
     let key = options
         .get("key")
@@ -796,6 +821,8 @@ fn parse_notify_nats(text: &str) -> Result<TargetConfig, String> {
             "nkey",
             "tls",
             "ca",
+            "client_cert",
+            "client_key",
             "tls_first",
         ],
     )?;
@@ -1542,6 +1569,32 @@ mod tests {
         std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
         assert!(tls_of(&format!("x=h:1,key=k,ca={}", ca.display())));
         assert!(tls_of(&format!("x=h:1,key=k,tls=true,ca={}", ca.display())));
+        // A client certificate and its key, both or neither, over TLS.
+        let issued = rcgen::CertificateParams::new(vec!["teifs".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (cert, key_file) = (dir.path().join("client.pem"), dir.path().join("client.key"));
+        std::fs::write(&cert, issued.pem()).unwrap();
+        std::fs::write(&key_file, key.serialize_pem()).unwrap();
+        let identity = format!(
+            "client_cert={},client_key={}",
+            cert.display(),
+            key_file.display()
+        );
+        assert!(tls_of(&format!("x=h:1,key=k,{identity}")));
+        for bad in [
+            format!("x=h:1,key=k,client_cert={}", cert.display()),
+            format!("x=h:1,key=k,client_key={}", key_file.display()),
+            format!("x=h:1,key=k,tls=false,{identity}"),
+            format!(
+                "x=h:1,key=k,client_cert={},client_key={}",
+                cert.display(),
+                empty.display()
+            ),
+        ] {
+            assert!(parse_notify_redis(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

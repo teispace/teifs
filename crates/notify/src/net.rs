@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rustls::{
     ClientConfig, RootCertStore,
-    pki_types::{CertificateDer, ServerName, pem::PemObject},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -92,12 +92,17 @@ pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 pub(crate) type Stream = Box<dyn Io>;
 
-/// How a target's server is verified over TLS.
+/// How a target's server is verified over TLS (with the system's certificates, or only
+/// `ca_pem`'s), and the certificate chain and key TeiFS shows it, if it asks for one.
 ///
 /// # Errors
 ///
-/// When `ca_pem` holds no certificate, or the system's trust store can't be used.
-pub fn tls_config(ca_pem: Option<&[u8]>) -> Result<Arc<ClientConfig>, String> {
+/// When `ca_pem` holds no certificate, the system's trust store can't be used, or the
+/// identity's chain or key can't be read or don't go together.
+pub fn tls_config(
+    ca_pem: Option<&[u8]>,
+    identity: Option<(&[u8], &[u8])>,
+) -> Result<Arc<ClientConfig>, String> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()
@@ -113,15 +118,28 @@ pub fn tls_config(ca_pem: Option<&[u8]>) -> Result<Arc<ClientConfig>, String> {
         if roots.is_empty() {
             return Err("the CA file holds no certificate".to_owned());
         }
-        builder.with_root_certificates(roots).with_no_client_auth()
+        builder.with_root_certificates(roots)
     } else {
         let verifier = rustls_platform_verifier::Verifier::new(provider)
             .map_err(|e| format!("the system's certificates can't be used: {e}"))?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth()
     };
+    let Some((chain_pem, key_pem)) = identity else {
+        return Ok(Arc::new(config.with_no_client_auth()));
+    };
+    let chain = CertificateDer::pem_slice_iter(chain_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("the certificate file isn't PEM: {e}"))?;
+    if chain.is_empty() {
+        return Err("the certificate file holds no certificate".to_owned());
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|_| "the key file holds no private key".to_owned())?;
+    let config = config
+        .with_client_auth_cert(chain, key)
+        .map_err(|e| format!("the certificate and key can't be used together: {e}"))?;
     Ok(Arc::new(config))
 }
 
@@ -239,8 +257,8 @@ mod tests {
 
     #[test]
     fn a_ca_file_must_hold_a_certificate() {
-        assert!(tls_config(Some(b"")).is_err());
-        assert!(tls_config(Some(b"not pem")).is_err());
-        assert!(tls_config(None).is_ok());
+        assert!(tls_config(Some(b""), None).is_err());
+        assert!(tls_config(Some(b"not pem"), None).is_err());
+        assert!(tls_config(None, None).is_ok());
     }
 }

@@ -251,7 +251,9 @@ certificate and name with the system's certificates or only the given CA, never 
 the check, before its password is sent; a NATS server that requires TLS gets it, or no
 credentials. A NATS nkey or `.creds` file is read from its path when the server starts,
 its seed kept only as the key that signs the server's nonce (a `.creds` file whose JWT is
-for another key is refused), and never shown.
+for another key is refused), and never shown. A client certificate's key
+(`client_key=PATH`) is likewise read once, from its file, into memory that's wiped after
+the TLS configuration takes it, and never shown.
 
 Bucket notifications can't reach anything the operator didn't name: a bucket's rules
 pick among the server's targets by ARN (an unknown one is refused when the rules are
