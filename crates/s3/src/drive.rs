@@ -211,16 +211,7 @@ impl Drive {
         let Some(checksum) = checksum else {
             return Ok((Sums::new(), None));
         };
-        if let Some(kind) = &input.checksum_type
-            && checksum.requested
-            && kind.as_str() != checksum.kind.as_str()
-        {
-            return Err(s3_error!(
-                InvalidRequest,
-                "The upload was created with the {} checksum type",
-                checksum.kind.as_str()
-            ));
-        }
+        check_complete(&checksum, input.checksum_type.as_ref(), listed)?;
         let computed = parts.and_then(|parts| {
             let sums: Vec<(u64, Option<&str>)> = parts
                 .iter()
@@ -3112,9 +3103,70 @@ impl S3 for Drive {
     }
 }
 
+/// S3's rules for the checksums a Complete sends: the upload's own checksum type, and
+/// for a composite checksum the client asked for (built from every part's), each part's.
+fn check_complete(
+    checksum: &teifs_types::UploadChecksum,
+    kind: Option<&dto::ChecksumType>,
+    listed: &[(u32, String, Sums)],
+) -> S3Result<()> {
+    if !checksum.requested {
+        return Ok(());
+    }
+    if kind.is_some_and(|kind| kind.as_str() != checksum.kind.as_str()) {
+        return Err(s3_error!(
+            InvalidRequest,
+            "The upload was created with the {} checksum type",
+            checksum.kind.as_str()
+        ));
+    }
+    if checksum.kind != teifs_store::ChecksumType::Composite {
+        return Ok(());
+    }
+    match listed
+        .iter()
+        .find(|(_, _, sent)| !sent.contains_key(&checksum.algorithm))
+    {
+        None => Ok(()),
+        Some((number, ..)) => Err(s3_error!(
+            InvalidRequest,
+            "The upload was created using a {} checksum. The complete request must include the checksum for each part. It was missing for part {number} in the request.",
+            checksum.algorithm.to_ascii_lowercase()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composite_checksums_need_every_parts() {
+        use teifs_store::ChecksumType::{Composite, FullObject};
+        let upload = |kind, requested| teifs_types::UploadChecksum {
+            algorithm: "SHA256".into(),
+            kind,
+            requested,
+        };
+        let sent = |name: &str| -> Sums { [(name.to_owned(), "x".to_owned())].into() };
+        let listed = [
+            (1, "a".to_owned(), sent("SHA256")),
+            (2, "b".to_owned(), sent("CRC32")),
+        ];
+        let err = check_complete(&upload(Composite, true), None, &listed).unwrap_err();
+        assert_eq!(err.code(), &s3s::S3ErrorCode::InvalidRequest);
+        let message = err.message().unwrap();
+        assert!(
+            message.contains("using a sha256 checksum") && message.contains("part 2"),
+            "{message}"
+        );
+        assert!(check_complete(&upload(Composite, true), None, &listed[..1]).is_ok());
+        assert!(check_complete(&upload(FullObject, true), None, &listed).is_ok());
+        assert!(check_complete(&upload(Composite, false), None, &listed).is_ok());
+        let full = dto::ChecksumType::from_static(dto::ChecksumType::FULL_OBJECT);
+        let err = check_complete(&upload(Composite, true), Some(&full), &listed[..1]);
+        assert!(err.unwrap_err().message().unwrap().contains("COMPOSITE"));
+    }
 
     #[test]
     fn copy_ranges_are_inclusive() {

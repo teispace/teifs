@@ -75,6 +75,8 @@ behaviour; the on-disk format is always upgraded automatically.
   command line. Uploads encrypted with a KMS or customer key send SHA-256 part checksums
   so an interrupted one still resumes (their ETags aren't MD5s). `stat` shows an SSE-C
   object's key MD5, and a bare `400` on a read suggests `--enc-c`.
+- A Complete of an upload with a `COMPOSITE` checksum must send every part's checksum,
+  as on AWS (`400 InvalidRequest` naming the first part without one); it was accepted.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 
