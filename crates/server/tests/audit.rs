@@ -20,18 +20,26 @@ use teifs_types::audit::AuditEntry;
 /// The log's entries once it has at least `count`: a request is written when its answer
 /// is done with, just after the client has it all.
 async fn entries(log: &Path, count: usize) -> (String, Vec<AuditEntry>) {
+    entries_where(log, |entries| entries.len() >= count).await
+}
+
+/// The log's entries once `done` holds for them.
+async fn entries_where(
+    log: &Path,
+    done: impl Fn(&[AuditEntry]) -> bool,
+) -> (String, Vec<AuditEntry>) {
     for _ in 0..200 {
         let text = std::fs::read_to_string(log).unwrap_or_default();
         let entries: Vec<AuditEntry> = text
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        if entries.len() >= count {
+        if done(&entries) {
             return (text, entries);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("the log never had {count} entries");
+    panic!("the log never had the entries awaited");
 }
 
 fn find<'e>(entries: &'e [AuditEntry], name: &str) -> &'e AuditEntry {
@@ -221,10 +229,10 @@ async fn a_hangup_reopens_the_file() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     s3.head_bucket().bucket("none").send().await.unwrap_err();
-    let (_, now) = entries(&log, 1).await;
-    assert!(now.iter().any(|e| e.api.name == "HeadBucket"));
+    let head = |entries: &[AuditEntry]| entries.iter().any(|e| e.api.name == "HeadBucket");
+    entries_where(&log, head).await;
     let (_, before) = entries(&rotated, 1).await;
-    assert!(!before.iter().any(|e| e.api.name == "HeadBucket"));
+    assert!(!head(&before));
 }
 
 #[tokio::test]
