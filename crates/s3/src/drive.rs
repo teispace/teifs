@@ -406,15 +406,17 @@ impl Drive {
         Ok(info)
     }
 
+    /// Streams a request body into `staged`, hashing it for the checksums asked for. A
+    /// body longer than `limit` is cut off with `EntityTooLarge`, whatever it declared.
     async fn stage(
         &self,
         mut staged: Staged,
         body: StreamingBlob,
         sums: &mut teifs_store::checksum::Checksums,
-        limit: Option<u64>,
+        limit: u64,
     ) -> S3Result<Staged> {
         let mut body = body;
-        let mut left = limit.unwrap_or(u64::MAX);
+        let mut left = limit;
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(from_body)?;
             left = left
@@ -435,6 +437,23 @@ fn with_customer_md5(info: Option<SseInfo>, md5: Option<String>) -> Option<SseIn
         }
         info
     })
+}
+
+/// A copy's source: its bucket, key and version, if it names one.
+fn copied_from(source: &CopySource) -> S3Result<(String, String, Option<String>)> {
+    let CopySource::Bucket {
+        bucket,
+        key,
+        version_id,
+    } = source
+    else {
+        return Err(s3_error!(
+            NotImplemented,
+            "copying from an access point isn't supported"
+        ));
+    };
+    let version = check_version(version_id.as_deref())?.map(str::to_owned);
+    Ok((bucket.to_string(), key.to_string(), version))
 }
 
 /// Checks a request's `versionId`. Without versioning, an object's only version is
@@ -1446,13 +1465,11 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutObjectOutput>> {
         let mut input = req.input;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
-        let limit = req
+        let cap = req
             .extensions
             .get::<Caps>()
             .and_then(|caps| caps.content_length);
-        if let Some(cap) = limit {
-            caps::admit(input.content_length, cap)?;
-        }
+        let limit = caps::body_limit(input.content_length, cap)?;
         let tags = header_tags(input.tagging.as_deref())?;
         let lock = write_lock!(input)?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
@@ -2739,20 +2756,8 @@ impl S3 for Drive {
         req: S3Request<dto::CopyObjectInput>,
     ) -> S3Result<S3Response<dto::CopyObjectOutput>> {
         let mut input = req.input;
-        let CopySource::Bucket {
-            bucket: src_bucket,
-            key: src_key,
-            version_id: src_version,
-        } = &input.copy_source
-        else {
-            return Err(s3_error!(
-                NotImplemented,
-                "copying from an access point isn't supported"
-            ));
-        };
-        let src_version = check_version(src_version.as_deref())?.map(str::to_owned);
+        let (src_bucket, src_key, src_version) = copied_from(&input.copy_source)?;
         let src_version = src_version.as_deref();
-        let (src_bucket, src_key) = (src_bucket.to_string(), src_key.to_string());
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),
             input.copy_source_sse_customer_key.as_deref(),
@@ -2799,6 +2804,7 @@ impl S3 for Drive {
             .await?;
         let lock = write_lock!(input)?;
         let attrs = copy_attrs(&mut input, &source.attrs, replace, acl, lock)?;
+        caps::copy_source(source.size)?;
         self.check_write(
             &input.bucket,
             Some(&input.key),
@@ -3171,9 +3177,7 @@ impl S3 for Drive {
         )?;
         // A capped upload's part must declare a length that fits beside the other parts.
         let room = self.store.part_room(&upload, number).await.s3()?;
-        if let Some(room) = room {
-            caps::admit(input.content_length, room)?;
-        }
+        let limit = caps::body_limit(input.content_length, room)?;
         self.check_write(&upload.bucket, None, input.content_length)
             .await?;
         let staged = self
@@ -3181,7 +3185,7 @@ impl S3 for Drive {
             .stage_part(&upload.id, number, customer.as_ref())
             .await
             .s3()?;
-        let staged = self.stage(staged, body, &mut hasher, room).await?;
+        let staged = self.stage(staged, body, &mut hasher, limit).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         if let Some(checksum) = &upload_checksum {
             checksums::check_part(checksum, &sent)?;
@@ -3214,18 +3218,8 @@ impl S3 for Drive {
         check_owner(&upload, &req.input.bucket, &req.input.key, &uploader(&req))?;
         let input = req.input;
         let number = part_number(input.part_number)?;
-        let CopySource::Bucket {
-            bucket: src_bucket,
-            key: src_key,
-            version_id: src_version,
-        } = &input.copy_source
-        else {
-            return Err(s3_error!(
-                NotImplemented,
-                "copying from an access point isn't supported"
-            ));
-        };
-        let src_version = check_version(src_version.as_deref())?;
+        let (src_bucket, src_key, src_version) = copied_from(&input.copy_source)?;
+        let (src_bucket, src_key, src_version) = (&*src_bucket, &*src_key, src_version.as_deref());
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),
             input.copy_source_sse_customer_key.as_deref(),
@@ -3253,6 +3247,7 @@ impl S3 for Drive {
             Some(range) => copy_range(range, source.size)?,
             None => (0, source.size),
         };
+        caps::copy_source(length)?;
         if let Some(room) = self.store.part_room(&upload, number).await.s3()?
             && length > room
         {

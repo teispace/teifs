@@ -199,6 +199,10 @@ behaviour; the on-disk format is always upgraded automatically.
   rules, redirects of every request and of single objects, S3's HTML error pages,
   ranges, conditional requests and CORS. Access logs record these requests as
   `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- As on AWS, a single upload (`PutObject`, a browser's `POST`, `UploadPart`) is at most
+  5 GiB, refused with `EntityTooLarge` before its body when it says it's larger, and a
+  copy (`CopyObject`, `UploadPartCopy`) reads at most 5 GiB of its source
+  (`InvalidRequest`); larger objects go in parts.
 - Bucket quotas, as `MinIO`'s hard quotas: `mc quota set|info|clear` (`MinIO`'s admin
   API, `/minio/admin/v3/set-bucket-quota` and `get-bucket-quota`, with its
   `admin:SetBucketQuota` and `admin:GetBucketQuota` actions) and `teifs quota set

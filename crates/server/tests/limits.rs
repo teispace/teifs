@@ -209,3 +209,106 @@ async fn a_refused_uploads_body_is_read_before_the_refusal() {
         "waited for the body"
     );
 }
+
+/// The largest single upload S3 takes: 5 GiB.
+const MAX_UPLOAD: u64 = 5 << 30;
+
+/// A presigned link's request line and `Host`, sent with `Content-Length: length` and
+/// waiting for `100 Continue`: the answer the server gives before any of the body.
+async fn declare(server: &Server, link: &str, length: u64) -> String {
+    let (authority, path) = link.trim_start_matches("http://").split_once('/').unwrap();
+    let request = format!(
+        "PUT /{path} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {length}\r\n\
+         Expect: 100-continue\r\nConnection: close\r\n\r\n"
+    );
+    let mut socket = connect(server).await;
+    socket.write_all(request.as_bytes()).await.unwrap();
+    read_to_close(&mut socket, Duration::from_secs(5)).await
+}
+
+/// As on S3, a `PutObject` or a part is at most 5 GiB, refused before its body when it
+/// says it's larger, and a copy reads at most 5 GiB of its source: larger objects are
+/// uploaded and copied in parts.
+#[tokio::test]
+async fn uploads_and_copies_larger_than_s3_takes_are_refused() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("big").send().await.unwrap();
+    let presign = || PresigningConfig::expires_in(Duration::from_secs(60)).unwrap();
+    let put = s3
+        .put_object()
+        .bucket("big")
+        .key("put")
+        .presigned(presign())
+        .await
+        .unwrap();
+    let answer = declare(&server, put.uri(), MAX_UPLOAD + 1).await;
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    assert!(answer.contains("<Code>EntityTooLarge</Code>"), "{answer}");
+    let upload = s3
+        .create_multipart_upload()
+        .bucket("big")
+        .key("parts")
+        .send()
+        .await
+        .unwrap();
+    let id = upload.upload_id().unwrap();
+    let part = s3
+        .upload_part()
+        .bucket("big")
+        .key("parts")
+        .upload_id(id)
+        .part_number(1)
+        .presigned(presign())
+        .await
+        .unwrap();
+    let answer = declare(&server, part.uri(), MAX_UPLOAD + 1).await;
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    assert!(answer.contains("<Code>EntityTooLarge</Code>"), "{answer}");
+
+    // A file just over 5 GiB, put in the folder by hand (sparse: it takes no room, where
+    // files can be sparse without asking).
+    if cfg!(windows) {
+        return;
+    }
+    let file = std::fs::File::create(server.dir.path().join("big/huge.bin")).unwrap();
+    file.set_len(MAX_UPLOAD + 1).unwrap();
+    let copy = s3
+        .copy_object()
+        .bucket("big")
+        .key("copy")
+        .copy_source("big/huge.bin")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(copy.code(), Some("InvalidRequest"));
+    assert_eq!(
+        copy.message(),
+        Some(
+            "The specified copy source is larger than the maximum allowable size for a copy \
+             source: 5368709120"
+        )
+    );
+    let whole = s3
+        .upload_part_copy()
+        .bucket("big")
+        .key("parts")
+        .upload_id(id)
+        .part_number(1)
+        .copy_source("big/huge.bin")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(whole.code(), Some("InvalidRequest"));
+    // A range of it is copied.
+    s3.upload_part_copy()
+        .bucket("big")
+        .key("parts")
+        .upload_id(id)
+        .part_number(1)
+        .copy_source("big/huge.bin")
+        .copy_source_range("bytes=0-9")
+        .send()
+        .await
+        .unwrap();
+}

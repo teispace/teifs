@@ -80,6 +80,35 @@ impl Caps {
     }
 }
 
+/// The most one request uploads, as on AWS: a `PutObject`'s body, a part, or what a copy
+/// reads from its source. Larger objects are uploaded, or copied, in parts.
+pub(crate) const MAX_UPLOAD: u64 = 5 << 30;
+
+/// The most bytes of a body read: its cap, when it has one, and never more than
+/// [`MAX_UPLOAD`]. A body declared longer is refused before any of it is read.
+pub(crate) fn body_limit(declared: Option<i64>, cap: Option<u64>) -> S3Result<u64> {
+    if let Some(cap) = cap {
+        admit(declared, cap)?;
+    }
+    if declared.and_then(|len| u64::try_from(len).ok()) > Some(MAX_UPLOAD) {
+        return Err(too_large());
+    }
+    Ok(cap.map_or(MAX_UPLOAD, |cap| cap.min(MAX_UPLOAD)))
+}
+
+/// Refuses a copy that would read more than [`MAX_UPLOAD`] bytes of its source, as AWS
+/// does.
+pub(crate) fn copy_source(size: u64) -> S3Result<()> {
+    if size > MAX_UPLOAD {
+        return Err(s3_error!(
+            InvalidRequest,
+            "The specified copy source is larger than the maximum allowable size for a copy \
+             source: {MAX_UPLOAD}"
+        ));
+    }
+    Ok(())
+}
+
 /// Checks a body's declared length against a cap before any of it is read: the length
 /// must be known, and within the cap.
 pub(crate) fn admit(declared: Option<i64>, cap: u64) -> S3Result<()> {
@@ -202,6 +231,38 @@ mod tests {
         assert_eq!(
             admit(Some(-1), 10).unwrap_err().code().as_str(),
             "MissingContentLength"
+        );
+    }
+
+    #[test]
+    fn nothing_uploads_more_than_s3_takes_at_once() {
+        let max = i64::try_from(MAX_UPLOAD).unwrap();
+        assert_eq!(MAX_UPLOAD, 5_368_709_120);
+        assert_eq!(body_limit(Some(max), None).unwrap(), MAX_UPLOAD);
+        assert_eq!(body_limit(None, None).unwrap(), MAX_UPLOAD);
+        assert_eq!(body_limit(Some(3), Some(10)).unwrap(), 10);
+        assert_eq!(body_limit(Some(3), Some(u64::MAX)).unwrap(), MAX_UPLOAD);
+        for (declared, cap) in [(Some(max + 1), None), (Some(max + 1), Some(u64::MAX))] {
+            let err = body_limit(declared, cap).unwrap_err();
+            assert_eq!(
+                err.code().as_str(),
+                "EntityTooLarge",
+                "{declared:?} {cap:?}"
+            );
+        }
+        assert_eq!(
+            body_limit(None, Some(10)).unwrap_err().code().as_str(),
+            "MissingContentLength"
+        );
+        assert!(copy_source(MAX_UPLOAD).is_ok());
+        let err = copy_source(MAX_UPLOAD + 1).unwrap_err();
+        assert_eq!(err.code().as_str(), "InvalidRequest");
+        assert_eq!(
+            err.message(),
+            Some(
+                "The specified copy source is larger than the maximum allowable size for a \
+                 copy source: 5368709120"
+            )
         );
     }
 }
