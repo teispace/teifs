@@ -218,7 +218,7 @@ requests live. See
 | `teifs version enable\|suspend\|info ALIAS/BUCKET` | Turn a bucket's versioning on, suspend it, or show it |
 | `teifs retention set governance\|compliance 30d\|1y TARGET` \| `clear\|info TARGET` | Keep objects from deletion for a time (`-r` for a prefix, `--version-id`, `--bypass` to shorten governance), or with `--default` set a bucket's default retention |
 | `teifs legalhold set\|clear\|info ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Keep objects from deletion until released |
-| `teifs event add ALIAS/BUCKET ARN [--event put,delete,get,ilm] [--prefix P] [--suffix S] [--id ID]` \| `event ls\|rm ALIAS/BUCKET …` | A bucket's notification rules, sending its events to the server's targets (as `mc event`) |
+| `teifs event add ALIAS/BUCKET ARN [--event put,delete,get,ilm] [--prefix P] [--suffix S] [--id ID]` \| `event ls\|rm ALIAS/BUCKET …` \| `event eventbridge ALIAS/BUCKET on\|off` | A bucket's notification rules, sending its events to the server's targets (as `mc event`; an AWS queue's, topic's or function's ARN too), and EventBridge |
 | `teifs watch ALIAS[/BUCKET[/PREFIX]] [--events put,delete,get,ilm,bucket] [--suffix S]` | Show a bucket's events (or every bucket's) as they happen, as `mc watch`; `--json` for S3's event records |
 | `teifs ilm rule add\|edit\|ls\|rm\|export\|import ALIAS/BUCKET` | Lifecycle rules: expire objects (`--expire-days 30 --prefix logs/`), older versions and lone delete markers, abort old uploads; `export`/`import` in AWS's JSON |
 | `teifs encrypt set sse-s3\|sse-kms\|dsse-kms [KEY] ALIAS/BUCKET` \| `clear\|info ALIAS/BUCKET` | How a bucket encrypts new objects (`--bucket-key`), and whether it takes customer keys (`--block-sse-c`, `--allow-sse-c`) |

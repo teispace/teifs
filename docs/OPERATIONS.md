@@ -415,8 +415,11 @@ teifs event add local/photos arn:teifs:sqs::orders:webhook --event put --prefix 
 `ilm` or S3's names, `put,delete,get` by default; `--id` names it), refusing one the
 bucket already has unless `--ignore-existing`; `teifs event ls ALIAS/BUCKET [ARN]` lists
 them, and `teifs event rm ALIAS/BUCKET` removes one (`--id`), those sending to an ARN, or
-all of them (`--all`). Each reads the bucket's rules and writes them back, so the server
-checks the whole configuration.
+all of them (`--all`). An SNS topic's or Lambda function's ARN makes the rule S3 is given
+for it (a `TopicConfiguration` or `LambdaFunctionConfiguration`); anything else is a
+queue's. `teifs event eventbridge ALIAS/BUCKET on|off` turns EventBridge on or off, and
+`ls` shows it. Each reads the bucket's configuration and writes it back whole, keeping
+what it doesn't change, so the server checks the whole configuration.
 
 A rule is a `QueueConfiguration`, `TopicConfiguration` or `CloudFunctionConfiguration`
 (all the same here): the target's ARN, events, and a key prefix and suffix (URL-encoded,

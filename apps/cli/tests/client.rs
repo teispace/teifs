@@ -1617,3 +1617,101 @@ async fn notification_rules_are_added_listed_and_removed() {
     cli.fails(&["event", "rm", "t/events"], 2).await;
     cli.fails(&["event", "ls", "t/events/key"], 2).await;
 }
+
+/// `teifs event` with AWS's destinations: a topic's or function's ARN makes the rule S3
+/// is given for it, and EventBridge is turned on and off without touching the rules
+/// (nor they it).
+#[tokio::test(flavor = "multi_thread")]
+async fn event_rules_name_aws_destinations_and_eventbridge() {
+    use teifs_notify::testing::AwsServer;
+    use teifs_server::{AwsCredentials, EventBridge, Lambda, Sns, TargetConfig, TargetKind};
+    let aws = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let keys = || {
+        Some(AwsCredentials {
+            access_key: "AKIDTEIFS".into(),
+            secret: "s3cret".to_owned().into(),
+            session_token: None,
+        })
+    };
+    let topic = "arn:aws:sns:eu-west-1:123456789012:uploads";
+    let mut sns = Sns::new(topic, Some(aws.url())).unwrap();
+    sns.credentials = keys();
+    let mut bus = EventBridge::new(
+        "arn:aws:events:eu-west-1:123456789012:event-bus/default",
+        Some(aws.url()),
+        None,
+    )
+    .unwrap();
+    bus.credentials = keys();
+    let function = "arn:aws:lambda:eu-west-1:123456789012:function:thumbs";
+    let mut lambda = Lambda::new(function, Some(aws.url())).unwrap();
+    lambda.credentials = keys();
+    let targets = vec![
+        TargetConfig::new("thumbs", TargetKind::Lambda(lambda)).unwrap(),
+        TargetConfig::new("uploads", TargetKind::Sns(sns)).unwrap(),
+        TargetConfig::new("bus", TargetKind::EventBridge(bus)).unwrap(),
+    ];
+    let server = start_with(|config| config.notify = targets).await;
+    let cli = Client::new(&server);
+    let s3 = client(&server, SECRET_KEY);
+    cli.ok(&["mb", "t/aws"]).await;
+
+    let on = records(&cli.ok(&event("eventbridge", "t/aws", "on")).await);
+    assert_eq!(on[0]["enabled"], true);
+    cli.ok(&event(
+        "add",
+        "t/aws",
+        &format!("{function} --event delete"),
+    ))
+    .await;
+    // The server lists topics before functions: the rule added is the one shown.
+    let added = records(
+        &cli.ok(&event("add", "t/aws", &format!("{topic} --event put")))
+            .await,
+    );
+    assert_eq!(added[0]["arn"], topic);
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("aws")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        read.topic_configurations()[0].topic_arn(),
+        topic,
+        "a topic's rule"
+    );
+    assert_eq!(
+        read.lambda_function_configurations()[0].lambda_function_arn(),
+        function,
+        "a function's rule"
+    );
+    assert!(read.queue_configurations().is_empty());
+    assert!(read.event_bridge_configuration().is_some(), "kept by add");
+    let listed = records(&cli.ok(&event("ls", "t/aws", "")).await);
+    assert_eq!(listed[0]["type"], "eventBridge");
+    assert_eq!(listed[1]["arn"], topic);
+    assert_eq!(listed[2]["arn"], function);
+
+    cli.ok(&event("rm", "t/aws", topic)).await;
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("aws")
+        .send()
+        .await
+        .unwrap();
+    assert!(read.event_bridge_configuration().is_some(), "kept by rm");
+    cli.ok(&event("add", "t/aws", &format!("{topic} --event put")))
+        .await;
+    let off = records(&cli.ok(&event("eventbridge", "t/aws", "off")).await);
+    assert_eq!(off[0]["enabled"], false);
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("aws")
+        .send()
+        .await
+        .unwrap();
+    assert!(read.event_bridge_configuration().is_none());
+    assert_eq!(read.topic_configurations().len(), 1, "rules kept");
+    cli.fails(&event("eventbridge", "t/aws", "maybe"), 2).await;
+}

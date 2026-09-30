@@ -1,11 +1,12 @@
 //! A bucket's notification rules: `teifs event add|ls|rm`, as `mc event` manages
-//! them. Each change reads the bucket's rules, changes them and writes them back, so the
-//! server checks the whole configuration as S3 does (and tests a target a rule starts
-//! naming).
+//! them, and `teifs event eventbridge on|off`. Each change reads the bucket's
+//! configuration, changes it and writes it back whole (keeping what it didn't change), so
+//! the server checks it as S3 does (and tests a target a rule starts naming).
 
 use aws_sdk_s3::types::{
-    Event, FilterRule, FilterRuleName, LambdaFunctionConfiguration, NotificationConfiguration,
-    NotificationConfigurationFilter, QueueConfiguration, S3KeyFilter, TopicConfiguration,
+    Event, EventBridgeConfiguration, FilterRule, FilterRuleName, LambdaFunctionConfiguration,
+    NotificationConfiguration, NotificationConfigurationFilter, QueueConfiguration, S3KeyFilter,
+    TopicConfiguration,
 };
 use clap::Subcommand;
 use serde_json::json;
@@ -20,7 +21,8 @@ pub enum EventAction {
     Add {
         /// `ALIAS/BUCKET`.
         target: String,
-        /// The target's ARN: `arn:teifs:sqs::ID:webhook` (or MinIO's `arn:minio:…`).
+        /// The target's ARN: `arn:teifs:sqs::ID:webhook` (or MinIO's `arn:minio:…`), or
+        /// an AWS queue's, topic's or function's own ARN, as on S3.
         arn: String,
         /// The events: `put`, `delete`, `get`, `ilm` (lifecycle expirations), or S3's
         /// names (`s3:ObjectCreated:Copy`), comma-separated.
@@ -64,6 +66,22 @@ pub enum EventAction {
         #[arg(long, requires = "all")]
         force: bool,
     },
+    /// Send every event of a bucket to the server's EventBridge bus, as S3 does, or
+    /// stop.
+    #[command(name = "eventbridge")]
+    EventBridge {
+        /// `ALIAS/BUCKET`.
+        target: String,
+        /// `on` or `off`.
+        state: Switch,
+    },
+}
+
+/// EventBridge on or off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 /// The events a short name stands for (as `mc event` and `mc watch` read them), or
@@ -86,6 +104,25 @@ enum Destination {
     Queue,
     Topic,
     Function,
+}
+
+impl Destination {
+    /// How S3 is given a rule for `arn`: an SNS topic's, a Lambda function's, else a
+    /// queue's (which the server's own targets are, as `sqs` in their ARNs says).
+    fn of(arn: &str) -> Self {
+        match arn.split(':').nth(2) {
+            Some("sns") => Self::Topic,
+            Some("lambda") => Self::Function,
+            _ => Self::Queue,
+        }
+    }
+}
+
+/// A bucket's notification configuration.
+#[derive(Debug, Default)]
+struct Config {
+    rules: Vec<Rule>,
+    event_bridge: bool,
 }
 
 /// One rule.
@@ -176,7 +213,8 @@ pub(super) async fn event(action: EventAction, aliases: &Aliases) -> Result<(), 
     let target = match &action {
         EventAction::Add { target, .. }
         | EventAction::Ls { target, .. }
-        | EventAction::Rm { target, .. } => target,
+        | EventAction::Rm { target, .. }
+        | EventAction::EventBridge { target, .. } => target,
     };
     let bucket = Rules::new(target, aliases)?;
     match action {
@@ -190,7 +228,7 @@ pub(super) async fn event(action: EventAction, aliases: &Aliases) -> Result<(), 
             ..
         } => {
             let rule = Rule {
-                kind: Destination::Queue,
+                kind: Destination::of(&arn),
                 id,
                 arn,
                 events: event.iter().flat_map(|e| events_of(e)).collect(),
@@ -207,6 +245,7 @@ pub(super) async fn event(action: EventAction, aliases: &Aliases) -> Result<(), 
             force,
             ..
         } => rm(&bucket, arn.as_deref(), id.as_deref(), all, force).await,
+        EventAction::EventBridge { state, .. } => event_bridge(&bucket, state == Switch::On).await,
     }
 }
 
@@ -234,7 +273,7 @@ impl Rules {
         })
     }
 
-    async fn read(&self) -> Result<Vec<Rule>, Error> {
+    async fn read(&self) -> Result<Config, Error> {
         let out = self
             .client
             .get_bucket_notification_configuration()
@@ -274,14 +313,17 @@ impl Rules {
                 f.filter(),
             )
         });
-        Ok(queues.chain(topics).chain(functions).collect())
+        Ok(Config {
+            rules: queues.chain(topics).chain(functions).collect(),
+            event_bridge: out.event_bridge_configuration().is_some(),
+        })
     }
 
-    /// Replaces the bucket's rules.
-    async fn write(&self, rules: &[Rule]) -> Result<(), Error> {
+    /// Replaces the bucket's configuration.
+    async fn write(&self, config: &Config) -> Result<(), Error> {
         let invalid = |e: aws_sdk_s3::error::BuildError| Error::usage(e.to_string());
         let (mut queues, mut topics, mut functions) = (Vec::new(), Vec::new(), Vec::new());
-        for rule in rules {
+        for rule in &config.rules {
             let events = Some(
                 rule.events
                     .iter()
@@ -322,6 +364,11 @@ impl Rules {
             .set_queue_configurations(Some(queues))
             .set_topic_configurations(Some(topics))
             .set_lambda_function_configurations(Some(functions))
+            .set_event_bridge_configuration(
+                config
+                    .event_bridge
+                    .then(|| EventBridgeConfiguration::builder().build()),
+            )
             .build();
         self.client
             .put_bucket_notification_configuration()
@@ -341,8 +388,8 @@ impl Rules {
 
 async fn add(bucket: &Rules, rule: Rule, ignore_existing: bool) -> Result<(), Error> {
     let name = &bucket.name;
-    let mut rules = bucket.read().await?;
-    if let Some(existing) = rules.iter().find(|r| r.same_as(&rule)) {
+    let mut config = bucket.read().await?;
+    if let Some(existing) = config.rules.iter().find(|r| r.same_as(&rule)) {
         if ignore_existing {
             ui::done(
                 format!("{name} already sends these events to {}", rule.arn),
@@ -357,7 +404,7 @@ async fn add(bucket: &Rules, rule: Rule, ignore_existing: bool) -> Result<(), Er
         .with_hint("add --ignore-existing to succeed anyway"));
     }
     if let Some(id) = &rule.id
-        && rules.iter().any(|r| r.id.as_ref() == Some(id))
+        && config.rules.iter().any(|r| r.id.as_ref() == Some(id))
     {
         return Err(Error::new(
             Kind::Conflict,
@@ -365,10 +412,17 @@ async fn add(bucket: &Rules, rule: Rule, ignore_existing: bool) -> Result<(), Er
         )
         .with_hint(format!("list them: teifs event ls {name}")));
     }
-    rules.push(rule);
-    bucket.write(&rules).await?;
-    // Read back for the id the server made up.
-    let added = bucket.read().await?.pop();
+    let arn = rule.arn.clone();
+    config.rules.push(rule);
+    bucket.write(&config).await?;
+    // Read back for the id the server made up (the server groups rules by kind).
+    let added = bucket
+        .read()
+        .await?
+        .rules
+        .into_iter()
+        .rev()
+        .find(|r| r.arn == arn);
     let id = added
         .as_ref()
         .and_then(|r| r.id.clone())
@@ -385,10 +439,23 @@ async fn add(bucket: &Rules, rule: Rule, ignore_existing: bool) -> Result<(), Er
 
 async fn ls(bucket: &Rules, arn: Option<&str>) -> Result<(), Error> {
     let name = &bucket.name;
-    let rules = bucket.read().await?;
+    let config = bucket.read().await?;
     let mut table = ui::Table::new(&["ID", "ARN", "EVENTS", "KEYS"]);
     let mut records = Vec::new();
-    for rule in rules.iter().filter(|r| arn.is_none_or(|a| r.arn == a)) {
+    if config.event_bridge && arn.is_none() {
+        table.row(vec![
+            String::new(),
+            "EventBridge".to_owned(),
+            "all S3 sends there".to_owned(),
+            "*".to_owned(),
+        ]);
+        records.push(json!({"type": "eventBridge", "bucket": name, "enabled": true}));
+    }
+    for rule in config
+        .rules
+        .iter()
+        .filter(|r| arn.is_none_or(|a| r.arn == a))
+    {
         let keys = format!(
             "{}*{}",
             rule.prefix.as_deref().unwrap_or_default(),
@@ -420,7 +487,8 @@ async fn rm(
     force: bool,
 ) -> Result<(), Error> {
     let name = &bucket.name;
-    let mut rules = bucket.read().await?;
+    let mut config = bucket.read().await?;
+    let rules = &mut config.rules;
     let before = rules.len();
     if all {
         if before == 0 {
@@ -455,14 +523,30 @@ async fn rm(
             .with_hint(format!("list them: teifs event ls {name}")));
         }
     }
-    bucket.write(&rules).await?;
     let removed = before - rules.len();
+    bucket.write(&config).await?;
     ui::done(
         format!(
             "Removed {removed} notification rule{} from {name}",
             plural(removed)
         ),
         || json!({"type": "eventRules", "bucket": name, "removed": removed}),
+    );
+    Ok(())
+}
+
+/// Turns EventBridge on or off for the bucket, keeping its rules.
+async fn event_bridge(bucket: &Rules, on: bool) -> Result<(), Error> {
+    let name = &bucket.name;
+    let mut config = bucket.read().await?;
+    let state = if on { "on" } else { "off" };
+    if config.event_bridge != on {
+        config.event_bridge = on;
+        bucket.write(&config).await?;
+    }
+    ui::done(
+        format!("EventBridge is {state} for {name}"),
+        || json!({"type": "eventBridge", "bucket": name, "enabled": on}),
     );
     Ok(())
 }

@@ -160,7 +160,9 @@ behaviour; the on-disk format is always upgraded automatically.
   whose notification configuration has `EventBridgeConfiguration` sends every event S3
   sends to EventBridge to the bus, with S3's `detail-type` and `detail`, using
   `PutEvents` signed with Signature Version 4 (source `teifs.s3`, since `aws.` sources are
-  AWS's own). It was `501 NotImplemented`.
+  AWS's own). It was `501 NotImplemented`. `teifs event eventbridge ALIAS/BUCKET on|off`
+  turns it on or off, and `teifs event add` makes a topic or function rule for an SNS or
+  Lambda ARN.
 - Lambda notification targets, as S3's: `teifs serve --notify-lambda
   ID=FUNCTION_ARN[,endpoint=URL]` invokes the function asynchronously with each event as
   S3 does, signed with Signature Version 4. Rules name it by the function's ARN, as on S3;
