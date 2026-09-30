@@ -2,18 +2,15 @@
 //! on an `nsqd` over its TCP protocol (`PUB`), over one connection made again after a
 //! failure.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
-    sync::Mutex,
 };
 
-use crate::net;
+use crate::net::{self, Kept, TIMEOUT};
 
-/// How long a connection or a command may take.
-const TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest frame read: more is a server that isn't `nsqd`.
 const MAX_FRAME: usize = 1 << 20;
 /// What a connection starts with: the protocol's version.
@@ -28,7 +25,7 @@ pub struct Nsq {
     pub address: String,
     /// The topic.
     pub topic: String,
-    connection: Arc<Mutex<Option<Connection>>>,
+    connection: Kept<Connection>,
 }
 
 impl Nsq {
@@ -56,7 +53,7 @@ impl Nsq {
         Ok(Self {
             address: address.to_owned(),
             topic: topic.to_owned(),
-            connection: Arc::new(Mutex::new(None)),
+            connection: Kept::new(),
         })
     }
 
@@ -77,31 +74,23 @@ impl Nsq {
 
     /// Checks that the `nsqd` answers.
     pub(crate) async fn test(&self) -> Result<(), String> {
-        let mut connection = self.connection.lock().await;
-        *connection = Some(self.connect().await?);
-        Ok(())
+        self.connection
+            .run(self, true, &(), |_, ()| Box::pin(async { Ok(()) }))
+            .await
     }
 
-    /// Sends `command` on the connection, making it first if there's none, and reads its
-    /// answer; a failure drops the connection.
+    /// Sends `command` on the kept connection and reads its answer (`nsqd` closes a
+    /// connection after an error, and one that missed its heartbeats while idle).
     async fn call(&self, command: &[u8]) -> Result<(), String> {
-        let mut connection = self.connection.lock().await;
-        if connection.is_none() {
-            *connection = Some(self.connect().await?);
-        }
-        let open = connection.as_mut().expect("connected");
-        let result = tokio::time::timeout(TIMEOUT, open.call(command))
+        self.connection
+            .run(self, false, command, |open, command| {
+                Box::pin(open.call(command))
+            })
             .await
-            .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()));
-        if result.is_err() {
-            // `nsqd` closes a connection after an error anyway.
-            *connection = None;
-        }
-        result
     }
 
     /// Connects, and says who's publishing (`IDENTIFY`), which `nsqd` answers.
-    async fn connect(&self) -> Result<Connection, String> {
+    async fn open(&self) -> Result<Connection, String> {
         let stream = net::connect(&self.address).await?;
         let mut connection = Connection {
             stream: BufReader::new(stream),
@@ -124,6 +113,14 @@ impl Nsq {
     }
 }
 
+impl net::Connects for Nsq {
+    type Connection = Connection;
+
+    fn connect(&self) -> impl Future<Output = Result<Connection, String>> + Send {
+        self.open()
+    }
+}
+
 impl fmt::Debug for Nsq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Nsq")
@@ -133,7 +130,7 @@ impl fmt::Debug for Nsq {
 }
 
 /// A connection to an `nsqd`.
-struct Connection {
+pub(crate) struct Connection {
     stream: BufReader<TcpStream>,
 }
 

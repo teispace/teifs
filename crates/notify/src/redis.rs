@@ -4,23 +4,18 @@
 //! `[{"Event":[record],"EventTime":…}]`. The client speaks RESP itself over one
 //! connection (TLS when asked for), made again after a failure.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc};
 
 use rustls::ClientConfig;
 use teifs_types::notify::EventMessage;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::Mutex,
-};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use zeroize::Zeroizing;
 
 use crate::{
     Format,
-    net::{self, Stream},
+    net::{self, Kept, Stream, TIMEOUT},
 };
 
-/// How long a connection or a command may take.
-const TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest reply read: more is a server that isn't Redis.
 const MAX_REPLY: usize = 1 << 20;
 /// How deeply replies may nest.
@@ -46,7 +41,7 @@ pub struct Redis {
     pub password: Option<Zeroizing<String>>,
     /// TLS, and how the server is verified; none for plain TCP.
     pub tls: Option<Arc<ClientConfig>>,
-    connection: Arc<Mutex<Option<Connection>>>,
+    connection: Kept<Connection>,
 }
 
 impl Redis {
@@ -71,7 +66,7 @@ impl Redis {
             user: None,
             password: None,
             tls: None,
-            connection: Arc::new(Mutex::new(None)),
+            connection: Kept::new(),
         })
     }
 
@@ -121,35 +116,29 @@ impl Redis {
     /// Checks that the server answers, takes the password, and that the key is free or
     /// of the format's type.
     pub(crate) async fn test(&self) -> Result<(), String> {
-        *self.connection.lock().await = None;
-        self.call(&args(&["PING"])).await.map(drop)
+        self.run(true, &args(&["PING"])).await.map(drop)
     }
 
-    /// Runs `command` on the connection, making it first if there's none; a failure
-    /// drops it.
+    /// Runs `command` on the kept connection; an error it answers leaves it kept.
     async fn call(&self, command: &[Vec<u8>]) -> Result<Reply, String> {
-        let mut connection = self.connection.lock().await;
-        if connection.is_none() {
-            *connection = Some(self.connect().await?);
-        }
-        let result = tokio::time::timeout(
-            TIMEOUT,
-            connection.as_mut().expect("connected").call(command),
-        )
-        .await
-        .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()));
-        match result {
-            Ok(Reply::Error(message)) => Err(format!("it answered: {message}")),
-            Ok(reply) => Ok(reply),
-            Err(err) => {
-                *connection = None;
-                Err(err)
-            }
+        self.run(false, command).await
+    }
+
+    async fn run(&self, fresh: bool, command: &[Vec<u8>]) -> Result<Reply, String> {
+        let reply = self
+            .connection
+            .run(self, fresh, command, |open, command| {
+                Box::pin(open.call(command))
+            })
+            .await?;
+        match reply {
+            Reply::Error(message) => Err(format!("it answered: {message}")),
+            reply => Ok(reply),
         }
     }
 
     /// Connects, authenticates, selects the database and checks the key's type.
-    async fn connect(&self) -> Result<Connection, String> {
+    async fn open(&self) -> Result<Connection, String> {
         let stream = net::connect(&self.address).await?;
         let stream = net::secure(stream, &self.address, self.tls.as_ref()).await?;
         let mut connection = Connection {
@@ -188,6 +177,14 @@ impl Redis {
     }
 }
 
+impl net::Connects for Redis {
+    type Connection = Connection;
+
+    fn connect(&self) -> impl Future<Output = Result<Connection, String>> + Send {
+        self.open()
+    }
+}
+
 impl fmt::Debug for Redis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Redis")
@@ -211,7 +208,7 @@ pub(crate) enum Reply {
 }
 
 /// A connection to the server.
-struct Connection {
+pub(crate) struct Connection {
     stream: BufReader<Stream>,
 }
 

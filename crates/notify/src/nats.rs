@@ -3,24 +3,19 @@
 //! it. One connection, made again after a failure; TLS when asked for (or the server
 //! requires it); a user and password, a token, an nkey, or a `.creds` file's user JWT.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc};
 
 use base64::Engine as _;
 use rustls::ClientConfig;
 use sha2::{Digest as _, Sha256};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::Mutex,
-};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use zeroize::Zeroizing;
 
 use crate::{
-    net::{self, Stream},
+    net::{self, Kept, Stream, TIMEOUT},
     nkey::UserKey,
 };
 
-/// How long a connection or a publish may take.
-const TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest line read: more is a server that isn't NATS.
 const MAX_LINE: u64 = 64 << 10;
 /// The longest message read (only acknowledgements come).
@@ -51,7 +46,7 @@ pub struct Nats {
     /// Whether TLS starts at once, before the server's `INFO` (its
     /// `handshake_first`), rather than after it.
     pub tls_first: bool,
-    connection: Arc<Mutex<Option<Connection>>>,
+    connection: Kept<Connection>,
 }
 
 impl Nats {
@@ -81,7 +76,7 @@ impl Nats {
             key: None,
             tls: None,
             tls_first: false,
-            connection: Arc::new(Mutex::new(None)),
+            connection: Kept::new(),
         })
     }
 
@@ -97,55 +92,35 @@ impl Nats {
         )
     }
 
-    /// Publishes `body`. A connection that was kept and fails is made again once at
-    /// once: a server closes one it hasn't heard from in a while.
+    /// Publishes `body`.
     pub(crate) async fn send(&self, body: &[u8]) -> Result<(), String> {
-        let mut connection = self.connection.lock().await;
-        let mut kept = connection.is_some();
-        loop {
-            if connection.is_none() {
-                *connection = Some(self.connect().await?);
-            }
-            let open = connection.as_mut().expect("connected");
-            let result = tokio::time::timeout(TIMEOUT, open.publish(&self.subject, body))
-                .await
-                .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()));
-            match result {
-                Ok(()) => return Ok(()),
-                Err(_) if kept => kept = false,
-                Err(e) => {
-                    *connection = None;
-                    return Err(e);
-                }
-            }
-            *connection = None;
-        }
+        let request = (self.subject.as_str(), body);
+        self.connection
+            .run(self, false, &request, |open, (subject, body)| {
+                Box::pin(open.publish(subject, body))
+            })
+            .await
     }
 
     /// Checks that the server takes the connection and, for `JetStream`, that a stream
     /// takes the subject, without publishing.
     pub(crate) async fn test(&self) -> Result<(), String> {
-        let mut connection = self.connection.lock().await;
-        *connection = None;
-        let mut open = self.connect().await?;
-        if self.jetstream {
-            let body = serde_json::json!({ "subject": self.subject }).to_string();
-            let reply =
-                tokio::time::timeout(TIMEOUT, open.request(STREAM_NAMES, body.as_bytes(), None))
-                    .await
-                    .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()))?;
-            let answer = reply.answer(|| "JetStream isn't enabled for its account".to_owned())?;
-            if answer["streams"].as_array().is_none_or(Vec::is_empty) {
-                return Err(format!("no JetStream stream takes `{}`", self.subject));
-            }
-        }
-        *connection = Some(open);
-        Ok(())
+        let request = self.jetstream.then_some(self.subject.as_str());
+        self.connection
+            .run(self, true, &request, |open, subject| {
+                Box::pin(async move {
+                    match subject {
+                        Some(subject) => open.check_stream(subject).await,
+                        None => Ok(()),
+                    }
+                })
+            })
+            .await
     }
 
     /// Connects: TLS if asked for or required, then `CONNECT` with its credentials,
     /// answered by the `PONG` to a `PING`.
-    async fn connect(&self) -> Result<Connection, String> {
+    async fn open(&self) -> Result<Connection, String> {
         let tcp = net::connect(&self.address).await?;
         let stream: Stream = if self.tls_first {
             let tls = self
@@ -251,6 +226,14 @@ impl Nats {
     }
 }
 
+impl net::Connects for Nats {
+    type Connection = Connection;
+
+    fn connect(&self) -> impl Future<Output = Result<Connection, String>> + Send {
+        self.open()
+    }
+}
+
 impl fmt::Debug for Nats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Nats")
@@ -283,7 +266,7 @@ fn random_token() -> Result<String, String> {
 }
 
 /// A connection to a NATS server.
-struct Connection {
+pub(crate) struct Connection {
     stream: BufReader<Stream>,
     /// Where `JetStream`'s acknowledgements come, `_INBOX.<random>`.
     inbox: String,
@@ -373,6 +356,17 @@ impl Connection {
         command.extend_from_slice(b"\r\nPING\r\n");
         self.write(&command).await?;
         self.pong().await
+    }
+
+    /// Checks that a `JetStream` stream takes `subject`.
+    async fn check_stream(&mut self, subject: &str) -> Result<(), String> {
+        let body = serde_json::json!({ "subject": subject }).to_string();
+        let reply = self.request(STREAM_NAMES, body.as_bytes(), None).await?;
+        let answer = reply.answer(|| "JetStream isn't enabled for its account".to_owned())?;
+        if answer["streams"].as_array().is_none_or(Vec::is_empty) {
+            return Err(format!("no JetStream stream takes `{subject}`"));
+        }
+        Ok(())
     }
 
     /// Sends `body` to `subject` with a reply subject, with `Nats-Msg-Id: id` when the

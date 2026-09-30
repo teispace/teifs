@@ -293,8 +293,12 @@ a user seed) or a `.creds` file's user JWT (`creds=PATH`, as `nsc` writes it). `
 or `ca=PATH` connects over TLS (a server that requires TLS asks for it), and
 `tls_first=true` starts TLS before the server's greeting, for a server set to
 `handshake_first`. Starting to name it checks that the server takes the credentials and,
-for JetStream, that a stream takes the subject, without publishing. A connection the
-server closed while idle is made again at once.
+for JetStream, that a stream takes the subject, without publishing.
+
+Redis, NSQ and NATS targets each keep one connection. One the server closed while it
+was idle (nsqd does after missed heartbeats, NATS after missed pings, Redis with a
+`timeout` set) is made again at once, rather than failing the event and waiting to
+retry it.
 
 ### Rules
 

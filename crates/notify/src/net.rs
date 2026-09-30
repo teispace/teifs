@@ -1,7 +1,7 @@
 //! Connections to targets that aren't HTTP: TCP with a timeout, and TLS when asked for,
 //! the server verified with the system's trust store or a CA file of the operator's.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rustls::{
     ClientConfig, RootCertStore,
@@ -10,10 +10,82 @@ use rustls::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
+    sync::Mutex,
 };
 
 /// How long a connection may take to open.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an event may take to be taken, or a check to be answered.
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What an operation on a kept connection returns.
+pub(crate) type Op<'c, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'c>>;
+
+/// A target that keeps a connection.
+pub(crate) trait Connects: Sync {
+    type Connection: Send;
+    /// Opens a connection, ready for events.
+    fn connect(&self) -> impl Future<Output = Result<Self::Connection, String>> + Send;
+}
+
+/// A connection kept between events: made when there's none, dropped when it fails.
+pub(crate) struct Kept<C>(Arc<Mutex<Option<C>>>);
+
+impl<C: Send> Kept<C> {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    /// Runs `op` with `request` on `target`'s connection, made if there's none, each
+    /// within [`TIMEOUT`]. A kept connection that fails is made again once, at once: servers
+    /// close connections that were idle a while. `fresh` drops the kept one first.
+    pub(crate) async fn run<X, R, T>(
+        &self,
+        target: &X,
+        fresh: bool,
+        request: &R,
+        op: for<'c> fn(&'c mut C, &'c R) -> Op<'c, T>,
+    ) -> Result<T, String>
+    where
+        X: Connects<Connection = C>,
+        R: Sync + ?Sized,
+    {
+        let mut slot = self.0.lock().await;
+        if fresh {
+            *slot = None;
+        }
+        let mut kept = slot.is_some();
+        loop {
+            let open = match &mut *slot {
+                Some(open) => open,
+                None => slot.insert(
+                    tokio::time::timeout(TIMEOUT, target.connect())
+                        .await
+                        .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()))?,
+                ),
+            };
+            let result = tokio::time::timeout(TIMEOUT, op(open, request))
+                .await
+                .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()));
+            match result {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    *slot = None;
+                    if !kept {
+                        return Err(err);
+                    }
+                    kept = false;
+                }
+            }
+        }
+    }
+}
+
+impl<C> Clone for Kept<C> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
 
 /// A connection, plain or TLS.
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -108,6 +180,61 @@ mod tests {
         assert_eq!(host_of("[::1]:6379"), "::1");
         assert_eq!(host_of("10.0.0.1:1"), "10.0.0.1");
         assert!(is_address("h:1") && !is_address("h") && !is_address(":1") && !is_address("h:0"));
+    }
+
+    /// Connections numbered as they're made; each takes as many operations as its
+    /// server lets it before failing.
+    struct Server {
+        made: std::sync::atomic::AtomicU32,
+        lives: u32,
+    }
+
+    impl Connects for Server {
+        type Connection = (u32, u32);
+
+        fn connect(&self) -> impl Future<Output = Result<(u32, u32), String>> + Send {
+            let n = self.made.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            async move {
+                if n > 3 {
+                    Err("down".to_owned())
+                } else {
+                    Ok((n, 0))
+                }
+            }
+        }
+    }
+
+    fn op<'c>(open: &'c mut (u32, u32), lives: &'c u32) -> Op<'c, u32> {
+        Box::pin(async move {
+            open.1 += 1;
+            if open.1 > *lives {
+                Err(format!("connection {} closed", open.0))
+            } else {
+                Ok(open.0)
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_kept_connection_that_failed_is_made_again_once() {
+        let server = Server {
+            made: 0.into(),
+            lives: 1,
+        };
+        let kept = Kept::new();
+        assert_eq!(kept.run(&server, false, &server.lives, op).await, Ok(1));
+        // The kept connection fails (its server closed it): a new one, at once.
+        assert_eq!(kept.run(&server, false, &server.lives, op).await, Ok(2));
+        // A fresh connection that fails isn't tried again.
+        let err = kept.run(&server, false, &0, op).await.unwrap_err();
+        assert_eq!(
+            err, "connection 3 closed",
+            "the kept one, then one fresh try"
+        );
+        assert_eq!(
+            kept.run(&server, true, &server.lives, op).await,
+            Err("down".into())
+        );
     }
 
     #[test]
