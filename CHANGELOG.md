@@ -131,6 +131,10 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs_store_stage_seconds{op,stage}`: how long the store's writes spend getting a
   data key, waiting for the commit lock, syncing and committing, and its reads finding a
   version and getting its key, to tell a slow disk or KMS from a slow network.
+- A client uploading to a server that refuses the upload (access denied, say) reads
+  the refusal: a small body is read before the answer, where it used to be left unread
+  and the connection closed, which could fail the client's write with a broken pipe.
+  A client that waits for `100 Continue` gets the refusal without sending the body.
 - `teifs admin trace ALIAS` shows each request the server answers, as it answers it
   (as `mc admin trace`): time, status, operation, bucket and key, client, duration and
   bytes, or with `--json` the audit entry. Filters (`--errors`, `--api`, `--bucket`,

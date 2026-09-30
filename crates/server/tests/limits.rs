@@ -1,6 +1,7 @@
 //! What one client can make the server hold, over raw connections: silent and slow
-//! clients are cut off, stalled uploads fail as S3 does, connections are capped, and
-//! oversized headers and metadata are refused.
+//! clients are cut off, stalled uploads fail as S3 does, connections are capped,
+//! oversized headers and metadata are refused, and a refused upload's client reads the
+//! refusal.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use aws_sdk_s3::{
     error::ProvideErrorMetadata, presigning::PresigningConfig, primitives::ByteStream,
 };
-use common::{SECRET_KEY, Server, client, start_with};
+use common::{SECRET_KEY, Server, client, start, start_with};
 use teifs_server::Limits;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -168,4 +169,43 @@ async fn oversized_headers_and_metadata_are_refused() {
     put("v".repeat(2047)).await.unwrap();
     let over = put("v".repeat(2048)).await.unwrap_err();
     assert_eq!(over.code(), Some("MetadataTooLarge"));
+}
+
+/// A server that refuses an upload without reading its body, and closes the connection,
+/// fails the client's write of the body before the client reads the refusal. The body
+/// is read first; a client waiting for `100 Continue` gets the refusal straight away.
+#[tokio::test]
+async fn a_refused_uploads_body_is_read_before_the_refusal() {
+    let server = start().await;
+    let put = |expect: &str| {
+        format!(
+            "PUT /bkt/key HTTP/1.1\r\nHost: localhost\r\nContent-Length: 65536\r\n\
+             Connection: close\r\n{expect}\r\n"
+        )
+    };
+    let mut socket = connect(&server).await;
+    socket.write_all(put("").as_bytes()).await.unwrap();
+    let mut first = [0; 1];
+    assert!(
+        tokio::time::timeout(SHORT, socket.read(&mut first))
+            .await
+            .is_err(),
+        "answered while the body was still coming"
+    );
+    socket.write_all(&vec![b'x'; 65_536]).await.unwrap();
+    let answer = read_to_close(&mut socket, Duration::from_secs(5)).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+
+    let started = Instant::now();
+    let mut waiting = connect(&server).await;
+    waiting
+        .write_all(put("Expect: 100-continue\r\n").as_bytes())
+        .await
+        .unwrap();
+    let answer = read_to_close(&mut waiting, Duration::from_secs(5)).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "waited for the body"
+    );
 }

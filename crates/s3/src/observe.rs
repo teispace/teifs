@@ -18,6 +18,7 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use http_body::{Body, Frame, SizeHint};
+use hyper::body::Incoming;
 use s3s::{HttpResponse, StdError};
 
 use crate::{
@@ -40,6 +41,8 @@ pub(crate) struct Seen {
     /// The bucket and key it's on.
     target: OnceLock<(String, String)>,
     received: AtomicU64,
+    /// What wasn't read of its body, if anything.
+    leftover: Mutex<Option<Incoming>>,
 }
 
 impl Seen {
@@ -51,6 +54,7 @@ impl Seen {
             access_key: OnceLock::new(),
             target: OnceLock::new(),
             received: AtomicU64::new(0),
+            leftover: Mutex::new(None),
         }
     }
 
@@ -141,27 +145,34 @@ fn next_id() -> String {
     format!("{:016X}", now.max(previous.saturating_add(1)))
 }
 
-/// A request body that counts the bytes read from it.
-pub(crate) struct Received<B> {
-    body: B,
+/// A request body that counts the bytes read from it, and leaves what wasn't read
+/// with the request's [`Seen`], for [`drain`].
+pub(crate) struct Received {
+    body: Option<Incoming>,
     seen: Arc<Seen>,
 }
 
-impl<B> Received<B> {
-    pub(crate) const fn new(body: B, seen: Arc<Seen>) -> Self {
-        Self { body, seen }
+impl Received {
+    pub(crate) const fn new(body: Incoming, seen: Arc<Seen>) -> Self {
+        Self {
+            body: Some(body),
+            seen,
+        }
     }
 }
 
-impl<B: Body<Data = Bytes> + Unpin> Body for Received<B> {
+impl Body for Received {
     type Data = Bytes;
-    type Error = B::Error;
+    type Error = hyper::Error;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
-        let poll = Pin::new(&mut self.body).poll_frame(cx);
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let Some(body) = self.body.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let poll = Pin::new(body).poll_frame(cx);
         if let Poll::Ready(Some(Ok(frame))) = &poll
             && let Some(data) = frame.data_ref()
         {
@@ -173,12 +184,60 @@ impl<B: Body<Data = Bytes> + Unpin> Body for Received<B> {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
+        self.body.as_ref().is_none_or(Body::is_end_stream)
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
+        self.body
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
     }
+}
+
+impl Drop for Received {
+    fn drop(&mut self) {
+        if let Some(body) = self.body.take()
+            && !body.is_end_stream()
+        {
+            *self
+                .seen
+                .leftover
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(body);
+        }
+    }
+}
+
+/// The most of a body left unread (by a request refused before its body mattered)
+/// that's read and thrown away before the answer, so the client gets to read the answer.
+const DRAIN_LIMIT: u64 = 1024 * 1024;
+/// How long that may take.
+const DRAIN_TIME: Duration = Duration::from_secs(2);
+
+/// Reads and throws away what's left of a request's body, up to [`DRAIN_LIMIT`]. A
+/// server that answers without reading a body and then closes the connection makes
+/// the client's write of it fail, and the client never reads the answer (the refusal
+/// of an upload, say): a client still sending a small body can read the answer once
+/// it's done. A larger body's client gets the connection closed.
+pub(crate) async fn drain(seen: &Seen) {
+    let Some(mut body) = seen
+        .leftover
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    let read = async {
+        let mut read = 0;
+        while read < DRAIN_LIMIT {
+            match std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+                Some(Ok(frame)) => read += frame.data_ref().map_or(0, |d| d.len() as u64),
+                Some(Err(_)) | None => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(DRAIN_TIME, read).await;
 }
 
 /// What watches requests: the metrics, and the audit log if one is kept.

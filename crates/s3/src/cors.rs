@@ -424,7 +424,13 @@ impl Service {
         let request = observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked);
         // Everything logged while answering names the request, as its answer does.
         let span = tracing::info_span!("request", id = %seen.id);
+        // A client waiting for `100 Continue` hasn't sent the body the answer spares it.
+        let continues = header(req.headers(), "expect")
+            .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"));
         let response = self.respond(req, &seen).instrument(span).await?;
+        if !continues {
+            observe::drain(&seen).await;
+        }
         Ok(observe::finish(response, request))
     }
 
