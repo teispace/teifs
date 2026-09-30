@@ -184,3 +184,32 @@ pub fn sig_v2_link(server: &Server, method: &str, path: &str, resource: &str) ->
         server.endpoint
     )
 }
+
+/// Waits until the server counts `count` events sent to the notification target
+/// `arn:teifs:sqs::ID:KIND`.
+pub async fn sent(server: &Server, kind: &str, id: &str, count: u64) {
+    let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
+    let wanted =
+        format!("teifs_notify_sent_total{{target=\"arn:teifs:sqs::{id}:{kind}\"}} {count}\n");
+    let mut scraped = String::new();
+    for _ in 0..300 {
+        scraped = reqwest::Client::new()
+            .get(format!(
+                "{}{}",
+                server.endpoint,
+                teifs_types::admin::METRICS_PATH
+            ))
+            .bearer_auth(token.as_str())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        if scraped.contains(&wanted) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{id} never sent {count} events: {scraped}");
+}

@@ -27,9 +27,9 @@ use clap::{Parser, Subcommand};
 use teifs_server::{
     Acks, Amqp, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability,
     Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl, KeyRules,
-    KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, SaslMechanism, Server, Sns,
-    Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook,
-    credentials, tls_config,
+    KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, Postgres, ProxyHeader, Redis, SaslMechanism,
+    Server, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey,
+    Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -354,6 +354,23 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_AMQP"
     )]
     notify_amqp: Vec<TargetConfig>,
+    /// A PostgreSQL table buckets' notification rules can send events to, as
+    /// `ID=HOST:PORT,database=NAME,table=NAME,user=NAME` (a table's name in double quotes
+    /// keeps its capitals, as `table="S3Events"`), with `format=namespace` (a row
+    /// per object, set by each event and deleted with it: the default) or `format=access`
+    /// (a row per event), and `tls=true` (the server verified with the system's
+    /// certificates) or `ca=PATH`, with `client_cert=PATH` and `client_key=PATH` (repeat
+    /// for more; in the environment, separated by spaces). The table is made if it's
+    /// missing. Rules name it `arn:teifs:sqs::ID:postgresql`. Its password,
+    /// `TEIFS_NOTIFY_POSTGRESQL_PASSWORD_ID`, is read only from the environment.
+    #[arg(
+        long = "notify-postgresql",
+        value_name = "ID=HOST:PORT,database=NAME,table=NAME,user=NAME",
+        value_parser = parse_notify_postgresql,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_POSTGRESQL"
+    )]
+    notify_postgresql: Vec<TargetConfig>,
     /// An SQS queue buckets' notification rules can send events to, as S3 sends them,
     /// as `ID=QUEUE_URL` (`https://sqs.REGION.amazonaws.com/ACCOUNT/NAME`, or any service
     /// that speaks SQS's API), with region=NAME when its host doesn't name it (repeat for
@@ -911,6 +928,44 @@ fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Redis(redis))
 }
 
+/// A PostgreSQL table, `ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=F]` and
+/// TLS options; its password comes from the environment later.
+fn parse_notify_postgresql(text: &str) -> Result<TargetConfig, String> {
+    let form = "ID=HOST:PORT,database=NAME,table=NAME,user=NAME";
+    let (id, address, options) = target_spec(
+        text,
+        form,
+        &[
+            "database",
+            "table",
+            "user",
+            "format",
+            "tls",
+            "ca",
+            "client_cert",
+            "client_key",
+        ],
+    )?;
+    let named = |name: &str| {
+        options
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("name the {name}: {form}"))
+    };
+    let format = options
+        .get("format")
+        .map_or(Ok(Format::Namespace), |f| Format::parse(f))?;
+    let mut pg = Postgres::new(
+        address,
+        named("database")?,
+        named("table")?,
+        format,
+        named("user")?,
+    )?;
+    pg.tls = target_tls(&options)?;
+    TargetConfig::new(id, TargetKind::Postgres(pg))
+}
+
 /// An NSQ topic, `ID=HOST:PORT,topic=NAME`.
 fn parse_notify_nsq(text: &str) -> Result<TargetConfig, String> {
     let (id, address, options) = target_spec(text, "ID=HOST:PORT,topic=NAME", &["topic"])?;
@@ -1214,12 +1269,7 @@ fn notify_targets(
             ));
         }
         let secret = |what: &str| {
-            let name = format!(
-                "TEIFS_NOTIFY_{}_{what}_{}",
-                arn.kind.to_ascii_uppercase(),
-                arn.id.to_ascii_uppercase().replace('-', "_")
-            );
-            env(&name)
+            env(&secret_variable(&arn, what))
                 .filter(|s| !s.trim().is_empty())
                 .map(Zeroizing::new)
         };
@@ -1227,6 +1277,15 @@ fn notify_targets(
         out.push(target);
     }
     Ok(out)
+}
+
+/// The variable a target's secret `what` is read from, as `TEIFS_NOTIFY_KIND_WHAT_ID`.
+fn secret_variable(arn: &teifs_types::notify::TargetArn, what: &str) -> String {
+    format!(
+        "TEIFS_NOTIFY_{}_{what}_{}",
+        arn.kind.to_ascii_uppercase(),
+        arn.id.to_ascii_uppercase().replace('-', "_")
+    )
 }
 
 /// Reads a target's secrets with `secret` (its own variables, by what they are) and
@@ -1250,6 +1309,7 @@ fn target_secrets(
             }
         }
         TargetKind::Nsq(_) => {}
+        TargetKind::Postgres(pg) => pg.password = secret("PASSWORD"),
         TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(arn, secret, &env)?,
         TargetKind::Sns(sns) => sns.credentials = aws_credentials(arn, secret, &env)?,
         TargetKind::Lambda(lambda) => {
@@ -1274,10 +1334,9 @@ fn target_secrets(
                 (None, None) => {}
                 (Some(_), None) => {
                     return Err(format!(
-                        "the Kafka target `{}` signs in with SASL: set its password in \
-                         TEIFS_NOTIFY_KAFKA_PASSWORD_{}",
+                        "the Kafka target `{}` signs in with SASL: set its password in {}",
                         arn.id,
-                        arn.id.to_ascii_uppercase().replace('-', "_")
+                        secret_variable(arn, "PASSWORD")
                     ));
                 }
                 (None, Some(_)) => {
@@ -1293,34 +1352,27 @@ fn target_secrets(
             amqp.password = secret("PASSWORD");
             if amqp.user.is_some() != amqp.password.is_some() {
                 return Err(format!(
-                    "the AMQP target `{}` needs both a user=NAME and its password in \
-                     TEIFS_NOTIFY_AMQP_PASSWORD_{}",
+                    "the AMQP target `{}` needs both a user=NAME and its password in {}",
                     arn.id,
-                    arn.id.to_ascii_uppercase().replace('-', "_")
+                    secret_variable(arn, "PASSWORD")
                 ));
             }
         }
         TargetKind::Nats(nats) => {
             nats.password = secret("PASSWORD");
             nats.token = secret("TOKEN");
-            let variable = |what: &str| {
-                format!(
-                    "TEIFS_NOTIFY_NATS_{what}_{}",
-                    arn.id.to_ascii_uppercase().replace('-', "_")
-                )
-            };
             if nats.user.is_some() != nats.password.is_some() {
                 return Err(format!(
                     "the NATS target `{}` needs both a user=NAME and its password in {}",
                     arn.id,
-                    variable("PASSWORD")
+                    secret_variable(arn, "PASSWORD")
                 ));
             }
             if nats.token.is_some() && (nats.user.is_some() || nats.key.is_some()) {
                 return Err(format!(
                     "the NATS target `{}` has a token in {}: leave out its user and key",
                     arn.id,
-                    variable("TOKEN")
+                    secret_variable(arn, "TOKEN")
                 ));
             }
         }
@@ -1328,10 +1380,9 @@ fn target_secrets(
             redis.password = secret("PASSWORD");
             if redis.user.is_some() && redis.password.is_none() {
                 return Err(format!(
-                    "the Redis target `{}` has a user: set its password in \
-                     TEIFS_NOTIFY_REDIS_PASSWORD_{}",
+                    "the Redis target `{}` has a user: set its password in {}",
                     arn.id,
-                    arn.id.to_ascii_uppercase().replace('-', "_")
+                    secret_variable(arn, "PASSWORD")
                 ));
             }
         }
@@ -1397,6 +1448,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_mqtt)
                 .chain(args.notify_kafka)
                 .chain(args.notify_amqp)
+                .chain(args.notify_postgresql)
                 .chain(args.notify_sqs)
                 .chain(args.notify_sns)
                 .chain(args.notify_lambda)
@@ -1871,6 +1923,58 @@ mod tests {
         // A user needs its password.
         let passwordless = redis("other=redis.local:6379,key=k,user=teifs");
         assert!(notify_targets(vec![passwordless], env).is_err());
+    }
+
+    #[test]
+    fn postgresql_targets_take_options_and_their_password_from_the_environment() {
+        let env = |name: &str| (name == "TEIFS_NOTIFY_POSTGRESQL_PASSWORD_DB").then(|| "pw".into());
+        let db = parse_notify_postgresql(
+            "db=pg.local:5432,database=s3,table=\"S3 Events\",user=teifs,format=access,tls=true",
+        )
+        .unwrap();
+        assert_eq!(db.arn().to_string(), "arn:teifs:sqs::db:postgresql");
+        let targets = notify_targets(vec![db], env).unwrap();
+        let TargetKind::Postgres(pg) = &targets[0].kind else {
+            panic!("not PostgreSQL")
+        };
+        assert_eq!(
+            (
+                pg.address.as_str(),
+                pg.database.as_str(),
+                pg.table.as_str(),
+                pg.user.as_str(),
+                pg.format,
+                pg.tls.is_some()
+            ),
+            (
+                "pg.local:5432",
+                "s3",
+                "\"S3 Events\"",
+                "teifs",
+                Format::Access,
+                true
+            )
+        );
+        assert_eq!(pg.password.as_deref().map(String::as_str), Some("pw"));
+        let trusted =
+            parse_notify_postgresql("other=pg.local:5432,database=s3,table=t,user=u").unwrap();
+        let targets = notify_targets(vec![trusted], env).unwrap();
+        let TargetKind::Postgres(pg) = &targets[0].kind else {
+            panic!("not PostgreSQL")
+        };
+        assert!(pg.password.is_none() && pg.tls.is_none());
+        assert_eq!(pg.format, Format::Namespace);
+        for bad in [
+            "x=pg.local:5432,table=t,user=u",
+            "x=pg.local:5432,database=s3,user=u",
+            "x=pg.local:5432,database=s3,table=t",
+            "x=pg.local,database=s3,table=t,user=u",
+            "x=pg.local:5432,database=s3,table=t;drop,user=u",
+            "x=pg.local:5432,database=s3,table=t,user=u,format=rows",
+            "x=pg.local:5432,database=s3,table=t,user=u,key=k",
+        ] {
+            assert!(parse_notify_postgresql(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

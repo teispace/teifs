@@ -7,13 +7,13 @@ use std::{
     time::Duration,
 };
 
-use aws_lc_rs::{digest, hmac, pbkdf2};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
+use super::scram_verify;
 use crate::kafka::wire::{Reader, Writer, api, read_batches};
 
 /// How a [`KafkaServer`] is made.
@@ -323,7 +323,7 @@ fn authenticate(
                 .ok_or("no nonce")?;
             let named = bare.split(',').find_map(|a| a.strip_prefix("n=")) == Some(user.as_str());
             if named {
-                let first = format!("r={nonce}srv,s={},i=4096", BASE64.encode(b"kafka-salt"));
+                let first = format!("r={nonce}srv,s={},i=4096", BASE64.encode(super::SCRAM_SALT));
                 (Some(first.clone().into_bytes()), Signin::Scram(bare, first))
             } else {
                 (None, Signin::None)
@@ -368,66 +368,6 @@ fn authenticate(
         }
     }
     Ok((out.0, ok))
-}
-
-/// Checks SCRAM's client proof as a server does, from what it stores (the stored key
-/// and server key); returns the server's signature.
-fn scram_verify(
-    mechanism: &str,
-    password: &str,
-    client_first_bare: &str,
-    server_first: &str,
-    client_final: &str,
-) -> Option<Vec<u8>> {
-    let (derive, mac, sha) = if mechanism == "SCRAM-SHA-512" {
-        (
-            pbkdf2::PBKDF2_HMAC_SHA512,
-            hmac::HMAC_SHA512,
-            &digest::SHA512,
-        )
-    } else {
-        (
-            pbkdf2::PBKDF2_HMAC_SHA256,
-            hmac::HMAC_SHA256,
-            &digest::SHA256,
-        )
-    };
-    let mut salted = vec![0; sha.output_len()];
-    pbkdf2::derive(
-        derive,
-        std::num::NonZeroU32::new(4096)?,
-        b"kafka-salt",
-        password.as_bytes(),
-        &mut salted,
-    );
-    let salted = hmac::Key::new(mac, &salted);
-    let stored_key = digest::digest(sha, hmac::sign(&salted, b"Client Key").as_ref());
-    let server_key = hmac::sign(&salted, b"Server Key");
-    let (without_proof, proof) = client_final.rsplit_once(",p=")?;
-    let nonce = server_first.split(',').next()?.strip_prefix("r=")?;
-    if without_proof != format!("c=biws,r={nonce}") {
-        return None;
-    }
-    let auth_message = format!("{client_first_bare},{server_first},{without_proof}");
-    let client_signature = hmac::sign(
-        &hmac::Key::new(mac, stored_key.as_ref()),
-        auth_message.as_bytes(),
-    );
-    let client_key: Vec<u8> = BASE64
-        .decode(proof)
-        .ok()?
-        .iter()
-        .zip(client_signature.as_ref())
-        .map(|(p, s)| p ^ s)
-        .collect();
-    (digest::digest(sha, &client_key).as_ref() == stored_key.as_ref()).then(|| {
-        hmac::sign(
-            &hmac::Key::new(mac, server_key.as_ref()),
-            auth_message.as_bytes(),
-        )
-        .as_ref()
-        .to_vec()
-    })
 }
 
 fn metadata(reader: &mut Reader<'_>, shared: &Shared) -> Result<Vec<u8>, String> {

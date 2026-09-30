@@ -354,7 +354,28 @@ asks. The user is `user=NAME` and its password comes from
 that the broker takes the user, the virtual host and the exchange, without publishing.
 Nightly CI runs it against a real RabbitMQ.
 
-Redis, NSQ, NATS, MQTT, Kafka and AMQP targets each keep their connections. One the server
+```sh
+teifs serve --notify-postgresql db=pg.internal:5432,database=teifs,table=s3_objects,user=teifs,ca=/etc/teifs/pg-ca.pem
+export TEIFS_NOTIFY_POSTGRESQL_PASSWORD_DB=…
+```
+
+A PostgreSQL target, `arn:teifs:sqs::ID:postgresql`, keeps events in a table, in
+MinIO's formats: `namespace` (the default) keeps a row per object, `key` (`bucket/object`,
+the primary key) and `value` (`{"Records":[record]}` as JSONB), set by each event and
+deleted when the object is; `access` adds a row per event, `event_time` (a timestamp with
+time zone) and `event_data` (the event as a webhook is sent it, as JSONB). The table is made
+when it's missing (`CREATE TABLE IF NOT EXISTS`, so the user needs `CREATE` on the schema
+the first time, and `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the table after); a name in
+double quotes keeps its capitals (`table="S3Events"`), and a table made beforehand must have
+the same columns. It signs in as `user=NAME` with the password from
+`TEIFS_NOTIFY_POSTGRESQL_PASSWORD_ID` by SCRAM-SHA-256 (PostgreSQL's default) or MD5, or
+with none under `trust`; a server that asks for the password in the clear gets it only over
+TLS. `tls=true` or `ca=PATH` asks for TLS before anything else is sent, verified with the
+system's certificates or the CA, with `client_cert` and `client_key` for a server that
+asks. Starting to name it checks that the server takes the user and the database and that
+the table is there or can be made. Nightly CI runs it against a real PostgreSQL 17.
+
+Redis, NSQ, NATS, MQTT, Kafka, AMQP and PostgreSQL targets each keep their connections. One the server
 closed while it was idle (nsqd does after missed heartbeats, NATS after missed pings, an
 MQTT broker after its keep alive, Kafka after `connections.max.idle.ms`, Redis with a
 `timeout` set) is made again at once, rather than failing the event and waiting to

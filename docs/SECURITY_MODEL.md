@@ -245,18 +245,25 @@ query or fragment. Redirects aren't followed, so entries go nowhere but the URL 
 targets' secrets are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`,
 `TEIFS_NOTIFY_ELASTICSEARCH_PASSWORD_ID` or `_API_KEY_ID`, `TEIFS_NOTIFY_REDIS_PASSWORD_ID`,
 `TEIFS_NOTIFY_NATS_PASSWORD_ID` or `_TOKEN_ID`, `TEIFS_NOTIFY_MQTT_PASSWORD_ID`,
-`TEIFS_NOTIFY_KAFKA_PASSWORD_ID`, `TEIFS_NOTIFY_AMQP_PASSWORD_ID`), sent as sensitive
-headers, Redis's `AUTH`, NATS's or MQTT's `CONNECT`, Kafka's SASL or AMQP's `StartOk`
+`TEIFS_NOTIFY_KAFKA_PASSWORD_ID`, `TEIFS_NOTIFY_AMQP_PASSWORD_ID`,
+`TEIFS_NOTIFY_POSTGRESQL_PASSWORD_ID`), sent as sensitive headers, Redis's `AUTH`, NATS's or
+MQTT's `CONNECT`, Kafka's SASL, AMQP's `StartOk` or PostgreSQL's password message
 (built in memory that's wiped), and never shown; an AMQP URL with a user or password in it
 is refused. With
 SASL SCRAM a Kafka password is never sent: the client proves it knows it, and the broker
 must prove it knows it too before any event is sent (an impostor is refused); SASL PLAIN
-sends it as it is, so use it only over TLS; a URL with a user or password in it is refused. An SQS, SNS,
+sends it as it is, so use it only over TLS; a URL with a user or password in it is refused.
+PostgreSQL's SCRAM-SHA-256 works the same way (a server that answers without proving it
+knows the password is refused); with MD5 only a salted hash is sent, and a server that
+asks for the password in the clear gets it only over TLS. A PostgreSQL target's events and
+keys are bound to its statements as parameters, never put in their SQL, and its table's
+name is checked when the server starts (letters, digits, `_` and `$`, or a quoted name
+without `"`), so an object's key can't change what's run. An SQS, SNS,
 Lambda or EventBridge target's secret key (`TEIFS_NOTIFY_KIND_SECRET_KEY_ID`, else
 `AWS_SECRET_ACCESS_KEY`) is kept in
 memory that's wiped and only signs requests (Signature Version 4); it is never sent, and
 only the access key is shown.
-A Redis, NATS, MQTT, Kafka or AMQP (`amqps://`) target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's
+A Redis, NATS, MQTT, Kafka, PostgreSQL or AMQP (`amqps://`) target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's
 certificate and name with the system's certificates or only the given CA, never skipping
 the check, before its password is sent; a NATS server that requires TLS gets it, or no
 credentials. A NATS nkey or `.creds` file is read from its path when the server starts,

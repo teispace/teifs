@@ -20,9 +20,6 @@ use zeroize::Zeroizing;
 
 use crate::{Format, webhook::described};
 
-/// The events that remove an object's document in the `namespace` format.
-const REMOVALS: &[&str] = &["s3:ObjectRemoved:Delete", "s3:LifecycleExpiration:Delete"];
-
 /// An index events are written to.
 #[derive(Clone)]
 pub struct Elasticsearch {
@@ -90,7 +87,7 @@ impl Elasticsearch {
         self.ensure_index(client).await?;
         let document = serde_json::json!({ "Records": message.records });
         let (method, path, ok_if_missing) = match self.format {
-            Format::Namespace if REMOVALS.contains(&message.event_name.as_str()) => (
+            Format::Namespace if Format::removes(&message.event_name) => (
                 Method::DELETE,
                 vec!["_doc".to_owned(), document_id(&message.key)],
                 true,

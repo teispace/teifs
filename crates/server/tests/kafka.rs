@@ -15,7 +15,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{Event, NotificationConfiguration, QueueConfiguration},
 };
-use common::{ACCESS_KEY, SECRET_KEY, Server, client, start_with};
+use common::{SECRET_KEY, client, start_with};
 use teifs_server::{Acks, Compression, Kafka, KafkaSasl, SaslMechanism, TargetConfig, TargetKind};
 use zeroize::Zeroizing;
 
@@ -29,35 +29,6 @@ fn target(id: &str, address: &str, sasl: Option<(&str, String)>) -> TargetConfig
         password: Zeroizing::new(password),
     });
     TargetConfig::new(id, TargetKind::Kafka(kafka)).unwrap()
-}
-
-/// Waits until the server counts `count` events sent to `target` (each acknowledged by
-/// the broker).
-async fn sent(server: &Server, target: &str, count: u64) {
-    let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
-    let wanted =
-        format!("teifs_notify_sent_total{{target=\"arn:teifs:sqs::{target}:kafka\"}} {count}\n");
-    let mut scraped = String::new();
-    for _ in 0..300 {
-        scraped = reqwest::Client::new()
-            .get(format!(
-                "{}{}",
-                server.endpoint,
-                teifs_types::admin::METRICS_PATH
-            ))
-            .bearer_auth(token.as_str())
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        if scraped.contains(&wanted) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("{target} never sent {count} events: {scraped}");
 }
 
 #[tokio::test]
@@ -131,6 +102,6 @@ async fn events_reach_a_real_kafka_broker() {
             .unwrap();
     }
     for id in ["k0", "k1", "k2", "k3"] {
-        sent(&server, id, 3).await;
+        common::sent(&server, "kafka", id, 3).await;
     }
 }

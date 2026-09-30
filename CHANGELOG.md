@@ -156,6 +156,14 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- PostgreSQL notification targets, as MinIO's: `teifs serve --notify-postgresql
+  ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=namespace|access]`. The
+  namespace format keeps a row per object (`key`, `value` as JSONB), set by each event and
+  deleted with the object; the access format adds a row per event (`event_time`,
+  `event_data`). The table is made when missing. It signs in with SCRAM-SHA-256 (the
+  server must prove it knows the password) or MD5, and sends a password in the clear only
+  over TLS (`tls=true` or `ca=PATH`); values are bound as parameters, never put in the SQL.
+  The password comes from `TEIFS_NOTIFY_POSTGRESQL_PASSWORD_ID`.
 - AMQP 0-9-1 notification targets (RabbitMQ, LavinMQ), as MinIO's: `teifs serve
   --notify-amqp ID=amqp[s]://HOST[:PORT][/VHOST],exchange=NAME,routing_key=KEY`
   publishes each event to the exchange as JSON, with MinIO's `minio-bucket` and

@@ -989,3 +989,42 @@ async fn amqp_rules_publish_each_event_to_the_exchange() {
     )
     .await;
 }
+
+/// PostgreSQL rules: the table is made when the rules are set, and each event sets its
+/// object's row.
+#[tokio::test]
+async fn postgresql_rules_keep_a_row_per_object() {
+    use teifs_notify::testing::{PostgresServer, PostgresSetup};
+    use teifs_server::{Format, Postgres};
+    let db = PostgresServer::start(PostgresSetup::default()).await;
+    let mut pg = Postgres::new(db.address(), "s3", "objects", Format::Namespace, "teifs").unwrap();
+    pg.password = Some(zeroize::Zeroizing::new("pw".into()));
+    let target = TargetConfig::new("db", TargetKind::Postgres(pg)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    let rule = QueueConfiguration::builder()
+        .queue_arn("arn:minio:sqs::db:postgresql")
+        .events(Event::from("s3:ObjectCreated:*"))
+        .build()
+        .unwrap();
+    configure(&s3, vec![rule]).await.unwrap();
+    assert!(db.table("objects").is_some(), "made when the rule was set");
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let rows = db.rows("objects", 1).await;
+    assert_eq!(rows[0][0], "bkt/a.txt");
+    let value: serde_json::Value = serde_json::from_str(&rows[0][1]).unwrap();
+    assert_eq!(value["Records"][0]["eventName"], "ObjectCreated:Put");
+    target_metrics(
+        &server,
+        "arn:teifs:sqs::db:postgresql",
+        &[("sent_total", 1), ("failed_total", 0)],
+    )
+    .await;
+}

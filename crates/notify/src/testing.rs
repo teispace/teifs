@@ -1,10 +1,12 @@
 //! Targets on this machine, for tests (the `testing` feature): a webhook receiver that
 //! takes requests (`POST`s, and the others an Elasticsearch target makes), or fails as
-//! many as it's told to first, Redis, NSQ, NATS and MQTT servers, a Kafka cluster, an AMQP broker, and a
-//! server that answers as AWS's SQS, SNS, Lambda and EventBridge do.
+//! many as it's told to first, Redis, NSQ, NATS and MQTT servers, a Kafka cluster, an AMQP
+//! broker, a PostgreSQL server, and a server that answers as AWS's SQS, SNS, Lambda and
+//! EventBridge do.
 
 mod amqp;
 mod kafka;
+mod postgres;
 
 use std::{
     convert::Infallible,
@@ -16,8 +18,11 @@ use std::{
 };
 
 pub use amqp::{AmqpDeclare, AmqpMessage, AmqpServer, AmqpSetup};
+use aws_lc_rs::{digest, hmac, pbkdf2};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use http_body_util::BodyExt;
 pub use kafka::{KafkaRecord, KafkaServer, KafkaSetup};
+pub use postgres::{PgAuth, PgImpostor, PgStartup, PostgresServer, PostgresSetup};
 
 /// One request taken.
 #[derive(Debug, Clone)]
@@ -1494,4 +1499,67 @@ fn events_answer(
         200,
         serde_json::json!({ "FailedEntryCount": failed, "Entries": entries }),
     )
+}
+
+/// The salt test servers keep SCRAM passwords with.
+pub(crate) const SCRAM_SALT: &[u8] = b"teifs-test-salt";
+
+/// Checks SCRAM's client proof as a server does, from what it stores (the stored key
+/// and server key); returns the server's signature.
+pub(crate) fn scram_verify(
+    mechanism: &str,
+    password: &str,
+    client_first_bare: &str,
+    server_first: &str,
+    client_final: &str,
+) -> Option<Vec<u8>> {
+    let (derive, mac, sha) = if mechanism == "SCRAM-SHA-512" {
+        (
+            pbkdf2::PBKDF2_HMAC_SHA512,
+            hmac::HMAC_SHA512,
+            &digest::SHA512,
+        )
+    } else {
+        (
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            hmac::HMAC_SHA256,
+            &digest::SHA256,
+        )
+    };
+    let mut salted = vec![0; sha.output_len()];
+    pbkdf2::derive(
+        derive,
+        std::num::NonZeroU32::new(4096)?,
+        SCRAM_SALT,
+        password.as_bytes(),
+        &mut salted,
+    );
+    let salted = hmac::Key::new(mac, &salted);
+    let stored_key = digest::digest(sha, hmac::sign(&salted, b"Client Key").as_ref());
+    let server_key = hmac::sign(&salted, b"Server Key");
+    let (without_proof, proof) = client_final.rsplit_once(",p=")?;
+    let nonce = server_first.split(',').next()?.strip_prefix("r=")?;
+    if without_proof != format!("c=biws,r={nonce}") {
+        return None;
+    }
+    let auth_message = format!("{client_first_bare},{server_first},{without_proof}");
+    let client_signature = hmac::sign(
+        &hmac::Key::new(mac, stored_key.as_ref()),
+        auth_message.as_bytes(),
+    );
+    let client_key: Vec<u8> = BASE64
+        .decode(proof)
+        .ok()?
+        .iter()
+        .zip(client_signature.as_ref())
+        .map(|(p, s)| p ^ s)
+        .collect();
+    (digest::digest(sha, &client_key).as_ref() == stored_key.as_ref()).then(|| {
+        hmac::sign(
+            &hmac::Key::new(mac, server_key.as_ref()),
+            auth_message.as_bytes(),
+        )
+        .as_ref()
+        .to_vec()
+    })
 }

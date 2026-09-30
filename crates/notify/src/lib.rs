@@ -1,6 +1,7 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, AMQP exchanges, SQS
-//! queues, SNS topics, Lambda functions and an EventBridge bus) are named by ARN,
+//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, AMQP
+//! exchanges, PostgreSQL tables, SQS queues, SNS topics, Lambda functions and an
+//! EventBridge bus) are named by ARN,
 //! `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
@@ -21,6 +22,7 @@ mod nats;
 mod net;
 mod nkey;
 mod nsq;
+mod postgres;
 mod queue;
 mod redis;
 mod scram;
@@ -53,6 +55,7 @@ pub use nats::Nats;
 pub use net::tls_config;
 pub use nkey::UserKey;
 pub use nsq::Nsq;
+pub use postgres::Postgres;
 pub use redis::Redis;
 pub use scram::ScramHash;
 pub use sns::Sns;
@@ -95,6 +98,8 @@ pub enum TargetKind {
     Mqtt(Mqtt),
     /// A Kafka topic, produced each event as JSON, keyed by its object.
     Kafka(Kafka),
+    /// A PostgreSQL table: a row per object, or a row per event.
+    Postgres(Postgres),
     /// An AMQP exchange, published each event as JSON.
     Amqp(Amqp),
     /// An SQS queue, sent each event as S3 sends it.
@@ -137,6 +142,14 @@ impl Format {
             Self::Namespace => "namespace",
             Self::Access => "access",
         }
+    }
+
+    /// Whether the event `name` removes its object's entry in the `namespace` format.
+    pub(crate) fn removes(name: &str) -> bool {
+        matches!(
+            name,
+            "s3:ObjectRemoved:Delete" | "s3:LifecycleExpiration:Delete"
+        )
     }
 }
 
@@ -181,6 +194,7 @@ impl TargetConfig {
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
             TargetKind::Kafka(kafka) => kafka.shown(),
             TargetKind::Amqp(amqp) => amqp.shown(),
+            TargetKind::Postgres(pg) => pg.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
             TargetKind::Lambda(lambda) => lambda.shown(),
@@ -202,6 +216,7 @@ impl TargetKind {
             Self::Mqtt(_) => "mqtt",
             Self::Kafka(_) => "kafka",
             Self::Amqp(_) => "amqp",
+            Self::Postgres(_) => "postgresql",
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
             Self::Lambda(_) => "lambda",
@@ -281,6 +296,7 @@ impl Target {
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
             TargetKind::Kafka(kafka) => kafka.send(&body).await,
             TargetKind::Amqp(amqp) => amqp.send(&body).await,
+            TargetKind::Postgres(pg) => pg.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
@@ -300,6 +316,7 @@ impl Target {
             TargetKind::Mqtt(mqtt) => mqtt.test().await,
             TargetKind::Kafka(kafka) => kafka.test().await,
             TargetKind::Amqp(amqp) => amqp.test().await,
+            TargetKind::Postgres(pg) => pg.test().await,
             // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,

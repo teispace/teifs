@@ -21,9 +21,6 @@ const MAX_REPLY: usize = 1 << 20;
 /// How deeply replies may nest.
 const MAX_DEPTH: usize = 8;
 
-/// The events that remove an object's field in the `namespace` format.
-const REMOVALS: &[&str] = &["s3:ObjectRemoved:Delete", "s3:LifecycleExpiration:Delete"];
-
 /// A key events are written to.
 #[derive(Clone)]
 pub struct Redis {
@@ -92,7 +89,7 @@ impl Redis {
         let message: EventMessage =
             serde_json::from_slice(body).map_err(|e| format!("not an event: {e}"))?;
         let command: Vec<Vec<u8>> = match self.format {
-            Format::Namespace if REMOVALS.contains(&message.event_name.as_str()) => {
+            Format::Namespace if Format::removes(&message.event_name) => {
                 args(&["HDEL", &self.key, &message.key])
             }
             Format::Namespace => {

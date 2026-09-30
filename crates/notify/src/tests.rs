@@ -1508,3 +1508,220 @@ async fn amqp_is_reached_over_tls() {
     let err = amqp.test().await.unwrap_err();
     assert!(err.contains("TLS failed"), "{err}");
 }
+
+fn postgres(server: &crate::testing::PostgresServer, format: Format) -> Postgres {
+    let mut pg = Postgres::new(server.address(), "s3", "events", format, "teifs").unwrap();
+    pg.password = Some(Zeroizing::new("pw".into()));
+    pg
+}
+
+/// PostgreSQL targets in the `namespace` format: the table is made when the connection
+/// is, with `MinIO`'s columns; each event sets its object's row, bound as parameters (a
+/// key with a quote is only a value), and a removal deletes it.
+#[tokio::test]
+async fn postgres_keeps_a_row_per_object() {
+    use crate::testing::{PostgresServer, PostgresSetup};
+    let server = PostgresServer::start(PostgresSetup::default()).await;
+    let pg = postgres(&server, Format::Namespace);
+    pg.test().await.unwrap();
+    let (columns, rows) = server.table("events").unwrap();
+    assert_eq!(columns, "(key VARCHAR PRIMARY KEY, value JSONB)");
+    assert!(rows.is_empty());
+    for (name, key) in [
+        ("s3:ObjectCreated:Put", "b/it's"),
+        ("s3:ObjectCreated:Put", "b/k"),
+        ("s3:ObjectCreated:Copy", "b/it's"),
+        ("s3:ObjectRemoved:Delete", "b/k"),
+    ] {
+        pg.send(&message(name, key)).await.unwrap();
+    }
+    let rows = server.rows("events", 1).await;
+    assert_eq!(rows[0][0], "b/it's");
+    let value: serde_json::Value = serde_json::from_str(&rows[0][1]).unwrap();
+    assert_eq!(value["Records"][0]["eventName"], "ObjectCreated:Copy");
+    assert_eq!(value.as_object().unwrap().len(), 1, "{value}");
+    let statements = server.statements();
+    assert!(statements.iter().all(|(sql, _)| !sql.contains("it's")));
+    assert_eq!(
+        statements.last().unwrap(),
+        &(
+            "DELETE FROM events WHERE key = $1;".to_owned(),
+            vec!["b/k".to_owned()]
+        )
+    );
+    // One connection for all of it, which says who it is.
+    let startups = server.startups();
+    assert_eq!(startups.len(), 1);
+    let parameters = &startups[0].parameters;
+    assert_eq!(parameters["user"], "teifs");
+    assert_eq!(parameters["database"], "s3");
+    assert_eq!(parameters["application_name"], "teifs");
+    assert_eq!(parameters["client_encoding"], "UTF8");
+    assert!(startups.iter().all(|s| s.signed_in && !s.tls));
+}
+
+/// PostgreSQL targets in the `access` format, signed in with MD5: a table that's there is
+/// used as it is, and each event is a row of its time and itself.
+#[tokio::test]
+async fn postgres_adds_a_row_per_event() {
+    use crate::testing::{PgAuth, PostgresServer, PostgresSetup};
+    let server = PostgresServer::start(PostgresSetup {
+        auth: PgAuth::Md5,
+        tables: [("\"S3 Log\"".to_owned(), "(given)".to_owned())].into(),
+        ..PostgresSetup::default()
+    })
+    .await;
+    let mut pg = postgres(&server, Format::Access);
+    pg.table = "\"S3 Log\"".into();
+    for (name, key) in [
+        ("s3:ObjectCreated:Put", "b/k"),
+        ("s3:ObjectRemoved:Delete", "b/k"),
+    ] {
+        pg.send(&message(name, key)).await.unwrap();
+    }
+    let rows = server.rows("\"S3 Log\"", 2).await;
+    assert_eq!(server.table("\"S3 Log\"").unwrap().0, "(given)");
+    assert_eq!(rows[1][0], "2026-09-30T12:00:00.000Z");
+    let event: serde_json::Value = serde_json::from_str(&rows[1][1]).unwrap();
+    assert_eq!(event["EventName"], "s3:ObjectRemoved:Delete");
+    assert!(
+        !server
+            .statements()
+            .iter()
+            .any(|(sql, _)| sql.starts_with("CREATE"))
+    );
+}
+
+/// What a PostgreSQL server refuses is named: the password, the database, a server that
+/// can't prove it knows the password, a password asked for in the clear without TLS, and
+/// a statement (which keeps the connection); a connection the server closed is made again.
+#[tokio::test]
+async fn postgres_names_what_the_server_refuses() {
+    use crate::testing::{PgAuth, PgImpostor, PostgresServer, PostgresSetup};
+    let server = PostgresServer::start(PostgresSetup::default()).await;
+    let mut pg = postgres(&server, Format::Namespace);
+    pg.password = Some(Zeroizing::new("wrong".into()));
+    let err = pg.test().await.unwrap_err();
+    assert!(
+        err.contains("refused the user or password") && err.contains("28P01"),
+        "{err}"
+    );
+    pg.password = None;
+    let err = pg.test().await.unwrap_err();
+    assert!(err.contains("TEIFS_NOTIFY_POSTGRESQL_PASSWORD_ID"), "{err}");
+    let mut pg = postgres(&server, Format::Namespace);
+    pg.database = "other".into();
+    let err = pg.test().await.unwrap_err();
+    assert!(err.contains("3D000") && err.contains("\"other\""), "{err}");
+
+    // A table it may not read isn't made again.
+    server.refuse(1);
+    let err = postgres(&server, Format::Namespace)
+        .test()
+        .await
+        .unwrap_err();
+    assert!(err.contains("42501"), "{err}");
+    assert!(
+        !server
+            .statements()
+            .iter()
+            .any(|(sql, _)| sql.starts_with("CREATE"))
+    );
+
+    let pg = postgres(&server, Format::Namespace);
+    pg.send(&message("s3:ObjectCreated:Put", "b/1"))
+        .await
+        .unwrap();
+    let connections = server.startups().len();
+    server.refuse(1);
+    let err = pg
+        .send(&message("s3:ObjectCreated:Put", "b/2"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("42501") && err.contains("permission denied"),
+        "{err}"
+    );
+    pg.send(&message("s3:ObjectCreated:Put", "b/3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        server.startups().len(),
+        connections,
+        "the connection is kept"
+    );
+    server.hang_up();
+    pg.send(&message("s3:ObjectCreated:Put", "b/4"))
+        .await
+        .unwrap();
+    assert_eq!(server.startups().len(), connections + 1);
+    assert_eq!(server.rows("events", 3).await.len(), 3);
+
+    for pretence in [PgImpostor::WrongProof, PgImpostor::NoProof] {
+        let impostor = PostgresServer::start(PostgresSetup {
+            impostor: Some(pretence),
+            ..PostgresSetup::default()
+        })
+        .await;
+        let err = postgres(&impostor, Format::Namespace)
+            .test()
+            .await
+            .unwrap_err();
+        assert!(err.contains("it isn't the server"), "{pretence:?}: {err}");
+        assert!(impostor.statements().is_empty(), "{pretence:?}");
+    }
+
+    let clear = PostgresServer::start(PostgresSetup {
+        auth: PgAuth::Password,
+        ..PostgresSetup::default()
+    })
+    .await;
+    let err = postgres(&clear, Format::Namespace)
+        .test()
+        .await
+        .unwrap_err();
+    assert!(err.contains("in the clear"), "{err}");
+    assert!(clear.statements().is_empty());
+
+    let trust = PostgresServer::start(PostgresSetup {
+        auth: PgAuth::Trust,
+        ..PostgresSetup::default()
+    })
+    .await;
+    let mut pg = postgres(&trust, Format::Access);
+    pg.password = None;
+    pg.test().await.unwrap();
+}
+
+/// PostgreSQL over TLS, asked for before the startup message: the server is verified with
+/// the operator's CA, a password in the clear is then sent, and a server without TLS or
+/// one the CA didn't sign is refused.
+#[tokio::test]
+async fn postgres_is_reached_over_tls() {
+    use crate::testing::{PgAuth, PostgresServer, PostgresSetup};
+    let (acceptor, ca_pem) = test_tls();
+    let server = PostgresServer::start(PostgresSetup {
+        auth: PgAuth::Password,
+        tls: Some(acceptor),
+        ..PostgresSetup::default()
+    })
+    .await;
+    let mut pg = postgres(&server, Format::Namespace);
+    pg.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert!(pg.shown().ends_with("(namespace, TLS)"), "{}", pg.shown());
+    pg.send(&message("s3:ObjectCreated:Put", "b/k"))
+        .await
+        .unwrap();
+    assert_eq!(server.rows("events", 1).await.len(), 1);
+    assert!(server.startups().iter().all(|s| s.tls && s.signed_in));
+
+    pg.tls = Some(tls_config(None, None).unwrap());
+    let err = pg.test().await.unwrap_err();
+    assert!(err.contains("TLS failed"), "{err}");
+
+    let plain = PostgresServer::start(PostgresSetup::default()).await;
+    let mut pg = postgres(&plain, Format::Namespace);
+    pg.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    let err = pg.test().await.unwrap_err();
+    assert_eq!(err, "the server doesn't take TLS");
+}

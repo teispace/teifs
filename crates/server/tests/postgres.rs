@@ -1,8 +1,7 @@
-//! Bucket notifications to a real `RabbitMQ`. Runs when `TEIFS_TEST_AMQP` names a broker
-//! (`amqp://HOST:PORT`) whose user `teifs` has the password `TEIFS_TEST_AMQP_PASSWORD`, with
-//! the durable direct exchange `teifs` bound to a queue by the key `events` (nightly CI
-//! starts one, and reads the messages back through its management API); skipped
-//! otherwise.
+//! Bucket notifications to a real PostgreSQL. Runs when `TEIFS_TEST_POSTGRES` names a
+//! server (`HOST:PORT`) whose user `teifs` has the password `TEIFS_TEST_POSTGRES_PASSWORD`
+//! and owns the database `teifs` (nightly CI starts one, signing in with SCRAM-SHA-256,
+//! and reads the tables back with `psql`); skipped otherwise.
 
 #![allow(
     clippy::unwrap_used,
@@ -16,38 +15,39 @@ use aws_sdk_s3::{
     types::{Event, NotificationConfiguration, QueueConfiguration},
 };
 use common::{SECRET_KEY, client, start_with};
-use teifs_server::{Amqp, TargetConfig, TargetKind};
+use teifs_server::{Format, Postgres, TargetConfig, TargetKind};
 use zeroize::Zeroizing;
 
-fn target(id: &str, url: &str, password: &str, declare: bool) -> TargetConfig {
-    let mut amqp = Amqp::new(url, "teifs", "events").unwrap();
-    amqp.user = Some("teifs".into());
-    amqp.password = Some(Zeroizing::new(password.into()));
-    amqp.mandatory = true;
-    if !declare {
-        amqp.declare = None;
-    }
-    TargetConfig::new(id, TargetKind::Amqp(amqp)).unwrap()
+fn target(id: &str, address: &str, table: &str, format: Format, password: &str) -> TargetConfig {
+    let mut pg = Postgres::new(address, "teifs", table, format, "teifs").unwrap();
+    pg.password = Some(Zeroizing::new(password.into()));
+    TargetConfig::new(id, TargetKind::Postgres(pg)).unwrap()
 }
 
 #[tokio::test]
-async fn events_reach_a_real_rabbitmq() {
-    let Ok(url) = std::env::var("TEIFS_TEST_AMQP") else {
-        eprintln!("skipped: TEIFS_TEST_AMQP isn't set");
+async fn events_reach_a_real_postgresql() {
+    let Ok(address) = std::env::var("TEIFS_TEST_POSTGRES") else {
+        eprintln!("skipped: TEIFS_TEST_POSTGRES isn't set");
         return;
     };
-    let password = std::env::var("TEIFS_TEST_AMQP_PASSWORD").unwrap();
+    let password = std::env::var("TEIFS_TEST_POSTGRES_PASSWORD").unwrap();
     let targets = vec![
-        target("declared", &url, &password, true),
-        target("checked", &url, &password, false),
-        target("wrong", &url, "not-it", true),
+        target(
+            "objects",
+            &address,
+            "teifs_objects",
+            Format::Namespace,
+            &password,
+        ),
+        target("log", &address, "teifs_log", Format::Access, &password),
+        target("wrong", &address, "teifs_wrong", Format::Access, "not-it"),
     ];
     let server = start_with(|config| config.notify = targets).await;
     let s3 = client(&server, SECRET_KEY);
-    for id in ["declared", "checked", "wrong"] {
+    for id in ["objects", "log", "wrong"] {
         s3.create_bucket().bucket(id).send().await.unwrap();
         let rule = QueueConfiguration::builder()
-            .queue_arn(format!("arn:teifs:sqs::{id}:amqp"))
+            .queue_arn(format!("arn:teifs:sqs::{id}:postgresql"))
             .events(Event::from("s3:ObjectCreated:*"))
             .events(Event::from("s3:ObjectRemoved:*"))
             .build()
@@ -64,11 +64,7 @@ async fn events_reach_a_real_rabbitmq() {
             .await;
         if id == "wrong" {
             let err = format!("{:?}", set.unwrap_err());
-            // RabbitMQ names the refusal, or (as 4.x does) closes the connection.
-            assert!(
-                err.contains("ACCESS_REFUSED") || err.contains("refused the user or password"),
-                "{err}"
-            );
+            assert!(err.contains("28P01"), "{err}");
             continue;
         }
         set.unwrap();
@@ -88,7 +84,7 @@ async fn events_reach_a_real_rabbitmq() {
             .await
             .unwrap();
     }
-    for id in ["declared", "checked"] {
-        common::sent(&server, "amqp", id, 3).await;
+    for id in ["objects", "log"] {
+        common::sent(&server, "postgresql", id, 3).await;
     }
 }

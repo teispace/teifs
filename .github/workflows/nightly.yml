@@ -169,8 +169,11 @@ jobs:
             sleep 2
           done
           $KAFKA/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic teifs-events --partitions 3 --replication-factor 1
-          $KAFKA/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users --entity-name teifs \
-            --add-config 'SCRAM-SHA-256=[iterations=4096,password=scram-test-only],SCRAM-SHA-512=[password=scram-test-only]'
+          # One credential per request: Kafka refuses two for a user in one.
+          for mechanism in SCRAM-SHA-256 SCRAM-SHA-512; do
+            $KAFKA/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users --entity-name teifs \
+              --add-config "$mechanism=[iterations=4096,password=scram-test-only]"
+          done
       - run: cargo test --locked -p teifs-server --test kafka -- --nocapture
         env:
           TEIFS_TEST_KAFKA: 127.0.0.1:9092
@@ -232,3 +235,39 @@ jobs:
           for bucket in declared checked; do
             test "$(jq --arg b "$bucket" '[.[] | select(.properties.headers["minio-bucket"] == $b)] | length' messages.json)" -eq 3
           done
+
+  postgres:
+    # Notifications to a real PostgreSQL, signed in with SCRAM-SHA-256: tables TeiFS
+    # makes, a row per object and a row per event, a refused password; the rows are
+    # read back with psql.
+    name: PostgreSQL notifications
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: teifs
+          POSTGRES_PASSWORD: postgres-test-only
+          POSTGRES_DB: teifs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U teifs" --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked -p teifs-server --test postgres -- --nocapture
+        env:
+          TEIFS_TEST_POSTGRES: 127.0.0.1:5432
+          TEIFS_TEST_POSTGRES_PASSWORD: postgres-test-only
+      - name: The rows, as PostgreSQL keeps them
+        env:
+          PSQL: docker exec ${{ job.services.postgres.id }} psql -U teifs -d teifs -tAX -c
+        run: |
+          $PSQL "SELECT key, value->'Records'->0->>'eventName' FROM teifs_objects"
+          test "$($PSQL "SELECT key FROM teifs_objects")" = "objects/dir/b c.txt"
+          test "$($PSQL "SELECT count(*) FROM teifs_log")" -eq 3
+          test "$($PSQL "SELECT count(*) FROM teifs_log WHERE event_data->>'EventName' = 's3:ObjectRemoved:Delete'")" -eq 1
+          test "$($PSQL "SELECT pg_typeof(event_time) FROM teifs_log LIMIT 1")" = "timestamp with time zone"
+          test "$($PSQL "SELECT count(*) FROM pg_tables WHERE tablename = 'teifs_wrong'")" -eq 0
