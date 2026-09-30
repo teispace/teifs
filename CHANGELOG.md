@@ -159,6 +159,8 @@ behaviour; the on-disk format is always upgraded automatically.
 - NSQ targets over TLS (`tls=true` or `ca=PATH`, as nsqd negotiates it after
   `IDENTIFY`) and with `AUTH`, its secret from `TEIFS_NOTIFY_NSQ_SECRET_ID`, sent only
   over TLS.
+- Kafka targets compress with Snappy, LZ4 and zstd too (`compression=snappy|lz4|zstd`),
+  as Kafka's own readers take them; zstd is produced with Produce v7 (Kafka 2.1 or later).
 - Webhook, audit webhook and Elasticsearch targets over TLS of their own, as MinIO's
   webhooks: `ca=PATH` to verify the server with a CA, and `client_cert=PATH` and
   `client_key=PATH` for a server that asks for a client certificate (mutual TLS).

@@ -248,7 +248,9 @@ async fn serve(mut stream: TcpStream, broker: usize, shared: &Shared) -> Result<
                 body
             }
             api::METADATA if version == 1 && signed_in => metadata(&mut reader, shared)?,
-            api::PRODUCE if version == 3 && signed_in => produce(&mut reader, broker, shared)?,
+            api::PRODUCE if matches!(version, 3 | 7) && signed_in => {
+                produce(&mut reader, version, broker, shared)?
+            }
             // Anything else, or before signing in: the connection is closed.
             _ => return Ok(()),
         };
@@ -423,7 +425,12 @@ fn node(broker: usize) -> i32 {
     i32::try_from(broker + 1).unwrap_or(i32::MAX)
 }
 
-fn produce(reader: &mut Reader<'_>, broker: usize, shared: &Shared) -> Result<Vec<u8>, String> {
+fn produce(
+    reader: &mut Reader<'_>,
+    version: i16,
+    broker: usize,
+    shared: &Shared,
+) -> Result<Vec<u8>, String> {
     let _transaction = reader.string()?;
     let acks = reader.i16()?;
     let _timeout = reader.i32()?;
@@ -476,6 +483,9 @@ fn produce(reader: &mut Reader<'_>, broker: usize, shared: &Shared) -> Result<Ve
             .i32(i32::try_from(partitions.len()).map_err(|_| "partitions")?);
         for (index, code) in partitions {
             out.i32(index).i16(code).i64(0).i64(-1);
+            if version >= 5 {
+                out.i64(0); // log start offset
+            }
         }
     }
     out.i32(0); // throttle time

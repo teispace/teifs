@@ -25,19 +25,30 @@ pub enum Compression {
     None,
     /// With gzip.
     Gzip,
+    /// With Snappy, as one block (as librdkafka and Sarama write it).
+    Snappy,
+    /// With LZ4, in LZ4's frame format with independent 64 KiB blocks, as Kafka reads it.
+    Lz4,
+    /// With Zstandard; Kafka takes it from 2.1 (Produce v7).
+    Zstd,
 }
 
 impl Compression {
-    /// Reads `none` or `gzip`.
+    /// Reads `none`, `gzip`, `snappy`, `lz4` or `zstd`.
     ///
     /// # Errors
     ///
-    /// When it's neither.
+    /// When it's none of them.
     pub fn parse(text: &str) -> Result<Self, String> {
         match text.to_ascii_lowercase().as_str() {
             "none" => Ok(Self::None),
             "gzip" => Ok(Self::Gzip),
-            _ => Err(format!("`{text}` isn't a compression: give none or gzip")),
+            "snappy" => Ok(Self::Snappy),
+            "lz4" => Ok(Self::Lz4),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(format!(
+                "`{text}` isn't a compression: give none, gzip, snappy, lz4 or zstd"
+            )),
         }
     }
 
@@ -47,6 +58,17 @@ impl Compression {
         match self {
             Self::None => "none",
             Self::Gzip => "gzip",
+            Self::Snappy => "snappy",
+            Self::Lz4 => "lz4",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    /// The Produce version that takes it: 7 for zstd (Kafka 2.1), else 3 (Kafka 0.11).
+    pub(crate) const fn produce_version(self) -> i16 {
+        match self {
+            Self::Zstd => 7,
+            _ => 3,
         }
     }
 
@@ -55,7 +77,66 @@ impl Compression {
         match self {
             Self::None => 0,
             Self::Gzip => 1,
+            Self::Snappy => 2,
+            Self::Lz4 => 3,
+            Self::Zstd => 4,
         }
+    }
+
+    /// `records`, compressed.
+    fn compress(self, records: Vec<u8>) -> Result<Vec<u8>, String> {
+        let failed = |e: &dyn std::fmt::Display| format!("can't compress it: {e}");
+        match self {
+            Self::None => Ok(records),
+            Self::Gzip => {
+                let mut gzip =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                gzip.write_all(&records)
+                    .and_then(|()| gzip.finish())
+                    .map_err(|e| failed(&e))
+            }
+            Self::Snappy => snap::raw::Encoder::new()
+                .compress_vec(&records)
+                .map_err(|e| failed(&e)),
+            Self::Lz4 => {
+                let frame = lz4_flex::frame::FrameInfo::new()
+                    .block_size(lz4_flex::frame::BlockSize::Max64KB)
+                    .block_mode(lz4_flex::frame::BlockMode::Independent);
+                let mut lz4 = lz4_flex::frame::FrameEncoder::with_frame_info(frame, Vec::new());
+                lz4.write_all(&records).map_err(|e| failed(&e))?;
+                lz4.finish().map_err(|e| failed(&e))
+            }
+            Self::Zstd => zstd::bulk::compress(&records, 0).map_err(|e| failed(&e)),
+        }
+    }
+
+    /// `packed`, a batch's records compressed with the codec `code`, uncompressed.
+    #[cfg(any(test, feature = "testing"))]
+    fn uncompress(code: i16, packed: &[u8]) -> Result<Vec<u8>, String> {
+        use std::io::Read as _;
+        let unreadable = |e: &dyn std::fmt::Display| format!("its compression can't be read: {e}");
+        let mut out = Vec::new();
+        match code {
+            0 => out.extend_from_slice(packed),
+            1 => {
+                flate2::read::GzDecoder::new(packed)
+                    .read_to_end(&mut out)
+                    .map_err(|e| unreadable(&e))?;
+            }
+            2 => {
+                out = snap::raw::Decoder::new()
+                    .decompress_vec(packed)
+                    .map_err(|e| unreadable(&e))?;
+            }
+            3 => {
+                lz4_flex::frame::FrameDecoder::new(packed)
+                    .read_to_end(&mut out)
+                    .map_err(|e| unreadable(&e))?;
+            }
+            4 => out = zstd::stream::decode_all(packed).map_err(|e| unreadable(&e))?,
+            codec => return Err(format!("compression {codec} isn't Kafka's")),
+        }
+        Ok(out)
     }
 }
 
@@ -308,16 +389,7 @@ pub(crate) fn record_batch(
         .varlong(i64::try_from(record.0.len()).unwrap_or(i64::MAX))
         .0
         .extend_from_slice(&record.0);
-    let records = match compression {
-        Compression::None => records.0,
-        Compression::Gzip => {
-            let mut gzip =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            gzip.write_all(&records.0)
-                .and_then(|()| gzip.finish())
-                .map_err(|e| format!("can't compress it: {e}"))?
-        }
-    };
+    let records = compression.compress(records.0)?;
     // What the CRC covers: from the attributes to the end.
     let mut covered = Writer::default();
     covered
@@ -358,7 +430,6 @@ pub(crate) type Record = (Option<Vec<u8>>, Option<Vec<u8>>);
 /// uncompressed, as a broker reads them.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) fn read_batches(bytes: &[u8]) -> Result<Vec<Record>, String> {
-    use std::io::Read as _;
     let mut records = Vec::new();
     let mut reader = Reader::new(bytes);
     while !reader.rest().is_empty() {
@@ -377,18 +448,7 @@ pub(crate) fn read_batches(bytes: &[u8]) -> Result<Vec<Record>, String> {
         let _ = (batch.i32()?, batch.i64()?, batch.i64()?);
         let _ = (batch.i64()?, batch.i16()?, batch.i32()?);
         let count = batch.i32()?;
-        let packed = batch.rest();
-        let unpacked = match attributes & 7 {
-            0 => packed.to_vec(),
-            1 => {
-                let mut out = Vec::new();
-                flate2::read::GzDecoder::new(packed)
-                    .read_to_end(&mut out)
-                    .map_err(|e| format!("its gzip can't be read: {e}"))?;
-                out
-            }
-            codec => return Err(format!("compression {codec} isn't read here")),
-        };
+        let unpacked = Compression::uncompress(attributes & 7, batch.rest())?;
         let mut body = Reader::new(&unpacked);
         for _ in 0..count {
             let length = usize::try_from(body.varlong()?).map_err(|_| GARBLED)?;
@@ -487,9 +547,10 @@ mod tests {
 
     #[test]
     fn batches_are_read_back_as_written() {
-        for compression in [Compression::None, Compression::Gzip] {
+        for compression in ALL {
             let batch =
                 record_batch(Some(b"b/k"), b"{\"a\":1}", 1_700_000_000_000, compression).unwrap();
+            assert_eq!(batch[22] & 7, compression.name_code(), "{compression:?}");
             assert_eq!(batch[16], 2, "magic");
             assert_eq!(
                 i32::from_be_bytes(batch[8..12].try_into().unwrap()),
@@ -531,6 +592,60 @@ mod tests {
         assert_eq!(crc32c(b"123456789"), 0xe306_9283, "CRC-32C's check value");
     }
 
+    const ALL: [Compression; 5] = [
+        Compression::None,
+        Compression::Gzip,
+        Compression::Snappy,
+        Compression::Lz4,
+        Compression::Zstd,
+    ];
+
+    impl Compression {
+        fn name_code(self) -> u8 {
+            u8::try_from(self.code()).unwrap()
+        }
+    }
+
+    /// Each codec's output is what Kafka's own readers take: a Snappy block, an LZ4 frame
+    /// of independent 64 KiB blocks (Kafka refuses linked ones), a Zstandard frame; and
+    /// records larger than a block come back whole.
+    #[test]
+    fn records_are_compressed_as_kafka_reads_them() {
+        let records: Vec<u8> = (0..300_000u32)
+            .flat_map(|n| (n % 251).to_be_bytes())
+            .collect();
+        for compression in ALL {
+            let packed = compression.compress(records.clone()).unwrap();
+            if compression != Compression::None {
+                assert!(
+                    packed.len() < records.len() / 2,
+                    "{compression:?} compresses"
+                );
+            }
+            let code = compression.code();
+            assert_eq!(Compression::uncompress(code, &packed).unwrap(), records);
+        }
+        let lz4 = Compression::Lz4.compress(records.clone()).unwrap();
+        assert_eq!(lz4[..4], [0x04, 0x22, 0x4d, 0x18], "LZ4's frame magic");
+        assert_eq!(
+            lz4[4] & 0b1110_0011,
+            0b0110_0000,
+            "version 1, independent blocks"
+        );
+        assert_eq!(lz4[5], 0x40, "64 KiB blocks");
+        let zstd = Compression::Zstd.compress(records.clone()).unwrap();
+        assert_eq!(
+            zstd[..4],
+            [0x28, 0xb5, 0x2f, 0xfd],
+            "Zstandard's frame magic"
+        );
+        let snappy = Compression::Snappy.compress(records).unwrap();
+        assert_ne!(snappy[0], 0x82, "a block, not xerial's framing");
+        assert!(Compression::uncompress(5, b"").is_err());
+        assert_eq!(Compression::Zstd.produce_version(), 7);
+        assert_eq!(Compression::Lz4.produce_version(), 3);
+    }
+
     #[test]
     fn compressions_are_named() {
         assert_eq!(Compression::parse("GZIP"), Ok(Compression::Gzip));
@@ -539,5 +654,8 @@ mod tests {
             Ok("none")
         );
         assert!(Compression::parse("zip").is_err());
+        for compression in ALL {
+            assert_eq!(Compression::parse(compression.name()), Ok(compression));
+        }
     }
 }

@@ -23,8 +23,8 @@ use crate::{
 };
 
 /// The versions of the APIs used: the oldest Kafka 4 still takes, which Kafka has
-/// taken since 0.11 (and SASL's since 1.0).
-const PRODUCE: i16 = 3;
+/// taken since 0.11 (and SASL's since 1.0); Produce's is its compression's
+/// ([`Compression::produce_version`]).
 const METADATA: i16 = 1;
 const SASL_HANDSHAKE: i16 = 1;
 const SASL_AUTHENTICATE: i16 = 0;
@@ -477,12 +477,19 @@ impl Connection {
             correlation: 0,
         };
         let answer = connection.call(api::API_VERSIONS, 0, &[]).await?;
-        let mut needed = vec![(api::PRODUCE, PRODUCE), (api::METADATA, METADATA)];
+        let produce = kafka.compression.produce_version();
+        let mut needed = vec![(api::PRODUCE, produce), (api::METADATA, METADATA)];
         if kafka.sasl.is_some() {
             needed.push((api::SASL_HANDSHAKE, SASL_HANDSHAKE));
             needed.push((api::SASL_AUTHENTICATE, SASL_AUTHENTICATE));
         }
-        check_versions(&answer, &needed)?;
+        check_versions(&answer, &needed).map_err(|e| {
+            if kafka.compression == Compression::Zstd {
+                format!("{e}; zstd needs Kafka 2.1 or later")
+            } else {
+                e
+            }
+        })?;
         if let Some(sasl) = &kafka.sasl {
             connection.sign_in(sasl).await?;
         }
@@ -568,7 +575,8 @@ impl Connection {
             .i32(1)
             .i32(partition)
             .bytes(batch)?;
-        let answer = self.call(api::PRODUCE, PRODUCE, &body.0).await?;
+        let version = kafka.compression.produce_version();
+        let answer = self.call(api::PRODUCE, version, &body.0).await?;
         let mut reader = Reader::new(&answer);
         for _ in 0..reader.array(6)? {
             let name = reader.string()?.ok_or(GARBLED)?;
@@ -577,6 +585,9 @@ impl Connection {
                 let code = reader.i16()?;
                 let _offset = reader.i64()?;
                 let _append_time = reader.i64()?;
+                if version >= 5 {
+                    let _log_start = reader.i64()?;
+                }
                 if name == kafka.topic && index == partition {
                     return Ok(code);
                 }
@@ -682,7 +693,10 @@ mod tests {
         answer.i16(0).i32(2);
         answer.i16(api::PRODUCE).i16(3).i16(12);
         answer.i16(api::METADATA).i16(0).i16(13);
-        let needed = [(api::PRODUCE, PRODUCE), (api::METADATA, METADATA)];
+        let needed = [
+            (api::PRODUCE, Compression::None.produce_version()),
+            (api::METADATA, METADATA),
+        ];
         assert_eq!(check_versions(&answer.0, &needed), Ok(()));
         let err = check_versions(&answer.0, &[(api::SASL_HANDSHAKE, 1)]).unwrap_err();
         assert!(err.contains("API 17"), "{err}");

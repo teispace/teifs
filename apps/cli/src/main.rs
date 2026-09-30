@@ -330,7 +330,7 @@ pub(crate) struct ServeArgs {
     /// A Kafka topic buckets' notification rules can send events to, as
     /// ID=BROKER[;BROKER…],topic=NAME, the brokers first asked about the topic
     /// (`HOST:PORT`), with acks=all (the default: every in-sync replica has each event) or
-    /// acks=1, compression=gzip, sasl=plain, scram-sha-256 or scram-sha-512 with
+    /// acks=1, compression=gzip, snappy, lz4 or zstd (Kafka 2.1 or later), sasl=plain, scram-sha-256 or scram-sha-512 with
     /// user=NAME, and tls=true or ca=PATH with `client_cert=PATH` and `client_key=PATH`
     /// (repeat for more; in the environment, separated by spaces). Rules name it
     /// `arn:teifs:sqs::ID:kafka`; each event is produced as a webhook is sent it, keyed

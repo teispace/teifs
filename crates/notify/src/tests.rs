@@ -1417,6 +1417,41 @@ async fn kafka_follows_leaders_and_names_refusals() {
     assert_eq!(last.value.as_bytes(), put);
 }
 
+/// Every codec Kafka has: each batch compressed with it, zstd produced with Produce v7,
+/// and a broker older than Kafka 2.1 refused for zstd, by name.
+#[tokio::test]
+async fn kafka_compresses_with_each_codec() {
+    use crate::testing::{KafkaServer, KafkaSetup};
+    let cluster = KafkaServer::start(KafkaSetup::new(1, "t", 1)).await;
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    let codecs = [
+        (Compression::Snappy, 2),
+        (Compression::Lz4, 3),
+        (Compression::Zstd, 4),
+    ];
+    for (i, (compression, code)) in codecs.into_iter().enumerate() {
+        let mut kafka = Kafka::new(&cluster.addresses()[0], "t").unwrap();
+        kafka.compression = compression;
+        kafka.test().await.unwrap();
+        kafka.send(&put).await.unwrap();
+        let record = cluster.records(i + 1).await.pop().unwrap();
+        assert_eq!(record.compression, code, "{compression:?}");
+        assert_eq!(record.value.as_bytes(), put);
+        assert_eq!(record.key.as_deref(), Some("photos/a.jpg"));
+    }
+
+    let mut old = KafkaSetup::new(1, "t", 1);
+    old.versions[0] = (crate::kafka::wire::api::PRODUCE, 3, 6);
+    let old = KafkaServer::start(old).await;
+    let mut zstd = Kafka::new(&old.addresses()[0], "t").unwrap();
+    zstd.compression = Compression::Zstd;
+    let err = zstd.test().await.unwrap_err();
+    assert!(err.contains("zstd needs Kafka 2.1 or later"), "{err}");
+    let mut lz4 = Kafka::new(&old.addresses()[0], "t").unwrap();
+    lz4.compression = Compression::Lz4;
+    lz4.send(&put).await.unwrap();
+}
+
 /// SASL: PLAIN and SCRAM sign in, a wrong password or mechanism is named, and a broker
 /// older than the versions used is refused.
 #[tokio::test]

@@ -347,7 +347,9 @@ object's events stay in order on one partition, and to that partition's leader, 
 answers once every in-sync replica has it (`acks=all`, the default) or once it has it
 (`acks=1`). A leader that moved or a partition being elected is looked up again at once;
 a record the broker refuses (`NOT_ENOUGH_REPLICAS`, say) is tried again later, like any
-event a target doesn't take. `compression=gzip` compresses each record. `sasl=plain`,
+event a target doesn't take. `compression=gzip`, `snappy`, `lz4` or `zstd` compresses
+each record, as MinIO's names do (zstd needs Kafka 2.1 or later; an older broker is
+refused by name). `sasl=plain`,
 `scram-sha-256` or `scram-sha-512` with `user=NAME` signs in, the password from
 `TEIFS_NOTIFY_KAFKA_PASSWORD_ID`; SCRAM never sends the password, and PLAIN is for TLS
 only. TLS takes the same options as Redis's, for every broker. The topic must exist, or
@@ -630,5 +632,3 @@ Its answer is one `{"Records":[record]}` line per event, as long as the caller r
 Events are made only while the server has targets or someone watches; a watcher that
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
-
-Not yet: Kafka's snappy, lz4 and zstd compression.

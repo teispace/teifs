@@ -3,6 +3,7 @@
 //! PLAIN (`teifs`, `TEIFS_TEST_KAFKA_PLAIN_PASSWORD`) and SCRAM (`teifs`,
 //! `TEIFS_TEST_KAFKA_SCRAM_PASSWORD`), with the topic `teifs-events` made (nightly CI
 //! starts one, and reads the records back with Kafka's own consumer); skipped otherwise.
+//! The four targets compress with gzip, Snappy, LZ4 and zstd, which the broker checks.
 
 #![allow(
     clippy::unwrap_used,
@@ -53,8 +54,16 @@ async fn events_reach_a_real_kafka_broker() {
         target("kafka3", &secured, Some(("scram-sha-512", scram_password))),
         target("wrong", &secured, Some(("scram-sha-512", "not-it".into()))),
     ];
-    if let TargetKind::Kafka(kafka) = &mut targets[0].kind {
-        kafka.compression = Compression::Gzip;
+    let codecs = [
+        Compression::Gzip,
+        Compression::Snappy,
+        Compression::Lz4,
+        Compression::Zstd,
+    ];
+    for (target, codec) in targets.iter_mut().zip(codecs) {
+        if let TargetKind::Kafka(kafka) = &mut target.kind {
+            kafka.compression = codec;
+        }
     }
     if let TargetKind::Kafka(kafka) = &mut targets[1].kind {
         kafka.acks = Acks::Leader;
