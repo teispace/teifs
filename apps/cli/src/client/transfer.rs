@@ -39,7 +39,10 @@ use tokio::{
     task::JoinSet,
 };
 
-use super::{Error, Kind, TransferArgs};
+use super::{
+    Error, Kind, TransferArgs,
+    sse::{Sse, copy_source_key, customer_key, encrypted},
+};
 use crate::ui::Progress;
 
 pub const KIB: u64 = 1024;
@@ -93,6 +96,8 @@ pub struct Object {
     pub endpoint: (String, String),
     /// A version of it, as a source (`--version-id`); `None`: the current one.
     pub version_id: Option<String>,
+    /// How it's encrypted, by the command's `--enc-*` rules.
+    pub sse: Option<Arc<Sse>>,
 }
 
 /// What's known about an object: from `HEAD` (with its type and metadata), or from a
@@ -107,14 +112,20 @@ pub struct Head {
 }
 
 impl Object {
+    /// How it's encrypted, by the command's rules.
+    pub fn sse(&self) -> Option<&Sse> {
+        self.sse.as_deref()
+    }
+
     /// The object's details; a `NotFound` error when it isn't there.
     pub async fn head(&self) -> Result<Head, Error> {
-        let output = self
+        let request = self
             .client
             .head_object()
             .bucket(&self.bucket)
             .key(&self.key)
-            .set_version_id(self.version_id.clone())
+            .set_version_id(self.version_id.clone());
+        let output = customer_key!(request, self.sse())
             .send()
             .await
             .map_err(|e| Error::s3(&self.name, &e))?;
@@ -181,12 +192,14 @@ impl Transfers {
                 .await
                 .map_err(|e| Error::general(format!("{}: {e}", what())))?;
             let _permit = self.permit().await;
-            to.client
+            let request = to
+                .client
                 .put_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
                 .set_content_type(content_type.map(str::to_owned))
-                .body(body)
+                .body(body);
+            encrypted!(request, to.sse())
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
@@ -199,7 +212,7 @@ impl Transfers {
         } else {
             let content_type = content_type.map(str::to_owned);
             let id = self
-                .start_upload(to, content_type, None, true)
+                .start_upload(to, content_type, None, Some(part_checksum(to)))
                 .await
                 .map_err(|e| e.within(what()))?;
             (id, BTreeMap::new())
@@ -223,15 +236,16 @@ impl Transfers {
                         .await
                         .map_err(|e| Error::general(format!("{}: {e}", what())))?;
                     let _permit = self.permit().await;
-                    let part = to
+                    let request = to
                         .client
                         .upload_part()
                         .bucket(&to.bucket)
                         .key(&to.key)
                         .upload_id(upload_id)
                         .part_number(number)
-                        .checksum_algorithm(ChecksumAlgorithm::Crc32)
-                        .body(body)
+                        .checksum_algorithm(part_checksum(to))
+                        .body(body);
+                    let part = customer_key!(request, to.sse())
                         .send()
                         .await
                         .map_err(|e| resumable_failure(Error::s3(what(), &e)))?;
@@ -241,6 +255,7 @@ impl Transfers {
                             .part_number(number)
                             .set_e_tag(part.e_tag)
                             .set_checksum_crc32(part.checksum_crc32)
+                            .set_checksum_sha256(part.checksum_sha256)
                             .build(),
                     )
                 }
@@ -270,11 +285,13 @@ impl Transfers {
         if first_len < stream_part_size(self.part_size, 1) {
             // It all fits in one request.
             let _permit = self.permit().await;
-            to.client
+            let request = to
+                .client
                 .put_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
-                .body(ByteStream::from(first))
+                .body(ByteStream::from(first));
+            encrypted!(request, to.sse())
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
@@ -282,7 +299,7 @@ impl Transfers {
             return Ok(first_len);
         }
         let upload_id = self
-            .start_upload(to, None, None, true)
+            .start_upload(to, None, None, Some(ChecksumAlgorithm::Crc32))
             .await
             .map_err(|e| e.within(what()))?;
         let sent = self.send_stream(&mut input, first, &upload_id, to).await;
@@ -358,7 +375,7 @@ impl Transfers {
     ) -> Result<CompletedPart, Error> {
         let len = body.len() as u64;
         let _permit = self.permit().await;
-        let part = to
+        let request = to
             .client
             .upload_part()
             .bucket(&to.bucket)
@@ -366,7 +383,8 @@ impl Transfers {
             .upload_id(upload_id)
             .part_number(number)
             .checksum_algorithm(ChecksumAlgorithm::Crc32)
-            .body(ByteStream::from(body))
+            .body(ByteStream::from(body));
+        let part = customer_key!(request, to.sse())
             .send()
             .await
             .map_err(|e| Error::s3(format!("sending part {number}"), &e))?;
@@ -385,7 +403,8 @@ impl Transfers {
         parts: Vec<CompletedPart>,
     ) -> Result<(), Error> {
         let _permit = self.permit().await;
-        to.client
+        let request = to
+            .client
             .complete_multipart_upload()
             .bucket(&to.bucket)
             .key(&to.key)
@@ -394,7 +413,8 @@ impl Transfers {
                 CompletedMultipartUpload::builder()
                     .set_parts(Some(parts))
                     .build(),
-            )
+            );
+        customer_key!(request, to.sse())
             .send()
             .await
             .map_err(|e| Error::s3("completing the upload", &e))?;
@@ -426,22 +446,31 @@ impl Transfers {
             .max_by_key(|u| u.initiated().map(|t| (t.secs(), t.subsec_nanos())))?
             .upload_id()?
             .to_owned();
-        let mut listed = to
+        let request = to
             .client
             .list_parts()
             .bucket(&to.bucket)
             .key(&to.key)
-            .upload_id(&upload_id)
+            .upload_id(&upload_id);
+        let mut listed = customer_key!(request, to.sse())
             .into_paginator()
             .items()
             .send();
         let mut done = BTreeMap::new();
         while let Some(part) = listed.next().await {
             let part = part.ok()?;
-            // Parts sent without a CRC32 can't join an upload that has them.
-            let (Some(number), Some(etag), Some(crc)) =
-                (part.part_number(), part.e_tag(), part.checksum_crc32())
-            else {
+            // Parts sent without the checksum this upload's parts have can't join it.
+            let (crc, sha) = (part.checksum_crc32(), part.checksum_sha256());
+            let sha_parts = part_checksum(to) == ChecksumAlgorithm::Sha256;
+            let (Some(number), Some(etag), true) = (
+                part.part_number(),
+                part.e_tag(),
+                if sha_parts {
+                    sha.is_some()
+                } else {
+                    crc.is_some()
+                },
+            ) else {
                 return None;
             };
             let Some(range) = usize::try_from(number - 1).ok().and_then(|i| parts.get(i)) else {
@@ -451,13 +480,21 @@ impl Transfers {
                 .size()
                 .and_then(|s| u64::try_from(s).ok())
                 .is_some_and(|s| s == range.end - range.start);
-            if same_size && md5_of(path, range.clone()).await.ok()? == etag.trim_matches('"') {
+            // Encrypted parts' ETags aren't MD5s: those are checked by their SHA-256.
+            let same_bytes = same_size
+                && if sha_parts {
+                    Some(sha256_of(path, range.clone()).await.ok()?.as_str()) == sha
+                } else {
+                    md5_of(path, range.clone()).await.ok()? == etag.trim_matches('"')
+                };
+            if same_bytes {
                 done.insert(
                     number,
                     CompletedPart::builder()
                         .part_number(number)
                         .e_tag(etag)
-                        .checksum_crc32(crc)
+                        .set_checksum_crc32(crc.filter(|_| !sha_parts).map(str::to_owned))
+                        .set_checksum_sha256(sha.filter(|_| sha_parts).map(str::to_owned))
                         .build(),
                 );
             }
@@ -490,14 +527,15 @@ impl Transfers {
                 .map_err(|e| local(&e))?;
             if head.size <= self.part_size {
                 let _permit = self.permit().await;
-                let got = from
+                let request = from
                     .client
                     .get_object()
                     .bucket(&from.bucket)
                     .key(&from.key)
                     .set_version_id(from.version_id.clone())
                     .set_if_match(head.etag.clone())
-                    .checksum_mode(ChecksumMode::Enabled)
+                    .checksum_mode(ChecksumMode::Enabled);
+                let got = customer_key!(request, from.sse())
                     .send()
                     .await
                     .map_err(|e| Error::s3(what(), &e))?;
@@ -556,14 +594,15 @@ impl Transfers {
         range: Range<u64>,
     ) -> Result<ByteStream, Error> {
         let _permit = self.permit().await;
-        let got = from
+        let request = from
             .client
             .get_object()
             .bucket(&from.bucket)
             .key(&from.key)
             .set_version_id(from.version_id.clone())
             .range(format!("bytes={}-{}", range.start, range.end - 1))
-            .set_if_match(head.etag.clone())
+            .set_if_match(head.etag.clone());
+        let got = customer_key!(request, from.sse())
             .send()
             .await
             .map_err(|e| Error::s3(format!("can't read {}", from.name), &e))?;
@@ -580,13 +619,16 @@ impl Transfers {
         }
         if server_side && head.size <= MAX_PART {
             let _permit = self.permit().await;
-            to.client
+            let request = to
+                .client
                 .copy_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
                 .copy_source(copy_source(from))
                 .set_copy_source_if_match(head.etag.clone())
-                .metadata_directive(MetadataDirective::Copy)
+                .metadata_directive(MetadataDirective::Copy);
+            let request = copy_source_key!(request, from.sse());
+            encrypted!(request, to.sse())
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
@@ -607,13 +649,15 @@ impl Transfers {
         if !server_side && head.size <= self.part_size {
             let body = self.get_whole(from, head).await?;
             let _permit = self.permit().await;
-            to.client
+            let request = to
+                .client
                 .put_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
                 .set_content_type(content_type)
                 .set_metadata(metadata)
-                .body(ByteStream::from(body))
+                .body(ByteStream::from(body));
+            encrypted!(request, to.sse())
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
@@ -621,7 +665,7 @@ impl Transfers {
             return Ok(());
         }
         let upload_id = self
-            .start_upload(to, content_type, metadata, false)
+            .start_upload(to, content_type, metadata, None)
             .await
             .map_err(|e| e.within(what()))?;
         let result = self
@@ -664,7 +708,8 @@ impl Transfers {
                 let len = range.end - range.start;
                 let etag = if server_side {
                     let _permit = self.permit().await;
-                    to.client
+                    let request = to
+                        .client
                         .upload_part_copy()
                         .bucket(&to.bucket)
                         .key(&to.key)
@@ -672,7 +717,9 @@ impl Transfers {
                         .part_number(number)
                         .copy_source(copy_source(from))
                         .copy_source_range(format!("bytes={}-{}", range.start, range.end - 1))
-                        .set_copy_source_if_match(head.etag.clone())
+                        .set_copy_source_if_match(head.etag.clone());
+                    let request = copy_source_key!(request, from.sse());
+                    customer_key!(request, to.sse())
                         .send()
                         .await
                         .map_err(|e| Error::s3("a part", &e))?
@@ -687,13 +734,15 @@ impl Transfers {
                         .map_err(|e| Error::new(Kind::Network, format!("a part: {e}")))?
                         .into_bytes();
                     let _permit = self.permit().await;
-                    to.client
+                    let request = to
+                        .client
                         .upload_part()
                         .bucket(&to.bucket)
                         .key(&to.key)
                         .upload_id(upload_id)
                         .part_number(number)
-                        .body(ByteStream::from(body))
+                        .body(ByteStream::from(body));
+                    customer_key!(request, to.sse())
                         .send()
                         .await
                         .map_err(|e| Error::s3("a part", &e))?
@@ -720,17 +769,18 @@ impl Transfers {
         to: &Object,
         content_type: Option<String>,
         metadata: Option<std::collections::HashMap<String, String>>,
-        crc32: bool,
+        checksum: Option<ChecksumAlgorithm>,
     ) -> Result<String, Error> {
         let _permit = self.permit().await;
-        let created = to
+        let request = to
             .client
             .create_multipart_upload()
             .bucket(&to.bucket)
             .key(&to.key)
             .set_content_type(content_type)
             .set_metadata(metadata)
-            .set_checksum_algorithm(crc32.then_some(ChecksumAlgorithm::Crc32))
+            .set_checksum_algorithm(checksum);
+        let created = encrypted!(request, to.sse())
             .send()
             .await
             .map_err(|e| Error::s3("starting the upload", &e))?;
@@ -743,14 +793,15 @@ impl Transfers {
     /// The whole of a small object, as long as it's still the one `head` describes.
     async fn get_whole(&self, from: &Object, head: &Head) -> Result<Bytes, Error> {
         let _permit = self.permit().await;
-        let got = from
+        let request = from
             .client
             .get_object()
             .bucket(&from.bucket)
             .key(&from.key)
             .set_version_id(from.version_id.clone())
             .set_if_match(head.etag.clone())
-            .checksum_mode(ChecksumMode::Enabled)
+            .checksum_mode(ChecksumMode::Enabled);
+        let got = customer_key!(request, from.sse())
             .send()
             .await
             .map_err(|e| Error::s3(format!("can't read {}", from.name), &e))?;
@@ -763,7 +814,16 @@ impl Transfers {
     }
 }
 
-/// A failed part: the upload stays, so the same command can carry on from it.
+/// The checksum a file's parts are sent with: SHA-256 when they're encrypted with a KMS
+/// or customer key (their ETags aren't MD5s then, so a resumed upload checks them by
+/// it), else CRC32.
+fn part_checksum(to: &Object) -> ChecksumAlgorithm {
+    match to.sse() {
+        Some(Sse::Kms(_) | Sse::Customer(_)) => ChecksumAlgorithm::Sha256,
+        _ => ChecksumAlgorithm::Crc32,
+    }
+}
+
 /// The size of a stream's part `number` (from 1): `part_size`, doubling after every
 /// 1,000 parts, at most S3's largest part.
 fn stream_part_size(part_size: u64, number: u64) -> u64 {
@@ -795,6 +855,7 @@ fn joined(
     }
 }
 
+/// A failed part: the upload stays, so the same command can carry on from it.
 fn resumable_failure(err: Error) -> Error {
     err.with_hint("the parts sent so far are kept: run the same command again to resume")
 }
@@ -833,22 +894,52 @@ async fn write_body(
 /// The MD5 of bytes `range` of the file at `path`, in hex (a single part's ETag).
 async fn md5_of(path: &Path, range: Range<u64>) -> std::io::Result<String> {
     use md5::Digest;
+    hash_range(
+        path,
+        range,
+        md5::Md5::new(),
+        |hasher, bytes| hasher.update(bytes),
+        |hasher| hex(&hasher.finalize()),
+    )
+    .await
+}
+
+/// The SHA-256 of bytes `range` of the file at `path`, in base64 (as S3 gives it).
+async fn sha256_of(path: &Path, range: Range<u64>) -> std::io::Result<String> {
+    use base64::Engine;
+    hash_range(
+        path,
+        range,
+        aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256),
+        aws_lc_rs::digest::Context::update,
+        |context| base64::engine::general_purpose::STANDARD.encode(context.finish()),
+    )
+    .await
+}
+
+/// Bytes `range` of the file at `path`, hashed by `hasher`.
+async fn hash_range<H: Send + 'static>(
+    path: &Path,
+    range: Range<u64>,
+    mut hasher: H,
+    update: fn(&mut H, &[u8]),
+    finish: fn(H) -> String,
+) -> std::io::Result<String> {
     use std::io::{Read, Seek};
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(path)?;
         file.seek(std::io::SeekFrom::Start(range.start))?;
         let mut limited = file.take(range.end - range.start);
-        let mut hasher = md5::Md5::new();
         let mut buf = vec![0; 256 * 1024];
         loop {
             let n = limited.read(&mut buf)?;
             if n == 0 {
                 break;
             }
-            hasher.update(&buf[..n]);
+            update(&mut hasher, &buf[..n]);
         }
-        Ok(hex(&hasher.finalize()))
+        Ok(finish(hasher))
     })
     .await
     .map_err(std::io::Error::other)?
@@ -936,6 +1027,7 @@ mod tests {
             name: String::new(),
             endpoint: (String::new(), String::new()),
             version_id: None,
+            sse: None,
         };
         assert_eq!(copy_source(&from), "b/a/b%20c%2B%C3%BC%3F.txt");
         from.version_id = Some("v 1/&".into());

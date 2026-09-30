@@ -119,7 +119,7 @@ impl Error {
                 (
                     kind_of(status, code),
                     describe(status, code, message),
-                    hint_for(code).map(str::to_owned),
+                    hint_for(status, code).map(str::to_owned),
                 )
             }
             _ => (Kind::General, source_chain(Some(err)), None),
@@ -142,7 +142,7 @@ impl Error {
             } => (
                 kind_of(*status, code),
                 describe(*status, code, message),
-                hint_for(code).map(str::to_owned),
+                hint_for(*status, code).map(str::to_owned),
             ),
             ClientError::Transport(e) => {
                 let chain = source_chain(Some(e));
@@ -226,8 +226,13 @@ fn kind_of(status: u16, code: &str) -> Kind {
 }
 
 /// What to do about an S3 error code, when there's something.
-fn hint_for(code: &str) -> Option<&'static str> {
+fn hint_for(status: u16, code: &str) -> Option<&'static str> {
     match code {
+        // A HEAD has no body to say why; for an object, it's most likely SSE-C.
+        "" if status == 400 => Some(
+            "an object encrypted with a customer key (SSE-C) is read with it: give \
+             `--enc-c ALIAS/BUCKET/PREFIX=FILE`",
+        ),
         "InvalidAccessKeyId" => Some("check the alias's access key: `teifs alias set`"),
         "SignatureDoesNotMatch" => Some("check the alias's secret key: `teifs alias set`"),
         "RequestTimeTooSkewed" => Some("this computer's clock is off: set it right"),
@@ -291,6 +296,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_bare_400_hints_at_customer_keys() {
+        assert!(hint_for(400, "").unwrap().contains("--enc-c"));
+        assert!(hint_for(400, "InvalidArgument").is_none());
+        assert!(hint_for(403, "").is_none());
+    }
+
+    #[test]
     fn statuses_and_codes_become_kinds() {
         assert_eq!(kind_of(404, ""), Kind::NotFound);
         assert_eq!(kind_of(404, "NoSuchKey"), Kind::NotFound);
@@ -309,11 +321,11 @@ mod tests {
             "The key is unknown. (InvalidAccessKeyId)"
         );
         assert!(
-            hint_for("SignatureDoesNotMatch")
+            hint_for(403, "SignatureDoesNotMatch")
                 .unwrap()
                 .contains("teifs alias set")
         );
-        assert_eq!(hint_for("NoSuchKey"), None);
+        assert_eq!(hint_for(404, "NoSuchKey"), None);
         assert_eq!(describe(400, "Bad", ""), "Bad");
     }
 

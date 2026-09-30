@@ -16,6 +16,7 @@ use super::{
     AliasAction, Command, Error, Kind, SetAlias,
     alias::{self, Alias, Aliases, Origin},
     listing,
+    sse::{self, customer_key},
     target::{Remote, Target, folder_prefix},
     transfer::Object,
 };
@@ -46,8 +47,14 @@ pub async fn run(command: Command) -> Result<(), Error> {
             with_lock,
         } => mb(remote(&target, "mb")?, layout, ignore_existing, with_lock).await,
         Command::Rb { target, force } => rb(remote(&target, "rb")?, force).await,
-        Command::Cp(args) => super::copy::copy(args, false, &aliases).await,
-        Command::Mv(args) => super::copy::copy(args, true, &aliases).await,
+        Command::Cp(args) => {
+            sse::use_rules(sse::Rules::read(&args.enc, &aliases)?);
+            super::copy::copy(args, false, &aliases).await
+        }
+        Command::Mv(args) => {
+            sse::use_rules(sse::Rules::read(&args.enc, &aliases)?);
+            super::copy::copy(args, true, &aliases).await
+        }
         Command::Rm {
             targets,
             recursive,
@@ -76,13 +83,20 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Cat {
             targets,
             version_id,
+            keys,
         } => {
+            sse::use_rules(sse::Rules::read(&keys.into(), &aliases)?);
             for target in &targets {
                 cat(remote(target, "cat")?, version_id.as_deref()).await?;
             }
             Ok(())
         }
-        Command::Stat { target, version_id } => {
+        Command::Stat {
+            target,
+            version_id,
+            keys,
+        } => {
+            sse::use_rules(sse::Rules::read(&keys.into(), &aliases)?);
             stat(remote(&target, "stat")?, version_id.as_deref()).await
         }
         Command::Version { action } => super::versions::versioning(action, &aliases).await,
@@ -102,7 +116,9 @@ pub async fn run(command: Command) -> Result<(), Error> {
             remove,
             dry_run,
             transfer,
+            enc,
         } => {
+            sse::use_rules(sse::Rules::read(&enc, &aliases)?);
             let source = Target::parse(&source, &aliases)?;
             let destination = Target::parse(&destination, &aliases)?;
             super::copy::mirror(source, destination, remove, dry_run, transfer).await
@@ -702,14 +718,16 @@ pub(super) async fn cat(remote: Remote, version_id: Option<&str>) -> Result<(), 
     use tokio::io::AsyncWriteExt;
     let bucket = remote.bucket()?;
     let name = remote.display(&remote.key);
-    let got = remote
+    let request = remote
         .alias
         .client()
         .get_object()
         .bucket(bucket)
         .key(&remote.key)
         .set_version_id(version_id.map(str::to_owned))
-        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
+    let sse = sse::for_object(&name);
+    let got = customer_key!(request, sse.as_deref())
         .send()
         .await
         .map_err(|e| Error::s3(format!("can't read {name}"), &e))?;
@@ -772,14 +790,14 @@ async fn stat(remote: Remote, version_id: Option<&str>) -> Result<(), Error> {
         ));
     }
     let name = remote.display(&remote.key);
-    let out = client
+    let request = client
         .head_object()
         .bucket(bucket)
         .key(&remote.key)
         .set_version_id(version_id.map(str::to_owned))
-        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
-        .send()
-        .await;
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
+    let sse = sse::for_object(&name);
+    let out = customer_key!(request, sse.as_deref()).send().await;
     let out = match out {
         Ok(out) => out,
         Err(e) => {
@@ -828,6 +846,7 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
         ("Storage", text(storage)),
         ("Encryption", text(encryption)),
         ("KMS key", text(out.ssekms_key_id())),
+        ("Customer key MD5", text(out.sse_customer_key_md5())),
         (
             "Bucket key",
             text(
@@ -869,6 +888,7 @@ fn show_object(key: &str, name: &str, out: &HeadObjectOutput) {
             "storageClass": storage,
             "encryption": encryption,
             "kmsKeyId": out.ssekms_key_id(),
+            "customerKeyMd5": out.sse_customer_key_md5(),
             "bucketKey": out.bucket_key_enabled(),
             "checksums": {
                 "crc32": out.checksum_crc32(),
@@ -990,6 +1010,7 @@ pub(super) fn object(remote: &Remote, key: &str) -> Object {
         name: remote.display(key),
         endpoint: (remote.alias.url.clone(), remote.alias.access_key.clone()),
         version_id: None,
+        sse: super::sse::for_object(&remote.display(key)),
     }
 }
 

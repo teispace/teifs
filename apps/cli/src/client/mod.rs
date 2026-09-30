@@ -8,6 +8,7 @@ mod encrypt;
 mod ilm;
 mod listing;
 mod lock;
+mod sse;
 mod target;
 mod transfer;
 pub(crate) mod trust;
@@ -108,6 +109,8 @@ pub enum Command {
         /// Print this version of the object instead of the current one.
         #[arg(long)]
         version_id: Option<String>,
+        #[command(flatten)]
+        keys: ReadKeyArgs,
     },
     /// Show an object's or a bucket's details.
     Stat {
@@ -116,6 +119,8 @@ pub enum Command {
         /// Show this version of the object instead of the current one.
         #[arg(long)]
         version_id: Option<String>,
+        #[command(flatten)]
+        keys: ReadKeyArgs,
     },
     /// Turn a bucket's versioning on, suspend it, or show it.
     Version {
@@ -175,6 +180,8 @@ pub enum Command {
         dry_run: bool,
         #[command(flatten)]
         transfer: TransferArgs,
+        #[command(flatten)]
+        enc: EncArgs,
     },
 }
 
@@ -531,6 +538,42 @@ pub struct CopyArgs {
     version_id: Option<String>,
     #[command(flatten)]
     transfer: TransferArgs,
+    #[command(flatten)]
+    enc: EncArgs,
+}
+
+/// Encryption by key prefix: of what's written, and customer keys to read with.
+#[derive(Args, Clone, Default)]
+pub struct EncArgs {
+    /// Encrypt what's written under `ALIAS/BUCKET[/PREFIX]` with SSE-S3 (repeatable).
+    #[arg(long = "enc-s3", value_name = "PREFIX")]
+    s3: Vec<String>,
+    /// Encrypt what's written under a prefix with a KMS key (repeatable).
+    #[arg(long = "enc-kms", value_name = "PREFIX=KEY")]
+    kms: Vec<String>,
+    /// Read and write objects under a prefix with a customer key (SSE-C) from a file:
+    /// 32 bytes, or base64 or hex (repeatable). `TEIFS_ENC_C` takes `PREFIX=KEY,…`.
+    #[arg(long = "enc-c", value_name = "PREFIX=FILE")]
+    customer: Vec<String>,
+}
+
+/// Customer keys (SSE-C) to read objects with.
+#[derive(Args, Clone, Default)]
+pub struct ReadKeyArgs {
+    /// Read objects under `ALIAS/BUCKET[/PREFIX]` with a customer key (SSE-C) from a
+    /// file: 32 bytes, or base64 or hex (repeatable). `TEIFS_ENC_C` takes
+    /// `PREFIX=KEY,…`.
+    #[arg(long, value_name = "PREFIX=FILE")]
+    enc_c: Vec<String>,
+}
+
+impl From<ReadKeyArgs> for EncArgs {
+    fn from(args: ReadKeyArgs) -> Self {
+        Self {
+            customer: args.enc_c,
+            ..Self::default()
+        }
+    }
 }
 
 /// How transfers run.

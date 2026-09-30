@@ -67,6 +67,14 @@ behaviour; the on-disk format is always upgraded automatically.
   version (`--version-id`) or everything under a prefix (`-r`) to a KMS key in place; a
   key's name is enough, its ARN is made from the alias's region and account. `stat`
   shows a bucket's default encryption and an object's Bucket Key.
+- Encryption on transfers, by key prefix as mc names it: `cp`, `mv` and `mirror` take
+  `--enc-s3 PREFIX`, `--enc-kms PREFIX=KEY` and `--enc-c PREFIX=FILE`, and `cat` and
+  `stat` take `--enc-c`, for uploads, downloads, streams and copies by the server or
+  through the client (source and destination keys apart). A customer key comes from a
+  file (32 bytes, or base64 or hex) or `TEIFS_ENC_C` (`PREFIX=KEY,…`), never from the
+  command line. Uploads encrypted with a KMS or customer key send SHA-256 part checksums
+  so an interrupted one still resumes (their ETags aren't MD5s). `stat` shows an SSE-C
+  object's key MD5, and a bare `400` on a read suggests `--enc-c`.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
 

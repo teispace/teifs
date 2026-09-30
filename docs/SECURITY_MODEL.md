@@ -330,6 +330,9 @@ given: keys with `..`, `.`, empty or absolute parts (and, on Windows, `\` or `:`
 refused instead of mapped to a path. `teifs init` never prints the secret key (aliases
 read it from the drive's file), writes no secret into the drive's settings, and refuses a
 keyring on the drive itself. `--json` output and error records carry no secrets.
+Customer keys (SSE-C) for transfers come from a file (`--enc-c PREFIX=FILE`) or
+`TEIFS_ENC_C`, never from the command line: a key given where a file belongs is refused
+without being repeated, and keys are held in memory that's wiped when dropped.
 Temporary credentials (`teifs sts`) are kept the same way, their session token as secret
 as the key; they go to the terminal only with `--output -`, never replace an alias with
 long-term keys, and an alias whose credentials expired is refused before it's used. A

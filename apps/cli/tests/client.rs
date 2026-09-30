@@ -1274,3 +1274,214 @@ async fn encryption_mistakes_are_refused(cli: &Client) {
     )
     .await;
 }
+
+#[tokio::test]
+async fn transfers_encrypt_by_prefix_and_read_with_customer_keys() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let server = start().await;
+    let cli = Client::new(&server);
+    let big = data(12 * MIB, 3);
+    fs::write(cli.path("big.bin"), &big).unwrap();
+    fs::write(cli.path("one.txt"), "one").unwrap();
+    fs::write(cli.path("key"), [5_u8; 32]).unwrap();
+    cli.ok(&["mb", "t/sec", "--layout", "object"]).await;
+    let small = ["--part-size", "5MiB"];
+    let c = ["--enc-c", "t/sec/c/=key"];
+    // Uploads in one request and in parts, read back only with the key.
+    cli.ok(&[
+        &["cp"],
+        &c[..],
+        &["one.txt", "big.bin", "t/sec/c/"],
+        &small[..],
+    ]
+    .concat())
+        .await;
+    let got = sse_stat(&cli, "t/sec/c/big.bin", true).await;
+    assert_eq!(got["customerKeyMd5"], STANDARD.encode(md5_of(&[5; 32])));
+    cli.fails(&["stat", "t/sec/c/one.txt"], 1).await;
+    cli.fails(&["cat", "t/sec/c/one.txt"], 1).await;
+    assert_eq!(
+        cli.ok(&[&["cat"], &c[..], &["t/sec/c/one.txt"]].concat())
+            .await,
+        "one"
+    );
+    cli.ok(&[
+        &["cp"],
+        &c[..],
+        &["t/sec/c/big.bin", "back.bin"],
+        &small[..],
+    ]
+    .concat())
+        .await;
+    assert_eq!(fs::read(cli.path("back.bin")).unwrap(), big);
+
+    // Copies by the server and through the client, from a customer key to SSE-KMS and
+    // SSE-S3.
+    let kms = [
+        "--enc-kms",
+        "t/sec/k/=teifs-default",
+        "--enc-kms",
+        "u/sec/k/=teifs-default",
+    ];
+    cli.ok(&[
+        &["cp"],
+        &c[..],
+        &kms[..],
+        &["t/sec/c/big.bin", "t/sec/k/by-server.bin"],
+    ]
+    .concat())
+        .await;
+    cli.ok(&[
+        &["cp"],
+        &c[..],
+        &kms[..],
+        &["t/sec/c/big.bin", "u/sec/k/by-client.bin"],
+        &small[..],
+    ]
+    .concat())
+        .await;
+    for at in ["t/sec/k/by-server.bin", "t/sec/k/by-client.bin"] {
+        let got = sse_stat(&cli, at, false).await;
+        assert_eq!(got["encryption"], "aws:kms", "{at}");
+        assert_eq!(got["kmsKeyId"], "teifs-default", "{at}");
+    }
+    for at in ["t/sec/k/by-server.bin", "t/sec/k/by-client.bin"] {
+        cli.ok(&["cp", at, "copied.bin"]).await;
+        assert_eq!(fs::read(cli.path("copied.bin")).unwrap(), big, "{at}");
+    }
+    cli.ok(&["encrypt", "set", "sse-kms", "teifs-default", "t/sec"])
+        .await;
+    cli.ok(&["cp", "--enc-s3", "t/sec/s3", "one.txt", "t/sec/s3/one.txt"])
+        .await;
+    assert_eq!(
+        sse_stat(&cli, "t/sec/s3/one.txt", false).await["encryption"],
+        "AES256"
+    );
+
+    customer_keys_come_from_the_environment_never_the_command_line(cli).await;
+}
+
+async fn customer_keys_come_from_the_environment_never_the_command_line(mut cli: Client) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    // Standard input, and a key from TEIFS_ENC_C (padded base64) for a mirror.
+    let key = STANDARD.encode([6_u8; 32]);
+    let env = format!("t/sec/m/={key},t/sec/c/={}", STANDARD.encode([5_u8; 32]));
+    cli.env.push(("TEIFS_ENC_C".to_owned(), env));
+    let run = cli
+        .run_with(&["cp", "-", "t/sec/m/in.txt"], "streamed")
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(cli.ok(&["cat", "t/sec/m/in.txt"]).await, "streamed");
+    cli.ok(&["mirror", "t/sec/c/", "t/sec/m/c/"]).await;
+    assert_eq!(cli.ok(&["cat", "t/sec/m/c/one.txt"]).await, "one");
+    assert!(!sse_stat(&cli, "t/sec/m/c/one.txt", false).await["customerKeyMd5"].is_null());
+
+    // Keys never come from the command line, and prefixes must name an alias.
+    let err = cli
+        .fails(
+            &[
+                "cp",
+                "--enc-c",
+                &format!("t/sec/={key}"),
+                "one.txt",
+                "t/sec/x",
+            ],
+            2,
+        )
+        .await;
+    assert!(
+        !err.contains(&key) && err.contains("never the key itself"),
+        "{err}"
+    );
+    cli.fails(&["cp", "--enc-s3", "nope/sec", "one.txt", "t/sec/x"], 2)
+        .await;
+}
+
+/// `teifs stat`'s record of `at`, with the key for `t/sec/c/` if `key`.
+async fn sse_stat(cli: &Client, at: &str, key: bool) -> serde_json::Value {
+    let mut args = vec!["--json", "stat", at];
+    if key {
+        args.extend(["--enc-c", "t/sec/c/=key"]);
+    }
+    records(&cli.ok(&args).await).remove(0)
+}
+
+fn md5_of(bytes: &[u8]) -> Vec<u8> {
+    use md5::Digest;
+    md5::Md5::digest(bytes).to_vec()
+}
+
+#[tokio::test]
+async fn uploads_with_customer_keys_resume() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let server = start().await;
+    let cli = Client::new(&server);
+    let big = data(12 * MIB, 4);
+    fs::write(cli.path("big.bin"), &big).unwrap();
+    fs::write(cli.path("key"), [8_u8; 32]).unwrap();
+    cli.ok(&["mb", "t/sres", "--layout", "object"]).await;
+    let (key, md5) = (
+        STANDARD.encode([8_u8; 32]),
+        STANDARD.encode(md5_of(&[8; 32])),
+    );
+    // An earlier run sent the first two parts, then stopped.
+    let s3 = client(&server, SECRET_KEY);
+    let upload = s3
+        .create_multipart_upload()
+        .bucket("sres")
+        .key("big.bin")
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&key)
+        .sse_customer_key_md5(&md5)
+        .send()
+        .await
+        .unwrap();
+    s3.upload_part()
+        .bucket("sres")
+        .key("big.bin")
+        .upload_id(upload.upload_id().unwrap())
+        .part_number(1)
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&key)
+        .sse_customer_key_md5(&md5)
+        .body(ByteStream::from(big[..5 * MIB].to_vec()))
+        .send()
+        .await
+        .unwrap();
+    // A part of the same size with other bytes is sent again.
+    s3.upload_part()
+        .bucket("sres")
+        .key("big.bin")
+        .upload_id(upload.upload_id().unwrap())
+        .part_number(2)
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&key)
+        .sse_customer_key_md5(&md5)
+        .body(ByteStream::from(vec![0; 5 * MIB]))
+        .send()
+        .await
+        .unwrap();
+    let run = cli
+        .run(&[
+            "cp",
+            "--enc-c",
+            "t/sres=key",
+            "big.bin",
+            "t/sres/big.bin",
+            "--part-size",
+            "5MiB",
+        ])
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("1 of 3 parts are already there"),
+        "{}",
+        run.stderr
+    );
+    cli.ok(&["cp", "--enc-c", "t/sres=key", "t/sres/big.bin", "back.bin"])
+        .await;
+    assert_eq!(fs::read(cli.path("back.bin")).unwrap(), big);
+}
