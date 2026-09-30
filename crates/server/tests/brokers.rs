@@ -3,7 +3,8 @@
 //! certificate). Each runs when its address is set: `TEIFS_TEST_NSQ` (an nsqd that
 //! requires TLS), `TEIFS_TEST_REDIS` (password `TEIFS_TEST_REDIS_PASSWORD`),
 //! `TEIFS_TEST_NATS` (user `teifs`, password `TEIFS_TEST_NATS_PASSWORD`, a stream taking
-//! `s3.events`) and `TEIFS_TEST_MQTT` (user `teifs`, password `TEIFS_TEST_MQTT_PASSWORD`).
+//! `s3.events`), `TEIFS_TEST_MQTT` (user `teifs`, password `TEIFS_TEST_MQTT_PASSWORD`),
+//! and `TEIFS_TEST_MQTT_WS`, the same broker's `wss://` URL, for MQTT over a WebSocket.
 //! Nightly CI starts them and reads what they got; skipped otherwise.
 
 #![allow(
@@ -59,6 +60,14 @@ async fn events_reach_real_brokers_over_tls() {
         mqtt.password = Some(secret("TEIFS_TEST_MQTT_PASSWORD"));
         mqtt.tls = Some(tls.clone());
         targets.push(TargetConfig::new("mqtt", TargetKind::Mqtt(mqtt)).unwrap());
+    }
+    if let Some(url) = address("TEIFS_TEST_MQTT_WS") {
+        let mut mqtt = Mqtt::new(&url, "s3/ws", 2).unwrap();
+        assert!(mqtt.websocket.is_some(), "{url} is a WebSocket's");
+        mqtt.user = Some("teifs".into());
+        mqtt.password = Some(secret("TEIFS_TEST_MQTT_PASSWORD"));
+        mqtt.tls = Some(tls.clone());
+        targets.push(TargetConfig::new("mqttws", TargetKind::Mqtt(mqtt)).unwrap());
     }
     let kinds: Vec<(String, &str)> = targets
         .iter()

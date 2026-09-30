@@ -312,8 +312,13 @@ An MQTT target, `arn:teifs:sqs::ID:mqtt`, publishes each event to a topic over M
 (the default) waits for the broker's `PUBACK`, `qos=2` for its `PUBREC` and `PUBCOMP`,
 and `qos=0` for the answer to a ping sent after it; messages aren't retained.
 `keepalive=SECONDS` (60 by default) is how long the broker waits for a packet before it
-drops the connection. TLS takes the same options as Redis's. Starting to name it checks
-that the broker takes the connection and the user and password, without publishing.
+drops the connection. TLS takes the same options as Redis's. The broker can also be
+given by its URL, as MinIO takes it: `tcp://` or `mqtt://`, `ssl://`, `tls://` or
+`mqtts://` for TLS (verified with the system's certificates unless `ca=PATH` says
+otherwise), and `ws://` or `wss://` for a broker reached over WebSockets at the URL's
+path (`wss://broker.example/mqtt`), asking for the `mqtt` subprotocol; a URL without a
+port has its scheme's (1883, 8883, 80, 443). Starting to name it checks that the broker
+takes the connection and the user and password, without publishing.
 
 ```sh
 teifs serve --notify-kafka 'stream=k1.internal:9093;k2.internal:9093,topic=s3-events,sasl=scram-sha-512,user=teifs,tls=true'
@@ -612,5 +617,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: Kafka's snappy, lz4 and zstd compression, MQTT over WebSockets, and client
-certificates for webhooks and Elasticsearch.
+Not yet: Kafka's snappy, lz4 and zstd compression, and client certificates for webhooks
+and Elasticsearch.

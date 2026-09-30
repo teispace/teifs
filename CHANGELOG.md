@@ -159,6 +159,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - NSQ targets over TLS (`tls=true` or `ca=PATH`, as nsqd negotiates it after
   `IDENTIFY`) and with `AUTH`, its secret from `TEIFS_NOTIFY_NSQ_SECRET_ID`, sent only
   over TLS.
+- MQTT targets over WebSockets: the broker given by its URL, as MinIO takes it
+  (`ws://HOST[:PORT]/PATH` or `wss://…`, and `tcp://`, `ssl://`, `tls://`, `mqtt://`,
+  `mqtts://`), asking for the `mqtt` subprotocol.
 - Nightly CI sends events to a real nsqd, Redis, NATS JetStream and Mosquitto, each
   over TLS and signed in, and checks what each got.
 - MySQL and MariaDB notification targets, as MinIO's: `teifs serve --notify-mysql

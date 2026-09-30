@@ -677,6 +677,22 @@ pub struct MqttServer {
     published: Arc<Mutex<Vec<MqttMessage>>>,
     connects: Arc<Mutex<Vec<MqttConnect>>>,
     denied: Arc<Mutex<Vec<String>>>,
+    upgrades: Arc<Mutex<Vec<WebSocketUpgrade>>>,
+}
+
+/// A WebSocket upgrade an [`MqttServer`] took, and what came over it.
+#[derive(Debug, Clone, Default)]
+pub struct WebSocketUpgrade {
+    /// The path asked for.
+    pub path: String,
+    /// The `Host` header.
+    pub host: String,
+    /// The protocols asked for.
+    pub protocol: String,
+    /// Whether every frame the client sent was masked.
+    pub masked: bool,
+    /// The pongs that answered its pings.
+    pub pongs: usize,
 }
 
 impl MqttServer {
@@ -686,6 +702,20 @@ impl MqttServer {
     ///
     /// When it can't listen.
     pub async fn start(login: Option<(&str, &str)>) -> Self {
+        Self::serve(login, false).await
+    }
+
+    /// Starts one reached over a WebSocket, at any path, that wants `login`, if any. Each
+    /// of its frames is split in two and follows a ping.
+    ///
+    /// # Panics
+    ///
+    /// When it can't listen.
+    pub async fn over_websocket(login: Option<(&str, &str)>) -> Self {
+        Self::serve(login, true).await
+    }
+
+    async fn serve(login: Option<(&str, &str)>, websocket: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a free port");
@@ -694,23 +724,33 @@ impl MqttServer {
             published: Arc::new(Mutex::new(Vec::new())),
             connects: Arc::new(Mutex::new(Vec::new())),
             denied: Arc::new(Mutex::new(Vec::new())),
+            upgrades: Arc::new(Mutex::new(Vec::new())),
         };
         let login = login.map(|(u, p)| (u.to_owned(), p.to_owned()));
-        let (published, connects, denied) = (
+        let (published, connects, denied, upgrades) = (
             Arc::clone(&server.published),
             Arc::clone(&server.connects),
             Arc::clone(&server.denied),
+            Arc::clone(&server.upgrades),
         );
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (published, connects, denied, login) = (
+                let (published, connects, denied, upgrades, login) = (
                     Arc::clone(&published),
                     Arc::clone(&connects),
                     Arc::clone(&denied),
+                    Arc::clone(&upgrades),
                     login.clone(),
                 );
                 tokio::spawn(async move {
-                    let _ = mqtt_serve(stream, login, &published, &connects, &denied).await;
+                    if websocket {
+                        let Ok(stream) = websocket_accept(stream, upgrades).await else {
+                            return;
+                        };
+                        let _ = mqtt_serve(stream, login, &published, &connects, &denied).await;
+                    } else {
+                        let _ = mqtt_serve(stream, login, &published, &connects, &denied).await;
+                    }
                 });
             }
         });
@@ -730,6 +770,15 @@ impl MqttServer {
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    /// The WebSocket upgrades taken.
+    #[must_use]
+    pub fn upgrades(&self) -> Vec<WebSocketUpgrade> {
+        self.upgrades
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The `CONNECT`s taken.
@@ -762,8 +811,145 @@ impl MqttServer {
     }
 }
 
-async fn mqtt_serve(
-    stream: tokio::net::TcpStream,
+/// Takes a WebSocket upgrade on `stream`, answering as RFC 6455 says, and returns what
+/// comes over it as a stream of bytes: the client's frames unmasked, and what's written
+/// sent in two frames after a ping. What it saw goes in `upgrades`.
+async fn websocket_accept(
+    mut stream: tokio::net::TcpStream,
+    upgrades: Arc<Mutex<Vec<WebSocketUpgrade>>>,
+) -> Result<tokio::io::DuplexStream, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let io = |e: std::io::Error| e.to_string();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.map_err(io)?);
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let header = |name: &str| {
+        head.lines()
+            .find_map(|l| {
+                let (n, v) = l.split_once(':')?;
+                n.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+            })
+            .unwrap_or_default()
+    };
+    let key = header("Sec-WebSocket-Key");
+    let digest = digest::digest(
+        &digest::SHA1_FOR_LEGACY_USE_ONLY,
+        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+    );
+    let at = {
+        let mut upgrades = upgrades.lock().unwrap_or_else(PoisonError::into_inner);
+        upgrades.push(WebSocketUpgrade {
+            path: head.split(' ').nth(1).unwrap_or_default().to_owned(),
+            host: header("Host"),
+            protocol: header("Sec-WebSocket-Protocol"),
+            masked: true,
+            pongs: 0,
+        });
+        upgrades.len() - 1
+    };
+    let answer = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n",
+        BASE64.encode(digest.as_ref())
+    );
+    stream.write_all(answer.as_bytes()).await.map_err(io)?;
+    let (ours, theirs) = tokio::io::duplex(1 << 20);
+    let (from_client, to_client) = stream.into_split();
+    let (from_broker, to_broker) = tokio::io::split(theirs);
+    tokio::spawn(websocket_unmask(from_client, to_broker, upgrades, at));
+    tokio::spawn(websocket_frame(from_broker, to_client));
+    Ok(ours)
+}
+
+/// The client's frames, unmasked, to the broker; noting in `upgrades[at]` whether they
+/// were masked and the pongs.
+async fn websocket_unmask(
+    mut from_client: tokio::net::tcp::OwnedReadHalf,
+    mut to_broker: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    upgrades: Arc<Mutex<Vec<WebSocketUpgrade>>>,
+    at: usize,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let note = |f: &dyn Fn(&mut WebSocketUpgrade)| {
+        f(&mut upgrades.lock().unwrap_or_else(PoisonError::into_inner)[at]);
+    };
+    loop {
+        let Ok(first) = from_client.read_u8().await else {
+            return;
+        };
+        let Ok(second) = from_client.read_u8().await else {
+            return;
+        };
+        if second & 0x80 == 0 {
+            note(&|u| u.masked = false);
+        }
+        let size = match second & 0x7f {
+            126 => usize::from(from_client.read_u16().await.unwrap_or_default()),
+            127 => usize::try_from(from_client.read_u64().await.unwrap_or_default())
+                .unwrap_or_default(),
+            n => usize::from(n),
+        };
+        let mut mask = [0; 4];
+        if second & 0x80 != 0 && from_client.read_exact(&mut mask).await.is_err() {
+            return;
+        }
+        let mut payload = vec![0; size];
+        if from_client.read_exact(&mut payload).await.is_err() {
+            return;
+        }
+        payload
+            .iter_mut()
+            .zip(mask.iter().cycle())
+            .for_each(|(b, m)| *b ^= m);
+        match first & 0x0f {
+            0x0 | 0x2 => {
+                if to_broker.write_all(&payload).await.is_err() {
+                    return;
+                }
+            }
+            0xa if payload == b"hi" => note(&|u| u.pongs += 1),
+            _ => return,
+        }
+    }
+}
+
+/// What the broker writes, split in two frames after a ping.
+async fn websocket_frame(
+    mut from_broker: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    mut to_client: tokio::net::tcp::OwnedWriteHalf,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut chunk = vec![0; 1 << 16];
+    loop {
+        let n = match from_broker.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        let half = n / 2;
+        let mut out = vec![0x89, 2, b'h', b'i'];
+        for (first, piece) in [(0x02, &chunk[..half]), (0x80, &chunk[half..n])] {
+            out.push(first);
+            if piece.len() < 126 {
+                out.push(u8::try_from(piece.len()).expect("under 126"));
+            } else {
+                out.push(126);
+                out.extend_from_slice(&u16::try_from(piece.len()).expect("fits").to_be_bytes());
+            }
+            out.extend_from_slice(piece);
+        }
+        if to_client.write_all(&out).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn mqtt_serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: S,
     login: Option<(String, String)>,
     published: &Mutex<Vec<MqttMessage>>,
     connects: &Mutex<Vec<MqttConnect>>,

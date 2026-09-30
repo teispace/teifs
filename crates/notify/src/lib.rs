@@ -33,6 +33,7 @@ mod sqs;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod webhook;
+mod websocket;
 
 use std::{
     collections::BTreeMap,

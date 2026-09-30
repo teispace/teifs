@@ -1,7 +1,8 @@
 //! MQTT targets, as `MinIO`'s: each event, as a webhook is sent it, published to a
 //! topic on a broker over MQTT 3.1.1, with `QoS` 0 (confirmed by a ping), 1 (the broker's
 //! `PUBACK`) or 2 (its `PUBREC`, then `PUBCOMP`). One connection with a clean session,
-//! made again after a failure; TLS when asked for; a user and password.
+//! made again after a failure; TLS when asked for; over a WebSocket for a broker given as
+//! `ws://` or `wss://`; a user and password.
 
 use std::{fmt, fmt::Write as _, future::Future, sync::Arc};
 
@@ -9,7 +10,10 @@ use rustls::ClientConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use zeroize::Zeroizing;
 
-use crate::net::{self, Kept, Stream};
+use crate::{
+    net::{self, Kept, Stream},
+    websocket,
+};
 
 /// The longest packet read: a broker only acknowledges.
 const MAX_PACKET: usize = 1 << 16;
@@ -35,6 +39,8 @@ pub(crate) mod packet {
 pub struct Mqtt {
     /// The broker, `HOST:PORT`.
     pub address: String,
+    /// The path of the broker's WebSocket, for one reached over a WebSocket.
+    pub websocket: Option<String>,
     /// The topic.
     pub topic: String,
     /// 0, 1 or 2.
@@ -51,17 +57,18 @@ pub struct Mqtt {
 }
 
 impl Mqtt {
-    /// Events for `topic` on the broker at `address` (`HOST:PORT`), with quality of service `qos`.
+    /// Events for `topic` on the broker at `address`, with quality of service `qos`.
+    /// `address` is `HOST:PORT`, or a URL as `MinIO` takes one: `tcp://` or `mqtt://`,
+    /// `ssl://`, `tls://` or `mqtts://` for TLS (verified with the system's certificates
+    /// until [`Mqtt::tls`] says otherwise), and `ws://` or `wss://` with the WebSocket's
+    /// path; a URL without a port has the scheme's.
     ///
     /// # Errors
     ///
-    /// When `address` isn't `HOST:PORT`, `topic` can't be published to, or `qos` isn't
+    /// When `address` isn't one of those, `topic` can't be published to, or `qos` isn't
     /// 0, 1 or 2.
     pub fn new(address: &str, topic: &str, qos: u8) -> Result<Self, String> {
-        let address = address.trim();
-        if !net::is_address(address) {
-            return Err(format!("`{address}` isn't HOST:PORT"));
-        }
+        let (address, websocket, secure) = broker(address.trim())?;
         if topic.is_empty()
             || topic.len() > usize::from(u16::MAX)
             || topic.contains(['+', '#', '\0'])
@@ -74,13 +81,14 @@ impl Mqtt {
             return Err(format!("QoS is 0, 1 or 2, not {qos}"));
         }
         Ok(Self {
-            address: address.to_owned(),
+            address,
+            websocket,
             topic: topic.to_owned(),
             qos,
             keep_alive: KEEP_ALIVE,
             user: None,
             password: None,
-            tls: None,
+            tls: secure.then(|| net::tls_config(None, None)).transpose()?,
             connection: Kept::new(),
         })
     }
@@ -88,10 +96,16 @@ impl Mqtt {
     /// Where it publishes.
     #[must_use]
     pub fn shown(&self) -> String {
+        let scheme = match (&self.websocket, self.tls.is_some()) {
+            (None, false) => "mqtt",
+            (None, true) => "mqtts",
+            (Some(_), false) => "ws",
+            (Some(_), true) => "wss",
+        };
         format!(
-            "{}://{} topic {} (QoS {})",
-            if self.tls.is_some() { "mqtts" } else { "mqtt" },
+            "{scheme}://{}{} topic {} (QoS {})",
             self.address,
+            self.websocket.as_deref().unwrap_or_default(),
             self.topic,
             self.qos
         )
@@ -117,7 +131,10 @@ impl Mqtt {
     /// Connects with a clean session and waits for the broker's `CONNACK`.
     async fn open(&self) -> Result<Connection, String> {
         let tcp = net::connect(&self.address).await?;
-        let stream = net::secure(tcp, &self.address, self.tls.as_ref()).await?;
+        let mut stream = net::secure(tcp, &self.address, self.tls.as_ref()).await?;
+        if let Some(path) = &self.websocket {
+            stream = websocket::open(stream, &self.address, path, "mqtt").await?;
+        }
         let mut connection = Connection {
             stream: BufReader::new(stream),
             next: 0,
@@ -179,6 +196,46 @@ impl fmt::Debug for Mqtt {
             .field("at", &self.shown())
             .finish_non_exhaustive()
     }
+}
+
+/// A broker's `HOST:PORT`, its WebSocket's path if it's reached over one, and whether
+/// its scheme is TLS, from `HOST:PORT` or a URL.
+fn broker(address: &str) -> Result<(String, Option<String>, bool), String> {
+    let Some((scheme, rest)) = address.split_once("://") else {
+        if !net::is_address(address) {
+            return Err(format!("`{address}` isn't HOST:PORT or a broker's URL"));
+        }
+        return Ok((address.to_owned(), None, false));
+    };
+    let (host, path) = rest.find('/').map_or((rest, "/"), |at| rest.split_at(at));
+    let (port, websocket, secure) = match scheme.to_ascii_lowercase().as_str() {
+        "tcp" | "mqtt" => (1883, false, false),
+        "ssl" | "tls" | "mqtts" => (8883, false, true),
+        "ws" => (80, true, false),
+        "wss" => (443, true, true),
+        _ => {
+            return Err(format!(
+                "`{scheme}://` isn't a broker's: give tcp://, ssl://, ws:// or wss://"
+            ));
+        }
+    };
+    let host = if host.contains(':') && !host.ends_with(']') {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    };
+    if !net::is_address(&host) || host.starts_with(':') {
+        return Err(format!("`{address}` names no broker"));
+    }
+    if !websocket && path != "/" {
+        return Err(format!(
+            "`{address}` has a path, which only a WebSocket's (ws:// or wss://) has"
+        ));
+    }
+    if !path.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(format!("`{path}` isn't a WebSocket's path"));
+    }
+    Ok((host, websocket.then(|| path.to_owned()), secure))
 }
 
 /// A client id every broker takes: up to 23 letters and digits.
@@ -358,6 +415,51 @@ mod tests {
         assert_eq!(
             Mqtt::new("h:1883", "s3/events", 2).unwrap().shown(),
             "mqtt://h:1883 topic s3/events (QoS 2)"
+        );
+    }
+
+    #[test]
+    fn brokers_are_taken_as_minio_takes_them() {
+        let of = broker;
+        for (address, host, websocket, secure) in [
+            ("h:1883", "h:1883", None, false),
+            ("tcp://h:1884", "h:1884", None, false),
+            ("mqtt://h", "h:1883", None, false),
+            ("TLS://h", "h:8883", None, true),
+            ("ssl://h:1", "h:1", None, true),
+            ("mqtts://[::1]", "[::1]:8883", None, true),
+            ("ws://h", "h:80", Some("/"), false),
+            ("ws://h:9001/mqtt", "h:9001", Some("/mqtt"), false),
+            (
+                "wss://broker.example/mqtt?x=1",
+                "broker.example:443",
+                Some("/mqtt?x=1"),
+                true,
+            ),
+        ] {
+            assert_eq!(
+                of(address),
+                Ok((host.to_owned(), websocket.map(str::to_owned), secure)),
+                "{address}"
+            );
+        }
+        for bad in [
+            "h",
+            "http://h",
+            "tcp://",
+            "tcp://:1883",
+            "tcp://h/path",
+            "ws://h/a b",
+            "ws://h:99999",
+        ] {
+            assert!(of(bad).is_err(), "{bad}");
+        }
+        let wss = Mqtt::new("wss://h/mqtt", "t", 1).unwrap();
+        assert!(wss.tls.is_some(), "verified with the system's certificates");
+        assert_eq!(wss.shown(), "wss://h:443/mqtt topic t (QoS 1)");
+        assert_eq!(
+            Mqtt::new("ws://h:9001", "t", 0).unwrap().shown(),
+            "ws://h:9001/ topic t (QoS 0)"
         );
     }
 

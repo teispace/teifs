@@ -270,7 +270,7 @@ Lambda or EventBridge target's secret key (`TEIFS_NOTIFY_KIND_SECRET_KEY_ID`, el
 `AWS_SECRET_ACCESS_KEY`) is kept in
 memory that's wiped and only signs requests (Signature Version 4); it is never sent, and
 only the access key is shown.
-A Redis, NSQ, NATS, MQTT, Kafka, PostgreSQL, MySQL or AMQP (`amqps://`) target asked for TLS (`tls=true` or `ca=PATH`) verifies the server's
+A Redis, NSQ, NATS, MQTT, Kafka, PostgreSQL, MySQL or AMQP (`amqps://`) target asked for TLS (`tls=true`, `ca=PATH`, or an MQTT broker's `ssl://` or `wss://` URL) verifies the server's
 certificate and name with the system's certificates or only the given CA, never skipping
 the check, before its password is sent; a NATS server that requires TLS gets it, or no
 credentials. A NATS nkey or `.creds` file is read from its path when the server starts,

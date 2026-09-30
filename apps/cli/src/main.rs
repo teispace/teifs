@@ -309,7 +309,8 @@ pub(crate) struct ServeArgs {
     )]
     notify_nats: Vec<TargetConfig>,
     /// An MQTT topic buckets' notification rules can send events to, as
-    /// ID=HOST:PORT,topic=NAME, the broker's address, with qos=0, 1 (the default) or 2,
+    /// ID=HOST:PORT,topic=NAME, the broker's address (or its URL: tcp://, ssl:// for TLS,
+    /// ws:// or wss:// with the WebSocket's path), with qos=0, 1 (the default) or 2,
     /// user=NAME, keepalive=SECONDS, and tls=true or ca=PATH with `client_cert=PATH` and
     /// `client_key=PATH` (repeat for more; in the environment, separated by spaces).
     /// Rules name it `arn:teifs:sqs::ID:mqtt`. Its password,
@@ -1143,7 +1144,13 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
             .parse()
             .map_err(|_| format!("keepalive is seconds up to 65535, not `{seconds}`"))?;
     }
-    mqtt.tls = target_tls(&options)?;
+    match target_tls(&options)? {
+        Some(tls) => mqtt.tls = Some(tls),
+        None if mqtt.tls.is_some() && target_flag(&options, "tls")? == Some(false) => {
+            return Err(format!("`{address}` is TLS: leave out tls=false"));
+        }
+        None => {}
+    }
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
@@ -2232,6 +2239,25 @@ mod tests {
             "x=broker.local:1883,topic=t,qos=one",
             "x=broker.local:1883,topic=t,keepalive=70000",
             "x=broker.local:1883,topic=t,subject=s",
+        ] {
+            assert!(parse_notify_mqtt(bad).is_err(), "{bad}");
+        }
+        // A broker's URL, as MinIO takes it: over TLS by its scheme, with a CA if given.
+        let wss = mqtt_of(&parse_notify_mqtt("w=wss://broker.local/mqtt,topic=t").unwrap());
+        assert_eq!(
+            (
+                wss.address.as_str(),
+                wss.websocket.as_deref(),
+                wss.tls.is_some()
+            ),
+            ("broker.local:443", Some("/mqtt"), true)
+        );
+        let ws = mqtt_of(&parse_notify_mqtt("w=ws://broker.local:9001/mqtt,topic=t").unwrap());
+        assert!(ws.tls.is_none() && ws.websocket.is_some());
+        for bad in [
+            "w=wss://broker.local/mqtt,topic=t,tls=false",
+            "w=ssl://broker.local,topic=t,ca=/nonexistent/ca.pem",
+            "w=http://broker.local,topic=t",
         ] {
             assert!(parse_notify_mqtt(bad).is_err(), "{bad}");
         }

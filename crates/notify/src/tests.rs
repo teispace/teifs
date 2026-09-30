@@ -899,6 +899,75 @@ async fn mqtt_publishes_with_each_quality_of_service() {
     );
 }
 
+/// MQTT over a WebSocket: the upgrade asks for `mqtt` at the URL's path, every frame sent
+/// is masked, frames split in pieces are put back together and pings are answered; over
+/// TLS too.
+#[tokio::test]
+async fn mqtt_publishes_over_websockets() {
+    use crate::testing::MqttServer;
+    let server = MqttServer::over_websocket(Some(("teifs", "pw"))).await;
+    let signed_in = |address: &str, qos| {
+        let mut mqtt = Mqtt::new(address, "s3/events", qos).unwrap();
+        mqtt.user = Some("teifs".into());
+        mqtt.password = Some(Zeroizing::new("pw".into()));
+        mqtt
+    };
+    for qos in 0..=2 {
+        let mqtt = signed_in(&format!("ws://{}/mqtt", server.address()), qos);
+        mqtt.test().await.unwrap();
+        mqtt.send(b"{\"n\":1}").await.unwrap();
+        mqtt.send(&vec![b'x'; 70_000]).await.unwrap();
+    }
+    let published = server.published(6).await;
+    assert_eq!(
+        published.iter().map(|m| m.qos).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 2]
+    );
+    assert_eq!(published[0].body, "{\"n\":1}");
+    assert_eq!(published[1].body.len(), 70_000);
+    let upgrades = server.upgrades();
+    assert_eq!(upgrades.len(), 3, "one connection for each target, kept");
+    for upgrade in &upgrades {
+        assert_eq!(
+            (
+                upgrade.path.as_str(),
+                upgrade.host.as_str(),
+                upgrade.protocol.as_str()
+            ),
+            ("/mqtt", server.address(), "mqtt")
+        );
+        assert!(upgrade.masked);
+    }
+    assert!(upgrades.iter().all(|u| u.pongs > 0), "{upgrades:?}");
+
+    let mut wrong = signed_in(&format!("ws://{}", server.address()), 1);
+    wrong.password = Some(Zeroizing::new("nope".into()));
+    assert!(
+        wrong
+            .test()
+            .await
+            .unwrap_err()
+            .contains("refused the user or password")
+    );
+    assert_eq!(server.upgrades().last().unwrap().path, "/");
+
+    // A broker that isn't a WebSocket's.
+    let plain = MqttServer::start(None).await;
+    let err = signed_in(&format!("ws://{}/mqtt", plain.address()), 1)
+        .test()
+        .await
+        .unwrap_err();
+    assert!(err.contains("WebSocket upgrade"), "{err}");
+
+    let (address, ca_pem) = tls_in_front_of(server.address()).await;
+    let mut secure = signed_in(&format!("wss://{address}/mqtt"), 1);
+    assert!(secure.test().await.is_err(), "not the system's CA");
+    secure.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert!(secure.shown().starts_with("wss://"));
+    secure.send(b"{}").await.unwrap();
+    assert_eq!(server.published(7).await[6].body, "{}");
+}
+
 #[tokio::test]
 async fn sqs_is_sent_each_event_as_s3_sends_it() {
     use crate::testing::AwsServer;
