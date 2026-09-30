@@ -33,6 +33,11 @@ bytes = "1"
 hyper-util = { version = "0.1.20", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 md-5 = "0.11"
+# S3's additional checksums, the same crates s3s uses (so no new code is trusted).
+crc-fast = "1.10"
+sha1 = "0.11"
+sha2 = "0.11"
+xxhash-rust = { version = "0.8.17", features = ["std", "xxh64", "xxh3"] }
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -18,6 +18,7 @@ mod init;
 mod sts;
 mod ui;
 mod units;
+mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
@@ -78,6 +79,10 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Check that the drive's objects are still the bytes written: every version against
+    /// its checksums and ETag, encrypted ones as they decrypt (the drive, while
+    /// `teifs serve` isn't using it). Exit code 1 when something is damaged.
+    Verify(verify::VerifyArgs),
     #[command(flatten)]
     Client(client::Command),
     /// Manage a TeiFS server through its admin API: its info and configuration, its
@@ -200,6 +205,11 @@ pub(crate) struct ServeArgs {
     /// `never`.
     #[arg(long, default_value = "7d", value_parser = parse_expiry, env = "TEIFS_UPLOAD_EXPIRY")]
     upload_expiry: Expiry,
+    /// Read every stored version back this often (`7d`, `30d`), checking it against
+    /// its checksums and ETag so damage on the disk is found early, or `never`. Passes
+    /// go at the background jobs' pace and carry on after a restart.
+    #[arg(long, default_value = "30d", value_parser = parse_expiry, env = "TEIFS_SCRUB_EVERY")]
+    scrub_every: Expiry,
     /// How hard writes are made to survive a power cut: `strict` (nothing
     /// acknowledged is lost), `relaxed` (file data synced; the last moments' writes
     /// may be lost) or `none` (scratch data). None of them can corrupt the drive.
@@ -456,6 +466,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         }
         Command::Bucket { action } => Ok(bucket(action).await?),
         Command::Key { action } => Ok(key(action).await?),
+        Command::Verify(args) => verify::verify(args).await,
         Command::Client(command) => client::run(command).await,
         Command::Admin { action } => admin::run(action).await,
         Command::Sts { action } => sts::run(action).await,
@@ -557,6 +568,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
         jobs: JobOptions {
             upload_expiry: args.upload_expiry.0,
+            scrub_every: args.scrub_every.0,
             ..JobOptions::default()
         },
         durability: args.durability.into(),
@@ -691,39 +703,56 @@ pub(crate) fn shell_word(text: &str) -> String {
     }
 }
 
+/// A KMS and where it is, in words.
+type PlacedKms = (std::sync::Arc<dyn teifs_store::Kms>, String);
+
+/// The KMS `keyring` names and where it is. Without `create`, a local keyring that
+/// doesn't exist yet is `None` rather than made.
+fn open_kms(
+    keyring: &KeyringArgs,
+    drive: Option<&Store>,
+    create: bool,
+) -> Result<Option<PlacedKms>, error::Error> {
+    use teifs_store::{LocalKms, TransitKms};
+    if let Some(address) = &keyring.kms_transit {
+        let token = std::env::var("VAULT_TOKEN")
+            .or_else(|_| std::env::var("BAO_TOKEN"))
+            .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
+        let kms = TransitKms::new(
+            address,
+            &keyring.kms_transit_mount,
+            token,
+            keyring.kms_transit_namespace.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(Some((
+            std::sync::Arc::new(kms),
+            format!("the transit engine at {address}"),
+        )));
+    }
+    let path = if let Some(path) = &keyring.kms_keyring {
+        path.clone()
+    } else {
+        let format = match drive {
+            Some(store) => store.format().drive.clone(),
+            None => open(&keyring.dir)?.format().drive.clone(),
+        };
+        teifs_server::default_keyring(&format).map_err(|e| e.to_string())?
+    };
+    if !create && !path.exists() {
+        return Ok(None);
+    }
+    let kms = LocalKms::open(&path)
+        .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
+    Ok(Some((std::sync::Arc::new(kms), path.display().to_string())))
+}
+
 async fn key(action: KeyAction) -> Result<(), error::Error> {
-    use teifs_store::{Kms, LocalKms, TransitKms};
     let (KeyAction::List { keyring }
     | KeyAction::Create { keyring, .. }
     | KeyAction::Rotate { keyring, .. }
     | KeyAction::Rewrap { keyring, .. }) = &action;
-    let (kms, place): (std::sync::Arc<dyn Kms>, String) =
-        if let Some(address) = &keyring.kms_transit {
-            let token = std::env::var("VAULT_TOKEN")
-                .or_else(|_| std::env::var("BAO_TOKEN"))
-                .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
-            let kms = TransitKms::new(
-                address,
-                &keyring.kms_transit_mount,
-                token,
-                keyring.kms_transit_namespace.clone(),
-            )
-            .map_err(|e| e.to_string())?;
-            (
-                std::sync::Arc::new(kms),
-                format!("the transit engine at {address}"),
-            )
-        } else {
-            let path = if let Some(path) = &keyring.kms_keyring {
-                path.clone()
-            } else {
-                let store = open(&keyring.dir)?;
-                teifs_server::default_keyring(&store.format().drive).map_err(|e| e.to_string())?
-            };
-            let kms = LocalKms::open(&path)
-                .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
-            (std::sync::Arc::new(kms), path.display().to_string())
-        };
+    let (kms, place) = open_kms(keyring, None, true)?.expect("a keyring is made when missing");
     match action {
         KeyAction::List { .. } => {
             let mut table = ui::Table::new(&["NAME", ">VERSION", "CREATED"]);

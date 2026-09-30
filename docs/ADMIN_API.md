@@ -46,7 +46,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 
 | Method | Path | What it does | Who may |
 |---|---|---|---|
-| `GET` | `/.teifs/admin/v1/info` | Version, drive, account, uptime and background jobs: `ServerInfo` | `teifs:GetServerInfo` |
+| `GET` | `/.teifs/admin/v1/info` | Version, drive, account, uptime, background jobs and what scrubs found: `ServerInfo` | `teifs:GetServerInfo` |
 | `GET` | `/.teifs/admin/v1/config` | How the server was started, without secrets: `ServerConfig` | `teifs:GetServerConfig` |
 | `GET` | `/.teifs/admin/v1/iam` | The account's IAM, access keys without their secrets: `IamExport` | `teifs:ExportIAM` |
 | `GET` | `/.teifs/admin/v1/iam/secrets` | The account's IAM with access keys' secrets, to move it to another drive | root user |

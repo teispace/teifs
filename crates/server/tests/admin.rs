@@ -76,6 +76,7 @@ async fn config_reports_how_the_server_started_without_secrets() {
         config.default_layout = teifs_store::Layout::Object;
         config.legacy_bucket_defaults = true;
         config.jobs.upload_expiry = None;
+        config.jobs.scrub_every = Some(std::time::Duration::from_hours(24));
     })
     .await;
     let (status, answer) = get(&server, ROOT, ADMIN_CONFIG).await;
@@ -96,6 +97,7 @@ async fn config_reports_how_the_server_started_without_secrets() {
     // Plain HTTP on loopback counts as secure.
     assert!(config.plain_http_is_secure);
     assert_eq!(config.upload_expiry_seconds, None);
+    assert_eq!(config.scrub_every_seconds, Some(86_400));
     assert_eq!(config.listen, server.endpoint.trim_start_matches("http://"));
     assert!(
         matches!(config.kms, KmsConfig::Keyring { ref path } if path.ends_with("keyring.json"))

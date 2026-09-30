@@ -1,11 +1,12 @@
 //! Shared TeiFS types with no I/O: bucket names and object keys with their rules, what
-//! is known about an object, ETags, and the admin API's messages.
+//! is known about an object, ETags, integrity checks' verdicts, and the admin API's messages.
 
 mod acl;
 pub mod admin;
 pub mod caps;
 mod names;
 mod object;
+pub mod verify;
 
 pub use acl::{Acl, AclGrant, Grantee, OWNER_ID, Permission};
 pub use names::{

@@ -174,7 +174,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_INFO,
         needs: Needs::Action("teifs:GetServerInfo", ANY),
         handler: Handler::Info,
-        about: "Version, drive, account, uptime and background jobs: `ServerInfo`",
+        about: "Version, drive, account, uptime, background jobs and what scrubs found: `ServerInfo`",
     },
     Endpoint {
         api: Api::Admin,
@@ -406,7 +406,7 @@ impl Routes {
                 let (bucket, call) = on_bucket.expect("decided as a call on a bucket");
                 call.call(&self.store, &self.rules, &bucket).await
             }
-            Handler::Info => Ok(admin::info(&self.store, &self.iam, self.started)),
+            Handler::Info => admin::info(&self.store, &self.iam, self.started).await,
             Handler::Config => admin::config(self.config.as_deref()),
             Handler::ExportIam => Ok(admin::export(&self.iam, false)),
             Handler::ExportIamSecrets => Ok(admin::export(&self.iam, true)),

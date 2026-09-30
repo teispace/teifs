@@ -406,3 +406,55 @@ async fn a_user_is_added_whole_or_not_at_all() {
     )
     .await;
 }
+
+/// Flips one bit of the file at `path`, keeping its size and modification time, as rot
+/// on the disk would.
+fn rot(path: &std::path::Path) {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    let mut bytes = fs::read(path).unwrap();
+    bytes[0] ^= 1;
+    fs::write(path, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn info_tells_what_scrubs_found() {
+    let server = start_with(|config| {
+        config.jobs.scrub_every = Some(std::time::Duration::from_millis(50));
+    })
+    .await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/files"]).await;
+    fs::write(cli.path("a.txt"), "hello").unwrap();
+    cli.ok(&["cp", "a.txt", "t/files/a.txt"]).await;
+    rot(&server.dir.path().join("files").join("a.txt"));
+    // Passes come every 50 ms; one after the rot finds it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let scrub = loop {
+        let info = records(&cli.ok(&["--json", "admin", "info", "t"]).await);
+        let scrub = info[0]["scrub"].clone();
+        if scrub["last"]["damaged"] == 1 {
+            break scrub;
+        }
+        assert!(std::time::Instant::now() < deadline, "{scrub}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(scrub["last"]["findings"][0]["key"], "a.txt");
+    // Uploaded through S3, it has a checksum (the SDK's CRC32), which is compared first.
+    assert_eq!(scrub["last"]["findings"][0]["problem"], "checksum");
+    assert_eq!(scrub["last"]["findings"][0]["algorithm"], "CRC32");
+    let run = cli.run_with(&["admin", "info", "t"], "").await;
+    assert_eq!(run.code, 0);
+    assert!(run.stdout.contains("Last scrub"), "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("damaged: files/a.txt: its bytes don't match its CRC32 checksum"),
+        "{}",
+        run.stderr
+    );
+}

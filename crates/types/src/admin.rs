@@ -272,6 +272,9 @@ pub struct ServerInfo {
     pub uptime_seconds: u64,
     /// What each background job has done since it started, by name.
     pub jobs: BTreeMap<String, JobInfo>,
+    /// What the drive's scrubs (integrity passes) have found.
+    #[serde(default)]
+    pub scrub: crate::verify::ScrubReport,
 }
 
 /// What a background job has done.
@@ -321,6 +324,9 @@ pub struct ServerConfig {
     pub legacy_bucket_defaults: bool,
     /// How long an unfinished multipart upload is kept; none for ever.
     pub upload_expiry_seconds: Option<u64>,
+    /// How often every stored version is read back and checked; none if never.
+    #[serde(default)]
+    pub scrub_every_seconds: Option<u64>,
     /// The background jobs' pause after a busy step, as a multiple of its duration.
     pub job_pace: f64,
     /// How long a client has to send a request's headers.
@@ -428,9 +434,24 @@ mod tests {
             started_ms: 1,
             uptime_seconds: 2,
             jobs: BTreeMap::from([("housekeeping".into(), JobInfo::default())]),
+            scrub: crate::verify::ScrubReport {
+                current: Some(crate::verify::ScrubPass {
+                    started_ms: 3,
+                    ..Default::default()
+                }),
+                last: None,
+            },
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["startedMs"], 1);
+        assert_eq!(json["scrub"]["current"]["startedMs"], 3);
+        // A server from before scrubs is still understood.
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("scrub");
+        assert_eq!(
+            serde_json::from_value::<ServerInfo>(older).unwrap().scrub,
+            crate::verify::ScrubReport::default()
+        );
         assert_eq!(
             json["jobs"]["housekeeping"]["lastProgressMs"],
             serde_json::Value::Null

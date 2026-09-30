@@ -94,6 +94,16 @@ behaviour; the on-disk format is always upgraded automatically.
   object. Objects stored before keep reading as they did.
 - A listing of an object bucket stopped early when a stretch of keys held only delete
   markers; it now carries on past them.
+- Integrity scrubs: a running server reads every stored version back every 30 days
+  (`--scrub-every`, or `never`) and checks it against what was recorded when it was
+  written, its checksums (each part's too) and its ETag, with encrypted objects
+  authenticated as they decrypt; nothing new is stored per object. Passes go at the
+  background jobs' pace, stop at shutdown and carry on after a restart. Damage is
+  logged, and `GET info` (`teifs admin info`) shows the last pass, the one under way
+  and the damaged versions. `teifs verify` does the same on a drive no server is using,
+  naming each damaged version (missing, cut short, a checksum or ETag that doesn't
+  match, a part that doesn't) and exiting 1; SSE-C objects, and encrypted ones without
+  the keyring, are reported as not checked.
 
 - `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are checked,
   as on AWS: a request that expects another account to own the bucket (or a copy's

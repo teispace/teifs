@@ -5,7 +5,8 @@ use std::{fs, time::Duration};
 use tempfile::TempDir;
 
 use super::*;
-use crate::{Encryption, Layout, ObjectAttrs, StoreError};
+use crate::{Encryption, Layout, ObjectAttrs, Precondition, StoreError};
+use teifs_types::verify::ScrubReport;
 
 const HOUR: Duration = Duration::from_hours(1);
 const DAY: Duration = Duration::from_hours(24);
@@ -112,12 +113,14 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
     let jobs = store.start_jobs(&JobOptions {
         upload_expiry: Some(Duration::ZERO),
         pace: 0.0,
+        scrub_every: Some(Duration::from_millis(20)),
     });
     // The upload goes during the step; the step's result is recorded right after.
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         let status = jobs.status();
-        if status.get("expire-uploads").is_some_and(|s| s.items == 1) {
+        let scrubbed = store.scrub_report().await.unwrap().last.is_some();
+        if status.get("expire-uploads").is_some_and(|s| s.items == 1) && scrubbed {
             break status;
         }
         assert!(
@@ -141,8 +144,144 @@ async fn jobs_run_in_the_background_and_stop_when_told() {
 }
 
 #[test]
-fn defaults_expire_uploads_after_a_week_at_half_a_core() {
+fn defaults_expire_uploads_after_a_week_and_scrub_monthly_at_half_a_core() {
     let options = JobOptions::default();
     assert_eq!(options.upload_expiry, Some(7 * DAY));
+    assert_eq!(options.scrub_every, Some(30 * DAY));
     assert!((options.pace - 1.0).abs() < f64::EPSILON);
+}
+
+/// Flips one bit of the file at `path`, keeping its size and modification time, as rot
+/// on the disk would.
+fn rot(path: &std::path::Path) {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    let mut bytes = fs::read(path).unwrap();
+    bytes[0] ^= 1;
+    fs::write(path, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
+async fn put(store: &Store, key: &str, bytes: &[u8]) {
+    let mut staged = store.stage_for("bkt", &Encryption::None).await.unwrap();
+    staged.write(bytes).await.unwrap();
+    store
+        .commit(
+            "bkt",
+            key,
+            staged,
+            ObjectAttrs::default(),
+            Precondition::default(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn scrubs_come_round_on_time_and_report_damage() {
+    let (dir, store) = store().await;
+    for key in ["a", "b", "c"] {
+        put(&store, key, key.repeat(1000).as_bytes()).await;
+    }
+    rot(&dir.path().join("bkt").join("b"));
+    let mut job = scrub::Scrub::new(store.clone(), 30 * DAY);
+    let now = SystemTime::now();
+    // The first pass is due an interval after the drive is first seen.
+    assert_eq!(job.run(&at(now)).await.unwrap(), 0);
+    assert_eq!(job.run(&at(now + 29 * DAY)).await.unwrap(), 0);
+    assert_eq!(store.scrub_report().await.unwrap(), ScrubReport::default());
+    // A small drive fits in one step, pass and all.
+    assert_eq!(job.run(&at(now + 30 * DAY)).await.unwrap(), 3);
+    let report = store.scrub_report().await.unwrap();
+    assert!(report.current.is_none());
+    let last = report.last.unwrap();
+    assert_eq!(
+        (last.versions, last.bytes, last.damaged, last.unverifiable),
+        (3, 3000, 1, 0)
+    );
+    assert_eq!(last.started_ms, millis(now + 30 * DAY));
+    assert!(last.finished_ms.unwrap() >= last.started_ms);
+    assert_eq!(last.findings[0].key, "b");
+    assert_eq!(
+        last.findings[0].verdict,
+        teifs_types::verify::Damage::Etag.into()
+    );
+    // The next one starts an interval after the last one started.
+    assert_eq!(job.run(&at(now + 59 * DAY)).await.unwrap(), 0);
+    assert_eq!(job.run(&at(now + 60 * DAY)).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn a_scrub_stopped_midway_carries_on_after_a_restart() {
+    let (dir, store) = store().await;
+    put(&store, "a", &[1; 5000]).await;
+    put(&store, "b", &[2; 5000]).await;
+    let now = SystemTime::now() + 31 * DAY;
+    let stopping = at(now);
+    stopping.cancel.cancel();
+    // Due (the drive was first seen a month before), but stopped before the first
+    // object was read through: nothing counted, and the pass is kept to carry on.
+    let mut job = scrub::Scrub::new(store.clone(), 30 * DAY);
+    store
+        .set_scrub_state(&scrub::State::since(millis(now - 31 * DAY)))
+        .await
+        .unwrap();
+    assert_eq!(job.run(&stopping).await.unwrap(), 0);
+    let current = store.scrub_report().await.unwrap().current.unwrap();
+    assert_eq!(current.versions, 0);
+    drop(job);
+    drop(store);
+
+    let store = Store::open(dir.path()).unwrap();
+    let mut job = scrub::Scrub::new(store.clone(), 30 * DAY);
+    let later = at(now + HOUR);
+    assert_eq!(job.run(&later).await.unwrap(), 2);
+    assert_eq!(job.run(&later).await.unwrap(), 0);
+    let last = store.scrub_report().await.unwrap().last.unwrap();
+    // The same pass, from when it started.
+    assert_eq!((last.versions, last.damaged), (2, 0));
+    assert_eq!(last.started_ms, millis(now));
+}
+
+#[tokio::test]
+async fn a_scrub_step_is_bounded() {
+    let (_dir, store) = store().await;
+    for n in 0..=BATCH {
+        put(&store, &format!("k{n:04}"), b"x").await;
+    }
+    let now = SystemTime::now() + 31 * DAY;
+    let mut job = scrub::Scrub::new(store.clone(), 30 * DAY);
+    store
+        .set_scrub_state(&scrub::State::since(millis(now - 31 * DAY)))
+        .await
+        .unwrap();
+    assert_eq!(job.run(&at(now)).await.unwrap(), BATCH);
+    // A pass that takes days ends when its last step runs…
+    assert_eq!(job.run(&at(now + 10 * DAY)).await.unwrap(), 1);
+    let last = store.scrub_report().await.unwrap().last.unwrap();
+    assert_eq!(last.versions, BATCH as u64 + 1);
+    assert_eq!(last.finished_ms, Some(millis(now + 10 * DAY)));
+
+    // …and the next is due an interval after it started. A step is bounded by the
+    // bytes it reads too: here, one listing's worth.
+    job.step_bytes = 1;
+    assert_eq!(job.run(&at(now + 30 * DAY)).await.unwrap(), 16);
+}
+
+#[tokio::test]
+async fn an_empty_drives_scrub_counts_as_progress() {
+    let (_dir, store) = store().await;
+    let now = SystemTime::now();
+    let mut job = scrub::Scrub::new(store.clone(), Duration::from_millis(50));
+    // Idle no longer than the interval, nor than an hour.
+    assert_eq!(job.idle(), Duration::from_millis(50));
+    assert_eq!(scrub::Scrub::new(store.clone(), 30 * DAY).idle(), HOUR);
+    assert_eq!(job.run(&at(now)).await.unwrap(), 0);
+    assert_eq!(job.run(&at(now + HOUR)).await.unwrap(), 1);
+    let last = store.scrub_report().await.unwrap().last.unwrap();
+    assert_eq!((last.versions, last.bytes), (0, 0));
 }

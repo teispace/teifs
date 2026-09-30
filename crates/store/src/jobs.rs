@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{Inner, Store, error::Result};
 
 mod lifecycle;
+pub(crate) mod scrub;
 #[cfg(test)]
 pub(crate) use lifecycle::ApplyLifecycle;
 
@@ -41,6 +42,9 @@ pub struct JobOptions {
     /// Pause after a busy step, as a multiple of the step's duration: 1 lets a job use
     /// at most half a core, 0 runs it flat out.
     pub pace: f64,
+    /// How often every stored version is read back and checked (a pass starts this
+    /// long after the last one started); `None` never scrubs.
+    pub scrub_every: Option<Duration>,
 }
 
 impl Default for JobOptions {
@@ -48,6 +52,7 @@ impl Default for JobOptions {
         Self {
             upload_expiry: Some(Duration::from_hours(7 * 24)),
             pace: 1.0,
+            scrub_every: Some(Duration::from_hours(30 * 24)),
         }
     }
 }
@@ -196,7 +201,7 @@ pub(crate) fn millis(time: SystemTime) -> i64 {
         .map_or(0, millis_of)
 }
 
-fn millis_of(duration: Duration) -> i64 {
+pub(crate) fn millis_of(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -253,6 +258,9 @@ impl Store {
         ];
         if let Some(after) = options.upload_expiry {
             jobs.push(Box::new(ExpireUploads { after }));
+        }
+        if let Some(every) = options.scrub_every {
+            jobs.push(Box::new(scrub::Scrub::new(self.clone(), every)));
         }
         let cancel = CancellationToken::new();
         let status = Arc::clone(&self.inner.jobs);

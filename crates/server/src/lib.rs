@@ -269,6 +269,7 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         allow_sig_v2: config.allow_sig_v2,
         legacy_bucket_defaults: config.legacy_bucket_defaults,
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
+        scrub_every_seconds: config.jobs.scrub_every.map(|d| d.as_secs()),
         job_pace: config.jobs.pace,
         header_timeout_seconds: config.limits.header_timeout.as_secs(),
         body_timeout_seconds: config.limits.body_timeout.as_secs(),

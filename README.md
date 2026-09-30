@@ -192,7 +192,7 @@ location / {
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -211,7 +211,8 @@ location / {
 | `teifs encrypt update --kms-key KEY ALIAS/BUCKET/KEY [-r] [--version-id ID]` | Move objects to a KMS key in place, without rewriting them (`--bucket-key`) |
 | `teifs presign ALIAS/BUCKET/KEY [--expires 1h] [--put [--max-size 10MiB]]` | A link that works without keys; an upload link can limit its size |
 | `teifs key list\|create NAME\|rotate NAME\|rewrap NAME` | Manage the KMS keys that encrypt objects; `rewrap` seals objects' keys again under a key's newest version (`--dry-run` counts) |
-| `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime and jobs; how it was started |
+| `teifs verify [--bucket B] [--dir DRIVE] [--kms-keyring PATH]` | Read every stored version back and check it against its checksums and ETag (encrypted ones as they decrypt); exit code 1 when something is damaged |
+| `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, jobs and what its scrubs found; how it was started |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |
@@ -237,7 +238,7 @@ location / {
 | Lifecycle | rules by prefix, tags and size (alone or combined), expiring current versions by days or date, removing noncurrent versions by age and count and delete markers left alone, aborting old uploads; `x-amz-expiration` on writes and reads, abort dates on uploads; Object Lock always wins |
 | Listing | ListObjectsV2 and V1, prefixes, delimiters, pagination, `encoding-type=url`; bucket lists page and filter too |
 | Multipart | create, upload part, upload part copy, list parts, list uploads, complete, abort |
-| Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode |
+| Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode; stored bytes read back and checked against them every 30 days (`--scrub-every`), or on demand with `teifs verify` |
 | Auth | Signature V4 (headers, presigned URLs and POST forms); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, roles, OpenID Connect providers, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS on the S3 endpoint (`aws iam --endpoint-url …`) |
 | Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `AssumeRoleWithWebIdentity` for OpenID Connect ID tokens (GitHub Actions, GitLab, Kubernetes, Keycloak…); `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRole` for a user's own permissions and `AssumeRoleWithWebIdentity` with the policies a token's claim names; signed S3 requests, presigned links and browser uploads with the session token |

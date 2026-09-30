@@ -293,7 +293,7 @@ impl Drive {
         &self,
         mut staged: Staged,
         body: StreamingBlob,
-        sums: &mut s3s::checksum::ChecksumHasher,
+        sums: &mut teifs_store::checksum::Checksums,
         limit: Option<u64>,
     ) -> S3Result<Staged> {
         let mut body = body;
@@ -1349,7 +1349,7 @@ impl S3 for Drive {
             .s3()?;
         let staged = self.stage(staged, body, &mut hasher, limit).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
-        let computed = checksums::from_dto(&hasher.finalize());
+        let computed = hasher.finish();
         checksums::verify(&sent, &computed)?;
         if let Some(content_md5) = &input.content_md5 {
             use base64::Engine;
@@ -2783,7 +2783,7 @@ impl S3 for Drive {
         if let Some(checksum) = &upload_checksum {
             checksums::check_part(checksum, &sent)?;
         }
-        let computed = checksums::from_dto(&hasher.finalize());
+        let computed = hasher.finish();
         checksums::verify(&sent, &computed)?;
         let part = self
             .store
@@ -2877,7 +2877,7 @@ impl S3 for Drive {
                 staged.write(&chunk).await.s3()?;
             }
         }
-        let computed = checksums::from_dto(&hasher.finalize());
+        let computed = hasher.finish();
         let part = self
             .store
             .put_part(&upload.id, number, staged, computed.clone())

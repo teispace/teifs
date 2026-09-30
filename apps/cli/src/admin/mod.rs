@@ -29,7 +29,7 @@ use crate::{
 #[derive(Subcommand)]
 pub enum AdminAction {
     /// Show what a TeiFS server is and how it's doing: its version, drive, account,
-    /// uptime and background jobs.
+    /// uptime, background jobs and what its scrubs found.
     Info {
         /// The server's alias.
         alias: String,
@@ -230,16 +230,15 @@ async fn info(client: &Client) -> Result<(), Error> {
         ui::emit(&record("server", &info));
         return Ok(());
     }
-    ui::details(
-        &[
-            ("Version", info.version.clone()),
-            ("Drive", info.drive.clone()),
-            ("Account", info.account.clone()),
-            ("Started", rfc3339(from_ms(info.started_ms))),
-            ("Uptime", uptime(Duration::from_secs(info.uptime_seconds))),
-        ],
-        || Value::Null,
-    );
+    let mut fields = vec![
+        ("Version", info.version.clone()),
+        ("Drive", info.drive.clone()),
+        ("Account", info.account.clone()),
+        ("Started", rfc3339(from_ms(info.started_ms))),
+        ("Uptime", uptime(Duration::from_secs(info.uptime_seconds))),
+    ];
+    fields.extend(scrub_details(&info.scrub));
+    ui::details(&fields, || Value::Null);
     let mut table = ui::Table::new(&["JOB", "STEPS", "ITEMS", "LAST PROGRESS", "LAST ERROR"]);
     for (name, job) in &info.jobs {
         table.row(vec![
@@ -253,7 +252,39 @@ async fn info(client: &Client) -> Result<(), Error> {
         ]);
     }
     table.print("No background jobs are running.");
+    for pass in [&info.scrub.last, &info.scrub.current]
+        .into_iter()
+        .flatten()
+    {
+        for item in &pass.findings {
+            ui::warn(format!("damaged: {}", crate::verify::line(item)));
+        }
+    }
     Ok(())
+}
+
+/// What a server's scrubs found, as details: the last pass and the one under way.
+fn scrub_details(report: &teifs_types::verify::ScrubReport) -> Vec<(&'static str, String)> {
+    let at = |ms: i64| rfc3339(from_ms(ms));
+    let mut fields = Vec::new();
+    if let Some(last) = &report.last {
+        let finished = last.finished_ms.map(at).unwrap_or_default();
+        fields.push((
+            "Last scrub",
+            format!("{finished}: {}", crate::verify::summary(last)),
+        ));
+    }
+    if let Some(current) = &report.current {
+        fields.push((
+            "Scrubbing",
+            format!(
+                "since {}: {}",
+                at(current.started_ms),
+                crate::verify::summary(current)
+            ),
+        ));
+    }
+    fields
 }
 
 async fn config(client: &Client) -> Result<(), Error> {
@@ -304,6 +335,12 @@ async fn config(client: &Client) -> Result<(), Error> {
                 "Upload expiry",
                 config
                     .upload_expiry_seconds
+                    .map_or_else(|| "never".to_owned(), |s| uptime(Duration::from_secs(s))),
+            ),
+            (
+                "Scrub every",
+                config
+                    .scrub_every_seconds
                     .map_or_else(|| "never".to_owned(), |s| uptime(Duration::from_secs(s))),
             ),
             ("Max connections", config.max_connections.to_string()),

@@ -125,8 +125,16 @@ fn job_info(status: &JobStatus) -> JobInfo {
 }
 
 /// `GET info`.
-pub(crate) fn info(store: &Store, iam: &Iam, started: SystemTime) -> S3Response<Body> {
-    json(&ServerInfo {
+pub(crate) async fn info(
+    store: &Store,
+    iam: &Iam,
+    started: SystemTime,
+) -> S3Result<S3Response<Body>> {
+    let scrub = store.scrub_report().await.map_err(|err| {
+        tracing::error!(error = %err, "can't read what the scrubs found");
+        S3Error::internal_error(err)
+    })?;
+    Ok(json(&ServerInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         drive: store.format().drive.clone(),
         account: iam.account(),
@@ -137,7 +145,8 @@ pub(crate) fn info(store: &Store, iam: &Iam, started: SystemTime) -> S3Response<
             .iter()
             .map(|(name, status)| ((*name).to_owned(), job_info(status)))
             .collect(),
-    })
+        scrub,
+    }))
 }
 
 /// `GET config`.

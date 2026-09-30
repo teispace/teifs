@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use s3s::{S3Result, TrailingHeaders, checksum::ChecksumHasher, dto::Checksum, s3_error};
-use teifs_store::{ChecksumType, UploadChecksum};
+use s3s::{S3Result, TrailingHeaders, dto::Checksum, s3_error};
+use teifs_store::{ChecksumType, UploadChecksum, checksum::Checksums};
 
 use crate::crc_combine::Crc;
 
@@ -14,7 +14,7 @@ use crate::crc_combine::Crc;
 pub(crate) type Sums = BTreeMap<String, String>;
 
 macro_rules! algorithms {
-    ($(($field:ident, $hasher:ident, $name:literal, $header:literal)),* $(,)?) => {
+    ($(($field:ident, $name:literal, $header:literal)),* $(,)?) => {
         /// The checksums in a DTO, by algorithm.
         pub(crate) fn from_dto(dto: &Checksum) -> Sums {
             let mut sums = Sums::new();
@@ -25,13 +25,6 @@ macro_rules! algorithms {
         /// A DTO holding these checksums.
         pub(crate) fn to_dto(sums: &Sums) -> Checksum {
             Checksum { $($field: sums.get($name).cloned(),)* ..Checksum::default() }
-        }
-
-        fn enable(hasher: &mut ChecksumHasher, name: &str) -> bool {
-            match name {
-                $($name => { hasher.$hasher = Some(Default::default()); true })*
-                _ => false,
-            }
         }
 
         /// Adds checksums sent as trailers after an `aws-chunked` body.
@@ -47,26 +40,26 @@ macro_rules! algorithms {
 }
 
 algorithms! {
-    (checksum_crc32, crc32, "CRC32", "x-amz-checksum-crc32"),
-    (checksum_crc32c, crc32c, "CRC32C", "x-amz-checksum-crc32c"),
-    (checksum_crc64nvme, crc64nvme, "CRC64NVME", "x-amz-checksum-crc64nvme"),
-    (checksum_sha1, sha1, "SHA1", "x-amz-checksum-sha1"),
-    (checksum_sha256, sha256, "SHA256", "x-amz-checksum-sha256"),
-    (checksum_sha512, sha512, "SHA512", "x-amz-checksum-sha512"),
-    (checksum_md5, md5, "MD5", "x-amz-checksum-md5"),
-    (checksum_xxhash64, xxhash64, "XXHASH64", "x-amz-checksum-xxhash64"),
-    (checksum_xxhash3, xxhash3, "XXHASH3", "x-amz-checksum-xxhash3"),
-    (checksum_xxhash128, xxhash128, "XXHASH128", "x-amz-checksum-xxhash128"),
+    (checksum_crc32, "CRC32", "x-amz-checksum-crc32"),
+    (checksum_crc32c, "CRC32C", "x-amz-checksum-crc32c"),
+    (checksum_crc64nvme, "CRC64NVME", "x-amz-checksum-crc64nvme"),
+    (checksum_sha1, "SHA1", "x-amz-checksum-sha1"),
+    (checksum_sha256, "SHA256", "x-amz-checksum-sha256"),
+    (checksum_sha512, "SHA512", "x-amz-checksum-sha512"),
+    (checksum_md5, "MD5", "x-amz-checksum-md5"),
+    (checksum_xxhash64, "XXHASH64", "x-amz-checksum-xxhash64"),
+    (checksum_xxhash3, "XXHASH3", "x-amz-checksum-xxhash3"),
+    (checksum_xxhash128, "XXHASH128", "x-amz-checksum-xxhash128"),
 }
 
 /// A hasher for the checksums sent and the algorithms asked for.
 pub(crate) fn hasher<'a>(
     sent: &'a Sums,
     algorithms: impl IntoIterator<Item = &'a str>,
-) -> S3Result<ChecksumHasher> {
-    let mut hasher = ChecksumHasher::default();
+) -> S3Result<Checksums> {
+    let mut hasher = Checksums::default();
     for name in sent.keys().map(String::as_str).chain(algorithms) {
-        if !enable(&mut hasher, name) {
+        if !hasher.add(name) {
             return Err(s3_error!(
                 InvalidRequest,
                 "unsupported checksum algorithm {name}"
@@ -109,7 +102,7 @@ pub(crate) fn for_upload(algorithm: Option<&str>, kind: Option<&str>) -> S3Resul
         });
     };
     let algorithm = algorithm.to_ascii_uppercase();
-    if !enable(&mut ChecksumHasher::default(), &algorithm) {
+    if !Checksums::supports(&algorithm) {
         return Err(s3_error!(
             InvalidRequest,
             "unsupported checksum algorithm {algorithm}"
@@ -176,12 +169,12 @@ pub(crate) fn of_parts(upload: &UploadChecksum, parts: &[(u64, Option<&str>)]) -
         .collect::<Option<Vec<_>>>()?;
     match upload.kind {
         ChecksumType::Composite => {
-            let mut hasher = ChecksumHasher::default();
-            enable(&mut hasher, &upload.algorithm);
+            let mut hasher = Checksums::default();
+            hasher.add(&upload.algorithm);
             for (_, digest) in &digests {
                 hasher.update(digest);
             }
-            let value = from_dto(&hasher.finalize()).remove(&upload.algorithm)?;
+            let value = hasher.finish().remove(&upload.algorithm)?;
             Some(format!("{value}-{}", digests.len()))
         }
         ChecksumType::FullObject => {
@@ -259,11 +252,46 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::default_trait_access,
+        reason = "each field is its own s3s hasher type"
+    )]
+    fn every_algorithm_matches_s3s() {
+        use s3s::checksum::ChecksumHasher;
+        let data: Vec<u8> = (0..100_000u32)
+            .map(|i| u8::try_from(i * 31 % 251).unwrap())
+            .collect();
+        let mut theirs = ChecksumHasher {
+            crc32: Some(Default::default()),
+            crc32c: Some(Default::default()),
+            crc64nvme: Some(Default::default()),
+            sha1: Some(Default::default()),
+            sha256: Some(Default::default()),
+            sha512: Some(Default::default()),
+            md5: Some(Default::default()),
+            xxhash64: Some(Default::default()),
+            xxhash3: Some(Default::default()),
+            xxhash128: Some(Default::default()),
+        };
+        let mut ours = Checksums::default();
+        for name in teifs_store::checksum::ALGORITHMS {
+            assert!(ours.add(name));
+        }
+        for piece in data.chunks(4099) {
+            theirs.update(piece);
+            ours.update(piece);
+        }
+        let ours = ours.finish();
+        assert_eq!(ours.len(), 10);
+        assert_eq!(ours, from_dto(&theirs.finalize()));
+    }
+
+    #[test]
     fn sent_checksums_are_verified() {
         let sent: Sums = [("CRC32".to_owned(), "NSRBwg==".to_owned())].into();
         let mut hasher = hasher(&sent, None).unwrap();
         hasher.update(b"hello world");
-        let computed = from_dto(&hasher.finalize());
+        let computed = hasher.finish();
         assert_eq!(computed.get("CRC32").map(String::as_str), Some("DUoRhQ=="));
         assert!(verify(&sent, &computed).is_err());
         let right: Sums = [("CRC32".to_owned(), "DUoRhQ==".to_owned())].into();
@@ -279,7 +307,7 @@ mod tests {
     fn sum_of(algorithm: &str, bytes: &[u8]) -> String {
         let mut h = hasher(&Sums::new(), Some(algorithm)).unwrap();
         h.update(bytes);
-        from_dto(&h.finalize()).remove(algorithm).unwrap()
+        h.finish().remove(algorithm).unwrap()
     }
 
     #[test]

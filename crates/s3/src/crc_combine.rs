@@ -110,9 +110,7 @@ mod tests {
     fn crc_of(algorithm: &str, bytes: &[u8]) -> u64 {
         let mut hasher = checksums::hasher(&checksums::Sums::new(), Some(algorithm)).unwrap();
         hasher.update(bytes);
-        let b64 = checksums::from_dto(&hasher.finalize())
-            .remove(algorithm)
-            .unwrap();
+        let b64 = hasher.finish().remove(algorithm).unwrap();
         STANDARD
             .decode(b64)
             .unwrap()

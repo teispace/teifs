@@ -10,6 +10,7 @@
 //! recorded ETag always belongs to its bytes.
 
 mod body;
+pub mod checksum;
 mod error;
 mod folder;
 mod folder_versions;
@@ -29,6 +30,7 @@ mod sse;
 mod staged;
 #[cfg(test)]
 mod test_util;
+mod verify;
 
 use std::{
     fs, io,
@@ -69,6 +71,7 @@ pub use teifs_types::{
     SseInfo, SseMode, UploadChecksum,
 };
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
+pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 
 use error::not_found_as;
 use folder::{FolderBucket, Found};
@@ -1430,5 +1433,7 @@ mod lock_tests;
 mod sse_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod verify_tests;
 #[cfg(test)]
 mod versioning_tests;
