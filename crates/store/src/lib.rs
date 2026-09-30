@@ -1156,8 +1156,7 @@ impl Inner {
         if self.durability == Durability::None {
             return Ok(());
         }
-        // Flushing needs write access on Windows.
-        fs::OpenOptions::new().write(true).open(path)?.sync_all()
+        staged::sync_file(path)
     }
 
     /// Syncs a folder so a new entry in it survives a power cut, in strict mode.

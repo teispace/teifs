@@ -217,6 +217,14 @@ fn put(from: &Path, to: &Path, how: Publish) -> io::Result<()> {
     }
 }
 
+/// Syncs a written file's data. Flushing needs write access on Windows.
+pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
 /// Syncs a folder so a rename into it survives a crash.
 #[cfg(unix)]
 pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {

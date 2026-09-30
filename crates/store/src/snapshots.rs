@@ -20,7 +20,7 @@ use crate::{
     error::Result,
     format::{BACKUPS, INDEX_DB, SYSTEM_DB},
     jobs::millis,
-    staged::sync_dir,
+    staged::{sync_dir, sync_file},
 };
 
 /// Where snapshots are kept, inside the backups folder.
@@ -76,7 +76,7 @@ impl Inner {
             if !teifs_meta::intact(&copy)? {
                 return Err(StoreError::CorruptMetadata);
             }
-            fs::File::open(&copy)?.sync_all()?;
+            sync_file(&copy)?;
         }
         let snapshot = Snapshot {
             name: name.to_owned(),
@@ -207,7 +207,7 @@ pub fn restore(root: &Path, from: &Path) -> Result<Restored> {
     for db in [INDEX_DB, SYSTEM_DB] {
         let staged = system.join(format!("{db}.restoring"));
         fs::copy(from.join(db), &staged)?;
-        fs::File::open(&staged)?.sync_all()?;
+        sync_file(&staged)?;
     }
     let now = millis(std::time::SystemTime::now());
     let previous = system
