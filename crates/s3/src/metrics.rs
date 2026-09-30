@@ -1,7 +1,8 @@
 //! Prometheus metrics at `GET /.teifs/metrics`, in the `OpenMetrics` text format: every
 //! request by operation and status, errors by S3 error code, latency, bytes moved, the
 //! drive's space and what it holds, the background jobs' progress and what the scrub
-//! found. `?buckets=1` adds what each bucket holds, labeled by bucket.
+//! found, and how each bucket notification target is doing. `?buckets=1` adds what
+//! each bucket holds, labeled by bucket.
 //!
 //! Metrics name buckets, users' operations and the drive's size, so a scrape needs a
 //! bearer token (`teifs admin prometheus generate`) whose key may `teifs:GetMetrics`,
@@ -30,6 +31,7 @@ use prometheus_client::{
 };
 use s3s::{HttpResponse, S3Error, S3ErrorCode};
 use teifs_iam::{AuthError, Iam};
+use teifs_notify::{Notifier, TargetStats};
 use teifs_store::{BucketUsage, Store, Usage};
 use teifs_types::{
     admin::METRICS_PATH,
@@ -82,7 +84,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(store: &Store) -> Self {
+    pub(crate) fn new(store: &Store, notifier: Arc<Notifier>) -> Self {
         let mut registry = Registry::with_prefix("teifs");
         let requests = Family::default();
         let errors = Family::default();
@@ -152,6 +154,7 @@ impl Metrics {
             store: store.clone(),
             started: SystemTime::now(),
         }));
+        registry.register_collector(Box::new(Notifications(notifier)));
         Self {
             registry,
             requests,
@@ -490,6 +493,70 @@ impl Collector for Server {
         for (job, status) in &jobs {
             ConstGauge::new(i64::from(status.last_error.is_some()))
                 .encode(failing.encode_family(&Job { job })?)?;
+        }
+        Ok(())
+    }
+}
+
+/// How each bucket notification target is doing.
+#[derive(Debug)]
+struct Notifications(Arc<Notifier>);
+
+/// Reads one figure of a target's.
+type Read<T> = fn(&TargetStats) -> T;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, EncodeLabelSet)]
+struct Target {
+    target: String,
+}
+
+impl Collector for Notifications {
+    fn encode(&self, mut encoder: DescriptorEncoder) -> std::fmt::Result {
+        let stats = self.0.stats();
+        if stats.is_empty() {
+            return Ok(());
+        }
+        let label = |arn: &teifs_types::notify::TargetArn| Target {
+            target: arn.to_string(),
+        };
+        let counters: [(&str, &str, Read<u64>); 3] = [
+            ("notify_sent", "Events each notification target took", |s| {
+                s.sent
+            }),
+            (
+                "notify_failed",
+                "Tries each notification target didn't take (each is tried again)",
+                |s| s.failed,
+            ),
+            (
+                "notify_dropped",
+                "Events dropped because too many waited for the target",
+                |s| s.dropped,
+            ),
+        ];
+        for (name, help, read) in counters {
+            let mut family = encoder.encode_descriptor(name, help, None, MetricType::Counter)?;
+            for stat in &stats {
+                ConstCounter::new(read(stat)).encode(family.encode_family(&label(&stat.arn))?)?;
+            }
+        }
+        let gauges: [(&str, &str, Read<i64>); 2] = [
+            (
+                "notify_queued",
+                "Events waiting on the drive for each notification target",
+                |s| i64::try_from(s.queued).unwrap_or(i64::MAX),
+            ),
+            (
+                "notify_online",
+                "Whether each notification target took its last try",
+                |s| i64::from(s.online),
+            ),
+        ];
+        for (name, help, read) in gauges {
+            let mut family = encoder.encode_descriptor(name, help, None, MetricType::Gauge)?;
+            for stat in &stats {
+                ConstGauge::new(read(stat)).encode(family.encode_family(&label(&stat.arn))?)?;
+            }
         }
         Ok(())
     }

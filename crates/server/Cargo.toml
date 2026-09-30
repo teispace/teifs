@@ -14,6 +14,7 @@ teifs-store.workspace = true
 teifs-s3.workspace = true
 teifs-types.workspace = true
 teifs-iam.workspace = true
+teifs-notify.workspace = true
 zeroize.workspace = true
 reqwest.workspace = true
 s3s.workspace = true
@@ -46,8 +47,7 @@ s3s.workspace = true
 tempfile.workspace = true
 rcgen.workspace = true
 aws-smithy-http-client.workspace = true
-hyper.workspace = true
-http-body-util.workspace = true
+teifs-notify = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

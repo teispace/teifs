@@ -11,10 +11,7 @@
 //! rounding is then to the next multiple of that day since the Unix epoch, which for a
 //! real day is midnight UTC.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use teifs_types::ObjectInfo;
@@ -337,52 +334,14 @@ impl Lifecycle {
     }
 }
 
-/// Buckets' lifecycle configurations, by bucket name, read from their records once and
-/// kept until any bucket's settings change.
-#[derive(Debug, Default)]
-pub(crate) struct LifecycleCache {
-    state: Mutex<CacheState>,
-}
-
-#[derive(Debug, Default)]
-struct CacheState {
-    /// Bumped by every change, so a read that raced one isn't kept.
-    generation: u64,
-    buckets: HashMap<String, Option<Arc<Lifecycle>>>,
-}
-
-impl LifecycleCache {
-    fn state(&self) -> std::sync::MutexGuard<'_, CacheState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Forgets everything; called after a bucket's settings change, or a bucket goes.
-    pub(crate) fn clear(&self) {
-        let mut state = self.state();
-        state.generation += 1;
-        state.buckets.clear();
-    }
-}
-
 impl Inner {
     /// A bucket's lifecycle configuration, if it has one.
     pub(crate) fn lifecycle(&self, bucket: &str) -> Result<Option<Arc<Lifecycle>>> {
-        let generation = {
-            let state = self.lifecycles.state();
-            if let Some(found) = state.buckets.get(bucket) {
-                return Ok(found.clone());
-            }
-            state.generation
-        };
-        let config = crate::settings::read_config(self.system().bucket_config(bucket)?.as_deref())?;
-        let found = config.lifecycle.map(Arc::new);
-        let mut state = self.lifecycles.state();
-        if state.generation == generation {
-            state.buckets.insert(bucket.to_owned(), found.clone());
-        }
-        Ok(found)
+        self.lifecycles.get(bucket, || {
+            let config =
+                crate::settings::read_config(self.system().bucket_config(bucket)?.as_deref())?;
+            Ok(config.lifecycle)
+        })
     }
 }
 
@@ -442,8 +401,8 @@ impl Store {
 
     /// A bucket's configuration from memory, reading it only when it isn't there.
     async fn cached_lifecycle(&self, bucket: &str) -> Result<Option<Arc<Lifecycle>>> {
-        if let Some(found) = self.inner.lifecycles.state().buckets.get(bucket) {
-            return Ok(found.clone());
+        if let Some(found) = self.inner.lifecycles.cached(bucket) {
+            return Ok(found);
         }
         let name = bucket.to_owned();
         self.blocking(move |inner| inner.lifecycle(&name)).await

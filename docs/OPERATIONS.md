@@ -101,6 +101,11 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_scrub_damaged_versions` | gauge | `pass` | Versions it found damaged |
 | `teifs_scrub_unverifiable_versions` | gauge | `pass` | Versions it couldn't check (SSE-C, whose keys it doesn't have) |
 | `teifs_scrub_last_finished_seconds` | gauge | | When the last pass finished (Unix time) |
+| `teifs_notify_sent_total` | counter | `target` | Events each notification target took |
+| `teifs_notify_failed_total` | counter | `target` | Tries it didn't take (each is tried again) |
+| `teifs_notify_dropped_total` | counter | `target` | Events dropped because too many waited for it |
+| `teifs_notify_queued` | gauge | `target` | Events waiting on the drive for it |
+| `teifs_notify_online` | gauge | `target` | 1 when it took its last try |
 | `teifs_start_time_seconds` | gauge | | When the server started (Unix time) |
 | `teifs_build_info` | info | `version` | The TeiFS version |
 
@@ -122,6 +127,7 @@ histogram_quantile(0.99, sum by (le, api) (rate(teifs_s3_ttfb_seconds_bucket[5m]
 teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearly full
 max(teifs_job_failing) > 0                                          # a job keeps failing
 max(teifs_scrub_damaged_versions) > 0                               # damage on the disk
+max(teifs_notify_queued) > 1000                                     # a target is falling behind
 histogram_quantile(0.99, sum by (le, stage) (rate(teifs_store_stage_seconds_bucket{op="write"}[5m])))
 topk(5, teifs_bucket_stored_bytes)                                  # the largest buckets
 ```
@@ -212,3 +218,104 @@ filters (`errors=true`, `api`, `bucket`, `prefix`, `status`, `slowerThanMs`). Th
 makes entries only while an audit log is kept or someone traces. A trace that reads too
 slowly skips entries rather than slow requests down, and every trace ends when the server
 stops.
+
+## Bucket notifications
+
+A bucket's rules send events (an object written, read, tagged, deleted, expired…) to
+targets the server has, as S3 sends them to queues and MinIO to its targets. The server
+names its targets; a bucket's rules pick among them, so whoever may configure a bucket
+can't make the server call anything else.
+
+### Targets
+
+```sh
+teifs serve --notify-webhook orders=https://hooks.example/s3 --notify-webhook audit=http://10.0.0.5/in
+export TEIFS_NOTIFY_WEBHOOK_TOKEN_ORDERS=…   # sent as Authorization: Bearer …
+```
+
+Each target is `ID=URL` (letters, digits, `-` and `_` in the ID); in the environment,
+`TEIFS_NOTIFY_WEBHOOK` holds them separated by spaces. A token is read only from the
+environment, `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID` (the ID in capitals, `-` as `_`), and one
+that names its scheme (`Basic …`) is sent as given. A target's ARN is
+`arn:teifs:sqs::ID:webhook`; MinIO's `arn:minio:sqs::ID:webhook` names it too, so `mc
+event add` works unchanged. `teifs admin config` lists the targets, without secrets.
+
+### Rules
+
+`PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
+
+```sh
+aws s3api put-bucket-notification-configuration --bucket photos --endpoint-url … \
+  --notification-configuration '{"QueueConfigurations": [{
+    "Id": "new-images", "QueueArn": "arn:teifs:sqs::orders:webhook",
+    "Events": ["s3:ObjectCreated:*"],
+    "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "images/"},
+                                       {"Name": "suffix", "Value": ".jpg"}]}}}]}'
+mc event add local/photos arn:minio:sqs::orders:webhook --event put --prefix images/
+```
+
+A rule is a `QueueConfiguration`, `TopicConfiguration` or `CloudFunctionConfiguration`
+(all the same here): the target's ARN, events, and a key prefix and suffix (URL-encoded,
+`+` for a space). S3's checks apply, each refused with `400 InvalidArgument`: events S3
+and MinIO name, a group's `*` (`s3:ObjectCreated:*`), at most one prefix and one suffix,
+at most 100 rules, a target the server has, and no two rules that could send the same
+event for the same key (they share an event and their prefixes and suffixes overlap). A
+rule without an id gets one. Each target a rule starts naming is sent S3's test event
+first (`{"Service":"TeiFS","Event":"s3:TestEvent",…}`), and one that doesn't take it
+fails the request and nothing changes, unless the request sends
+`x-amz-skip-destination-validation: true`. An empty configuration removes the rules;
+EventBridge is `501 NotImplemented`. Bucket exports carry the rules, and an import checks
+them against the new server's targets.
+
+| Event | When |
+|---|---|
+| `s3:ObjectCreated:Put`, `:Post`, `:Copy`, `:CompleteMultipartUpload` | An object was written, by PutObject, a browser form, CopyObject or a multipart upload |
+| `s3:ObjectRemoved:Delete` | A version was removed (or an object, without versioning), by DeleteObject or DeleteObjects |
+| `s3:ObjectRemoved:DeleteMarkerCreated` | A delete made a delete marker |
+| `s3:LifecycleExpiration:Delete`, `:DeleteMarkerCreated` | A lifecycle rule removed a version or a delete marker, or hid an object behind a marker |
+| `s3:ObjectTagging:Put`, `:Delete` | An object's tags were set or removed |
+| `s3:ObjectAcl:Put` | An object's ACL changed |
+| `s3:ObjectRetention:Put` | An object's retention was set |
+| `s3:ObjectCreated:PutLegalHold` | Its legal hold was set (MinIO's name) |
+| `s3:ObjectAccessed:Get`, `:Head`, `:Attributes`, `:GetRetention`, `:GetLegalHold` | An object was read (MinIO's) |
+
+MinIO's `s3:ObjectCreated:PutTagging`, `:DeleteTagging` and `:PutRetention` name the
+tagging and retention events too.
+
+### What's sent
+
+Each event is `POST`ed on its own as JSON: MinIO's envelope around the record S3 sends
+(`eventVersion` 2.6), so consumers of either read it.
+
+```json
+{"EventName":"s3:ObjectCreated:Put","Key":"photos/images/my cat.jpg","Records":[{
+  "eventVersion":"2.6","eventSource":"aws:s3","awsRegion":"us-east-1",
+  "eventTime":"2026-09-30T12:00:00.123Z","eventName":"ObjectCreated:Put",
+  "userIdentity":{"principalId":"TFABCDEF…"},
+  "requestParameters":{"sourceIPAddress":"10.0.0.7"},
+  "responseElements":{"x-amz-request-id":"18DA16C11FC2F0D0","x-amz-id-2":"…"},
+  "s3":{"s3SchemaVersion":"1.0","configurationId":"new-images",
+    "bucket":{"name":"photos","ownerIdentity":{"principalId":"teifs"},"arn":"arn:aws:s3:::photos"},
+    "object":{"key":"images/my+cat.jpg","size":52431,"eTag":"…","versionId":"…",
+      "sequencer":"18DA16C11FC2F0D0"}}}]}
+```
+
+The key is URL-encoded as S3 sends it (`unquote_plus` reads it). `principalId` is the
+access key that signed the request (empty for anonymous requests and lifecycle rules),
+and `x-amz-request-id` the request's id, also in the audit log. A key's events have
+growing `sequencer`s.
+
+### Delivery
+
+An event is written to the drive (`.teifs/events.db`) before the request that made it is
+answered. Each target is sent its events one at a time, in order; any `2xx` takes one.
+One that isn't taken (an error, another status, no answer in 10 seconds) is tried again
+after half a second, then twice as long each time up to 30 seconds, until it is, so a
+target that's down gets everything once it's back, and a restart loses nothing. Delivery
+is at least once: an event whose answer was lost is sent again. A target with 100 000
+events waiting drops new ones (`teifs_notify_dropped_total`). Redirects aren't followed.
+Events waiting for a target the server no longer has stay on the drive until it's
+configured again.
+
+Not yet: other kinds of targets (NATS, Kafka, AMQP, Redis, MQTT, databases, Elasticsearch),
+MinIO's listen API (`mc watch`), and `teifs event` commands.

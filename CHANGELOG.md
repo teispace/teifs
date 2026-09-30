@@ -131,6 +131,17 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs_store_stage_seconds{op,stage}`: how long the store's writes spend getting a
   data key, waiting for the commit lock, syncing and committing, and its reads finding a
   version and getting its key, to tell a slow disk or KMS from a slow network.
+- Bucket notifications, as S3's and MinIO's: `teifs serve --notify-webhook ID=URL`
+  (repeatable; its token from `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`) gives the server a
+  target, `arn:teifs:sqs::ID:webhook` (MinIO's `arn:minio:sqs::ID:webhook` too), and
+  `PutBucketNotificationConfiguration` sets a bucket's rules with S3's checks and test
+  event (`GetBucketNotificationConfiguration` reads them; `mc event add|ls` work). Objects
+  written, removed, tagged, locked, read (MinIO's `ObjectAccessed`) and expired by
+  lifecycle rules send S3's event records (version 2.6) in MinIO's envelope, each queued
+  on the drive before the request is answered and sent in order, retried until taken, so
+  a target that's down or a restart loses nothing. `teifs admin config` lists the targets,
+  and the metrics count each target's events sent, failed, dropped and waiting. Bucket
+  exports carry the rules.
 - A client uploading to a server that refuses the upload (access denied, say) reads
   the refusal: a small body is read before the answer, where it used to be left unread
   and the connection closed, which could fail the client's write with a broken pipe.

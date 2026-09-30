@@ -23,6 +23,7 @@ mod lifecycle;
 pub(crate) mod scrub;
 #[cfg(test)]
 pub(crate) use lifecycle::ApplyLifecycle;
+pub use lifecycle::Expirations;
 
 /// How long an idle staged file may sit before it's swept (active writes keep touching it).
 const STAGED_IDLE: Duration = Duration::from_hours(1);

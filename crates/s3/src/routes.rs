@@ -378,6 +378,8 @@ pub(crate) struct Routes {
     pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
     /// Whoever watches live traces.
     pub(crate) tracers: Arc<Tracers>,
+    /// The server's notification targets.
+    pub(crate) notifier: Arc<teifs_notify::Notifier>,
 }
 
 #[async_trait::async_trait]
@@ -525,7 +527,9 @@ impl Routes {
             Handler::Snapshots => admin::snapshots(&self.store).await,
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
-            Handler::ImportBuckets => bucket_export::import(&self.store, &self.rules, req).await,
+            Handler::ImportBuckets => {
+                bucket_export::import(&self.store, &self.rules, &self.notifier, req).await
+            }
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }

@@ -25,7 +25,8 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     AuditTarget, Config, Credentials, Durability, JobOptions, KeyRules, KmsLocation, Limits,
-    ProxyHeader, Server, TlsSource, Transit, TrustedProxies, Webhook, credentials,
+    ProxyHeader, Server, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, Webhook,
+    credentials,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -226,6 +227,20 @@ pub(crate) struct ServeArgs {
     /// only from the environment: `TEIFS_AUDIT_WEBHOOK_TOKEN`.
     #[arg(long, value_name = "URL", value_parser = parse_audit_webhook, env = "TEIFS_AUDIT_WEBHOOK")]
     audit_webhook: Option<Webhook>,
+    /// A webhook buckets' notification rules can send events to, as ID=URL (repeat for
+    /// more; in the environment, separated by spaces). Rules name it by its ARN,
+    /// `arn:teifs:sqs::ID:webhook`; each event is sent as JSON, retried until it's
+    /// taken, and waits on the drive meanwhile. Its token, sent as `Authorization:
+    /// Bearer TOKEN` (or as given when it names a scheme), is read only from the
+    /// environment: `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID` (the ID in capitals, `-` as `_`).
+    #[arg(
+        long = "notify-webhook",
+        value_name = "ID=URL",
+        value_parser = parse_notify_webhook,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_WEBHOOK"
+    )]
+    notify_webhooks: Vec<(String, Webhook)>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -587,6 +602,42 @@ fn audit_targets(
         .collect()
 }
 
+/// A notification webhook, `ID=URL`; its token comes from the environment later.
+fn parse_notify_webhook(text: &str) -> Result<(String, Webhook), String> {
+    let (id, url) = text
+        .split_once('=')
+        .ok_or_else(|| "give the webhook as ID=URL".to_owned())?;
+    let hook = Webhook::new(url, None)?;
+    TargetConfig::new(id.trim(), TargetKind::Webhook(hook.clone()))?;
+    Ok((id.trim().to_owned(), hook))
+}
+
+/// The notification targets: each webhook with its token,
+/// `TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`.
+fn notify_targets(
+    webhooks: Vec<(String, Webhook)>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<TargetConfig>, String> {
+    let mut targets: Vec<TargetConfig> = Vec::new();
+    for (id, hook) in webhooks {
+        if targets.iter().any(|t| t.id == id) {
+            return Err(format!("two notification webhooks are named `{id}`"));
+        }
+        let name = format!(
+            "TEIFS_NOTIFY_WEBHOOK_TOKEN_{}",
+            id.to_ascii_uppercase().replace('-', "_")
+        );
+        let hook = Webhook {
+            token: env(&name)
+                .filter(|t| !t.trim().is_empty())
+                .map(Zeroizing::new),
+            ..hook
+        };
+        targets.push(TargetConfig::new(&id, TargetKind::Webhook(hook))?);
+    }
+    Ok(targets)
+}
+
 /// Checks a trusted proxy's address or network.
 fn parse_network(text: &str) -> Result<String, String> {
     TrustedProxies::new(&[text], ProxyHeader::default())?;
@@ -635,6 +686,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         audit: audit_targets(args.audit_log, args.audit_webhook, |name| {
             std::env::var(name).ok()
         }),
+        notify: notify_targets(args.notify_webhooks, |name| std::env::var(name).ok())?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
@@ -1009,6 +1061,40 @@ mod tests {
         };
         assert!(sent.token.is_none());
         assert!(audit_targets(None, None, env("t0ken")).is_empty());
+    }
+
+    #[test]
+    fn notification_webhooks_are_named_and_take_their_tokens_from_the_environment() {
+        let hook = |text| parse_notify_webhook(text).unwrap();
+        for bad in [
+            "https://hooks.example",
+            "a b=https://hooks.example",
+            "x=ftp://h",
+        ] {
+            assert!(parse_notify_webhook(bad).is_err(), "{bad}");
+        }
+        let env = |name: &str| (name == "TEIFS_NOTIFY_WEBHOOK_TOKEN_ORDERS_1").then(|| "t".into());
+        let targets = notify_targets(
+            vec![
+                hook("orders-1=https://a.example/in"),
+                hook("audit=https://b.example"),
+            ],
+            env,
+        )
+        .unwrap();
+        assert_eq!(
+            targets[0].arn().to_string(),
+            "arn:teifs:sqs::orders-1:webhook"
+        );
+        let tokens: Vec<_> = targets
+            .iter()
+            .map(|t| match &t.kind {
+                TargetKind::Webhook(hook) => hook.token.as_deref().cloned(),
+            })
+            .collect();
+        assert_eq!(tokens, [Some("t".to_owned()), None]);
+        let twice = vec![hook("a=https://a.example"), hook("a=https://b.example")];
+        assert!(notify_targets(twice, env).is_err());
     }
 
     #[test]

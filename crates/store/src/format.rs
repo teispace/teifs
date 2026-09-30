@@ -28,6 +28,8 @@ const LEGACY_DB: &str = "meta.db";
 pub(crate) const INDEX_DB: &str = "index.db";
 /// The system database.
 pub(crate) const SYSTEM_DB: &str = "system.db";
+/// Bucket notifications waiting to be sent.
+pub(crate) const EVENTS_DB: &str = "events.db";
 /// Where backups made before an upgrade go.
 pub(crate) const BACKUPS: &str = "backups";
 

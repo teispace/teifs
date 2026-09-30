@@ -441,6 +441,19 @@ async fn config(client: &Client) -> Result<(), Error> {
                     .unwrap_or_else(|| "none".to_owned()),
             ),
             (
+                "Notify targets",
+                if config.notify_targets.is_empty() {
+                    "none".to_owned()
+                } else {
+                    config
+                        .notify_targets
+                        .iter()
+                        .map(|t| format!("{} → {}", t.arn, t.endpoint))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            ),
+            (
                 "Upload expiry",
                 config
                     .upload_expiry_seconds

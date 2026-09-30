@@ -282,9 +282,16 @@ keys, DSSE-KMS (two layers: a named key's and the drive's), and SSE-C with your 
 (`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
 objects can't be read without it.
 
+**Bucket notifications**, as S3's and MinIO's: `teifs serve --notify-webhook
+orders=https://hooks.example/s3` gives the server a target, and a bucket's rules
+(`aws s3api put-bucket-notification-configuration`, `mc event add`) send it the events
+they pick (objects written, deleted, tagged, read, expired), each queued on the drive
+before the request is answered and retried until it's taken. See
+[OPERATIONS.md](docs/OPERATIONS.md#bucket-notifications).
+
 **Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
 storage classes (every object is `STANDARD`), website
-hosting, event notifications, replication, several disks or machines.
+hosting, replication, several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
 **Two kinds of bucket.** An *object bucket* (the default) stores objects by id under

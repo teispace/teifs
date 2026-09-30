@@ -19,6 +19,20 @@ use crate::{
     error::Result,
 };
 
+/// What the lifecycle job removed, told to whoever wants to know (bucket notifications),
+/// before the job goes on.
+pub trait Expirations: Send + Sync + std::fmt::Debug {
+    /// `key` in `bucket` expired: its version `version_id` was removed, or (`marker`) a
+    /// delete marker `version_id` was made for it.
+    fn expired<'a>(
+        &'a self,
+        bucket: &'a str,
+        key: &'a str,
+        version_id: Option<String>,
+        marker: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 /// Where a pass is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cursor {
@@ -271,12 +285,18 @@ impl ApplyLifecycle {
                         if_modified_at: Some(version.info.modified),
                         ..Precondition::default()
                     };
-                    tolerate(
+                    let deleted = self.store.delete_if(bucket, key, None, precondition).await;
+                    if let Ok(deleted) = &deleted {
                         self.store
-                            .delete_if(bucket, key, None, precondition)
-                            .await
-                            .map(drop),
-                    )?;
+                            .expired(
+                                bucket,
+                                key,
+                                deleted.version_id.clone(),
+                                deleted.delete_marker,
+                            )
+                            .await;
+                    }
+                    tolerate(deleted.map(drop))?;
                 }
             } else {
                 let since = successor.unwrap_or(made);
@@ -311,7 +331,13 @@ impl ApplyLifecycle {
             )
             .await;
         match result {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                let version_id = version.info.version_id.clone();
+                self.store
+                    .expired(bucket, &version.info.key, version_id, false)
+                    .await;
+                Ok(true)
+            }
             Err(StoreError::ObjectLocked) => Ok(false),
             Err(err) => tolerate(Err(err)).map(|()| false),
         }

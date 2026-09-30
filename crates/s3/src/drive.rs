@@ -11,6 +11,7 @@ use s3s::{
     },
     s3_error,
 };
+use teifs_notify::Notifier;
 use teifs_store::{
     Acl, After, BucketEncryption, CustomerKey, DefaultEncryption, Encryption, Layout, ListQuery,
     Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
@@ -26,7 +27,8 @@ use crate::{
     checksums::{self, Sums, checksum_of, set_checksums},
     cors, encode,
     errors::{StoreResultExt, from_body},
-    lifecycle,
+    events::{Events, Happened},
+    lifecycle, notification,
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     post_form::{self, Form},
     sse::{self, set_sse},
@@ -60,18 +62,39 @@ pub struct Drive {
     /// New buckets start as S3's did before April 2023: ACLs enabled, no Block Public
     /// Access.
     legacy_bucket_defaults: bool,
+    /// Where bucket notifications go.
+    events: Events,
 }
 
 impl Drive {
     /// Serves `store`; buckets created without choosing get `default_layout`.
     #[must_use]
-    pub fn new(store: Store, default_layout: Layout, legacy_bucket_defaults: bool) -> Self {
+    pub fn new(
+        store: Store,
+        default_layout: Layout,
+        legacy_bucket_defaults: bool,
+        notifier: Arc<Notifier>,
+    ) -> Self {
         Self {
             rules: Arc::new(Rules::new(store.clone())),
+            events: Events::new(store.clone(), notifier),
             store,
             default_layout,
             legacy_bucket_defaults,
         }
+    }
+
+    /// Records that the request with these extensions did `name` to one object.
+    async fn notify(
+        &self,
+        extensions: &http::Extensions,
+        name: &str,
+        bucket: &str,
+        happened: Happened,
+    ) {
+        self.events
+            .happened(extensions, name, bucket, vec![happened])
+            .await;
     }
 
     /// The `x-amz-expiration` of the current version `info` of an object in `bucket`,
@@ -444,9 +467,29 @@ fn deleted_object(
     }
 }
 
+/// The event of a delete that removed a version.
+const REMOVED: &str = "ObjectRemoved:Delete";
+/// The event of a delete that made a delete marker.
+const MARKED: &str = "ObjectRemoved:DeleteMarkerCreated";
+
+/// A delete's event: a delete marker made (a delete that named no version), or a
+/// version removed (a delete marker too, when its version was named).
+fn removed(
+    key: &str,
+    asked: Option<&str>,
+    deleted: &teifs_store::Deleted,
+) -> (&'static str, Happened) {
+    let happened = Happened {
+        version_id: deleted.version_id.clone(),
+        ..Happened::to(key)
+    };
+    let made_marker = deleted.delete_marker && asked.is_none();
+    (if made_marker { MARKED } else { REMOVED }, happened)
+}
+
 /// The version id a write answers with: the new version's, none when it's `null` (a
 /// bucket without versioning, or suspended), as s3-tests expect and MinIO answers.
-fn written_version(info: &ObjectInfo) -> Option<String> {
+pub(crate) fn written_version(info: &ObjectInfo) -> Option<String> {
     info.version_id.clone().filter(|id| id != NULL_VERSION)
 }
 
@@ -1370,6 +1413,13 @@ impl S3 for Drive {
             .commit(&input.bucket, &input.key, staged, attrs, pre)
             .await
             .s3()?;
+        let name = if req.extensions.get::<Form>().is_some() {
+            "ObjectCreated:Post"
+        } else {
+            "ObjectCreated:Put"
+        };
+        self.notify(&req.extensions, name, &input.bucket, Happened::of(&info))
+            .await;
         let mut out = dto::PutObjectOutput {
             e_tag: Some(etag(&info.etag)),
             checksum_type: checksum_type(&computed, None),
@@ -1495,6 +1545,13 @@ impl S3 for Drive {
             }
             None => StreamingBlob::from(s3s::Body::empty()),
         };
+        self.notify(
+            &req.extensions,
+            "ObjectAccessed:Get",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         let mut out = dto::GetObjectOutput {
             version_id: info.version_id.clone(),
             body: Some(body),
@@ -1575,6 +1632,13 @@ impl S3 for Drive {
             input.if_unmodified_since.as_ref(),
         )?;
         let slice = Slice::of(&info, input.range.as_ref(), input.part_number)?;
+        self.notify(
+            &req.extensions,
+            "ObjectAccessed:Head",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         let mut out = dto::HeadObjectOutput {
             version_id: info.version_id.clone(),
             content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
@@ -1639,6 +1703,13 @@ impl S3 for Drive {
                 .flat_map(|a| a.as_str().split(','))
                 .any(|a| a.trim() == name)
         };
+        self.notify(
+            &req.extensions,
+            "ObjectAccessed:Attributes",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         let mut out = dto::GetObjectAttributesOutput {
             last_modified: Some(info.modified.into()),
             version_id: info.version_id.clone(),
@@ -1697,6 +1768,13 @@ impl S3 for Drive {
             .set_tags(&input.bucket, &input.key, version_id, tags)
             .await
             .s3()?;
+        self.notify(
+            &req.extensions,
+            "ObjectTagging:Put",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         Ok(S3Response::new(dto::PutObjectTaggingOutput {
             version_id: info.version_id,
         }))
@@ -1713,6 +1791,13 @@ impl S3 for Drive {
             .set_tags(&input.bucket, &input.key, version_id, tagging::Tags::new())
             .await
             .s3()?;
+        self.notify(
+            &req.extensions,
+            "ObjectTagging:Delete",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         Ok(S3Response::new(dto::DeleteObjectTaggingOutput {
             version_id: info.version_id,
         }))
@@ -1762,6 +1847,13 @@ impl S3 for Drive {
             .locked_version(&input.bucket, &input.key, input.version_id.as_deref())
             .await?;
         let retention = info.attrs.retention.ok_or_else(no_lock_of_object)?;
+        self.notify(
+            &req.extensions,
+            "ObjectAccessed:GetRetention",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         Ok(S3Response::new(dto::GetObjectRetentionOutput {
             retention: Some(object_lock::retention_to_dto(&retention)),
         }))
@@ -1780,6 +1872,17 @@ impl S3 for Drive {
             .set_retention(&input.bucket, &input.key, version_id, retention, bypass)
             .await
             .s3()?;
+        let happened = Happened {
+            version_id: input.version_id.clone(),
+            ..Happened::to(&input.key)
+        };
+        self.notify(
+            &req.extensions,
+            "ObjectRetention:Put",
+            &input.bucket,
+            happened,
+        )
+        .await;
         Ok(S3Response::new(dto::PutObjectRetentionOutput::default()))
     }
 
@@ -1792,6 +1895,13 @@ impl S3 for Drive {
             .locked_version(&input.bucket, &input.key, input.version_id.as_deref())
             .await?;
         let on = info.attrs.legal_hold.ok_or_else(no_lock_of_object)?;
+        self.notify(
+            &req.extensions,
+            "ObjectAccessed:GetLegalHold",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         Ok(S3Response::new(dto::GetObjectLegalHoldOutput {
             legal_hold: Some(object_lock::legal_hold_to_dto(on)),
         }))
@@ -1808,6 +1918,18 @@ impl S3 for Drive {
             .set_legal_hold(&input.bucket, &input.key, version_id, on)
             .await
             .s3()?;
+        let happened = Happened {
+            version_id: input.version_id.clone(),
+            ..Happened::to(&input.key)
+        };
+        // MinIO's name: S3 has none.
+        self.notify(
+            &req.extensions,
+            "ObjectCreated:PutLegalHold",
+            &input.bucket,
+            happened,
+        )
+        .await;
         Ok(S3Response::new(dto::PutObjectLegalHoldOutput::default()))
     }
 
@@ -1823,6 +1945,53 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::UpdateObjectEncryptionOutput::default()))
+    }
+
+    async fn get_bucket_notification_configuration(
+        &self,
+        req: S3Request<dto::GetBucketNotificationConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketNotificationConfigurationOutput>> {
+        let config = self
+            .store
+            .bucket_notifications(&req.input.bucket)
+            .await
+            .s3()?;
+        Ok(S3Response::new(notification::to_dto(config.as_deref())))
+    }
+
+    /// Replaces the rules. As on S3, each target a rule starts naming is sent a test
+    /// event first, unless `x-amz-skip-destination-validation` says not to: one that
+    /// doesn't take it fails the request, and nothing changes.
+    async fn put_bucket_notification_configuration(
+        &self,
+        req: S3Request<dto::PutBucketNotificationConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketNotificationConfigurationOutput>> {
+        let input = req.input;
+        let notifier = self.events.notifier();
+        let config =
+            notification::from_dto(input.notification_configuration, |arn| notifier.has(arn))?;
+        if input.skip_destination_validation != Some(true) {
+            let before = self.store.bucket_notifications(&input.bucket).await.s3()?;
+            for arn in notification::new_targets(&config, before.as_deref()) {
+                self.events
+                    .test(&req.extensions, &input.bucket, &arn)
+                    .await
+                    .map_err(|err| {
+                        s3_error!(
+                            InvalidArgument,
+                            "Unable to validate the following destination configurations: \
+                             {arn} didn't take the test event ({err})"
+                        )
+                    })?;
+            }
+        }
+        self.store
+            .set_bucket_notifications(&input.bucket, Some(config))
+            .await
+            .s3()?;
+        Ok(S3Response::new(
+            dto::PutBucketNotificationConfigurationOutput::default(),
+        ))
     }
 
     async fn get_bucket_cors(
@@ -2136,16 +2305,28 @@ impl S3 for Drive {
             ..acl_headers!(input)
         };
         let requested = acl::put_request(&headers, input.access_control_policy.take(), false)?;
-        self.store
+        let before = self
+            .store
             .head_version(&input.bucket, &input.key, version_id)
             .await
             .s3()?;
         let rules = self.rules.of(&input.bucket).await?;
         let acl = acl::for_acl_write(requested, rules.ownership, rules.block)?;
+        // As on S3, the event is only for an ACL that changed.
+        let changed = before.attrs.acl.as_ref() != Some(&acl);
         self.store
             .set_acl(&input.bucket, &input.key, version_id, Some(acl))
             .await
             .s3()?;
+        if changed {
+            let happened = Happened {
+                etag: Some(before.etag.clone()),
+                version_id: written_version(&before),
+                ..Happened::to(&input.key)
+            };
+            self.notify(&req.extensions, "ObjectAcl:Put", &input.bucket, happened)
+                .await;
+        }
         Ok(S3Response::new(dto::PutObjectAclOutput::default()))
     }
 
@@ -2259,6 +2440,9 @@ impl S3 for Drive {
             .delete_with(&input.bucket, &input.key, version_id, precondition, bypass)
             .await
             .s3()?;
+        let (name, happened) = removed(&input.key, input.version_id.as_deref(), &deleted);
+        self.notify(&req.extensions, name, &input.bucket, happened)
+            .await;
         Ok(S3Response::new(dto::DeleteObjectOutput {
             version_id: deleted.version_id,
             // AWS says so only when it's true.
@@ -2282,6 +2466,7 @@ impl S3 for Drive {
         self.store.head_bucket(&input.bucket).await.s3()?;
         let quiet = input.delete.quiet.unwrap_or(false);
         let (mut deleted, mut errors) = (Vec::new(), Vec::new());
+        let (mut removals, mut markers) = (Vec::new(), Vec::new());
         for object in input.delete.objects {
             let precondition = Precondition {
                 if_match: object.e_tag.as_ref().map(|etag| match etag.value() {
@@ -2316,6 +2501,14 @@ impl S3 for Drive {
                     .s3(),
                 Err(err) => Err(err),
             };
+            if let Ok(done) = &result {
+                let (name, happened) = removed(&object.key, object.version_id.as_deref(), done);
+                if name == MARKED {
+                    markers.push(happened);
+                } else {
+                    removals.push(happened);
+                }
+            }
             match result {
                 Ok(_) if quiet => {}
                 Ok(done) => deleted.push(deleted_object(object.key, object.version_id, done)),
@@ -2326,6 +2519,11 @@ impl S3 for Drive {
                     version_id: object.version_id,
                 }),
             }
+        }
+        for (name, objects) in [(REMOVED, removals), (MARKED, markers)] {
+            self.events
+                .happened(&req.extensions, name, &input.bucket, objects)
+                .await;
         }
         Ok(S3Response::new(dto::DeleteObjectsOutput {
             deleted: Some(deleted),
@@ -2418,6 +2616,13 @@ impl S3 for Drive {
             )
             .await
             .s3()?;
+        self.notify(
+            &req.extensions,
+            "ObjectCreated:Copy",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         let mut out = dto::CopyObjectOutput {
             copy_object_result: Some(dto::CopyObjectResult {
                 e_tag: Some(etag(&info.etag)),
@@ -3074,6 +3279,13 @@ impl S3 for Drive {
             )
             .await
             .s3()?;
+        self.notify(
+            &req.extensions,
+            "ObjectCreated:CompleteMultipartUpload",
+            &input.bucket,
+            Happened::of(&info),
+        )
+        .await;
         let mut out = complete_output(&input.bucket, &input.key, &info, &sums, kind);
         out.expiration = self.expiration(&input.bucket, &info).await;
         // S3 reports SSE-S3 and SSE-KMS here, not SSE-C.

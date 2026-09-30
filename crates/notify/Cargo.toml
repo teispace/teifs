@@ -1,0 +1,35 @@
+[package]
+name = "teifs-notify"
+description = "TeiFS bucket notifications' delivery: targets, the durable queue and its senders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+teifs-types.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+# The `testing` feature's webhook receiver.
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+
+[features]
+# A webhook receiver for tests: `teifs_notify::testing`.
+testing = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+
+[dev-dependencies]
+tempfile.workspace = true
+teifs-notify = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

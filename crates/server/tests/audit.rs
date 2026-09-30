@@ -14,6 +14,7 @@ use aws_sdk_s3::{operation::RequestId, presigning::PresigningConfig, primitives:
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{ACCESS_KEY, SECRET_KEY, client, start_with};
 use md5::{Digest, Md5};
+use teifs_notify::testing::Receiver;
 use teifs_server::AuditTarget;
 use teifs_types::audit::AuditEntry;
 
@@ -247,97 +248,28 @@ async fn a_log_that_cant_be_opened_stops_the_server_starting() {
     );
 }
 
-/// A webhook receiver: what each request carried, answering `500` to the first `failing`.
-#[derive(Default)]
-struct Received {
-    failing: std::sync::atomic::AtomicUsize,
-    posts: std::sync::Mutex<Vec<(String, String, String)>>,
-}
-
-impl Received {
-    /// The entries taken, once there are at least `count`.
-    async fn entries(&self, count: usize) -> Vec<AuditEntry> {
-        for _ in 0..500 {
-            let entries: Vec<AuditEntry> = self
-                .posts
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|(_, _, body)| body.lines().map(|l| serde_json::from_str(l).unwrap()))
-                .collect::<Vec<_>>();
-            if entries.len() >= count {
-                return entries;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+/// The entries a webhook took, once there are at least `count`.
+async fn sent(receiver: &Receiver, count: usize) -> Vec<AuditEntry> {
+    for _ in 0..500 {
+        let entries: Vec<AuditEntry> = receiver
+            .taken()
+            .iter()
+            .flat_map(|post| post.body.lines().map(|l| serde_json::from_str(l).unwrap()))
+            .collect();
+        if entries.len() >= count {
+            return entries;
         }
-        panic!("the webhook never had {count} entries");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-/// A webhook receiver on this machine, and its URL.
-async fn receiver(failing: usize) -> (std::sync::Arc<Received>, String) {
-    use http_body_util::BodyExt;
-    let received = std::sync::Arc::new(Received::default());
-    received
-        .failing
-        .store(failing, std::sync::atomic::Ordering::SeqCst);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/audit", listener.local_addr().unwrap());
-    let state = received.clone();
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let state = state.clone();
-            let service =
-                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let state = state.clone();
-                    async move {
-                        let header = |name| {
-                            req.headers()
-                                .get(name)
-                                .map(|v: &hyper::header::HeaderValue| {
-                                    v.to_str().unwrap().to_owned()
-                                })
-                                .unwrap_or_default()
-                        };
-                        let (auth, kind) = (header("authorization"), header("content-type"));
-                        let body = req.into_body().collect().await.unwrap().to_bytes();
-                        let fail = state
-                            .failing
-                            .fetch_update(
-                                std::sync::atomic::Ordering::SeqCst,
-                                std::sync::atomic::Ordering::SeqCst,
-                                |n| n.checked_sub(1),
-                            )
-                            .is_ok();
-                        let status = if fail {
-                            500
-                        } else {
-                            let body = String::from_utf8(body.to_vec()).unwrap();
-                            state.posts.lock().unwrap().push((auth, kind, body));
-                            200
-                        };
-                        let answer = hyper::Response::builder()
-                            .status(status)
-                            .body(http_body_util::Empty::<hyper::body::Bytes>::new())
-                            .unwrap();
-                        Ok::<_, std::convert::Infallible>(answer)
-                    }
-                });
-            tokio::spawn(
-                hyper::server::conn::http1::Builder::new()
-                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service),
-            );
-        }
-    });
-    (received, url)
+    panic!("the webhook never had {count} entries");
 }
 
 /// A webhook that fails at first gets every entry once it takes them, as the file does,
 /// with its token; and the URL is shown without its query.
 #[tokio::test]
 async fn a_webhook_gets_every_entry_after_failing() {
-    let (received, url) = receiver(2).await;
+    let receiver = Receiver::start(2).await;
+    let url = receiver.url().to_owned();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
     let hook = teifs_server::Webhook::new(
@@ -356,7 +288,7 @@ async fn a_webhook_gets_every_entry_after_failing() {
             .unwrap_err();
     }
     let (_, written) = entries(&log, 5).await;
-    let sent = received.entries(5).await;
+    let sent = sent(&receiver, 5).await;
     let ids = |entries: &[AuditEntry]| {
         entries
             .iter()
@@ -364,13 +296,13 @@ async fn a_webhook_gets_every_entry_after_failing() {
             .collect::<std::collections::BTreeSet<_>>()
     };
     assert_eq!(ids(&sent), ids(&written));
-    assert_eq!(
-        received.failing.load(std::sync::atomic::Ordering::SeqCst),
-        0
+    assert!(
+        receiver.tries() > receiver.taken().len(),
+        "it failed at first"
     );
-    for (auth, kind, _) in received.posts.lock().unwrap().iter() {
+    for post in receiver.taken() {
         assert_eq!(
-            (auth.as_str(), kind.as_str()),
+            (post.authorization.as_str(), post.content_type.as_str()),
             ("Bearer t0ken", "application/x-ndjson")
         );
     }
@@ -388,9 +320,9 @@ async fn a_webhook_gets_every_entry_after_failing() {
 /// A token naming its scheme is sent as given.
 #[tokio::test]
 async fn a_webhook_token_with_a_scheme_is_sent_as_given() {
-    let (received, url) = receiver(0).await;
+    let receiver = Receiver::start(0).await;
     let hook = teifs_server::Webhook::new(
-        &url,
+        receiver.url(),
         Some(teifs_client::Zeroizing::new(
             "Basic dXNlcjpwYXNz".to_owned(),
         )),
@@ -402,7 +334,7 @@ async fn a_webhook_token_with_a_scheme_is_sent_as_given() {
         .send()
         .await
         .unwrap();
-    let sent = received.entries(1).await;
+    let sent = sent(&receiver, 1).await;
     assert_eq!(sent[0].api.name, "ListBuckets");
-    assert_eq!(received.posts.lock().unwrap()[0].0, "Basic dXNlcjpwYXNz");
+    assert_eq!(receiver.taken()[0].authorization, "Basic dXNlcjpwYXNz");
 }

@@ -18,7 +18,7 @@ use std::{
 use std::sync::Arc;
 use teifs_iam::{Iam, RootKey};
 use teifs_s3::Options;
-use teifs_types::admin::{KmsConfig, ServerConfig};
+use teifs_types::admin::{KmsConfig, NotifyTarget, ServerConfig};
 
 use teifs_store::{
     BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions, TransitKms,
@@ -26,9 +26,11 @@ use teifs_store::{
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
-pub use audit::{AuditTarget, Webhook};
+pub use audit::AuditTarget;
 pub use credentials::Credentials;
 pub use serve::{DRAIN, Limits, serve};
+use teifs_notify::Notifier;
+pub use teifs_notify::{TargetConfig, TargetKind, Webhook};
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource};
@@ -87,6 +89,8 @@ pub struct Config {
     pub public_metrics: bool,
     /// Where to keep an audit log of every request: each target gets every entry.
     pub audit: Vec<AuditTarget>,
+    /// Where bucket notifications may be sent: buckets' rules name them by ARN.
+    pub notify: Vec<TargetConfig>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
 }
@@ -163,6 +167,9 @@ pub enum ServerError {
         /// Why.
         source: io::Error,
     },
+    /// Bucket notifications couldn't start.
+    #[error(transparent)]
+    Notify(teifs_notify::OpenError),
     /// A transit engine was asked for without a token.
     #[error("set VAULT_TOKEN (or BAO_TOKEN) to use the transit engine at {0}")]
     NoTransitToken(String),
@@ -201,6 +208,8 @@ pub struct Server {
     tls: Option<Arc<Tls>>,
     /// Write the audit log until the service is gone.
     audit_writers: Vec<audit::Writer>,
+    /// Sends bucket notifications.
+    notifier: Arc<Notifier>,
 }
 
 impl std::fmt::Debug for Server {
@@ -353,6 +362,14 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
             .iter()
             .find(|t| matches!(t, AuditTarget::Webhook(_)))
             .map(ToString::to_string),
+        notify_targets: config
+            .notify
+            .iter()
+            .map(|target| NotifyTarget {
+                arn: target.arn().to_string(),
+                endpoint: target.shown(),
+            })
+            .collect(),
         upload_expiry_seconds: config.jobs.upload_expiry.map(|d| d.as_secs()),
         scrub_every_seconds: config.jobs.scrub_every.map(|d| d.as_secs()),
         snapshots: config.jobs.snapshots,
@@ -415,6 +432,9 @@ impl Server {
             .map_err(ServerError::Iam)?,
         );
         let (audit, audit_writers) = start_audit(&config.audit)?;
+        let notifier = Arc::new(
+            Notifier::start(&store.events_db(), config.notify).map_err(ServerError::Notify)?,
+        );
         let service = teifs_s3::service(
             store.clone(),
             Options {
@@ -428,6 +448,7 @@ impl Server {
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
                 public_metrics: config.public_metrics,
                 audit,
+                notifier: Some(Arc::clone(&notifier)),
                 config: Some(admin_config),
                 root_keys,
             },
@@ -445,6 +466,7 @@ impl Server {
             kms: location,
             tls,
             audit_writers,
+            notifier,
         })
     }
 
@@ -512,6 +534,8 @@ impl Server {
             reloads.abort();
         }
         jobs.stop().await;
+        // What's still queued is sent after the next start.
+        self.notifier.stop().await;
         // The service is gone with its connections, so the writers are finishing what's
         // queued.
         let deadline = tokio::time::Instant::now() + DRAIN;

@@ -10,6 +10,7 @@
 //! recorded ETag always belongs to its bytes.
 
 mod body;
+mod cache;
 pub mod checksum;
 mod error;
 mod folder;
@@ -48,7 +49,7 @@ use teifs_meta::{BucketRecord, Index, System};
 pub use body::{BodyReader, ObjectBody};
 pub use error::{Result, StoreError};
 pub use format::{DriveFormat, FORMAT};
-pub use jobs::{JobOptions, JobStatus, Jobs};
+pub use jobs::{Expirations, JobOptions, JobStatus, Jobs};
 pub use lifecycle::{
     And, Condition, DAY_MS, Expiration, Expiry, Lifecycle, LifecycleRule, MAX_LIFECYCLE_RULES,
     MAX_NEWER_NONCURRENT, MAX_RULE_ID_LEN, NoncurrentExpiration, RuleFilter, Tag,
@@ -264,6 +265,8 @@ struct Inner {
     format: DriveFormat,
     /// Seals and unseals the data keys of encrypted objects (set once, at or after open).
     kms: std::sync::OnceLock<Arc<dyn Kms>>,
+    /// Told what the lifecycle job removes (set once, after open).
+    expirations: std::sync::OnceLock<Arc<dyn jobs::Expirations>>,
     /// The encryption settings of object buckets that have none of their own.
     default_encryption: BucketEncryption,
     /// What each background job has done since the drive opened.
@@ -272,7 +275,9 @@ struct Inner {
     /// takes a snapshot being written for one in progress.
     snapshots: Mutex<()>,
     /// Buckets' lifecycle configurations, read once.
-    lifecycles: lifecycle::LifecycleCache,
+    lifecycles: cache::SettingCache<lifecycle::Lifecycle>,
+    /// Buckets' notification rules, read once.
+    notifications: cache::SettingCache<teifs_types::notify::NotificationConfig>,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
     day_ms: i64,
     /// How long each stage of reads and writes takes.
@@ -375,9 +380,11 @@ impl Store {
             system: Mutex::new(system_db),
             format,
             kms: std::sync::OnceLock::new(),
+            expirations: std::sync::OnceLock::new(),
             jobs: jobs::StatusMap::default(),
             snapshots: Mutex::new(()),
-            lifecycles: lifecycle::LifecycleCache::default(),
+            lifecycles: cache::SettingCache::default(),
+            notifications: cache::SettingCache::default(),
             stages: stages::new(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)
@@ -411,6 +418,12 @@ impl Store {
         &self.inner.root
     }
 
+    /// Where bucket notifications wait to be sent.
+    #[must_use]
+    pub fn events_db(&self) -> PathBuf {
+        self.inner.system_dir.join(format::EVENTS_DB)
+    }
+
     /// The drive's system database, which IAM keeps its state in too.
     #[must_use]
     pub fn system_db(&self) -> PathBuf {
@@ -424,6 +437,22 @@ impl Store {
             .kms
             .set(kms)
             .map_err(|_| StoreError::InvalidRequest("the store already has a KMS"))
+    }
+
+    /// Tells `to` what the lifecycle job removes from now on. Fails if it's told
+    /// something else already.
+    pub fn tell_expirations(&self, to: Arc<dyn Expirations>) -> Result<()> {
+        self.inner
+            .expirations
+            .set(to)
+            .map_err(|_| StoreError::InvalidRequest("the store already tells expirations"))
+    }
+
+    /// Tells whoever wants to know that the lifecycle job removed something.
+    async fn expired(&self, bucket: &str, key: &str, version_id: Option<String>, marker: bool) {
+        if let Some(to) = self.inner.expirations.get() {
+            to.expired(bucket, key, version_id, marker).await;
+        }
     }
 
     fn kms(&self) -> Option<&dyn Kms> {
@@ -557,7 +586,7 @@ impl Store {
             let unfinished = conn.list_uploads(&name, "", None, usize::MAX)?;
             conn.forget_bucket(&name)?;
             inner.system().forget_bucket(&name)?;
-            inner.lifecycles.clear();
+            inner.settings_changed();
             drop(conn);
             for upload in unfinished {
                 let _ = fs::remove_dir_all(inner.uploads.join(&upload.id));

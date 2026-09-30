@@ -523,7 +523,7 @@ mod tests {
         let store = teifs_store::Store::open(dir.path()).unwrap();
         let sink: Arc<dyn AuditSink> = Arc::clone(sink) as _;
         let watch = Watch::new(
-            Metrics::new(&store),
+            Metrics::new(&store, Arc::new(teifs_notify::Notifier::none())),
             Scrapers::Anyone,
             Some(sink),
             Arc::new(Tracers::new()),

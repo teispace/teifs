@@ -6,6 +6,7 @@ pub mod admin;
 pub mod audit;
 pub mod caps;
 mod names;
+pub mod notify;
 mod object;
 pub mod verify;
 

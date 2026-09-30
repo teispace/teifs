@@ -15,11 +15,13 @@ mod crc_combine;
 mod drive;
 mod encode;
 mod errors;
+mod events;
 mod health;
 mod iam_api;
 mod lifecycle;
 mod limits;
 mod metrics;
+mod notification;
 mod object_lock;
 mod observe;
 mod post_form;
@@ -91,14 +93,25 @@ pub struct Options {
     pub public_metrics: bool,
     /// Where audit entries go, one per request; none keeps no audit log.
     pub audit: Option<Arc<dyn AuditSink>>,
+    /// The targets bucket notifications are sent to; none has no targets.
+    pub notifier: Option<Arc<teifs_notify::Notifier>>,
 }
 
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
+    let notifier = options
+        .notifier
+        .unwrap_or_else(|| Arc::new(teifs_notify::Notifier::none()));
+    if !notifier.is_empty() {
+        let events = events::Events::new(store.clone(), Arc::clone(&notifier));
+        // A store serves one service: a second is told nothing new.
+        let _ = store.tell_expirations(Arc::new(events));
+    }
     let drive = Drive::new(
         store.clone(),
         options.default_layout,
         options.legacy_bucket_defaults,
+        Arc::clone(&notifier),
     );
     let rules = drive.rules();
     let scrapers = match &options.iam {
@@ -107,7 +120,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     };
     let tracers = Arc::new(trace::Tracers::new());
     let watch = observe::Watch::new(
-        metrics::Metrics::new(&store),
+        metrics::Metrics::new(&store, Arc::clone(&notifier)),
         scrapers,
         options.audit,
         Arc::clone(&tracers),
@@ -140,6 +153,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             config: options.config.map(Arc::new),
             root_keys: options.root_keys,
             tracers,
+            notifier,
         });
     }
     let host = if options.domains.is_empty() {

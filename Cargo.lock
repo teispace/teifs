@@ -3129,6 +3129,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "teifs-notify"
+version = "0.1.0"
+dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "rusqlite",
+ "teifs-notify",
+ "teifs-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "teifs-policy"
 version = "0.1.0"
 dependencies = [
@@ -3163,6 +3182,7 @@ dependencies = [
  "serde",
  "serde_json",
  "teifs-iam",
+ "teifs-notify",
  "teifs-policy",
  "teifs-store",
  "teifs-types",
@@ -3188,8 +3208,6 @@ dependencies = [
  "aws-smithy-http-client",
  "base64",
  "dirs",
- "http-body-util",
- "hyper",
  "hyper-util",
  "md-5",
  "rcgen",
@@ -3201,6 +3219,7 @@ dependencies = [
  "serde_json",
  "teifs-client",
  "teifs-iam",
+ "teifs-notify",
  "teifs-s3",
  "teifs-store",
  "teifs-types",

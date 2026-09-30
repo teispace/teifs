@@ -9,9 +9,9 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
+use teifs_notify::{Backoff, Webhook};
 use teifs_s3::AuditSink;
 use teifs_types::audit::AuditEntry;
 use tokio::{
@@ -19,7 +19,6 @@ use tokio::{
     sync::mpsc,
     task::JoinHandle,
 };
-use zeroize::Zeroizing;
 
 use crate::signals::Hangups;
 
@@ -27,10 +26,6 @@ use crate::signals::Hangups;
 const QUEUE: usize = 16_384;
 /// The most entries a webhook gets in one request.
 const BATCH: usize = 100;
-/// How long a webhook has to answer.
-const TIMEOUT: Duration = Duration::from_secs(10);
-/// The longest pause between tries of a batch a webhook didn't take.
-const MAX_PAUSE: Duration = Duration::from_secs(30);
 /// How many more times a batch is tried once the server is stopping.
 const TRIES_WHEN_STOPPING: u32 = 3;
 
@@ -45,55 +40,12 @@ pub enum AuditTarget {
     Webhook(Webhook),
 }
 
-/// A webhook the entries are sent to, with `POST`.
-#[derive(Clone)]
-pub struct Webhook {
-    /// Its URL: `http` or `https`.
-    pub url: reqwest::Url,
-    /// Its `Authorization`: as given if it names a scheme (`Basic …`), else sent as
-    /// `Bearer TOKEN`.
-    pub token: Option<Zeroizing<String>>,
-}
-
-impl Webhook {
-    /// A webhook at `url`, which must be `http` or `https` with a host.
-    ///
-    /// # Errors
-    ///
-    /// When `url` isn't such a URL.
-    pub fn new(url: &str, token: Option<Zeroizing<String>>) -> Result<Self, String> {
-        let url = reqwest::Url::parse(url.trim()).map_err(|e| format!("not a URL: {e}"))?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err("give an http or https URL".to_owned());
-        }
-        Ok(Self { url, token })
-    }
-}
-
-impl fmt::Debug for Webhook {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Webhook")
-            .field("url", &shown(&self.url))
-            .finish_non_exhaustive()
-    }
-}
-
-/// A URL without what could be a secret in it: a user and password, or a query.
-fn shown(url: &reqwest::Url) -> String {
-    let mut url = url.clone();
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
-}
-
 impl fmt::Display for AuditTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stdout => f.write_str("standard output"),
             Self::File(path) => write!(f, "{}", path.display()),
-            Self::Webhook(hook) => f.write_str(&shown(&hook.url)),
+            Self::Webhook(hook) => f.write_str(&hook.shown()),
         }
     }
 }
@@ -137,10 +89,7 @@ pub(crate) fn start(
         let (queue, entries) = mpsc::channel(QUEUE);
         let writer = match target {
             AuditTarget::Webhook(hook) => {
-                let client = reqwest::Client::builder()
-                    .timeout(TIMEOUT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
+                let client = teifs_notify::client()
                     .map_err(|e| (target.clone(), std::io::Error::other(e)))?;
                 tokio::spawn(deliver(client, hook.clone(), entries))
             }
@@ -228,7 +177,7 @@ async fn line(output: &mut BufWriter<Output>, entry: &AuditEntry) -> std::io::Re
 /// Sends what's queued to a webhook, a batch at a time, each tried until it's taken (a
 /// few more times only, once the server is stopping).
 async fn deliver(client: reqwest::Client, hook: Webhook, mut entries: mpsc::Receiver<AuditEntry>) {
-    let to = shown(&hook.url);
+    let to = hook.shown();
     let mut batch = Vec::with_capacity(BATCH);
     while let Some(entry) = entries.recv().await {
         batch.push(entry);
@@ -243,11 +192,14 @@ async fn deliver(client: reqwest::Client, hook: Webhook, mut entries: mpsc::Rece
                 body.push(b'\n');
             }
         }
-        let mut pause = Duration::from_millis(500);
+        let mut backoff = Backoff::new();
         let mut failing = false;
         let mut tries_left = TRIES_WHEN_STOPPING;
         loop {
-            match post(&client, &hook, body.clone()).await {
+            match hook
+                .post(&client, "application/x-ndjson", body.clone())
+                .await
+            {
                 Ok(()) => {
                     if failing {
                         tracing::info!(to, "the audit webhook takes entries again");
@@ -269,46 +221,18 @@ async fn deliver(client: reqwest::Client, hook: Webhook, mut entries: mpsc::Rece
                             return;
                         }
                     }
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(MAX_PAUSE);
+                    tokio::time::sleep(backoff.next_pause()).await;
                 }
             }
         }
     }
 }
 
-/// POSTs JSON lines; anything but a `2xx` is a failure.
-async fn post(client: &reqwest::Client, hook: &Webhook, body: Vec<u8>) -> Result<(), String> {
-    let mut request = client
-        .post(hook.url.clone())
-        .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
-        .body(body);
-    if let Some(token) = &hook.token {
-        let value = if token.contains(' ') {
-            Zeroizing::new(token.to_string())
-        } else {
-            Zeroizing::new(format!("Bearer {}", token.as_str()))
-        };
-        let mut value = reqwest::header::HeaderValue::from_str(&value)
-            .map_err(|_| "the token isn't a valid header value".to_owned())?;
-        value.set_sensitive(true);
-        request = request.header(reqwest::header::AUTHORIZATION, value);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| e.without_url().to_string())?;
-    let status = response.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(format!("it answered {status}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use zeroize::Zeroizing;
 
     #[test]
     fn a_webhook_is_shown_without_its_secrets() {

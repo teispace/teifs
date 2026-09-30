@@ -1,10 +1,10 @@
 //! Bucket settings kept in `system.db` (the `config` JSON of a bucket's record).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
-use teifs_types::{Acl, SseMode};
+use teifs_types::{Acl, SseMode, notify::NotificationConfig};
 
 use crate::{
     Bucket, Inner, Store, StoreError, error::Result, folder::FolderBucket, lifecycle::Lifecycle,
@@ -43,6 +43,9 @@ pub(crate) struct BucketConfig {
     /// Its lifecycle rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lifecycle: Option<Lifecycle>,
+    /// Its notification rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notifications: Option<NotificationConfig>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -82,6 +85,9 @@ pub struct BucketSettings {
     /// Its lifecycle rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<Lifecycle>,
+    /// Its notification rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationConfig>,
 }
 
 /// How a bucket encrypts objects written without asking, and which encryption it
@@ -356,6 +362,7 @@ impl Store {
             abac: config.abac,
             object_lock: config.object_lock,
             lifecycle: config.lifecycle,
+            notifications: config.notifications,
         })
     }
 
@@ -372,6 +379,36 @@ impl Store {
     /// Replaces a bucket's CORS rules; `None` removes them.
     pub async fn set_bucket_cors(&self, bucket: &str, rules: Option<Vec<CorsRule>>) -> Result<()> {
         self.change_config(bucket, move |config| config.cors = rules)
+            .await
+    }
+
+    /// A bucket's notification rules, if it has any; from memory once read.
+    pub async fn bucket_notifications(
+        &self,
+        bucket: &str,
+    ) -> Result<Option<Arc<NotificationConfig>>> {
+        if let Some(found) = self.inner.notifications.cached(bucket) {
+            return Ok(found);
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            inner.notifications.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.notifications)
+            })
+        })
+        .await
+    }
+
+    /// Replaces a bucket's notification rules (checked by the caller); `None` or no
+    /// rules removes them.
+    pub async fn set_bucket_notifications(
+        &self,
+        bucket: &str,
+        rules: Option<NotificationConfig>,
+    ) -> Result<()> {
+        let rules = rules.filter(|config| !config.rules.is_empty());
+        self.change_config(bucket, move |config| config.notifications = rules)
             .await
     }
 
@@ -623,6 +660,12 @@ impl Store {
 }
 
 impl Inner {
+    /// Forgets the settings kept in memory, after any bucket's change or a bucket goes.
+    pub(crate) fn settings_changed(&self) {
+        self.lifecycles.clear();
+        self.notifications.clear();
+    }
+
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.
     pub(crate) fn update_config(
         &self,
@@ -649,7 +692,7 @@ impl Inner {
             return Err(StoreError::NoSuchBucket);
         }
         drop(system);
-        self.lifecycles.clear();
+        self.settings_changed();
         Ok(())
     }
 }

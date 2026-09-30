@@ -54,6 +54,10 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
                                per SNI name, reloads them), graceful shutdown, and
                                `Server::bind` / `run`, which the command and embedders
                                use.
+crates/notify   teifs-notify   Bucket notifications' delivery: the server's targets
+                               (webhooks), the queue on the drive (events.db, SQLite)
+                               and a sender per target; the webhook code the audit log
+                               shares; a test receiver behind the `testing` feature.
 crates/client   teifs-client   A typed client for the admin API (reqwest, Signature V4),
                                for `teifs admin` and apps that manage a server.
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
@@ -293,6 +297,16 @@ Live traces (`trace.rs`) get the same entries from a broadcast channel, each wat
 through a task that applies its filter and feeds its answer's body; entries are made
 while a sink exists or anyone watches, and `Service::stopping` ends every trace when the
 server stops, so shutdown doesn't wait on them.
+Bucket notifications: a bucket's rules (`teifs_types::notify`: event names, the
+overlap rule, target ARNs) are checked in `notification.rs` and kept with the bucket's
+settings, read once into memory (`SettingCache`, as lifecycle rules are). After an
+operation succeeds, `drive.rs` tells `events.rs` what happened to which objects; when the
+server has targets, the rules that match pick the targets, and each event (S3's record
+in MinIO's envelope) is queued by `teifs-notify` in one SQLite transaction before the
+request is answered. Each target's sender reads its events in order and deletes them once
+taken, retrying with the audit webhook's backoff. The store's lifecycle job reports what
+it removes through the `Expirations` hook, which `events.rs` implements, so expirations
+are queued the same way before the job goes on.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

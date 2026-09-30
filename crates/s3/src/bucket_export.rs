@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result, dto};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use teifs_notify::Notifier;
 use teifs_store::{
     BucketEncryption, CorsRule, Layout, Lifecycle, NewBucket, ObjectLock, ObjectOwnership,
     PublicAccessBlock, Store, Versioning,
@@ -17,6 +18,7 @@ use teifs_types::{
     admin::{
         BUCKETS_EXPORT_FORMAT, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
     },
+    notify::NotificationConfig,
 };
 
 use crate::{
@@ -42,6 +44,7 @@ const SETTINGS: &[&str] = &[
     "cors",
     "lifecycle",
     "encryption",
+    "notifications",
 ];
 
 /// `GET buckets`: every bucket, or `?bucket=NAME`'s alone.
@@ -106,6 +109,7 @@ fn no_such_bucket(name: &str) -> S3Error {
 pub(crate) async fn import(
     store: &Store,
     rules: &Rules,
+    notifier: &Notifier,
     mut req: S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
     let body = signed_body(&mut req, admin::MAX_IMPORT_BYTES)
@@ -133,6 +137,7 @@ pub(crate) async fn import(
         let mut import = Import {
             store,
             rules,
+            notifier,
             bucket: &bucket.name,
             items: &mut report.items,
         };
@@ -155,6 +160,7 @@ const FAILED: &str = "failed";
 struct Import<'a> {
     store: &'a Store,
     rules: &'a Rules,
+    notifier: &'a Notifier,
     bucket: &'a str,
     items: &'a mut Vec<BucketImportItem>,
 }
@@ -300,6 +306,10 @@ impl Import<'_> {
             let result = self.encryption(value).await;
             self.report("encryption", result.map(|()| APPLIED));
         }
+        if let Some(value) = settings.get("notifications") {
+            let result = self.notifications(value).await;
+            self.report("notifications", result.map(|()| APPLIED));
+        }
     }
 
     async fn object_lock(&self, value: &Value) -> S3Result<()> {
@@ -431,6 +441,19 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Checked as `PutBucketNotificationConfiguration` checks them, against this
+    /// server's targets; no test event is sent.
+    async fn notifications(&self, value: &Value) -> S3Result<()> {
+        let config: NotificationConfig = parse("notifications", value)?;
+        config
+            .check(|arn| self.notifier.has(arn))
+            .map_err(|err| invalid(err.to_string()))?;
+        self.store
+            .set_bucket_notifications(self.bucket, Some(config))
+            .await
+            .s3()
+    }
+
     async fn encryption(&self, value: &Value) -> S3Result<()> {
         let encryption: BucketEncryption = parse("encryption", value)?;
         self.store
@@ -526,6 +549,7 @@ mod tests {
             abac: true,
             object_lock: Some(ObjectLock::default()),
             lifecycle: Some(Lifecycle::default()),
+            notifications: Some(NotificationConfig::default()),
         };
         let Value::Object(given) = serde_json::to_value(all).unwrap() else {
             unreachable!()

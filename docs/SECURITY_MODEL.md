@@ -241,7 +241,17 @@ created readable only by its owner; a test sends each of them and looks for none
 file (`crates/server/tests/audit.rs`). An audit webhook's token is read only from the
 environment, is marked sensitive in the request that carries it, and is never shown:
 the webhook's `Debug` and `teifs admin config` show its URL without the user, password,
-query or fragment. Redirects aren't followed, so entries go nowhere but the URL given.
+query or fragment. Redirects aren't followed, so entries go nowhere but the URL given. Notification
+webhooks' tokens are read the same way (`TEIFS_NOTIFY_WEBHOOK_TOKEN_ID`), sent the same
+way, and never shown.
+
+Bucket notifications can't reach anything the operator didn't name: a bucket's rules
+pick among the server's targets by ARN (an unknown one is refused when the rules are
+set, and when a bucket export is imported), so whoever may `s3:PutBucketNotification`
+chooses what's sent where, not what the server calls. Events carry what a request did
+(keys, sizes, ETags, the signing access key and the client's address), never object
+data, metadata or secrets, and the queue on the drive (`.teifs/events.db`) sits with the
+rest of the drive's metadata.
 
 ### 7. Keys can't escape their bucket
 Every key is parsed into an `ObjectKey` (`crates/types/src/names.rs`) that refuses empty,

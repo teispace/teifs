@@ -398,6 +398,16 @@ pub struct JobInfo {
     pub last_error: Option<String>,
 }
 
+/// A bucket notification target, as the server's configuration shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyTarget {
+    /// Its ARN, which rules name: `arn:teifs:sqs::ID:TYPE`.
+    pub arn: String,
+    /// Where it sends, without secrets.
+    pub endpoint: String,
+}
+
 /// How a server was started. Secrets are never part of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -439,6 +449,10 @@ pub struct ServerConfig {
     /// they aren't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_webhook: Option<String>,
+    /// The bucket notification targets: each one's ARN and where it sends (without
+    /// secrets).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notify_targets: Vec<NotifyTarget>,
     /// How long an unfinished multipart upload is kept; none for ever.
     pub upload_expiry_seconds: Option<u64>,
     /// How often every stored version is read back and checked; none if never.
