@@ -369,6 +369,19 @@ impl Notifier {
         self.targets.contains_key(arn)
     }
 
+    /// The target a rule's ARN names: `arn:teifs:sqs::ID:KIND` (or `MinIO`'s form), or an
+    /// SQS queue's own ARN on AWS, as S3's rules name it.
+    #[must_use]
+    pub fn resolve(&self, arn: &str) -> Option<TargetArn> {
+        if let Some(ours) = TargetArn::parse(arn) {
+            return self.has(&ours).then_some(ours);
+        }
+        self.targets
+            .iter()
+            .find(|(_, t)| matches!(&t.config.kind, TargetKind::Sqs(sqs) if sqs.is_named_by(arn)))
+            .map(|(ours, _)| ours.clone())
+    }
+
     /// The targets.
     pub fn targets(&self) -> impl Iterator<Item = &TargetConfig> {
         self.targets.values().map(|t| &t.config)

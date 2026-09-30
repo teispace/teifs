@@ -1977,11 +1977,14 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutBucketNotificationConfigurationOutput>> {
         let input = req.input;
         let notifier = self.events.notifier();
-        let config =
-            notification::from_dto(input.notification_configuration, |arn| notifier.has(arn))?;
+        let config = notification::from_dto(input.notification_configuration, |arn| {
+            notifier.resolve(arn)
+        })?;
         if input.skip_destination_validation != Some(true) {
             let before = self.store.bucket_notifications(&input.bucket).await.s3()?;
-            for arn in notification::new_targets(&config, before.as_deref()) {
+            for arn in
+                notification::new_targets(&config, before.as_deref(), |arn| notifier.resolve(arn))
+            {
                 self.events
                     .test(&req.extensions, &input.bucket, &arn)
                     .await

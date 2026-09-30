@@ -1009,6 +1009,16 @@ fn notify_targets(
             TargetKind::Nsq(_) => {}
             TargetKind::Sqs(sqs) => {
                 sqs.credentials = sqs_credentials(&arn.id, secret, &env)?;
+                let same = |t: &TargetConfig| {
+                    matches!(&t.kind, TargetKind::Sqs(other) if other.aws_arn().is_some()
+                        && other.aws_arn() == sqs.aws_arn())
+                };
+                if let Some(other) = out.iter().find(|t| same(t)) {
+                    return Err(format!(
+                        "the SQS targets `{}` and `{}` are the same queue",
+                        other.id, arn.id
+                    ));
+                }
             }
             TargetKind::Mqtt(mqtt) => {
                 mqtt.password = secret("PASSWORD");
@@ -1766,6 +1776,17 @@ mod tests {
         assert!(keys_of(&[]).unwrap().is_none(), "unsigned");
         assert!(keys_of(&[("TEIFS_NOTIFY_SQS_ACCESS_KEY_Q", "AKIDOWN")]).is_err());
         assert!(keys_of(&[("AWS_SECRET_ACCESS_KEY", "aws")]).is_err());
+        let twice =
+            parse_notify_sqs("r=https://sqs.eu-west-1.amazonaws.com/123456789012/events/").unwrap();
+        assert!(notify_targets(vec![queue.clone(), twice], |_| None).is_err());
+        let other =
+            parse_notify_sqs("o=https://sqs.eu-west-1.amazonaws.com/123456789012/other").unwrap();
+        assert_eq!(
+            notify_targets(vec![queue.clone(), other], |_| None)
+                .unwrap()
+                .len(),
+            2
+        );
         for bad in [
             "q=sqs.eu-west-1.amazonaws.com/1/q",
             "q=https://sqs.eu-west-1.amazonaws.com/events",

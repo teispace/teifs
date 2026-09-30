@@ -160,7 +160,8 @@ behaviour; the on-disk format is always upgraded automatically.
   sends each event to the queue as S3 does (`{"Records":[...]}`), with `SendMessage`
   signed with Signature Version 4, keys from `TEIFS_NOTIFY_SQS_ACCESS_KEY_ID` and
   `_SECRET_KEY_ID` or AWS's own variables, FIFO queues grouped by object, and the
-  answer's MD5 checked. Any service that speaks SQS's API will do.
+  answer's MD5 checked. Any service that speaks SQS's API will do. Rules may name the
+  queue by its own ARN (`arn:aws:sqs:REGION:ACCOUNT:NAME`), as on S3.
 - MQTT notification targets, as MinIO's: `teifs serve --notify-mqtt
   ID=HOST:PORT,topic=NAME[,qos=0|1|2][,user=NAME][,keepalive=SECONDS]` publishes each
   event over MQTT 3.1.1, acknowledged as its quality of service asks (1 by default), with

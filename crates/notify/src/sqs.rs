@@ -59,10 +59,42 @@ impl Sqs {
         })
     }
 
-    /// Where it sends.
+    /// Where it sends, and the AWS ARN rules may name it by.
     #[must_use]
     pub fn shown(&self) -> String {
-        format!("{} ({})", self.queue_url, self.region)
+        match self.aws_arn() {
+            Some(arn) => format!("{} ({}), also {arn}", self.queue_url, self.region),
+            None => format!("{} ({})", self.queue_url, self.region),
+        }
+    }
+
+    /// Its ARN on AWS, `arn:PARTITION:sqs:REGION:ACCOUNT:NAME`, when its URL is
+    /// `…/ACCOUNT/NAME` (as AWS's, and those of the services that copy it, are).
+    #[must_use]
+    pub fn aws_arn(&self) -> Option<String> {
+        let mut path = self.queue_url.path_segments()?.filter(|p| !p.is_empty());
+        let (account, name) = (path.next()?, path.next()?);
+        if path.next().is_some() {
+            return None;
+        }
+        let host = self.queue_url.host_str().unwrap_or_default();
+        let partition = if host.ends_with(".amazonaws.com.cn") {
+            "aws-cn"
+        } else if self.region.starts_with("us-gov-") {
+            "aws-us-gov"
+        } else {
+            "aws"
+        };
+        Some(format!(
+            "arn:{partition}:sqs:{}:{account}:{name}",
+            self.region
+        ))
+    }
+
+    /// Whether it's the queue `arn` names, as S3's rules name queues.
+    #[must_use]
+    pub fn is_named_by(&self, arn: &str) -> bool {
+        self.aws_arn().as_deref() == Some(arn.trim())
     }
 
     /// Whether it's a FIFO queue, whose messages need a group.
@@ -162,6 +194,52 @@ mod tests {
             "https://key:secret@h/1/q",
         ] {
             assert!(Sqs::new(bad, None).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn queues_are_named_by_their_aws_arns() {
+        let arn = |url: &str, region: Option<&str>| Sqs::new(url, region).unwrap().aws_arn();
+        assert_eq!(
+            arn(
+                "https://sqs.eu-west-1.amazonaws.com/123456789012/events.fifo",
+                None
+            )
+            .as_deref(),
+            Some("arn:aws:sqs:eu-west-1:123456789012:events.fifo")
+        );
+        assert_eq!(
+            arn(
+                "https://sqs.cn-north-1.amazonaws.com.cn/123456789012/q",
+                None
+            )
+            .as_deref(),
+            Some("arn:aws-cn:sqs:cn-north-1:123456789012:q")
+        );
+        assert_eq!(
+            arn(
+                "https://sqs.us-gov-west-1.amazonaws.com/123456789012/q",
+                None
+            )
+            .as_deref(),
+            Some("arn:aws-us-gov:sqs:us-gov-west-1:123456789012:q")
+        );
+        assert_eq!(
+            arn("http://localhost:4566/000000000000/q", None).as_deref(),
+            Some("arn:aws:sqs:us-east-1:000000000000:q"),
+            "as LocalStack names it"
+        );
+        assert_eq!(arn("http://localhost:4566/queue/eu/1/q", None), None);
+        let sqs = Sqs::new("https://sqs.eu-west-1.amazonaws.com/123456789012/q", None).unwrap();
+        assert!(sqs.is_named_by("arn:aws:sqs:eu-west-1:123456789012:q"));
+        for other in [
+            "arn:aws:sqs:eu-west-2:123456789012:q",
+            "arn:aws:sqs:eu-west-1:210987654321:q",
+            "arn:aws:sqs:eu-west-1:123456789012:q2",
+            "arn:aws:sns:eu-west-1:123456789012:q",
+            "arn:teifs:sqs::q:sqs",
+        ] {
+            assert!(!sqs.is_named_by(other), "{other}");
         }
     }
 

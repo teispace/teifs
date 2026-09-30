@@ -158,12 +158,6 @@ impl NotificationRule {
                 .as_deref()
                 .is_none_or(|s| key.ends_with(decoded(s).as_str()))
     }
-
-    /// The target its ARN names, if it names one.
-    #[must_use]
-    pub fn target(&self) -> Option<TargetArn> {
-        TargetArn::parse(&self.arn)
-    }
 }
 
 /// A filter value as S3 reads it: URL-encoded, with `+` for a space.
@@ -192,15 +186,15 @@ impl NotificationConfig {
         self.rules.iter().filter(move |r| r.matches(event, key))
     }
 
-    /// Checks the configuration as S3 does, with `known` saying which targets the
-    /// server has.
+    /// Checks the configuration as S3 does, with `resolve` giving the server's target a
+    /// rule's ARN names.
     ///
     /// # Errors
     ///
     /// What's wrong, for the caller: an unknown event, a filter value that's too long,
     /// a target that doesn't exist, two rules with the same id, or two rules that
     /// could send the same event for the same key.
-    pub fn check(&self, known: impl Fn(&TargetArn) -> bool) -> Result<(), NotifyError> {
+    pub fn check(&self, resolve: impl Fn(&str) -> Option<TargetArn>) -> Result<(), NotifyError> {
         if self.rules.len() > MAX_RULES {
             return Err(NotifyError::TooManyRules);
         }
@@ -215,7 +209,7 @@ impl NotificationConfig {
             if long(&rule.prefix) || long(&rule.suffix) {
                 return Err(NotifyError::FilterTooLong);
             }
-            if !rule.target().is_some_and(|t| known(&t)) {
+            if resolve(&rule.arn).is_none() {
                 return Err(NotifyError::UnknownTarget(rule.arn.clone()));
             }
             for other in &self.rules[..i] {
@@ -559,7 +553,8 @@ pub enum NotifyError {
     /// An ARN that isn't one of the server's targets.
     #[error(
         "A specified destination ARN does not exist or is not well-formed: `{0}`. Name a \
-         target the server has, as arn:teifs:sqs::ID:TYPE"
+         target the server has, as arn:teifs:sqs::ID:TYPE, or an SQS target's queue by its \
+         ARN (teifs admin config shows them)"
     )]
     UnknownTarget(String),
     /// Two rules with the same id.
@@ -600,7 +595,7 @@ mod tests {
     }
 
     fn check(rules: Vec<NotificationRule>) -> Result<(), NotifyError> {
-        NotificationConfig { rules }.check(|t| t.id == "hook")
+        NotificationConfig { rules }.check(|arn| TargetArn::parse(arn).filter(|t| t.id == "hook"))
     }
 
     #[test]

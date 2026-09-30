@@ -334,6 +334,12 @@ the queue S3's test event, as S3 does, so a queue that doesn't exist or keys it 
 (`QueueDoesNotExist`, `InvalidSignatureException`) are named at once. The keys need
 `sqs:SendMessage` on the queue.
 
+Rules can also name the queue by its own ARN, as on S3:
+`arn:aws:sqs:eu-west-1:123456789012:orders` names the target above, so an existing
+`put-bucket-notification-configuration` works unchanged. The ARN is read from the queue's
+URL (`…/ACCOUNT/NAME`) and region, and `teifs admin config` shows it; the rule keeps the
+ARN it was given. Two targets for the same queue are refused.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -446,5 +452,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: SNS and Lambda targets, rules naming a queue by its AWS ARN, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
+Not yet: SNS and Lambda targets, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
 certificates for webhooks and Elasticsearch.

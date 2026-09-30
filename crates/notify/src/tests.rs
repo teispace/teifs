@@ -123,6 +123,50 @@ fn targets_are_named_as_arns_can_name_them() {
     assert!(Notifier::none().is_empty());
 }
 
+#[tokio::test]
+async fn rules_name_targets_by_our_arns_or_a_queues_own() {
+    let hook = Webhook::new("http://localhost/", None).unwrap();
+    let sqs = Sqs::new(
+        "https://sqs.eu-west-1.amazonaws.com/123456789012/orders",
+        None,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(
+        &dir.path().join("events.db"),
+        vec![
+            TargetConfig::new("hook", TargetKind::Webhook(hook)).unwrap(),
+            TargetConfig::new("orders", TargetKind::Sqs(sqs)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let resolved = |arn: &str| notifier.resolve(arn).map(|t| t.to_string());
+    assert_eq!(
+        resolved("arn:minio:sqs::hook:webhook").as_deref(),
+        Some("arn:teifs:sqs::hook:webhook")
+    );
+    for arn in [
+        "arn:teifs:sqs::orders:sqs",
+        "arn:aws:sqs:eu-west-1:123456789012:orders",
+    ] {
+        assert_eq!(
+            resolved(arn).as_deref(),
+            Some("arn:teifs:sqs::orders:sqs"),
+            "{arn}"
+        );
+    }
+    for unknown in [
+        "arn:teifs:sqs::other:webhook",
+        "arn:teifs:sqs::hook:sqs",
+        "arn:aws:sqs:eu-west-1:123456789012:other",
+        "arn:aws:sns:eu-west-1:123456789012:orders",
+        "",
+    ] {
+        assert_eq!(resolved(unknown), None, "{unknown}");
+    }
+    notifier.stop().await;
+}
+
 /// An event as the server queues it: `name` on `BUCKET/KEY`.
 pub(crate) fn message(name: &str, key: &str) -> Vec<u8> {
     let (bucket, object) = key.split_once('/').unwrap();

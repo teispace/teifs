@@ -522,3 +522,69 @@ async fn lifecycle_expirations_are_sent() {
     assert_eq!(version(2), version(0), "the marker made is the one removed");
     assert_eq!(sent[0].records[0].user_identity.principal_id, "");
 }
+
+/// A rule may name an SQS queue by its own ARN, as on S3: it gets S3's test event and
+/// each event as S3 sends it, and the rule reads back as it was written.
+#[tokio::test]
+async fn rules_name_sqs_queues_by_their_aws_arns() {
+    use teifs_notify::testing::AwsServer;
+    use teifs_server::{AwsCredentials, Sqs};
+    let aws = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let mut sqs = Sqs::new(
+        &format!("{}/123456789012/orders", aws.url()),
+        Some("eu-west-1"),
+    )
+    .unwrap();
+    sqs.credentials = Some(AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: "s3cret".to_owned().into(),
+        session_token: None,
+    });
+    let target = TargetConfig::new("orders", TargetKind::Sqs(sqs)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    let arn = "arn:aws:sqs:eu-west-1:123456789012:orders";
+    let rule = |arn: &str| {
+        QueueConfiguration::builder()
+            .queue_arn(arn)
+            .events(Event::from("s3:ObjectCreated:*"))
+            .build()
+            .unwrap()
+    };
+    configure(&s3, vec![rule(arn)]).await.unwrap();
+    assert_eq!(
+        configure(&s3, vec![rule("arn:aws:sqs:eu-west-1:123456789012:other")])
+            .await
+            .unwrap_err(),
+        "InvalidArgument"
+    );
+    let read = s3
+        .get_bucket_notification_configuration()
+        .bucket("bkt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.queue_configurations()[0].queue_arn(), arn);
+
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let requests = aws.requests(2).await;
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|r| {
+            let sent: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+            serde_json::from_str(sent["MessageBody"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(bodies[0]["Event"], "s3:TestEvent");
+    let record = &bodies[1]["Records"][0];
+    assert_eq!(record["eventName"], "ObjectCreated:Put");
+    assert_eq!(record["s3"]["object"]["key"], "a.txt");
+    assert!(bodies[1].get("EventName").is_none(), "no MinIO envelope");
+}

@@ -158,7 +158,7 @@ impl Events {
         let mut queued = Vec::new();
         for object in &objects {
             for rule in config.matching(&event, &object.key) {
-                let Some(arn) = rule.target() else {
+                let Some(arn) = self.notifier.resolve(&rule.arn) else {
                     continue;
                 };
                 let message = EventMessage {

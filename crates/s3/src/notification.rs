@@ -4,11 +4,11 @@
 use s3s::{S3Result, dto, s3_error};
 use teifs_types::notify::{DestinationKind, NotificationConfig, NotificationRule, TargetArn};
 
-/// The rules a configuration gives, checked, with `known` saying which targets exist.
+/// The rules a configuration gives, checked, with `resolve` giving the target an ARN names.
 /// A rule without an id gets one, as on S3.
 pub(crate) fn from_dto(
     config: dto::NotificationConfiguration,
-    known: impl Fn(&TargetArn) -> bool,
+    resolve: impl Fn(&str) -> Option<TargetArn>,
 ) -> S3Result<NotificationConfig> {
     if config.event_bridge_configuration.is_some() {
         return Err(s3_error!(
@@ -46,7 +46,7 @@ pub(crate) fn from_dto(
     }
     let config = NotificationConfig { rules };
     config
-        .check(known)
+        .check(resolve)
         .map_err(|err| s3_error!(InvalidArgument, "{err}"))?;
     Ok(config)
 }
@@ -169,19 +169,15 @@ fn filter(rule: &NotificationRule) -> Option<dto::NotificationConfigurationFilte
 pub(crate) fn new_targets(
     config: &NotificationConfig,
     before: Option<&NotificationConfig>,
+    resolve: impl Fn(&str) -> Option<TargetArn>,
 ) -> Vec<TargetArn> {
     let old: Vec<TargetArn> = before
-        .map(|b| {
-            b.rules
-                .iter()
-                .filter_map(NotificationRule::target)
-                .collect()
-        })
+        .map(|b| b.rules.iter().filter_map(|r| resolve(&r.arn)).collect())
         .unwrap_or_default();
     let mut new: Vec<TargetArn> = config
         .rules
         .iter()
-        .filter_map(NotificationRule::target)
+        .filter_map(|r| resolve(&r.arn))
         .filter(|arn| !old.contains(arn))
         .collect();
     new.sort();
@@ -227,8 +223,8 @@ mod tests {
         }
     }
 
-    fn known(arn: &TargetArn) -> bool {
-        arn.id == "primary"
+    fn known(arn: &str) -> Option<TargetArn> {
+        TargetArn::parse(arn).filter(|t| t.id == "primary")
     }
 
     fn code(result: S3Result<NotificationConfig>) -> String {
@@ -282,7 +278,7 @@ mod tests {
         ]);
         assert_eq!(code(from_dto(overlapping, known)), "InvalidArgument");
         let unknown = config(vec![queue(None, &[])]);
-        assert_eq!(code(from_dto(unknown, |_| false)), "InvalidArgument");
+        assert_eq!(code(from_dto(unknown, |_| None)), "InvalidArgument");
         let bridge = dto::NotificationConfiguration {
             event_bridge_configuration: Some(dto::EventBridgeConfiguration {}),
             ..Default::default()
@@ -300,11 +296,17 @@ mod tests {
         other.prefix = Some("b/".into());
         two.rules.push(other);
         let arn = |s: &str| TargetArn::parse(s).unwrap();
-        assert_eq!(new_targets(&one, None), [arn(ARN)]);
+        let any = TargetArn::parse;
+        assert_eq!(new_targets(&one, None, any), [arn(ARN)]);
         assert_eq!(
-            new_targets(&two, Some(&one)),
+            new_targets(&two, Some(&one), any),
             [arn("arn:teifs:sqs::second:webhook")]
         );
-        assert!(new_targets(&one, Some(&two)).is_empty());
+        assert!(new_targets(&one, Some(&two), any).is_empty());
+        // A target named again by another of its ARNs isn't new.
+        let mut renamed = one.clone();
+        renamed.rules[0].arn = "arn:aws:sqs:us-east-1:123456789012:primary".into();
+        let aws = |s: &str| any(s).or_else(|| (s == renamed.rules[0].arn).then(|| arn(ARN)));
+        assert!(new_targets(&renamed, Some(&one), aws).is_empty());
     }
 }

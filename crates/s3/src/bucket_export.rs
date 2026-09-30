@@ -446,7 +446,7 @@ impl Import<'_> {
     async fn notifications(&self, value: &Value) -> S3Result<()> {
         let config: NotificationConfig = parse("notifications", value)?;
         config
-            .check(|arn| self.notifier.has(arn))
+            .check(|arn| self.notifier.resolve(arn))
             .map_err(|err| invalid(err.to_string()))?;
         self.store
             .set_bucket_notifications(self.bucket, Some(config))
