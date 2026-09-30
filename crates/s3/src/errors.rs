@@ -3,6 +3,37 @@
 use s3s::{S3Error, S3ErrorCode, StdError, s3_error, stream::upload_stream::UploadStreamError};
 use teifs_store::{NameError, StoreError};
 
+/// The S3 error for a store error about encryption keys; `None` for any other.
+fn encryption_error(err: &StoreError) -> Option<S3Error> {
+    Some(match err {
+        StoreError::CustomerKeyRequired => s3_error!(
+            InvalidRequest,
+            "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."
+        ),
+        StoreError::WrongCustomerKey => s3_error!(
+            InvalidRequest,
+            "The provided encryption parameters did not match the ones used originally to encrypt the object."
+        ),
+        StoreError::CustomerKeyNotApplicable => s3_error!(
+            InvalidRequest,
+            "The encryption parameters are not applicable to this object."
+        ),
+        StoreError::NoKms => s3_error!(
+            NotImplemented,
+            "encryption at rest needs a KMS, and none is configured"
+        ),
+        StoreError::Crypto(teifs_store::CryptoError::NoSuchKey(key)) => {
+            let mut err = S3Error::with_message(
+                S3ErrorCode::Custom("KMS.NotFoundException".into()),
+                format!("KMS key {key} doesn't exist"),
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            err
+        }
+        _ => return None,
+    })
+}
+
 /// Maps a store error to the S3 error a client expects.
 pub(crate) fn from_store(err: StoreError) -> S3Error {
     if err.is_storage_full() {
@@ -13,6 +44,9 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         );
         full.set_status_code(http::StatusCode::INSUFFICIENT_STORAGE);
         return full;
+    }
+    if let Some(err) = encryption_error(&err) {
+        return err;
     }
     match err {
         StoreError::NoSuchBucket => s3_error!(NoSuchBucket),
@@ -56,20 +90,12 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
             "Access Denied because object protected by object lock."
         ),
         StoreError::PreconditionFailed => s3_error!(PreconditionFailed),
+        StoreError::ChangedMeanwhile => s3_error!(
+            OperationAborted,
+            "A conflicting conditional operation is currently in progress against this resource. Please try again."
+        ),
         StoreError::AclsDisabled => crate::acl::not_supported(),
         StoreError::AclGrantsOthers => crate::acl::invalid_with_ownership(),
-        StoreError::CustomerKeyRequired => s3_error!(
-            InvalidRequest,
-            "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."
-        ),
-        StoreError::WrongCustomerKey => s3_error!(
-            InvalidRequest,
-            "The provided encryption parameters did not match the ones used originally to encrypt the object."
-        ),
-        StoreError::CustomerKeyNotApplicable => s3_error!(
-            InvalidRequest,
-            "The encryption parameters are not applicable to this object."
-        ),
         StoreError::IdempotencyMismatch => {
             let mut err = S3Error::with_message(
                 S3ErrorCode::Custom("IdempotencyParameterMismatch".into()),
@@ -78,18 +104,10 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
             err.set_status_code(http::StatusCode::BAD_REQUEST);
             err
         }
-        StoreError::NoKms => s3_error!(
-            NotImplemented,
-            "encryption at rest needs a KMS, and none is configured"
-        ),
-        StoreError::Crypto(teifs_store::CryptoError::NoSuchKey(key)) => {
-            let mut err = S3Error::with_message(
-                S3ErrorCode::Custom("KMS.NotFoundException".into()),
-                format!("KMS key {key} doesn't exist"),
-            );
-            err.set_status_code(http::StatusCode::BAD_REQUEST);
-            err
-        }
+        StoreError::CustomerKeyRequired
+        | StoreError::WrongCustomerKey
+        | StoreError::CustomerKeyNotApplicable
+        | StoreError::NoKms => unreachable!("answered by encryption_error"),
         err @ (StoreError::Io(_)
         | StoreError::Meta(_)
         | StoreError::StorageFull

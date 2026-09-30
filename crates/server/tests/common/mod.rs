@@ -144,3 +144,35 @@ macro_rules! in_both_layouts {
         }
     )*};
 }
+
+/// A Signature Version 2 presigned link for `method` on `path` (with its query, if any),
+/// signed over `resource`, as boto3 makes by default.
+#[allow(dead_code, reason = "not every test file signs with Signature V2")]
+pub fn sig_v2_link(server: &Server, method: &str, path: &str, resource: &str) -> String {
+    use aws_lc_rs::hmac;
+    use base64::Engine as _;
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    let signed = hmac::sign(
+        &hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, SECRET_KEY.as_bytes()),
+        format!("{method}\n\n\n{expires}\n{resource}").as_bytes(),
+    );
+    let signature = base64::engine::general_purpose::STANDARD.encode(signed.as_ref());
+    let signature: String = signature
+        .bytes()
+        .map(|b| match b {
+            b'+' => "%2B".to_owned(),
+            b'/' => "%2F".to_owned(),
+            b'=' => "%3D".to_owned(),
+            b => char::from(b).to_string(),
+        })
+        .collect();
+    let join = if path.contains('?') { '&' } else { '?' };
+    format!(
+        "{}{path}{join}AWSAccessKeyId={ACCESS_KEY}&Expires={expires}&Signature={signature}",
+        server.endpoint
+    )
+}

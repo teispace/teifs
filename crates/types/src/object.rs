@@ -159,6 +159,8 @@ pub struct SseInfo {
     pub kms_key: Option<String>,
     /// The base64 MD5 of the customer's key (SSE-C), as S3 echoes it.
     pub customer_key_md5: Option<String>,
+    /// Whether an S3 Bucket Key is used for it (SSE-KMS).
+    pub bucket_key: bool,
 }
 
 /// One part of an object uploaded in parts.

@@ -82,6 +82,9 @@ pub enum StoreError {
     /// An `If-Match` / `If-None-Match` condition wasn't met.
     #[error("the precondition wasn't met")]
     PreconditionFailed,
+    /// The object kept changing while it was being changed: trying again may work.
+    #[error("the object changed while it was being changed; try again")]
+    ChangedMeanwhile,
     /// The drive was formatted by a newer TeiFS.
     #[error(
         "this drive was formatted by a newer TeiFS (format {found}); upgrade TeiFS, or restore a backup made by this version"

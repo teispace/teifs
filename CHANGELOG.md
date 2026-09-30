@@ -46,6 +46,12 @@ behaviour; the on-disk format is always upgraded automatically.
   the rules through the same checks as requests, so an object written again meanwhile
   and a version Object Lock protects stay. Transitions to other storage classes are
   refused (`InvalidStorageClass`). 20 more tests of the s3-tests suite pass.
+- UpdateObjectEncryption: an SSE-S3 or SSE-KMS object (or one version of it) moves to
+  SSE-KMS under another key in place, by sealing its data key again: its data, ETag,
+  Last-Modified and checksums stay. With AWS's rules: a full KMS key ARN, Signature V4,
+  `s3:UpdateObjectEncryption`, nothing for unencrypted, SSE-C or Object Lock-protected
+  versions. Objects report `x-amz-server-side-encryption-bucket-key-enabled` when the
+  update asked for an S3 Bucket Key.
 - Lifecycle rules from the command line, with mc's options: `teifs ilm rule add`
   (`--prefix`, `--tags`, `--size-gt`, `--size-lt`, `--expire-days`, `--expire-date`,
   `--expire-delete-marker`, `--noncurrent-expire-days`, `--noncurrent-expire-newer`,

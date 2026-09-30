@@ -229,7 +229,7 @@ location / {
 | Area | Supported |
 |---|---|
 | Buckets | list, create, head, delete, location, tags, CORS, encryption settings, versioning |
-| Objects | put, browser uploads (`POST` with a signed form and policy), get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags) |
+| Objects | put, browser uploads (`POST` with a signed form and policy), get and head (ranges, by part number, conditional requests, response overrides), attributes, tags, rename, delete (conditional), delete many, copy (keep or replace metadata and tags), changing an object's encryption to another KMS key in place (UpdateObjectEncryption) |
 | Versions | versioning enabled or suspended, every version readable, taggable and deletable by id, delete markers, ListObjectVersions, restoring a version by copying it |
 | Object Lock | buckets created with it or given it later, default retention in days or years, governance and compliance retention and legal holds per version (set on writes, copies, uploads in parts, or later), governance bypassed only with `s3:BypassGovernanceRetention` |
 | Lifecycle | rules by prefix, tags and size (alone or combined), expiring current versions by days or date, removing noncurrent versions by age and count and delete markers left alone, aborting old uploads; `x-amz-expiration` on writes and reads, abort dates on uploads; Object Lock always wins |

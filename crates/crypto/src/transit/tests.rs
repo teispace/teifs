@@ -185,6 +185,10 @@ async fn keys_are_listed_created_and_rotated() {
     assert_eq!(new.kms_version, 2);
     // Keys sealed by older versions still open.
     assert_eq!(kms.unseal(&old, &ctx("o")).await.unwrap(), key);
+    // And can be sealed again under the newest version.
+    let resealed = kms.seal(Some("photos"), &ctx("o"), &key).await.unwrap();
+    assert_eq!(resealed.kms_version, 2);
+    assert_eq!(kms.unseal(&resealed, &ctx("o")).await.unwrap(), key);
     let keys = kms.keys().await.unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!((keys[0].name.as_str(), keys[0].version), ("photos", 2));

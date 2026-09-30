@@ -106,6 +106,19 @@ modes.
 salt = none, info = `"teifs meta v1"`), a random 12-byte nonce stored in front, and no
 AAD. Each object's data key is unique, so random nonces here are never near their limit.
 
+## Changing an object's encryption
+
+UpdateObjectEncryption moves an SSE-S3 or SSE-KMS version to SSE-KMS under another key
+without touching its data: the data key is unsealed and sealed again under the new KMS
+key, with the same context (the object id, and the client's SSE-KMS pairs), so the
+packages, the ETag, the modification time and the checksums stay. Checksums an SSE-S3
+object kept in the clear (the object's and its parts') are sealed with the data key, as
+SSE-KMS keeps them. The new record replaces the old one only if the version's record is
+still the one read (else the object was written again meanwhile, and the request fails
+with `409 OperationAborted`). SSE-C and unencrypted objects can't be changed this way. The
+record is `crypt` in the index; `bucketKey: true` marks one reported as using an S3 Bucket
+Key.
+
 ## Versions
 
 | Version | Change |

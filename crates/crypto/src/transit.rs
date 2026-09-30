@@ -171,10 +171,14 @@ fn created_ms(data: &KeyData) -> i64 {
 
 #[async_trait::async_trait]
 impl Kms for TransitKms {
-    async fn generate(&self, key: Option<&str>, context: &Context) -> Result<(DataKey, SealedKey)> {
+    async fn seal(
+        &self,
+        key: Option<&str>,
+        context: &Context,
+        data_key: &DataKey,
+    ) -> Result<SealedKey> {
         let name = key.unwrap_or(DEFAULT_KEY);
         self.ensure_exists(name).await?;
-        let data_key = DataKey::generate();
         let body = json!({
             "plaintext": STANDARD.encode(data_key.bytes()),
             "associated_data": STANDARD.encode(context.canonical()),
@@ -188,17 +192,14 @@ impl Kms for TransitKms {
             .await?
             .ok_or_else(|| CryptoError::Kms("the transit engine returned nothing".into()))?;
         let version = version_of(&sealed.ciphertext)?;
-        Ok((
-            data_key,
-            SealedKey {
-                version: 1,
-                provider: TRANSIT.to_owned(),
-                kms_key: name.to_owned(),
-                kms_version: version,
-                salt: Vec::new(),
-                sealed: sealed.ciphertext.into_bytes(),
-            },
-        ))
+        Ok(SealedKey {
+            version: 1,
+            provider: TRANSIT.to_owned(),
+            kms_key: name.to_owned(),
+            kms_version: version,
+            salt: Vec::new(),
+            sealed: sealed.ciphertext.into_bytes(),
+        })
     }
 
     async fn unseal(&self, sealed: &SealedKey, context: &Context) -> Result<DataKey> {

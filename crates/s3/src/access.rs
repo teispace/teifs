@@ -412,6 +412,12 @@ impl S3Access for Access {
             }
         };
         let operation = cx.s3_op().name();
+        if operation == "UpdateObjectEncryption" && signed && !is_sig_v4(cx) {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Requests that modify an object encryption configuration require AWS Signature Version 4. Modify the request to use AWS Signature Version 4, and then try again."
+            ));
+        }
         let path = posted.as_ref().unwrap_or_else(|| cx.s3_path());
         let source = source(operation, cx)?;
         let bucket_name = match path {

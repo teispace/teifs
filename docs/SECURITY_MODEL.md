@@ -309,7 +309,10 @@ comes only from the environment. SSE-C keys are never stored (only a salted HMAC
 them), are blocked on buckets by default, and are refused on plain HTTP (except on a
 server listening only on loopback, or with `--sse-c-over-http`) for every request that
 carries one, reads and copy sources included: one check in front of every operation
-(`crates/s3/src/cors.rs`, tested in `crates/server/tests/tls.rs`). Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
+(`crates/s3/src/cors.rs`, tested in `crates/server/tests/tls.rs`). Changing an
+object's encryption (UpdateObjectEncryption) only seals its data key again, needs
+`s3:UpdateObjectEncryption` and Signature V4, and is refused for a version Object Lock
+protects. Keys are wiped from memory when dropped. Tests prove no plaintext reaches the
 disk and tampered data fails to decrypt (`crates/store/src/sse_tests.rs`).
 
 ### 15. Browsers get only what a bucket's CORS rules grant

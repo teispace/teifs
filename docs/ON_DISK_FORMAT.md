@@ -109,6 +109,10 @@ size before encryption), then a footer:
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
 
+The footer records the object as it was written. Later changes (tags, retention, legal
+hold, an encryption update) are in the index only; an older sealed key in a footer still
+opens its data, because KMS key versions are never deleted.
+
 Each version has a data file of its own; a delete marker is a row without one, so
 markers are the one thing the files can't rebuild. Version ids are `null` or 32 hex
 digits (a UUIDv7); a key's versions are ordered by `seq`, not by id, and exactly one

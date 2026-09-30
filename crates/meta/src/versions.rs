@@ -340,6 +340,35 @@ impl Index {
         Ok(())
     }
 
+    /// Replaces a version's encryption record, attributes and parts if its record is
+    /// still `old_crypt` (a write since changes it); whether it was.
+    pub fn replace_version_crypt(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        version_id: &str,
+        old_crypt: &str,
+        new: (&str, &ObjectAttrs, Option<&str>),
+    ) -> Result<bool> {
+        let (crypt, attrs, parts) = new;
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE object_versions SET crypt = ?5, attrs = ?6, parts = ?7
+                 WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3 AND crypt = ?4",
+            )?
+            .execute(params![
+                bucket_id,
+                key.as_bytes(),
+                version_id,
+                old_crypt,
+                crypt,
+                attrs_to_json(attrs),
+                parts
+            ])?;
+        Ok(changed == 1)
+    }
+
     /// Forgets every version in a bucket (it's being deleted and has none left that
     /// matter), queuing their data files.
     pub fn forget_bucket_versions(&self, bucket_id: &str, now_ms: i64) -> Result<Vec<String>> {
@@ -610,6 +639,46 @@ mod tests {
         assert!(index.latest_version("b1", "b").unwrap().is_none());
         index.drop_garbage("o3").unwrap();
         assert!(!index.bucket_has_versions("b1").unwrap());
+    }
+
+    #[test]
+    fn encryption_is_replaced_only_if_unchanged() {
+        let (_dir, index) = index();
+        let sealed = VersionRow {
+            crypt: Some("old".into()),
+            ..row("a", "o1")
+        };
+        index.put_version(&sealed, 1).unwrap();
+        let attrs = ObjectAttrs {
+            content_type: Some("text/plain".into()),
+            ..ObjectAttrs::default()
+        };
+        let new = ("new", &attrs, Some("[]"));
+        assert!(
+            !index
+                .replace_version_crypt("b1", "a", NULL_VERSION, "other", new)
+                .unwrap()
+        );
+        assert!(
+            index
+                .replace_version_crypt("b1", "a", NULL_VERSION, "old", new)
+                .unwrap()
+        );
+        let got = index.latest_version("b1", "a").unwrap().unwrap();
+        assert_eq!(
+            (
+                got.crypt.as_deref(),
+                got.parts.as_deref(),
+                got.attrs.content_type.as_deref()
+            ),
+            (Some("new"), Some("[]"), Some("text/plain"))
+        );
+        // Done once: the old record is gone.
+        assert!(
+            !index
+                .replace_version_crypt("b1", "a", NULL_VERSION, "old", new)
+                .unwrap()
+        );
     }
 
     #[test]

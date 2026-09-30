@@ -5,7 +5,10 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use md5::{Digest, Md5};
-use teifs_types::SseMode;
+use teifs_crypto::DEFAULT_KEY;
+
+use crate::{objects::crypt_of, sse::Resealed};
+use teifs_types::{LockMode, SseMode};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 
@@ -573,4 +576,234 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
             );
         }
     }
+}
+
+/// An SSE-S3 object uploaded in one part, with checksums for the part and the whole.
+async fn sse_s3_upload(drive: &Drive, key: &str, bytes: &[u8]) -> ObjectInfo {
+    let store = &drive.store;
+    let upload = store
+        .create_upload(
+            "vault",
+            key,
+            ObjectAttrs::default(),
+            None,
+            &Encryption::S3,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut staged = store.stage_part(&upload.id, 1, None).await.unwrap();
+    staged.write(bytes).await.unwrap();
+    let part = store
+        .put_part(
+            &upload.id,
+            1,
+            staged,
+            [("SHA256".into(), "part-sum".into())].into(),
+        )
+        .await
+        .unwrap();
+    store
+        .complete(
+            &upload.id,
+            vec![(1, part.etag)],
+            Precondition::default(),
+            CompleteWith {
+                checksums: [("SHA256".into(), "whole-sum".into())].into(),
+                checksum_type: Some(teifs_types::ChecksumType::Composite),
+                customer: None,
+            },
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn encryption_is_updated_by_sealing_the_data_key_again() {
+    let drive = drive().await;
+    drive.kms.create_key("photos").await.unwrap();
+    let bytes = pattern(100_000);
+    let before = sse_s3_upload(&drive, "k", &bytes).await;
+    assert_eq!(before.sse.as_ref().unwrap().mode, SseMode::S3);
+    let stored: Vec<Vec<u8>> = data_files(&drive)
+        .iter()
+        .map(|p| fs::read(p).unwrap())
+        .collect();
+
+    drive
+        .store
+        .update_encryption("vault", "k", None, "photos", true)
+        .await
+        .unwrap();
+    // The data isn't touched; the ETag and the modification time stay.
+    let after: Vec<Vec<u8>> = data_files(&drive)
+        .iter()
+        .map(|p| fs::read(p).unwrap())
+        .collect();
+    assert_eq!(after, stored);
+    let head = drive.store.head("vault", "k").await.unwrap();
+    assert_eq!((&head.etag, head.modified), (&before.etag, before.modified));
+    let sse = head.sse.unwrap();
+    assert_eq!(
+        (sse.mode, sse.kms_key.as_deref(), sse.bucket_key),
+        (SseMode::Kms, Some("photos"), true)
+    );
+    // SSE-KMS keeps checksums sealed: shown only to a read.
+    assert!(head.attrs.checksums.is_empty() && head.parts[0].checksums.is_empty());
+    let (read, _) = drive.store.read("vault", "k").await.unwrap();
+    assert_eq!(read.attrs.checksums["SHA256"], "whole-sum");
+    assert_eq!(read.parts[0].checksums["SHA256"], "part-sum");
+    assert_eq!(get(&drive.store, "k", None).await.unwrap(), bytes);
+
+    // From one KMS key to another; checksums aren't sealed twice.
+    drive
+        .store
+        .update_encryption("vault", "k", None, DEFAULT_KEY, false)
+        .await
+        .unwrap();
+    let (read, _) = drive.store.read("vault", "k").await.unwrap();
+    let sse = read.sse.unwrap();
+    assert_eq!(
+        (sse.kms_key.as_deref(), sse.bucket_key),
+        (Some(DEFAULT_KEY), false)
+    );
+    assert_eq!(read.attrs.checksums["SHA256"], "whole-sum");
+    assert_eq!(read.parts[0].checksums["SHA256"], "part-sum");
+    assert_eq!(get(&drive.store, "k", None).await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn encryption_updates_are_refused_as_s3_refuses_them() {
+    let drive = drive().await;
+    let store = &drive.store;
+    let update = |key: &'static str, kms_key: &'static str| {
+        store.update_encryption("vault", key, None, kms_key, false)
+    };
+    put(store, "plain", b"p", &Encryption::None).await;
+    put(store, "ssec", b"c", &Encryption::Customer(customer(3))).await;
+    put(store, "s3", b"s", &Encryption::S3).await;
+    assert!(
+        matches!(update("plain", DEFAULT_KEY).await, Err(StoreError::InvalidRequest(m)) if m.contains("unencrypted"))
+    );
+    assert!(
+        matches!(update("ssec", DEFAULT_KEY).await, Err(StoreError::InvalidRequest(m)) if m.contains("SSE-C"))
+    );
+    assert!(matches!(
+        update("gone", DEFAULT_KEY).await,
+        Err(StoreError::NoSuchKey)
+    ));
+    // An unknown key changes nothing.
+    assert!(matches!(
+        update("s3", "missing").await,
+        Err(StoreError::Crypto(CryptoError::NoSuchKey(_)))
+    ));
+    let head = store.head("vault", "s3").await.unwrap();
+    assert_eq!(head.sse.unwrap().mode, SseMode::S3);
+    // Folder buckets keep plain files.
+    store.create_bucket("files", Layout::Folder).await.unwrap();
+    assert!(matches!(
+        store
+            .update_encryption("files", "a", None, DEFAULT_KEY, false)
+            .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+}
+
+#[tokio::test]
+async fn encryption_updates_name_versions_and_respect_object_lock() {
+    let drive = drive().await;
+    let store = &drive.store;
+    store
+        .set_bucket_versioning("vault", Versioning::Enabled)
+        .await
+        .unwrap();
+    store
+        .set_bucket_object_lock(
+            "vault",
+            ObjectLock {
+                default_retention: None,
+            },
+        )
+        .await
+        .unwrap();
+    let first = put(store, "k", b"one", &Encryption::S3).await;
+    put(store, "k", b"two", &Encryption::S3).await;
+    let old = first.version_id.unwrap();
+    // A version by its id; the current one stays as it was.
+    store
+        .update_encryption("vault", "k", Some(&old), DEFAULT_KEY, false)
+        .await
+        .unwrap();
+    let mode = |info: ObjectInfo| info.sse.unwrap().mode;
+    assert_eq!(
+        mode(store.head_version("vault", "k", Some(&old)).await.unwrap()),
+        SseMode::Kms
+    );
+    assert_eq!(mode(store.head("vault", "k").await.unwrap()), SseMode::S3);
+
+    // A legal hold or a retention of either mode refuses it.
+    store
+        .set_legal_hold("vault", "k", None, true)
+        .await
+        .unwrap();
+    let update = || store.update_encryption("vault", "k", None, DEFAULT_KEY, false);
+    assert!(matches!(update().await, Err(StoreError::ObjectLocked)));
+    store
+        .set_legal_hold("vault", "k", None, false)
+        .await
+        .unwrap();
+    let until = now_ms() + 60_000;
+    let governance = Retention {
+        mode: LockMode::Governance,
+        until_ms: until,
+    };
+    store
+        .set_retention("vault", "k", None, Some(governance), false)
+        .await
+        .unwrap();
+    assert!(matches!(update().await, Err(StoreError::ObjectLocked)));
+    store
+        .set_retention("vault", "k", None, None, true)
+        .await
+        .unwrap();
+    update().await.unwrap();
+    assert_eq!(mode(store.head("vault", "k").await.unwrap()), SseMode::Kms);
+    // A delete marker has no encryption to update.
+    store.delete("vault", "k").await.unwrap();
+    assert!(matches!(
+        update().await,
+        Err(StoreError::DeleteMarker { .. })
+    ));
+}
+
+#[tokio::test]
+async fn an_object_written_meanwhile_keeps_its_own_key() {
+    let drive = drive().await;
+    let store = &drive.store;
+    put(store, "k", b"old", &Encryption::S3).await;
+    // Read, sealed again; then the object is written again before the record is.
+    let (bucket_id, row) = store.updatable_row("vault", "k", None).await.unwrap();
+    let crypt = crypt_of(&row).unwrap().unwrap();
+    let context = crypt.context(&store.inner.format.drive, &bucket_id);
+    let data_key = drive.kms.unseal(&crypt.sealed, &context).await.unwrap();
+    let sealed = drive.kms.seal(None, &context, &data_key).await.unwrap();
+    put(store, "k", b"new", &Encryption::S3).await;
+    let new = Resealed {
+        crypt,
+        sealed,
+        bucket_key: false,
+        data_key,
+    };
+    assert!(matches!(
+        store.write_resealed("vault", "k", row, new).await,
+        Err(StoreError::ChangedMeanwhile)
+    ));
+    // The new object keeps its own key; trying again starts from what's there now.
+    assert_eq!(get(store, "k", None).await.unwrap(), b"new");
+    store
+        .update_encryption("vault", "k", None, DEFAULT_KEY, false)
+        .await
+        .unwrap();
+    assert_eq!(get(store, "k", None).await.unwrap(), b"new");
 }

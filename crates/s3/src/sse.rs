@@ -135,6 +135,51 @@ pub(crate) fn kms_key_name(id: &str) -> String {
         .to_owned()
 }
 
+/// What `UpdateObjectEncryption` asks for: the KMS key (by name) and whether to report an
+/// S3 Bucket Key. S3 takes SSE-KMS only, with a key's full ARN.
+pub(crate) fn update_target(encryption: dto::ObjectEncryption) -> S3Result<(String, bool)> {
+    let dto::ObjectEncryption::SSEKMS(kms) = encryption else {
+        return Err(s3_error!(
+            InvalidRequest,
+            "Requests that modify an object encryption configuration require a valid new encryption type. Valid values are SSEKMS."
+        ));
+    };
+    let name = key_arn_name(&kms.kms_key_arn).ok_or_else(|| {
+        s3_error!(
+            InvalidRequest,
+            "Requests that modify an object's encryption type to SSE-KMS require a valid AWS KMS key Amazon Resource Name (ARN)."
+        )
+    })?;
+    Ok((name.to_owned(), kms.bucket_key_enabled.unwrap_or(false)))
+}
+
+/// The key name in a KMS key ARN, `arn:aws[-a-z0-9]*:kms:[-a-z0-9]*:<12 digits>:key/<name>`
+/// (as S3 requires it: no alias, no bare key id).
+fn key_arn_name(arn: &str) -> Option<&str> {
+    let mut fields = arn.splitn(6, ':');
+    let (Some("arn"), Some(partition), Some("kms"), Some(region), Some(account), Some(rest)) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return None;
+    };
+    let lower = |s: &str| {
+        s.bytes()
+            .all(|b| b == b'-' || b.is_ascii_lowercase() || b.is_ascii_digit())
+    };
+    let name = rest.strip_prefix("key/").filter(|n| !n.is_empty())?;
+    (partition.starts_with("aws")
+        && lower(partition)
+        && lower(region)
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit()))
+    .then_some(name)
+}
+
 /// `x-amz-server-side-encryption-context`: base64 of a JSON object of strings.
 fn kms_context(header: Option<&str>) -> S3Result<BTreeMap<String, String>> {
     let Some(header) = header else {
@@ -156,6 +201,8 @@ pub(crate) struct Headers {
     pub kms_key: Option<String>,
     pub customer_algorithm: Option<String>,
     pub customer_key_md5: Option<String>,
+    /// `x-amz-server-side-encryption-bucket-key-enabled`, sent only when true.
+    pub bucket_key: Option<bool>,
 }
 
 pub(crate) fn headers(info: Option<&SseInfo>) -> Headers {
@@ -165,6 +212,7 @@ pub(crate) fn headers(info: Option<&SseInfo>) -> Headers {
             kms_key: None,
             customer_algorithm: None,
             customer_key_md5: None,
+            bucket_key: None,
         };
     };
     match info.mode {
@@ -175,6 +223,7 @@ pub(crate) fn headers(info: Option<&SseInfo>) -> Headers {
             kms_key: None,
             customer_algorithm: None,
             customer_key_md5: None,
+            bucket_key: None,
         },
         SseMode::Kms => Headers {
             sse: Some(dto::ServerSideEncryption::from_static(
@@ -183,12 +232,14 @@ pub(crate) fn headers(info: Option<&SseInfo>) -> Headers {
             kms_key: info.kms_key.clone(),
             customer_algorithm: None,
             customer_key_md5: None,
+            bucket_key: info.bucket_key.then_some(true),
         },
         SseMode::Customer => Headers {
             sse: None,
             kms_key: None,
             customer_algorithm: Some("AES256".to_owned()),
             customer_key_md5: info.customer_key_md5.clone(),
+            bucket_key: None,
         },
     }
 }
@@ -201,6 +252,7 @@ macro_rules! set_sse {
         $out.ssekms_key_id = h.kms_key;
         $out.sse_customer_algorithm = h.customer_algorithm;
         $out.sse_customer_key_md5 = h.customer_key_md5;
+        $out.bucket_key_enabled = h.bucket_key;
     }};
 }
 pub(crate) use set_sse;
@@ -221,6 +273,36 @@ mod tests {
             kms_key: None,
             kms_context: None,
             customer: None,
+        }
+    }
+
+    #[test]
+    fn updates_name_a_kms_key_by_its_full_arn() {
+        let target = |arn: &str, bucket_key| {
+            update_target(dto::ObjectEncryption::SSEKMS(dto::SSEKMSEncryption {
+                kms_key_arn: arn.to_owned(),
+                bucket_key_enabled: bucket_key,
+            }))
+        };
+        assert_eq!(
+            target("arn:aws:kms:us-east-1:111122223333:key/photos", Some(true)).unwrap(),
+            ("photos".to_owned(), true)
+        );
+        assert_eq!(
+            target("arn:aws-cn:kms:cn-north-1:000000000000:key/a:b", None).unwrap(),
+            ("a:b".to_owned(), false)
+        );
+        for bad in [
+            "photos",
+            "arn:aws:kms:us-east-1:111122223333:alias/photos",
+            "arn:aws:kms:us-east-1:1111:key/photos",
+            "arn:aws:kms:us-east-1:11112222333a:key/photos",
+            "arn:aws:s3:us-east-1:111122223333:key/photos",
+            "arn:aws:kms:us-east-1:111122223333:key/",
+            "arn:gcp:kms:us-east-1:111122223333:key/photos",
+            "arn:aws:kms:US-EAST-1:111122223333:key/photos",
+        ] {
+            assert!(target(bad, None).is_err(), "{bad}");
         }
     }
 

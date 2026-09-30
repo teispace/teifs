@@ -1838,37 +1838,6 @@ async fn folder_buckets_refuse_names_other_systems_cant_hold() {
     assert_eq!(device.unwrap_err().code(), Some("InvalidBucketName"));
 }
 
-/// A Signature Version 2 presigned GET link to `path`, signed over `resource`, as boto3
-/// makes by default.
-fn sig_v2_link(server: &common::Server, path: &str, resource: &str) -> String {
-    use aws_lc_rs::hmac;
-    use base64::Engine as _;
-    let expires = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 60;
-    let signed = hmac::sign(
-        &hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, SECRET_KEY.as_bytes()),
-        format!("GET\n\n\n{expires}\n{resource}").as_bytes(),
-    );
-    let signature = base64::engine::general_purpose::STANDARD.encode(signed.as_ref());
-    let signature: String = signature
-        .bytes()
-        .map(|b| match b {
-            b'+' => "%2B".to_owned(),
-            b'/' => "%2F".to_owned(),
-            b'=' => "%3D".to_owned(),
-            b => char::from(b).to_string(),
-        })
-        .collect();
-    format!(
-        "{}{path}?AWSAccessKeyId={}&Expires={expires}&Signature={signature}",
-        server.endpoint,
-        common::ACCESS_KEY
-    )
-}
-
 #[tokio::test]
 async fn signature_v2_is_refused_unless_allowed() {
     for allowed in [false, true] {
@@ -1883,7 +1852,7 @@ async fn signature_v2_is_refused_unless_allowed() {
             .await
             .unwrap();
         let object = "/legacy/v2.txt";
-        let answer = reqwest::get(sig_v2_link(&server, object, object))
+        let answer = reqwest::get(common::sig_v2_link(&server, "GET", object, object))
             .await
             .unwrap();
         if allowed {
@@ -1892,7 +1861,7 @@ async fn signature_v2_is_refused_unless_allowed() {
             // A bucket's resource is `/bucket/`, whether its path ends in `/` or not, as
             // botocore signs it.
             for path in ["/legacy", "/legacy/"] {
-                let answer = reqwest::get(sig_v2_link(&server, path, "/legacy/"))
+                let answer = reqwest::get(common::sig_v2_link(&server, "GET", path, "/legacy/"))
                     .await
                     .unwrap();
                 assert_eq!(answer.status(), 200, "{path}");

@@ -34,8 +34,21 @@ pub struct KeyInfo {
 /// OpenBao) implement the same trait.
 #[async_trait::async_trait]
 pub trait Kms: Send + Sync + std::fmt::Debug {
+    /// Seals `data_key` under the newest version of `key` (the default key when `None`),
+    /// bound to `context`.
+    async fn seal(
+        &self,
+        key: Option<&str>,
+        context: &Context,
+        data_key: &DataKey,
+    ) -> Result<SealedKey>;
+
     /// A new data key and its seal under `key` (the default key when `None`).
-    async fn generate(&self, key: Option<&str>, context: &Context) -> Result<(DataKey, SealedKey)>;
+    async fn generate(&self, key: Option<&str>, context: &Context) -> Result<(DataKey, SealedKey)> {
+        let data_key = DataKey::generate();
+        let sealed = self.seal(key, context, &data_key).await?;
+        Ok((data_key, sealed))
+    }
 
     /// The data key inside `sealed`, if `context` is the one it was sealed with.
     async fn unseal(&self, sealed: &SealedKey, context: &Context) -> Result<DataKey>;
@@ -123,16 +136,25 @@ impl LocalKms {
 
 #[async_trait::async_trait]
 impl Kms for LocalKms {
-    async fn generate(&self, key: Option<&str>, context: &Context) -> Result<(DataKey, SealedKey)> {
+    async fn seal(
+        &self,
+        key: Option<&str>,
+        context: &Context,
+        data_key: &DataKey,
+    ) -> Result<SealedKey> {
         let name = key.unwrap_or(DEFAULT_KEY);
         self.with_keys(|keys| {
             let newest = keys
                 .get(name)
                 .and_then(|v| v.last())
                 .ok_or_else(|| CryptoError::NoSuchKey(name.to_owned()))?;
-            let data_key = DataKey::generate();
-            let sealed = seal(&newest.material, context, &data_key, name, newest.version);
-            Ok((data_key, sealed))
+            Ok(seal(
+                &newest.material,
+                context,
+                data_key,
+                name,
+                newest.version,
+            ))
         })
     }
 
@@ -354,6 +376,18 @@ mod tests {
         assert!(kms.create_key("bad name!").await.is_err());
         let (key, sealed) = kms.generate(Some("photos"), &ctx()).await.unwrap();
         assert_eq!(kms.unseal(&sealed, &ctx()).await.unwrap(), key);
+        // An existing data key sealed again, under another key and its newest version.
+        kms.rotate_key(DEFAULT_KEY).await.unwrap();
+        let resealed = kms.seal(None, &ctx(), &key).await.unwrap();
+        assert_eq!(
+            (resealed.kms_key.as_str(), resealed.kms_version),
+            (DEFAULT_KEY, 2)
+        );
+        assert_eq!(kms.unseal(&resealed, &ctx()).await.unwrap(), key);
+        assert!(matches!(
+            kms.seal(Some("missing"), &ctx(), &key).await,
+            Err(CryptoError::NoSuchKey(_))
+        ));
         assert!(matches!(
             kms.generate(Some("missing"), &ctx()).await,
             Err(CryptoError::NoSuchKey(_))

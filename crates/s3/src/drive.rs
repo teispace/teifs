@@ -1823,6 +1823,20 @@ impl S3 for Drive {
         Ok(S3Response::new(dto::PutObjectLegalHoldOutput::default()))
     }
 
+    async fn update_object_encryption(
+        &self,
+        req: S3Request<dto::UpdateObjectEncryptionInput>,
+    ) -> S3Result<S3Response<dto::UpdateObjectEncryptionOutput>> {
+        let input = req.input;
+        let version_id = check_version(input.version_id.as_deref())?;
+        let (kms_key, bucket_key) = sse::update_target(input.object_encryption)?;
+        self.store
+            .update_encryption(&input.bucket, &input.key, version_id, &kms_key, bucket_key)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::UpdateObjectEncryptionOutput::default()))
+    }
+
     async fn get_bucket_cors(
         &self,
         req: S3Request<dto::GetBucketCorsInput>,

@@ -6,9 +6,16 @@ use std::collections::BTreeMap;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use teifs_crypto::{Context, CustomerKey, DEFAULT_KEY, DataKey, Kms, SealedKey};
+use teifs_meta::VersionRow;
 use teifs_types::{SseInfo, SseMode};
 
-use crate::{StoreError, error::Result};
+use crate::{
+    Bucket, Inner, Store, StoreError,
+    error::Result,
+    lock::check_removal,
+    now_ms,
+    objects::{PartsRecord, crypt_of},
+};
 
 /// The encryption a write asks for.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +54,9 @@ pub(crate) struct Crypt {
     /// SSE-KMS and SSE-C: the object's checksums, sealed with its data key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksums: Option<String>,
+    /// SSE-KMS: whether it's reported as using an S3 Bucket Key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bucket_key: bool,
 }
 
 /// What recognizes an SSE-C key without storing it.
@@ -78,6 +88,7 @@ impl Crypt {
             mode: self.mode,
             kms_key: (self.mode == SseMode::Kms).then(|| self.sealed.kms_key.clone()),
             customer_key_md5,
+            bucket_key: self.bucket_key,
         }
     }
 }
@@ -127,6 +138,7 @@ pub(crate) async fn new_key(
                     context: BTreeMap::new(),
                     customer: Some(check),
                     checksums: None,
+                    bucket_key: false,
                 },
             }));
         }
@@ -141,6 +153,7 @@ pub(crate) async fn new_key(
             context,
             customer: None,
             checksums: None,
+            bucket_key: false,
         },
     }))
 }
@@ -180,6 +193,141 @@ pub(crate) async fn data_key(
             let kms = kms.ok_or(StoreError::NoKms)?;
             Ok(kms.unseal(&crypt.sealed, &context).await?)
         }
+    }
+}
+
+const UNENCRYPTED: &str = "The UpdateObjectEncryption operation doesn't support unencrypted source objects. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.";
+const NOT_UPDATABLE: &str = "The UpdateObjectEncryption operation doesn't support source objects with the encryption type DSSE-KMS or SSE-C. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.";
+
+impl Store {
+    /// Seals the data key of a version of an object (`None`: the current one) under the
+    /// KMS key `kms_key`, as S3's `UpdateObjectEncryption` does: the data isn't touched,
+    /// and its ETag, modification time and checksums stay. For SSE-S3 and SSE-KMS
+    /// objects that Object Lock doesn't protect.
+    pub async fn update_encryption(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        kms_key: &str,
+        bucket_key: bool,
+    ) -> Result<()> {
+        let kms = self.kms().ok_or(StoreError::NoKms)?;
+        let (bucket_id, row) = self.updatable_row(bucket, key, version_id).await?;
+        let crypt = crypt_of(&row)?.ok_or(StoreError::CorruptMetadata)?;
+        let context = crypt.context(&self.inner.format.drive, &bucket_id);
+        let data_key = kms.unseal(&crypt.sealed, &context).await?;
+        let sealed = kms.seal(Some(kms_key), &context, &data_key).await?;
+        let new = Resealed {
+            crypt,
+            sealed,
+            bucket_key,
+            data_key,
+        };
+        self.write_resealed(bucket, key, row, new).await
+    }
+
+    /// Records `new` for the version `row` describes, if its record is still the one
+    /// `row` holds (else it was written again meanwhile, and the caller may try again)
+    /// and Object Lock doesn't protect it.
+    pub(crate) async fn write_resealed(
+        &self,
+        bucket: &str,
+        key: &str,
+        row: VersionRow,
+        new: Resealed,
+    ) -> Result<()> {
+        let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        self.blocking(move |inner| {
+            let conn = inner.lock();
+            let Bucket::Object(bucket) = inner.bucket(&bucket)? else {
+                return Err(StoreError::InvalidRequest(UNENCRYPTED));
+            };
+            let old = row.crypt.as_deref().ok_or(StoreError::CorruptMetadata)?;
+            let mut current = Inner::version_row(&conn, &bucket, &key, Some(&row.version_id))?;
+            check_removal(&current.attrs, false, now_ms())?;
+            let crypt = new.record(&mut current)?;
+            let replaced = conn.replace_version_crypt(
+                &bucket.id,
+                &key,
+                &current.version_id,
+                old,
+                (&crypt, &current.attrs, current.parts.as_deref()),
+            )?;
+            if replaced {
+                Ok(())
+            } else {
+                Err(StoreError::ChangedMeanwhile)
+            }
+        })
+        .await
+    }
+
+    /// The row of a version whose encryption may be updated, and its bucket's id.
+    pub(crate) async fn updatable_row(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<(String, VersionRow)> {
+        let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        let version_id = version_id.map(str::to_owned);
+        self.blocking(move |inner| {
+            let Bucket::Object(bucket) = inner.bucket(&bucket)? else {
+                // Folder buckets keep plain files.
+                return Err(StoreError::InvalidRequest(UNENCRYPTED));
+            };
+            let conn = inner.lock();
+            let row = Inner::version_row(&conn, &bucket, &key, version_id.as_deref())?;
+            match crypt_of(&row)? {
+                None => return Err(StoreError::InvalidRequest(UNENCRYPTED)),
+                Some(crypt) if crypt.mode == SseMode::Customer => {
+                    return Err(StoreError::InvalidRequest(NOT_UPDATABLE));
+                }
+                Some(_) => {}
+            }
+            Ok((bucket.id.clone(), row))
+        })
+        .await
+    }
+}
+
+/// An object's record once its data key is sealed again by a KMS key.
+pub(crate) struct Resealed {
+    /// The record it had.
+    pub crypt: Crypt,
+    /// The data key, sealed by the KMS key.
+    pub sealed: SealedKey,
+    pub bucket_key: bool,
+    pub data_key: DataKey,
+}
+
+impl Resealed {
+    /// The new record (JSON) of the version `row` describes: SSE-KMS, with checksums an
+    /// SSE-S3 object kept in the open now sealed (as SSE-KMS keeps them).
+    fn record(self, row: &mut VersionRow) -> Result<String> {
+        let was_s3 = self.crypt.mode == SseMode::S3;
+        let mut crypt = Crypt {
+            mode: SseMode::Kms,
+            sealed: self.sealed,
+            bucket_key: self.bucket_key,
+            ..self.crypt
+        };
+        if was_s3 {
+            if !row.attrs.checksums.is_empty() {
+                crypt.checksums = Some(seal_sums(&self.data_key, &row.attrs.checksums));
+                row.attrs.checksums.clear();
+            }
+            if let Some(json) = &row.parts {
+                let mut record = PartsRecord::parse(json)?;
+                record.checksums = std::mem::take(&mut record.checksums)
+                    .into_iter()
+                    .map(|sums| part_sums(Some(&self.data_key), sums))
+                    .collect();
+                row.parts = Some(record.to_json());
+            }
+        }
+        Ok(serde_json::to_string(&crypt).expect("crypt serializes"))
     }
 }
 
