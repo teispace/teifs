@@ -176,7 +176,7 @@ pub struct Restored {
 /// at `root`, which no process may have open. It must be of this drive, in its format,
 /// and intact. The metadata it replaces is moved to `.teifs/backups/pre-restore-<time>/`,
 /// never removed. Objects written since keep their bytes: folder buckets' files are
-/// indexed again when the drive is next served.
+/// indexed again when the drive is next served, object buckets' given back by a repair.
 pub fn restore(root: &Path, from: &Path) -> Result<Restored> {
     let system = root.join(crate::SYSTEM_DIR);
     let format = crate::format::read(&system)?;

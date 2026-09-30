@@ -75,6 +75,75 @@ struct Footer<'a> {
     version: Option<&'a str>,
 }
 
+/// A data file's footer as read back: what's needed to rebuild the version's row.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredFooter {
+    pub bucket: String,
+    pub key: String,
+    pub object: String,
+    pub size: u64,
+    pub etag: String,
+    pub created_ms: i64,
+    pub attrs: ObjectAttrs,
+    #[serde(default)]
+    pub crypt: Option<Crypt>,
+    #[serde(default)]
+    pub parts: Option<PartsRecord>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+impl StoredFooter {
+    /// The version's row, as it was when the file was written (tags, retention and
+    /// other changes since are only in the index).
+    pub(crate) fn row(self) -> VersionRow {
+        VersionRow {
+            bucket_id: self.bucket,
+            key: self.key,
+            version_id: self.version.unwrap_or_else(|| NULL_VERSION.to_owned()),
+            delete_marker: false,
+            object_id: Some(self.object),
+            size: self.size,
+            etag: self.etag,
+            modified_ms: self.created_ms,
+            attrs: self.attrs,
+            crypt: self
+                .crypt
+                .map(|c| serde_json::to_string(&c).expect("crypt serializes")),
+            parts: self.parts.map(|p| p.to_json()),
+            inline: None,
+            seq: 0,
+            latest: false,
+        }
+    }
+}
+
+/// The footer at the end of the data file at `path`; `None` when it has none that can
+/// be read (a file cut short, or not a data file).
+pub(crate) fn read_footer(path: &Path) -> io::Result<Option<StoredFooter>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let Some(json_end) = len.checked_sub(9) else {
+        return Ok(None);
+    };
+    let mut tail = [0u8; 9];
+    file.seek(SeekFrom::Start(json_end))?;
+    file.read_exact(&mut tail)?;
+    if &tail[5..] != MAGIC || tail[4] != FOOTER_VERSION {
+        return Ok(None);
+    }
+    let json_len = u64::from(u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]));
+    let Some(start) = json_end.checked_sub(json_len) else {
+        return Ok(None);
+    };
+    let mut json = vec![0u8; usize::try_from(json_len).map_err(io::Error::other)?];
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut json)?;
+    Ok(serde_json::from_slice(&json).ok())
+}
+
 /// A multipart object's parts (the row's `parts` column, JSON), in both layouts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PartsRecord {

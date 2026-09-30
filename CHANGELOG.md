@@ -103,6 +103,17 @@ behaviour; the on-disk format is always upgraded automatically.
   `teifs restore [DIR] --from FOLDER|SNAPSHOT` puts a backup or snapshot back on a drive
   no server has open, after checking it's of that drive and intact, keeping what it
   replaces.
+- `teifs repair [DIR] [--apply] [--forget-missing]` finds where a drive's metadata
+  and its files disagree, on a drive no server has open, and reports it; with
+  `--apply` it sets right what's safe to. Objects written after a restored snapshot
+  get their versions back from what each data file records, in their place among a
+  key's versions; a file a crash left behind after it was replaced, and upload folders
+  of no upload, are removed. Versions whose data file is missing are only forgotten
+  with `--forget-missing`, and files it can't tell apart safely, or folders of no
+  bucket, are reported and left alone. It refuses databases SQLite finds damaged, and
+  rebuilds a lost object index from the data files. Exit code 1 while problems are left.
+- Snapshots and backups failed on Windows ("Access is denied"): their copies are now
+  synced through a handle that may write.
 - Integrity scrubs: a running server reads every stored version back every 30 days
   (`--scrub-every`, or `never`) and checks it against what was recorded when it was
   written, its checksums (each part's too) and its ETag, with encrypted objects

@@ -99,6 +99,9 @@ pub enum StoreError {
     /// A snapshot can't be restored onto this drive.
     #[error("that snapshot can't be restored here: {0}")]
     BadSnapshot(String),
+    /// One of the drive's databases fails SQLite's check: a repair can't trust it.
+    #[error("the drive's {0} is damaged")]
+    DamagedDatabase(&'static str),
     /// The object is encrypted with a customer key (SSE-C) and the request has none.
     #[error("the object is encrypted with a customer-provided key; send that key")]
     CustomerKeyRequired,

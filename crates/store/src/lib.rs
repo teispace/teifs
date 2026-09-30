@@ -23,6 +23,7 @@ mod lock;
 mod multipart;
 mod objects;
 mod reconcile;
+mod repair;
 mod rewrap;
 mod settings;
 mod snapshots;
@@ -55,6 +56,7 @@ pub use lock::{
     DefaultRetention, MAX_RETENTION_DAYS, MAX_RETENTION_YEARS, ObjectLock, RetentionPeriod,
 };
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
+pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
 pub use rewrap::Rewrapped;
 pub use settings::{
     BucketAccess, BucketEncryption, CorsRule, DefaultEncryption, NewBucket, ObjectOwnership,

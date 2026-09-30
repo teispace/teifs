@@ -103,8 +103,8 @@ pub fn restore(args: &RestoreArgs) -> Result<(), error::Error> {
         },
     );
     ui::note(
-        "Objects written since keep their bytes: folder buckets' files are indexed again \
-         when the drive is next served.",
+        "Objects written since keep their bytes: `teifs repair --apply` gives object \
+         buckets' back, and folder buckets' files are indexed again when the drive is next served.",
     );
     Ok(())
 }

@@ -16,6 +16,7 @@ mod config;
 mod error;
 mod health;
 mod init;
+mod repair;
 mod sts;
 mod ui;
 mod units;
@@ -90,6 +91,10 @@ enum Command {
     /// its checksums and ETag, encrypted ones as they decrypt (the drive, while
     /// `teifs serve` isn't using it). Exit code 1 when something is damaged.
     Verify(verify::VerifyArgs),
+    /// Find where the drive's metadata and its files disagree (after restoring an older
+    /// snapshot, say) and, with --apply, set right what's safe to (the drive, while
+    /// `teifs serve` isn't using it). Exit code 1 when problems are left.
+    Repair(repair::RepairArgs),
     #[command(flatten)]
     Client(client::Command),
     /// Manage a TeiFS server through its admin API: its info and configuration, its
@@ -478,6 +483,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Bucket { action } => Ok(bucket(action).await?),
         Command::Key { action } => Ok(key(action).await?),
         Command::Verify(args) => verify::verify(args).await,
+        Command::Repair(args) => repair::repair(args).await,
         Command::Backup(args) => backup::backup(args).await,
         Command::Restore(args) => backup::restore(&args),
         Command::Client(command) => client::run(command).await,

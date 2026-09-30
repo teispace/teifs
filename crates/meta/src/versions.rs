@@ -549,6 +549,125 @@ impl Index {
             .is_some())
     }
 
+    /// Whether some version of the bucket `bucket_id` uses the data file `object_id`.
+    pub fn bucket_uses_object(&self, bucket_id: &str, object_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT 1 FROM object_versions WHERE object_id = ?1 AND bucket_id = ?2 LIMIT 1",
+            )?
+            .query_row([object_id, bucket_id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// Whether the data file `object_id` is queued to be removed.
+    pub fn is_garbage(&self, object_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT 1 FROM garbage WHERE object_id = ?1")?
+            .query_row([object_id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// A page of a bucket's versions that have a data file, in key and `seq` order, after
+    /// `after` (a key and a `seq`).
+    pub fn versions_with_files(
+        &self,
+        bucket_id: &str,
+        after: Option<(&str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<VersionRow>> {
+        let (key, seq) = after.map_or((&[][..], i64::MIN), |(k, s)| (k.as_bytes(), s));
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {READ} FROM object_versions
+             WHERE bucket_id = ?1 AND object_id IS NOT NULL AND (key, seq) > (?2, ?3)
+             ORDER BY key, seq LIMIT ?4"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                bucket_id,
+                key,
+                seq,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Adds `row`, a version found without a row of its own, among its key's versions by
+    /// when it was written (`modified_ms`); with `current`, the newest of them becomes
+    /// the current one. Nothing is replaced: `false` when the key already has a version
+    /// with its id.
+    pub fn adopt_version(&self, row: &VersionRow, current: bool) -> Result<bool> {
+        let tx = self.begin()?;
+        let key = row.key.as_bytes();
+        let taken = tx
+            .prepare_cached(
+                "SELECT 1 FROM object_versions
+                 WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3",
+            )?
+            .query_row(params![row.bucket_id, key, row.version_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if taken {
+            return Ok(false);
+        }
+        // Its place: before the first version written after it.
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(
+                (SELECT MIN(seq) FROM object_versions
+                 WHERE bucket_id = ?1 AND key = ?2 AND modified_ms > ?3),
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM object_versions
+                 WHERE bucket_id = ?1 AND key = ?2))",
+            params![row.bucket_id, key, row.modified_ms],
+            |r| r.get(0),
+        )?;
+        // Those after it move up one, through negative numbers so no two ever meet.
+        tx.execute(
+            "UPDATE object_versions SET seq = -(seq + 1)
+             WHERE bucket_id = ?1 AND key = ?2 AND seq >= ?3",
+            params![row.bucket_id, key, seq],
+        )?;
+        tx.execute(
+            "UPDATE object_versions SET seq = -seq WHERE bucket_id = ?1 AND key = ?2 AND seq < 0",
+            params![row.bucket_id, key],
+        )?;
+        tx.execute(
+            &format!(
+                "INSERT INTO object_versions ({COLUMNS}, seq, latest)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)"
+            ),
+            params![
+                row.bucket_id,
+                key,
+                row.version_id,
+                row.delete_marker,
+                row.object_id,
+                to_db(row.size),
+                row.etag,
+                row.modified_ms,
+                attrs_to_json(&row.attrs),
+                row.crypt,
+                row.parts,
+                row.inline,
+                seq,
+            ],
+        )?;
+        if current {
+            tx.execute(
+                "UPDATE object_versions SET latest = (seq =
+                   (SELECT MAX(seq) FROM object_versions WHERE bucket_id = ?1 AND key = ?2))
+                 WHERE bucket_id = ?1 AND key = ?2",
+                params![row.bucket_id, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Data files waiting to be removed: `(bucket id, object id)`, oldest first.
     pub fn garbage(&self, limit: usize) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare_cached(
@@ -645,6 +764,55 @@ mod tests {
             seq: 0,
             latest: false,
         }
+    }
+
+    fn written(key: &str, id: &str, at: i64) -> VersionRow {
+        VersionRow {
+            version_id: id.into(),
+            modified_ms: at,
+            ..row(key, &format!("o-{id}"))
+        }
+    }
+
+    /// `key`'s versions, oldest first, with the current one marked.
+    fn order(index: &Index, key: &str) -> Vec<String> {
+        let mut rows = index.versions_with_files("b1", None, 100).unwrap();
+        rows.retain(|r| r.key == key);
+        rows.iter()
+            .map(|r| format!("{}{}", r.version_id, if r.latest { "*" } else { "" }))
+            .collect()
+    }
+
+    #[test]
+    fn adopted_versions_take_their_place_by_time() {
+        let (_dir, index) = index();
+        index.put_version(&written("k", "v1", 10), 10).unwrap();
+        index.put_version(&written("k", "v3", 30), 30).unwrap();
+        assert!(index.adopt_version(&written("k", "v2", 20), true).unwrap());
+        assert_eq!(order(&index, "k"), ["v1", "v2", "v3*"]);
+        assert!(index.adopt_version(&written("k", "v0", 5), true).unwrap());
+        assert!(index.adopt_version(&written("k", "v4", 40), true).unwrap());
+        assert_eq!(order(&index, "k"), ["v0", "v1", "v2", "v3", "v4*"]);
+        // A version id already there is left alone.
+        assert!(!index.adopt_version(&written("k", "v2", 99), true).unwrap());
+        assert_eq!(order(&index, "k"), ["v0", "v1", "v2", "v3", "v4*"]);
+        // Not made current where the current version lives elsewhere (a folder).
+        assert!(index.adopt_version(&written("f", "old", 1), false).unwrap());
+        assert_eq!(order(&index, "f"), ["old"]);
+        // Paged by key and position.
+        let first = index.versions_with_files("b1", None, 2).unwrap();
+        let next = index
+            .versions_with_files("b1", Some((&first[1].key, first[1].seq)), 100)
+            .unwrap();
+        assert_eq!(first.len() + next.len(), 6);
+        assert_eq!(
+            (first[0].key.as_str(), next[0].version_id.as_str()),
+            ("f", "v1")
+        );
+        assert!(!index.is_garbage("o-v1").unwrap());
+        assert!(index.bucket_uses_object("b1", "o-v1").unwrap());
+        assert!(!index.bucket_uses_object("b2", "o-v1").unwrap());
+        assert!(!index.bucket_uses_object("b1", "o-v9").unwrap());
     }
 
     #[test]

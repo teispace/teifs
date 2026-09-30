@@ -389,6 +389,13 @@ bucket's settings change, answers `x-amz-expiration` without reading them for ev
 request. `serve` has a hidden `--lifecycle-day` (`TEIFS_LIFECYCLE_DAY`) that makes a
 lifecycle day seconds long, for testing rules; answers still count real days.
 
+Offline tools work on a drive no server has open, holding its lock:
+`teifs_store::restore` (`crates/store/src/snapshots.rs`) puts a snapshot back, and
+`Store::repair` (`crates/store/src/repair.rs`) sets metadata and files in step again by
+walking every object bucket's data folder (unlisted files get their rows back from their
+footers through `Index::adopt_version`, which places a version by its modification
+time) and every version with a data file (missing ones are reported).
+
 Each job works in bounded steps on the blocking pool. After a step that did something it
 sleeps for as long as the step took (so it uses at most half a core), and after a step
 with nothing to do it waits for its idle interval. A job never loops without progress:

@@ -116,7 +116,8 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         | StoreError::CorruptMetadata
         | StoreError::NewerFormat { .. }
         | StoreError::CorruptFormat(_)
-        | StoreError::BadSnapshot(_)) => {
+        | StoreError::BadSnapshot(_)
+        | StoreError::DamagedDatabase(_)) => {
             tracing::error!(error = %err, "storage failed");
             S3Error::with_source(S3ErrorCode::InternalError, Box::new(err))
         }

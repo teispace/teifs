@@ -233,8 +233,29 @@ pass the quick check. The copies are staged beside the databases as
 `<db>.restoring`, the current databases (with their `-wal` and `-shm` files) are moved
 to `.teifs/backups/pre-restore-<UTC time>/`, and the copies renamed into place. Objects
 written after the snapshot keep their bytes but not rows: folder buckets' files are
-indexed again, while object buckets' data files stay on the disk, unlisted, until a
-repair adopts them.
+indexed again, while object buckets' data files stay on the disk, unlisted, until
+`teifs repair --apply` gives them back.
+
+### Repairs
+
+`teifs repair` compares a drive's metadata with its files, on a drive no server has
+open, and reports what disagrees; `--apply` sets right what's safe to. It first runs
+SQLite's quick check on both databases and stops if either fails it: restore a snapshot
+first.
+
+| Found | With `--apply` |
+|---|---|
+| A data file no version refers to, not queued for removal | Its footer gives its version back, placed among its key's versions by `createdMs` (the key's newest becomes current). A `null` version replaced since keeps its place and the file is removed; a newer one replaces the recorded `null` version |
+| A version whose data file is missing | Forgotten only with `--forget-missing` |
+| A data file with no footer (a folder bucket's older version), whose footer names another bucket or file, or whose version id another file has | Left alone |
+| A folder under `.teifs/buckets/` of no bucket | Left alone |
+| A folder under `.teifs/uploads/` of no upload | Removed |
+
+A lost `index.db` is rebuilt the same way: with it removed, the drive opens with an
+empty index, `teifs repair --apply` gives every object bucket's versions back from their
+footers, and folder buckets are indexed again when the drive is next served. What
+footers don't record is lost: delete markers, and tags, retention and legal holds set
+after a version was written.
 
 To go back to an older release after an upgrade, restore the matching backup: stop
 TeiFS, copy the databases from `.teifs/backups/pre-format-<n>/` back into `.teifs/`, and
