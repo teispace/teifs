@@ -159,6 +159,8 @@ behaviour; the on-disk format is always upgraded automatically.
 - NSQ targets over TLS (`tls=true` or `ca=PATH`, as nsqd negotiates it after
   `IDENTIFY`) and with `AUTH`, its secret from `TEIFS_NOTIFY_NSQ_SECRET_ID`, sent only
   over TLS.
+- Nightly CI sends events to a real nsqd, Redis, NATS JetStream and Mosquitto, each
+  over TLS and signed in, and checks what each got.
 - MySQL and MariaDB notification targets, as MinIO's: `teifs serve --notify-mysql
   ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=namespace|access]`, with MinIO's
   tables (made when missing) and statements, prepared once per connection with their

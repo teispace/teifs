@@ -413,6 +413,8 @@ connections. One the server closed while it was idle (nsqd does after missed hea
 NATS after missed pings, an MQTT broker after its keep alive, Kafka after
 `connections.max.idle.ms`, Redis with a `timeout` set, MySQL after `wait_timeout`) is made
 again at once, rather than failing the event and waiting to retry it.
+Nightly CI sends events to a real nsqd, Redis, NATS JetStream and Mosquitto, each over
+TLS verified with a CA and signed in, and reads back what each got.
 
 ```sh
 teifs serve --notify-sqs orders=https://sqs.eu-west-1.amazonaws.com/123456789012/orders

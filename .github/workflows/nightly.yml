@@ -328,3 +328,71 @@ jobs:
           test "$($SQL "SELECT COUNT(*) FROM teifs_log")" -eq 3
           test "$($SQL "SELECT COUNT(*) FROM teifs_log WHERE JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.EventName')) = 's3:ObjectRemoved:Delete'")" -eq 1
           test "$($SQL "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'teifs_wrong'")" -eq 0
+
+  brokers:
+    # Notifications to real NSQ, Redis, NATS (JetStream) and MQTT servers, each over TLS
+    # verified with a CA made here; what each got is read back with its own tools.
+    name: Notifications to NSQ, Redis, NATS and MQTT (TLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: A CA, and a certificate for localhost it signed
+        run: |
+          mkdir certs && cd certs
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj /CN=teifs-test-ca
+          openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj /CN=localhost
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > ext.cnf
+          openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.pem -days 2 -extfile ext.cnf
+          chmod 644 ./*
+      - name: The servers, each requiring TLS
+        run: |
+          C="$PWD/certs"
+          docker run -d --name nsqd -p 4150:4150 -p 4151:4151 -v "$C:/certs:ro" nsqio/nsq:v1.3.0 \
+            /nsqd --tls-cert=/certs/server.pem --tls-key=/certs/server.key --tls-required=true
+          docker run -d --name redis -p 6380:6380 -v "$C:/certs:ro" redis:7.4 redis-server --port 0 \
+            --tls-port 6380 --tls-cert-file /certs/server.pem --tls-key-file /certs/server.key \
+            --tls-ca-cert-file /certs/ca.pem --tls-auth-clients no --requirepass redis-test-only
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 -v "$C:/certs:ro" nats:2.11 -js -m 8222 \
+            --tls --tlscert /certs/server.pem --tlskey /certs/server.key --user teifs --pass nats-test-only
+          printf '%s\n' 'listener 8883' 'cafile /certs/ca.pem' 'certfile /certs/server.pem' \
+            'keyfile /certs/server.key' 'allow_anonymous false' 'password_file /certs/passwd' > "$C/mosquitto.conf"
+          docker run --rm -v "$C:/certs" eclipse-mosquitto:2 sh -c \
+            'mosquitto_passwd -b -c /certs/passwd teifs mqtt-test-only && chown mosquitto /certs/passwd && chmod 0700 /certs/passwd'
+          docker run -d --name mqtt -p 8883:8883 -v "$C:/certs" eclipse-mosquitto:2 mosquitto -c /certs/mosquitto.conf
+          for port in 4150 6380 4222 8883; do
+            for _ in $(seq 60); do (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null && break; sleep 1; done
+          done
+          docker run --rm --network host -v "$C:/certs:ro" natsio/nats-box:latest nats --server tls://localhost:4222 \
+            --tlsca /certs/ca.pem --user teifs --password nats-test-only stream add S3 --subjects s3.events --defaults
+          docker exec -d mqtt sh -c 'mosquitto_sub --cafile /certs/ca.pem -h localhost -p 8883 -u teifs \
+            -P mqtt-test-only -t s3/events -q 1 -C 3 > /certs/mqtt.txt'
+          sleep 2
+      - run: cargo test --locked -p teifs-server --test brokers -- --nocapture
+        env:
+          TEIFS_TEST_BROKERS_CA: ${{ github.workspace }}/certs/ca.pem
+          TEIFS_TEST_NSQ: localhost:4150
+          TEIFS_TEST_REDIS: localhost:6380
+          TEIFS_TEST_REDIS_PASSWORD: redis-test-only
+          TEIFS_TEST_NATS: localhost:4222
+          TEIFS_TEST_NATS_PASSWORD: nats-test-only
+          TEIFS_TEST_MQTT: localhost:8883
+          TEIFS_TEST_MQTT_PASSWORD: mqtt-test-only
+      - name: What each server got
+        run: |
+          curl -sf 'http://127.0.0.1:4151/stats?format=json&topic=s3-events' > nsq.json
+          test "$(jq '[.. | objects | select(.topic_name? == "s3-events") | .message_count] | first' nsq.json)" -eq 3
+          docker exec redis redis-cli --tls --cacert /certs/ca.pem -h localhost -p 6380 -a redis-test-only \
+            --no-auth-warning HKEYS teifs-events > redis.txt
+          cat redis.txt
+          test "$(cat redis.txt)" = "redis-events/dir/b c.txt"
+          curl -sf 'http://127.0.0.1:8222/jsz?streams=true' > nats.json
+          test "$(jq '[.. | objects | select(.name? == "S3") | .state.messages] | first' nats.json)" -eq 3
+          for _ in $(seq 20); do [ "$(wc -l < certs/mqtt.txt)" -ge 3 ] && break; sleep 1; done
+          cut -c1-120 certs/mqtt.txt
+          test "$(wc -l < certs/mqtt.txt)" -eq 3
+          grep -q '"EventName":"s3:ObjectRemoved:Delete"' certs/mqtt.txt
+      - name: The servers' logs
+        if: failure()
+        run: for c in nsqd redis nats mqtt; do echo "== $c"; docker logs "$c" 2>&1 | tail -30; done
