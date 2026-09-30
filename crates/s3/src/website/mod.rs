@@ -1,6 +1,10 @@
 //! `PutBucketWebsite`, `GetBucketWebsite`: a bucket's website configuration, read from
 //! S3's XML with S3's checks and messages, and answered as it was given.
 
+mod serve;
+
+pub(crate) use serve::{Domains, Endpoint, Website};
+
 use s3s::{S3Error, S3Result, dto, s3_error};
 use teifs_types::website::{
     Condition, KeyReplacement, MAX_ROUTING_RULES, Protocol, Redirect, RoutingRule, Site,
@@ -216,6 +220,27 @@ pub(crate) fn check(config: &WebsiteConfig) -> S3Result<WebsiteConfig> {
         redirect_all_requests_to: answer.redirect_all_requests_to,
         routing_rules: answer.routing_rules,
     })
+}
+
+/// An object's `x-amz-website-redirect-location`, checked as S3 checks it: another
+/// object of the bucket (`/key`) or a URL.
+pub(crate) fn redirect_location(location: Option<String>) -> S3Result<Option<String>> {
+    match location {
+        Some(location)
+            if !["/", "http://", "https://"]
+                .iter()
+                .any(|prefix| location.starts_with(prefix)) =>
+        {
+            let mut err = S3Error::with_message(
+                s3s::S3ErrorCode::Custom("InvalidRedirectLocation".into()),
+                "The website redirect location must have a prefix of 'http://' or 'https://' or \
+                 '/'.",
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            Err(err)
+        }
+        location => Ok(location),
+    }
 }
 
 /// `NoSuchWebsiteConfiguration`, for a bucket that isn't a website.

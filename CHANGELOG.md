@@ -192,6 +192,17 @@ behaviour; the on-disk format is always upgraded automatically.
   From the command line: `teifs website set ALIAS/BUCKET [--index I] [--error E]
   [--rules FILE]` (redirection rules as the S3 console writes them) or `--redirect-all
   URL`, `teifs website info` and `teifs website rm`.
+- Static websites, as S3's website endpoint: `teifs serve --website-domain DOMAIN`
+  (repeatable; `TEIFS_WEBSITE_DOMAINS`) serves each bucket with a website configuration
+  at `BUCKET.DOMAIN`, answering `GET` and `HEAD` with what the bucket lets anybody read:
+  index documents, a folder's redirect to its slash, the error document, redirection
+  rules, redirects of every request and of single objects, S3's HTML error pages,
+  ranges, conditional requests and CORS. Access logs record these requests as
+  `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- A `304 Not Modified` answers the object's `ETag` and `Last-Modified`, as HTTP says
+  and S3 does.
+- An object's `x-amz-website-redirect-location` must start with `/`, `http://` or
+  `https://` (`InvalidRedirectLocation`), as on S3.
 - Webhook, audit webhook and Elasticsearch targets over TLS of their own, as MinIO's
   webhooks: `ca=PATH` to verify the server with a CA, and `client_cert=PATH` and
   `client_key=PATH` for a server that asks for a client certificate (mutual TLS).

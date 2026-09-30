@@ -22,6 +22,9 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
 3. **Errors**: a new failure is a `StoreError` variant (`crates/store/src/error.rs`) and
    gets its S3 error in `from_store` (`crates/s3/src/errors.rs`). TeiFS-only codes start
    with `XTeiFS`.
+   A code s3s doesn't know (`S3ErrorCode::Custom`) is `500` unless you
+   `set_status_code` (clients then retry it); assert the status in its test with
+   `err.raw_response().unwrap().status()`.
 4. **The S3 method** in `impl S3 for Drive` (`crates/s3/src/drive.rs`), in the order the
    file already uses (buckets, objects, listings, multipart). Keep it thin: read the
    input, call the store with `.s3()?`, build the output. A small example:
@@ -60,6 +63,11 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    in `SUBRESOURCES` (`crates/s3/src/access_log/record.rs`); one that also acts on
    another object than its path's adds an `access_log::Also` for it, as copies do in
    `Access::check` and multi-object deletes in `delete_objects`.
+
+   **Websites**: the website endpoint (`crates/s3/src/website/serve.rs`) reads objects
+   with an anonymous `GetObject`/`HeadObject` through the S3 service, so a change to
+   those reads applies there too; a new request header those reads honour reaches them
+   from a website visitor only when it's in `FORWARDED` there.
 5. **Tests**:
    - store behaviour in `crates/store/src/tests.rs`, or for a larger feature a module of
      its own beside it (as `versioning_tests.rs`);

@@ -52,6 +52,8 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Domains for virtual-hosted-style requests (`bucket.domain`).
     pub domains: Vec<String>,
+    /// Domains for buckets' static websites (`bucket.domain`).
+    pub website_domains: Vec<String>,
     /// Credentials to use; `None` loads the drive's own, generating them on first run.
     pub credentials: Option<Credentials>,
     /// The layout of buckets created without choosing one.
@@ -152,7 +154,7 @@ pub enum ServerError {
     /// IAM couldn't be opened.
     #[error("can't open IAM: {0}")]
     Iam(teifs_iam::IamError),
-    /// A domain for virtual-hosted-style requests is invalid.
+    /// A domain for virtual-hosted-style requests or websites is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
     /// The TLS certificates couldn't be loaded.
@@ -322,6 +324,7 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
     ServerConfig {
         listen: listen.to_string(),
         domains: config.domains.clone(),
+        website_domains: config.website_domains.clone(),
         default_layout: match config.default_layout {
             Layout::Folder => "folder",
             Layout::Object => "object",
@@ -450,11 +453,13 @@ impl Server {
                     path: config.dir.clone(),
                     source,
                 })?;
+        check_website_domains(&config.domains, &config.website_domains)?;
         let service = teifs_s3::service(
             store.clone(),
             Options {
                 iam: Some(iam.clone()),
                 domains: config.domains,
+                website_domains: config.website_domains,
                 default_layout: config.default_layout,
                 plain_http_is_secure: admin_config.plain_http_is_secure,
                 trusted_proxies: config.trusted_proxies,
@@ -573,4 +578,22 @@ impl Server {
             }
         }
     }
+}
+
+/// Refuses a domain that's both for S3 requests and for websites: its hosts couldn't
+/// tell which a request is for.
+fn check_website_domains(
+    domains: &[String],
+    website_domains: &[String],
+) -> Result<(), ServerError> {
+    let name = |domain: &String| domain.trim_matches('.').to_ascii_lowercase();
+    for website in website_domains {
+        if domains.iter().any(|domain| name(domain) == name(website)) {
+            return Err(ServerError::Domain(format!(
+                "{website} is both a --domain and a --website-domain: give websites a domain \
+                 of their own"
+            )));
+        }
+    }
+    Ok(())
 }

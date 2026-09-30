@@ -200,12 +200,16 @@ impl Arrival {
         if bucket.is_empty() {
             return;
         }
-        let operation = record::operation(
-            &self.method,
-            seen.operation(),
-            self.query.as_deref(),
-            key.is_some(),
-        );
+        let operation = if seen.is_website() {
+            format!("WEBSITE.{}.OBJECT", self.method)
+        } else {
+            record::operation(
+                &self.method,
+                seen.operation(),
+                self.query.as_deref(),
+                key.is_some(),
+            )
+        };
         let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let (signature, auth) = seen.signature().unzip();
         let object_size = answer.object_size.or_else(|| {

@@ -261,7 +261,49 @@ Delivered objects are written like any other: encrypted as the target's default 
 counted in its usage, and announced by its notifications. Secrets in a request's query
 (a presigned link's signature and security token) are replaced by `REDACTED`. As on S3,
 logging is best effort: a record can arrive in a later object than its neighbours, and
-records of the last second before a crash can be lost.
+records of the last second before a crash can be lost. A request to a
+[website](#static-websites) is recorded as S3 records it: `WEBSITE.GET.OBJECT` or
+`WEBSITE.HEAD.OBJECT`, on the object it answered with.
+
+## Static websites
+
+A bucket with a website configuration is a static website, as on S3's website endpoint,
+at `BUCKET.DOMAIN` for each `serve --website-domain DOMAIN` (repeatable, or
+`TEIFS_WEBSITE_DOMAINS`), on the server's own listener:
+
+```sh
+teifs serve --website-domain web.example.com       # *.web.example.com resolves to the server
+teifs website set local/blog --index index.html --error 404.html
+aws s3api put-bucket-policy --bucket blog --policy file://public-read.json
+# http://blog.web.example.com:9000/ answers blog/index.html
+```
+
+A website shows only what anybody may read: each request reads its object as an
+anonymous S3 request, so the bucket's policy, ACLs and Block Public Access decide, as on
+S3, and a private bucket's site answers `403 Forbidden`. Grant `s3:GetObject` on the
+bucket's objects to `"Principal": "*"` (and turn off the bucket's Block Public Access);
+grant `s3:ListBucket` too for a missing page to be `404 Not Found` rather than `403`, as
+AWS advises. A website answers as S3's does:
+
+- `GET` and `HEAD` only (`405 MethodNotAllowed` otherwise); `OPTIONS` is a CORS
+  preflight, and answers follow the bucket's CORS rules.
+- `/` and every `…/` answer the folder's index document; `/about` answers `302` to
+  `/about/` when `about/index.html` exists.
+- Errors answer S3's HTML page, with `x-amz-error-code` and `x-amz-error-message`; a
+  `4XX` answers the error document, if there is one, with the error's status.
+- Redirection rules apply in order: those without an error code before the object is
+  read, those with one after its read fails with that status. `RedirectAllRequestsTo`
+  sends every request elsewhere with `301`, and an object's
+  `x-amz-website-redirect-location` (`/key`, `http://…` or `https://…`) sends its page
+  there with `301`.
+- Ranges and conditional requests (`If-None-Match`, …) work, and encrypted objects are
+  served decrypted, as through the S3 API.
+
+A website domain can't also be a `--domain` (the server refuses to start): their hosts
+look the same. For a site under a name of its own (`www.example.com`), put a reverse
+proxy in front that forwards to the server with `Host: BUCKET.DOMAIN`, and TLS there
+too; redirects keep the scheme the server was reached with (`X-Forwarded-Proto` from a
+`--trusted-proxy`).
 
 ## Bucket notifications
 

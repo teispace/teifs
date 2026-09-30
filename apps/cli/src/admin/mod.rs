@@ -395,6 +395,7 @@ async fn config(client: &Client) -> Result<(), Error> {
         &[
             ("Listen", config.listen.clone()),
             ("Domains", config.domains.join(", ")),
+            ("Website domains", config.website_domains.join(", ")),
             ("Default layout", config.default_layout.clone()),
             ("Durability", config.durability.clone()),
             ("Key names", config.key_names.clone()),

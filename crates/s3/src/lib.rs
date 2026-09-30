@@ -71,6 +71,9 @@ pub struct Options {
     /// Domains for virtual-hosted-style requests (`bucket.domain/key`), besides the
     /// path style (`domain/bucket/key`) that always works.
     pub domains: Vec<String>,
+    /// Domains for buckets' static websites (`bucket.domain/key`), as S3's website
+    /// endpoint.
+    pub website_domains: Vec<String>,
     /// The layout of buckets created without choosing one.
     pub default_layout: Layout,
     /// Whether plain HTTP counts as a secure connection for SSE-C keys: true for a server
@@ -201,5 +204,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.trusted_proxies,
         watch,
     )
-    .with_access_log(worker, expirations))
+    .with_access_log(worker, expirations)
+    .with_website_domains(&options.website_domains))
 }

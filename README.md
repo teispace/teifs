@@ -206,7 +206,7 @@ requests live. See
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--website-domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -301,9 +301,15 @@ show a bucket's events as they happen. See
 S3's format, to log objects in another bucket (or the same one), which S3's log readers
 read. See [OPERATIONS.md](docs/OPERATIONS.md#server-access-logs).
 
+**Static websites**, as S3's website endpoint: with `teifs serve --website-domain
+web.example.com`, `teifs website set local/blog --index index.html --error 404.html`
+makes `http://blog.web.example.com/` the bucket's site, showing what its policy lets
+anybody read, with S3's index and error documents, redirects and error pages. See
+[OPERATIONS.md](docs/OPERATIONS.md#static-websites).
+
 **Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
-storage classes (every object is `STANDARD`), website
-hosting, replication, several disks or machines.
+storage classes (every object is `STANDARD`), replication, several disks or
+machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
 **Two kinds of bucket.** An *object bucket* (the default) stores objects by id under

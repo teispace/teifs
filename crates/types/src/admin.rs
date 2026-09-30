@@ -420,6 +420,9 @@ pub struct ServerConfig {
     pub listen: String,
     /// Domains for virtual-hosted-style requests.
     pub domains: Vec<String>,
+    /// Domains for buckets' static websites.
+    #[serde(default)]
+    pub website_domains: Vec<String>,
     /// The layout of buckets created without choosing one: `folder` or `object`.
     pub default_layout: String,
     /// How hard writes are made to survive a power cut: `strict`, `relaxed` or `none`.

@@ -37,6 +37,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         dir: dir.to_owned(),
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
+        website_domains: Vec::new(),
         notify: Vec::new(),
         access_log_interval: None,
         credentials: Some(DriveCredentials {

@@ -758,3 +758,87 @@ async fn lifecycle_removals_are_logged_as_s3_logs_them() {
     }
     panic!("the lifecycle's removals were never logged");
 }
+
+#[tokio::test]
+async fn website_requests_are_logged_as_s3_logs_them() {
+    use aws_sdk_s3::types::{IndexDocument, WebsiteConfiguration};
+
+    let server = common::start_with(|config| {
+        fast(config);
+        config.website_domains = vec!["web.test".to_owned()];
+    })
+    .await;
+    let root = setup(&server).await;
+    let account = server.iam.account();
+    root.delete_public_access_block()
+        .bucket("app")
+        .send()
+        .await
+        .unwrap();
+    put_policy(
+        &root,
+        "app",
+        r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::app/*"}}"#,
+    )
+    .await;
+    root.put_object()
+        .bucket("app")
+        .key("index.html")
+        .body(b"home".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    let site = WebsiteConfiguration::builder()
+        .index_document(
+            IndexDocument::builder()
+                .suffix("index.html")
+                .build()
+                .unwrap(),
+        )
+        .build();
+    root.put_bucket_website()
+        .bucket("app")
+        .website_configuration(site)
+        .send()
+        .await
+        .unwrap();
+    put_policy(
+        &root,
+        "logs",
+        &delivery_policy("logs", "app/", "app", &account),
+    )
+    .await;
+    assert_eq!(put(&root, "app", Some(enabled("logs", "app/"))).await, "ok");
+    let web = reqwest::Client::new();
+    for path in ["/", "/missing"] {
+        web.get(format!("{}{path}", server.endpoint))
+            .header("host", "app.web.test")
+            .send()
+            .await
+            .unwrap();
+    }
+    // Refused before any object is named: still the site's bucket's.
+    web.post(format!("{}/other/key", server.endpoint))
+        .header("host", "app.web.test")
+        .send()
+        .await
+        .unwrap();
+
+    let (_, records) = delivered(&root, "logs", "app/", 3).await;
+    let home = find(&records, "WEBSITE.GET.OBJECT", "index.html");
+    assert_eq!(home[4], "-", "anonymous");
+    assert!(home[8].starts_with("\"GET / HTTP/1.1"), "{home:?}");
+    assert_eq!((home[9].as_str(), home[12].as_str()), ("200", "4"));
+    assert_eq!(home[22], "app.web.test");
+    let missing = find(&records, "WEBSITE.GET.OBJECT", "missing");
+    assert_eq!(
+        (missing[9].as_str(), missing[10].as_str()),
+        ("403", "AccessDenied"),
+        "anybody may read, not list"
+    );
+    let post = find(&records, "WEBSITE.POST.OBJECT", "-");
+    assert_eq!(
+        (post[9].as_str(), post[10].as_str()),
+        ("405", "MethodNotAllowed")
+    );
+}

@@ -63,6 +63,14 @@ requests nothing, and the check sits in the one decision every operation goes th
 so no read or list path escapes it (the known bypass, anonymous `ListObjectVersions`,
 has its own test with 15 other paths). Anonymous requests can never read or change a
 bucket's policy.
+A bucket's website (`serve --website-domain`) is read the same way: each request to it
+is an anonymous `GetObject` or `HeadObject` through the same decision, never the owner's,
+so a site shows only what its bucket already lets everybody read, and a private bucket's
+site answers `403`. Only `GET` and `HEAD` reach it. A website domain can't also be a
+`--domain`, so a website host is never mistaken for a signed virtual-hosted request, or
+the other way round. Values an error page quotes are HTML-escaped, and an object's
+`x-amz-website-redirect-location` must be a key of the bucket (`/…`) or an `http`/`https`
+URL, checked when it's written.
 
 ACLs are disabled on every new bucket (Object Ownership `BucketOwnerEnforced`, as on
 AWS): a request with an ACL other than the bucket owner's full control is refused, and

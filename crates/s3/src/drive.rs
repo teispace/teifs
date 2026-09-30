@@ -707,14 +707,29 @@ fn check_read(
     }
     if let Some(c) = if_none_match {
         if matches(c) {
-            return Err(s3_error!(NotModified));
+            return Err(not_modified(info));
         }
     } else if let Some(since) = if_modified_since
         && modified <= timestamp_seconds(since)
     {
-        return Err(s3_error!(NotModified));
+        return Err(not_modified(info));
     }
     Ok(())
+}
+
+/// `304 Not Modified`, with the object's `ETag` and `Last-Modified` as HTTP says a 304
+/// carries them (RFC 9110 §15.4.5) and S3's does.
+fn not_modified(info: &ObjectInfo) -> s3s::S3Error {
+    let mut err = s3_error!(NotModified);
+    let mut headers = http::HeaderMap::new();
+    if let Ok(value) = http::HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
+        headers.insert(http::header::ETAG, value);
+    }
+    if let Ok(value) = http::HeaderValue::from_str(&http_date(&info.modified.into())) {
+        headers.insert(http::header::LAST_MODIFIED, value);
+    }
+    err.set_headers(headers);
+    err
 }
 
 /// The attributes a write sets.
@@ -769,7 +784,9 @@ macro_rules! new_attrs {
             content_language: $input.content_language.take(),
             cache_control: $input.cache_control.take(),
             expires: $input.expires.take().map(|e| e.to_string()),
-            website_redirect_location: $input.website_redirect_location.take(),
+            website_redirect_location: crate::website::redirect_location(
+                $input.website_redirect_location.take(),
+            )?,
             metadata: $input.metadata.take(),
         }
     };

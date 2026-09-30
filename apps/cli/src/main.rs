@@ -172,6 +172,14 @@ pub(crate) struct ServeArgs {
     /// A domain for virtual-hosted-style requests (bucket.domain); repeatable.
     #[arg(long = "domain", env = "TEIFS_DOMAINS", value_delimiter = ',')]
     domains: Vec<String>,
+    /// A domain for buckets' static websites (`bucket.domain`), as S3's website
+    /// endpoint; repeatable. Buckets with a website configuration answer there.
+    #[arg(
+        long = "website-domain",
+        env = "TEIFS_WEBSITE_DOMAINS",
+        value_delimiter = ','
+    )]
+    website_domains: Vec<String>,
     /// The access key (else one is generated and kept in the drive).
     #[arg(long, env = "TEIFS_ACCESS_KEY")]
     access_key: Option<String>,
@@ -1563,6 +1571,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         dir: args.dir,
         listen: args.listen,
         domains: args.domains,
+        website_domains: args.website_domains,
         credentials,
         default_layout: args.default_layout.into(),
         kms_keyring: args.kms_keyring,

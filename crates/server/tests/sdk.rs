@@ -375,7 +375,15 @@ async fn conditions_are_honoured() {
         .if_none_match(first.e_tag().unwrap())
         .send()
         .await;
-    assert!(not_modified.is_err());
+    let not_modified = not_modified.unwrap_err();
+    let raw = not_modified.raw_response().unwrap();
+    assert_eq!(raw.status().as_u16(), 304);
+    assert_eq!(
+        raw.headers().get("etag"),
+        first.e_tag(),
+        "a 304 names what's there"
+    );
+    assert!(raw.headers().get("last-modified").is_some());
     let wrong = s3
         .get_object()
         .bucket("cas")

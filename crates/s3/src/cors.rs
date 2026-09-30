@@ -24,6 +24,7 @@ use crate::{
     limits::{StallTimeout, refusal},
     metrics,
     observe::{self, Received, Seen, Watch},
+    website::Website,
 };
 
 /// How many rules a bucket's CORS configuration may have.
@@ -208,6 +209,8 @@ pub struct Service {
     access_log: Arc<std::sync::Mutex<Option<crate::AccessLogWorker>>>,
     /// What the store tells the lifecycle's removals, kept while the service is.
     expirations: Option<Arc<dyn teifs_store::Expirations>>,
+    /// The domains buckets' websites are served on.
+    websites: Arc<crate::website::Domains>,
 }
 
 impl std::fmt::Debug for Service {
@@ -230,6 +233,7 @@ impl Service {
             watch: Arc::new(watch),
             access_log: Arc::default(),
             expirations: None,
+            websites: Arc::default(),
             s3,
             store,
             host: host.map(Arc::new),
@@ -253,6 +257,13 @@ impl Service {
             .access_log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+        self
+    }
+
+    /// The service with buckets' websites served on `domains` (`BUCKET.DOMAIN`).
+    #[must_use]
+    pub(crate) fn with_website_domains(mut self, domains: &[String]) -> Self {
+        self.websites = Arc::new(crate::website::Domains::new(domains));
         self
     }
 
@@ -334,6 +345,30 @@ impl Service {
             .and_then(|vh| vh.bucket().map(str::to_owned))
     }
 
+    /// The website a request is for, if it's for one.
+    fn website<B>(&self, req: &Request<B>) -> Option<Website> {
+        let name = header(req.headers(), "host").or_else(|| req.uri().host())?;
+        self.websites.site(name)
+    }
+
+    /// Answers a request: on a website when `website` says so, else through S3.
+    async fn answer(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        seen: &Arc<Seen>,
+        website: Option<Website>,
+    ) -> Result<HttpResponse, HttpError> {
+        let Some(website) = website else {
+            return self.s3(req, seen).await;
+        };
+        let endpoint = crate::website::Endpoint {
+            s3: &self.s3,
+            store: &self.store,
+            client: self.proxies.client(self.client, req.headers()),
+        };
+        Ok(endpoint.serve(&req, website, seen).await)
+    }
+
     /// The bucket a request is for: from a virtual host, else the path's first segment.
     fn bucket_of<B>(&self, req: &Request<B>) -> Option<String> {
         if let Some(bucket) = self.virtual_bucket(req) {
@@ -349,7 +384,7 @@ impl Service {
     }
 
     /// Answers a preflight request.
-    async fn preflight<B>(&self, req: &Request<B>) -> HttpResponse {
+    async fn preflight<B>(&self, req: &Request<B>, bucket: Option<String>) -> HttpResponse {
         let headers = req.headers();
         let (Some(origin), Some(method)) = (
             header(headers, "origin"),
@@ -361,7 +396,7 @@ impl Service {
                 "Insufficient information. Origin request header needed.",
             );
         };
-        let Some(bucket) = self.bucket_of(req) else {
+        let Some(bucket) = bucket else {
             return error(
                 StatusCode::BAD_REQUEST,
                 "BadRequest",
@@ -430,7 +465,8 @@ impl Service {
 
     async fn handle(self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
         let path = req.uri().path();
-        if self.virtual_bucket(&req).is_none() {
+        let website = self.website(&req);
+        if website.is_none() && self.virtual_bucket(&req).is_none() {
             if health::is_health_check(req.method(), path) {
                 return Ok(health::response(req.method()));
             }
@@ -456,7 +492,11 @@ impl Service {
         });
         let arrival = self.watch.access_log.on().then(|| {
             let client = self.proxies.client(self.client, req.headers());
-            Arrival::of(&req, client, self.bucket_of(&req))
+            let bucket = match &website {
+                Some(website) => website.0.clone(),
+                None => self.bucket_of(&req),
+            };
+            Arrival::of(&req, client, bucket)
         });
         let request =
             observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked, arrival);
@@ -465,38 +505,44 @@ impl Service {
         // A client waiting for `100 Continue` hasn't sent the body the answer spares it.
         let continues = header(req.headers(), "expect")
             .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"));
-        let response = self.respond(req, &seen).instrument(span).await?;
+        let response = self.respond(req, &seen, website).instrument(span).await?;
         if !continues {
             observe::drain(&seen).await;
         }
         Ok(observe::finish(response, request))
     }
 
-    /// Answers anything but the health check and metrics.
+    /// Answers anything but the health check and metrics: a website's request when
+    /// `website` says so.
     async fn respond(
         &self,
         req: Request<hyper::body::Incoming>,
         seen: &Arc<Seen>,
+        website: Option<Website>,
     ) -> Result<HttpResponse, HttpError> {
         if let Some(refused) = refusal(req.headers()) {
             return Ok(refused);
         }
+        let bucket = match &website {
+            Some(website) => website.0.clone(),
+            None => self.bucket_of(&req),
+        };
         if req.method() == Method::OPTIONS {
             seen.name("PreflightRequest");
-            return Ok(self.preflight(&req).await);
+            return Ok(self.preflight(&req, bucket).await);
         }
         let Some(origin) = header(req.headers(), "origin").map(str::to_owned) else {
-            return self.s3(req, seen).await;
+            return self.answer(req, seen, website).await;
         };
         // S3-compatible servers match an actual request on Access-Control-Request-Method
         // when it's sent, else on the request's own method.
         let method = header(req.headers(), "access-control-request-method")
             .map_or_else(|| req.method().as_str().to_owned(), str::to_owned);
-        let rules = match self.bucket_of(&req) {
+        let rules = match bucket {
             Some(bucket) => self.store.bucket_cors(&bucket).await.ok().flatten(),
             None => None,
         };
-        let mut response = self.s3(req, seen).await?;
+        let mut response = self.answer(req, seen, website).await?;
         if let Some(rules) = rules {
             let headers = response.headers_mut();
             headers.insert(header::VARY, HeaderValue::from_static(VARY));

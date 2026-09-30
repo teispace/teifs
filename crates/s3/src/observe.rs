@@ -52,6 +52,8 @@ pub(crate) struct Seen {
     acl_required: AtomicBool,
     /// The access log records it adds to its own.
     also: Mutex<Vec<Also>>,
+    /// Whether it came to a website endpoint.
+    website: AtomicBool,
 }
 
 impl Seen {
@@ -68,6 +70,7 @@ impl Seen {
             signature: OnceLock::new(),
             acl_required: AtomicBool::new(false),
             also: Mutex::new(Vec::new()),
+            website: AtomicBool::new(false),
         }
     }
 
@@ -96,6 +99,15 @@ impl Seen {
 
     pub(crate) fn acl_required(&self) -> bool {
         self.acl_required.load(Ordering::Relaxed)
+    }
+
+    /// Records that it came to a website endpoint.
+    pub(crate) fn on_website(&self) {
+        self.website.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_website(&self) -> bool {
+        self.website.load(Ordering::Relaxed)
     }
 
     /// Adds an access log record to its own.
@@ -564,9 +576,13 @@ pub(crate) fn finish(mut response: HttpResponse, request: Request) -> HttpRespon
     })
 }
 
-/// The error code an error answer's body names (S3's XML, or the admin API's JSON),
-/// adding `<RequestId>` to an S3 error body that has none, as S3's have.
+/// The error code an error answer names: in its `x-amz-error-code` header (a website's
+/// HTML page), else in its body (S3's XML, or the admin API's JSON), adding
+/// `<RequestId>` to an S3 error body that has none, as S3's have.
 fn error_code(response: &mut HttpResponse, id: &str) -> Option<String> {
+    if let Some(code) = response.headers().get("x-amz-error-code") {
+        return code.to_str().ok().map(str::to_owned);
+    }
     let bytes = response.body().bytes()?;
     let text = std::str::from_utf8(&bytes).ok()?;
     if text.trim_start().starts_with('{') {
@@ -592,7 +608,7 @@ fn error_code(response: &mut HttpResponse, id: &str) -> Option<String> {
 }
 
 /// The text between the first `start` and the `end` after it.
-fn between<'t>(text: &'t str, start: &str, end: &str) -> Option<&'t str> {
+pub(crate) fn between<'t>(text: &'t str, start: &str, end: &str) -> Option<&'t str> {
     let from = text.find(start)? + start.len();
     let len = text[from..].find(end)?;
     Some(&text[from..from + len])

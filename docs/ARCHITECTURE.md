@@ -263,6 +263,16 @@ lands in one transaction or not at all. The root key is part of IAM's locked sta
 `Iam::replace_root_key` saves a new one through the server's `RootKeyStore` (only for
 drive-generated credentials) before swapping it into the credential lookup.
 
+The website endpoint (`website/serve.rs`) comes first in `cors::Service`: a `Host` of
+`BUCKET.DOMAIN` for a website domain is answered there, before virtual hosts, the
+health check and metrics. Each object it serves is read by an internal path-style
+request (no `Host` header, no signature: anonymous) through the S3 service itself, with
+the request's `Seen` so metrics and access logs count it as the website's
+(`WEBSITE.GET.OBJECT`), and with only its range and conditional headers; the probe for a
+folder's index and the error document are read with a `Seen` of their own, counted
+nowhere. Answers the S3 service gives are passed on as they are (a success, `304`) or
+turned into S3's HTML error page, whose code `observe` reads from `x-amz-error-code`.
+
 ### The protocol layer: s3s
 
 [s3s](https://github.com/s3s-project/s3s) turns HTTP requests into typed S3 operations and
