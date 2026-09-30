@@ -796,3 +796,95 @@ async fn a_key_with_more_versions_than_a_batch_lists_them_all(layout: Layout) {
     let latest = listing.versions.iter().filter(|v| v.latest).count();
     assert_eq!(latest, 2);
 }
+
+/// The steps of making a folder bucket's current file an older version: the link, then
+/// the rows, then the file. A crash after the rows (the version recorded twice) lists
+/// it once, reads it, and the next write keeps it once, with no data file left over.
+#[tokio::test]
+async fn a_version_kept_twice_by_a_crash_is_listed_and_kept_once() {
+    let (dir, store) = versioned(Layout::Folder, Versioning::Enabled).await;
+    let v1 = put(&store, "k", b"one").await;
+    {
+        // As a write of `k` does before it replaces the file, and no further.
+        let inner = &store.inner;
+        let conn = inner.lock();
+        let Bucket::Folder(bucket) = inner.bucket("docs").unwrap() else {
+            unreachable!("a folder bucket")
+        };
+        let key = ObjectKey::parse("k").unwrap();
+        let folder::Found::File(path, meta) = Inner::find(&bucket.dir, &key).unwrap() else {
+            unreachable!("the file is there")
+        };
+        let archived = inner
+            .archive_for_write(&conn, &bucket, &key, Some((&path, &meta)), Some("new"))
+            .unwrap();
+        assert_eq!(archived.as_deref(), Some(v1.as_str()));
+    }
+    // Listed once, as the current version, and readable both ways.
+    assert_eq!(
+        versions(&store).await,
+        [("k".into(), v1.clone(), true, false)]
+    );
+    assert_eq!(bytes_of(&store, "k", None).await.unwrap(), b"one");
+    assert_eq!(bytes_of(&store, "k", Some(&v1)).await.unwrap(), b"one");
+
+    // The next write keeps it once, and only its one data file.
+    let v2 = put(&store, "k", b"two").await;
+    assert_eq!(
+        versions(&store).await,
+        [
+            ("k".into(), v2, true, false),
+            ("k".into(), v1.clone(), false, false)
+        ]
+    );
+    assert_eq!(bytes_of(&store, "k", Some(&v1)).await.unwrap(), b"one");
+    let store_dir = dir.path().join(SYSTEM_DIR).join(objects::BUCKETS_DIR);
+    assert_eq!(data_files(&store_dir), ["one"]);
+}
+
+/// A crash between the link into the version store and the rows leaves a file nothing
+/// refers to: reads and writes go on as if it weren't there, and a repair reports it
+/// (it can't tell which key it was) without removing it.
+#[tokio::test]
+async fn a_version_linked_but_not_recorded_changes_nothing_else() {
+    let (dir, store) = versioned(Layout::Folder, Versioning::Enabled).await;
+    let v1 = put(&store, "k", b"one").await;
+    let bucket_id = store.inner.system().bucket("docs").unwrap().unwrap().id;
+    let orphan = dir
+        .path()
+        .join(SYSTEM_DIR)
+        .join(objects::BUCKETS_DIR)
+        .join(&bucket_id)
+        .join("zz/zz/0000000000000000000000000000zzzz");
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    fs::hard_link(dir.path().join("docs/k"), &orphan).unwrap();
+
+    let v2 = put(&store, "k", b"two").await;
+    assert_eq!(
+        versions(&store).await,
+        [
+            ("k".into(), v2, true, false),
+            ("k".into(), v1.clone(), false, false)
+        ]
+    );
+    assert_eq!(bytes_of(&store, "k", Some(&v1)).await.unwrap(), b"one");
+    let report = store.repair(crate::RepairOptions {
+        apply: true,
+        forget_missing: false,
+    });
+    let report = report.await.unwrap();
+    assert!(
+        matches!(
+            &report.findings[..],
+            [crate::Repair {
+                finding: crate::Finding::Stray {
+                    why: crate::Stray::NoFooter,
+                    ..
+                },
+                fixed: false
+            }]
+        ),
+        "{report:?}"
+    );
+    assert!(orphan.is_file());
+}
