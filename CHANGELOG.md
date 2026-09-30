@@ -128,6 +128,8 @@ behaviour; the on-disk format is always upgraded automatically.
   [--token-file F]` makes one, signed with the alias's key as `mc admin prometheus
   generate` does, and prints the scrape configuration. `teifs serve --public-metrics`
   serves them to anyone instead.
+- The server's log names the request each line belongs to (`request{id=…}`, the id its
+  answer carried), for what the store logs as well as the S3 layer.
 - What the drive holds, in the metrics and in `teifs admin info`: buckets, objects,
   versions, delete markers and bytes stored, in total, and by bucket for a scrape with
   `?buckets=1` (`teifs admin prometheus generate --buckets`). The index keeps the counts

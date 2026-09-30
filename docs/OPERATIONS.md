@@ -11,6 +11,11 @@ admin API's JSON), so a failure a client reports can be found in the server's lo
 metrics. The AWS SDKs keep it with the error (`request_id()`), and the AWS CLI prints it
 with `--debug`.
 
+The server's own log names it too: whatever is logged while a request is answered, by
+the S3 layer or the store, is in a `request` span with its id, so `TEIFS_LOG=debug`
+shows each line as `request{id=18DA16C11FC2F0D0}: …`, and a client's failure can be
+followed through the log with the id it got.
+
 ## Health
 
 `GET /.teifs/health` answers `200 OK` without a signature and tells nothing about the

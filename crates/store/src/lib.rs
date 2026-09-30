@@ -430,7 +430,9 @@ impl Store {
         f: impl FnOnce(&Inner) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || f(&inner))
+        // What's logged there belongs to the request (its span) that asked.
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || span.in_scope(|| f(&inner)))
             .await
             .expect("storage task panicked")
     }

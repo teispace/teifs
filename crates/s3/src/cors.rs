@@ -15,6 +15,7 @@ use s3s::{
     service::S3Service,
 };
 use teifs_store::{CorsRule, Store, StoreError};
+use tracing::Instrument;
 
 use crate::{
     audit::Asked,
@@ -414,7 +415,9 @@ impl Service {
             Asked::of(&req, client.ip)
         });
         let request = observe::Request::new(Arc::clone(&self.watch), Arc::clone(&seen), asked);
-        let response = self.respond(req, &seen).await?;
+        // Everything logged while answering names the request, as its answer does.
+        let span = tracing::info_span!("request", id = %seen.id);
+        let response = self.respond(req, &seen).instrument(span).await?;
         Ok(observe::finish(response, request))
     }
 

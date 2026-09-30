@@ -11,7 +11,7 @@ use std::{
 };
 
 use aws_credential_types::Credentials;
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::{operation::RequestId, primitives::ByteStream};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use md5::{Digest, Md5};
 use tracing_subscriber::{
@@ -249,8 +249,19 @@ async fn secrets_never_reach_the_logs() {
     export_and_import(&server).await;
     let wrong = client_as(&server, &carol, "a-wrong-secret-of-the-right-length-40ch");
     assert!(wrong.list_buckets().send().await.is_err());
+    let listed = client(&server, SECRET_KEY)
+        .list_buckets()
+        .send()
+        .await
+        .unwrap();
 
     let text = log.text();
+    // What's logged while answering names the request, as the answer does.
+    let id = listed.request_id().unwrap();
+    assert!(
+        text.contains(&format!("request{{id={id}}}")),
+        "{id} isn't logged"
+    );
     assert!(
         text.contains("TRACE") || text.contains("DEBUG"),
         "the log was captured"
