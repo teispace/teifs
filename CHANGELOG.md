@@ -156,6 +156,11 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- SQS notification targets, as S3's: `teifs serve --notify-sqs ID=QUEUE_URL[,region=NAME]`
+  sends each event to the queue as S3 does (`{"Records":[...]}`), with `SendMessage`
+  signed with Signature Version 4, keys from `TEIFS_NOTIFY_SQS_ACCESS_KEY_ID` and
+  `_SECRET_KEY_ID` or AWS's own variables, FIFO queues grouped by object, and the
+  answer's MD5 checked. Any service that speaks SQS's API will do.
 - MQTT notification targets, as MinIO's: `teifs serve --notify-mqtt
   ID=HOST:PORT,topic=NAME[,qos=0|1|2][,user=NAME][,keepalive=SECONDS]` publishes each
   event over MQTT 3.1.1, acknowledged as its quality of service asks (1 by default), with

@@ -773,3 +773,85 @@ async fn mqtt_publishes_with_each_quality_of_service() {
             .any(|m| m.topic == "s3/tls")
     );
 }
+
+#[tokio::test]
+async fn sqs_is_sent_each_event_as_s3_sends_it() {
+    use crate::testing::AwsServer;
+    let server = AwsServer::start("eu-west-1", "AKIDTEIFS", "s3cret").await;
+    let keys = || AwsCredentials {
+        access_key: "AKIDTEIFS".into(),
+        secret: Zeroizing::new("s3cret".into()),
+        session_token: None,
+    };
+    let standard_url = format!("{}/123456789012/events", server.url());
+    let fifo_url = format!("{}/123456789012/events.fifo", server.url());
+    let mut targets = Vec::new();
+    for (id, url) in [("std", &standard_url), ("fifo", &fifo_url)] {
+        let mut sqs = Sqs::new(url, Some("eu-west-1")).unwrap();
+        sqs.credentials = Some(keys());
+        targets.push(TargetConfig::new(id, TargetKind::Sqs(sqs)).unwrap());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let notifier = Notifier::start(&dir.path().join("events.db"), targets).unwrap();
+    let put = message("s3:ObjectCreated:Put", "photos/a.jpg");
+    let test = br#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"photos"}"#;
+    for id in ["std", "fifo"] {
+        let arn = TargetArn::parse(&format!("arn:teifs:sqs::{id}:sqs")).unwrap();
+        notifier.send_now(&arn, test.to_vec()).await.unwrap();
+        notifier.queue(vec![(arn, put.clone())]).await.unwrap();
+    }
+    let requests = server.requests(4).await;
+    notifier.stop().await;
+    let records = serde_json::from_slice::<serde_json::Value>(&put).unwrap()["Records"].clone();
+    for request in &requests {
+        assert_eq!(request.target, "AmazonSQS.SendMessage");
+        assert_eq!(request.path, "/");
+        let sent: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        let body = sent["MessageBody"].as_str().unwrap();
+        let fifo = sent["QueueUrl"] == fifo_url.as_str();
+        if body.contains("s3:TestEvent") {
+            assert_eq!(body.as_bytes(), test, "the test event is sent as it is");
+            assert_eq!(fifo, sent["MessageGroupId"] == "teifs-test");
+        } else {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({ "Records": records }),
+                "no envelope"
+            );
+            assert_eq!(fifo, sent["MessageGroupId"] == "photos/a.jpg");
+        }
+        assert_eq!(
+            fifo,
+            sent["MessageDeduplicationId"].as_str().map(str::len) == Some(64)
+        );
+    }
+
+    // AWS's errors are named, and an answer for another message is caught.
+    let mut sqs = Sqs::new(&standard_url, Some("eu-west-1")).unwrap();
+    sqs.credentials = Some(keys());
+    let client = reqwest::Client::new();
+    server.wrong_digest(true);
+    assert!(
+        sqs.send(&client, b"{}")
+            .await
+            .unwrap_err()
+            .contains("doesn't match")
+    );
+    server.wrong_digest(false);
+    server.missing(&standard_url);
+    let missing = sqs.send(&client, b"{}").await.unwrap_err();
+    assert!(missing.contains("QueueDoesNotExist"), "{missing}");
+    let mut elsewhere = Sqs::new(&fifo_url, Some("us-east-1")).unwrap();
+    elsewhere.credentials = Some(keys());
+    let refused = elsewhere.send(&client, b"{}").await.unwrap_err();
+    assert!(refused.contains("InvalidSignatureException"), "{refused}");
+    let unsigned = Sqs::new(&fifo_url, Some("eu-west-1")).unwrap();
+    assert!(unsigned.send(&client, b"{}").await.is_err());
+    let mut temporary = Sqs::new(&fifo_url, Some("eu-west-1")).unwrap();
+    temporary.credentials = Some(AwsCredentials {
+        session_token: Some(Zeroizing::new("session".into())),
+        ..keys()
+    });
+    temporary.send(&client, b"{}").await.unwrap();
+}

@@ -315,6 +315,25 @@ was idle (nsqd does after missed heartbeats, NATS after missed pings, an MQTT br
 after its keep alive, Redis with a `timeout` set) is made again at once, rather than failing the event and waiting to
 retry it.
 
+```sh
+teifs serve --notify-sqs orders=https://sqs.eu-west-1.amazonaws.com/123456789012/orders
+export TEIFS_NOTIFY_SQS_ACCESS_KEY_ORDERS=AKIA… TEIFS_NOTIFY_SQS_SECRET_KEY_ORDERS=…
+```
+
+An SQS target, `arn:teifs:sqs::ID:sqs`, sends each event to a queue as S3 does: the
+message is S3's `{"Records":[...]}`, without MinIO's envelope, sent with `SendMessage` in
+SQS's JSON protocol and signed with Signature Version 4. The region is the one the
+queue's host names (`region=NAME` for another host, `us-east-1` if neither says), so any
+service that speaks SQS's API will do. A FIFO queue (`….fifo`) gets each object's events
+in order, grouped by `BUCKET/KEY`, with the message's SHA-256 as its deduplication id.
+The keys come from `TEIFS_NOTIFY_SQS_ACCESS_KEY_ID`, `TEIFS_NOTIFY_SQS_SECRET_KEY_ID` and
+`TEIFS_NOTIFY_SQS_SESSION_TOKEN_ID`, else from `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`; with none, requests go unsigned. The
+answer's `MD5OfMessageBody` is checked, as AWS's SDKs check it. Starting to name it sends
+the queue S3's test event, as S3 does, so a queue that doesn't exist or keys it refuses
+(`QueueDoesNotExist`, `InvalidSignatureException`) are named at once. The keys need
+`sqs:SendMessage` on the queue.
+
 ### Rules
 
 `PutBucketNotificationConfiguration` sets a bucket's rules, as on S3:
@@ -427,5 +446,5 @@ Events are made only while the server has targets or someone watches; a watcher 
 reads too slowly skips events rather than slow requests down, and every watch ends when
 the server stops.
 
-Not yet: other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
+Not yet: SNS and Lambda targets, rules naming a queue by its AWS ARN, other kinds of targets (Kafka, AMQP, databases), MQTT over WebSockets, NSQ over TLS, and client
 certificates for webhooks and Elasticsearch.

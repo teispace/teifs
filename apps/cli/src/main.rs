@@ -25,9 +25,10 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    AuditTarget, Config, Credentials, Durability, Elasticsearch, Format, JobOptions, KeyRules,
-    KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, TargetConfig, TargetKind,
-    TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials, tls_config,
+    AuditTarget, AwsCredentials, Config, Credentials, Durability, Elasticsearch, Format,
+    JobOptions, KeyRules, KmsLocation, Limits, Mqtt, Nats, Nsq, ProxyHeader, Redis, Server, Sqs,
+    TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey, Webhook, credentials,
+    tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -317,6 +318,22 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_MQTT"
     )]
     notify_mqtt: Vec<TargetConfig>,
+    /// An SQS queue buckets' notification rules can send events to, as S3 sends them,
+    /// as `ID=QUEUE_URL` (`https://sqs.REGION.amazonaws.com/ACCOUNT/NAME`, or any service
+    /// that speaks SQS's API), with region=NAME when its host doesn't name it (repeat for
+    /// more; in the environment, separated by spaces). Rules name it
+    /// `arn:teifs:sqs::ID:sqs`. Requests are signed with
+    /// `TEIFS_NOTIFY_SQS_ACCESS_KEY_ID`, `TEIFS_NOTIFY_SQS_SECRET_KEY_ID` and
+    /// `TEIFS_NOTIFY_SQS_SESSION_TOKEN_ID`, else `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, read only from the environment.
+    #[arg(
+        long = "notify-sqs",
+        value_name = "ID=QUEUE_URL",
+        value_parser = parse_notify_sqs,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_SQS"
+    )]
+    notify_sqs: Vec<TargetConfig>,
     /// Accept SSE-C keys over plain HTTP. Only behind a proxy that terminates TLS;
     /// a server listening on this machine only accepts them anyway.
     #[arg(long, env = "TEIFS_SSE_C_OVER_HTTP")]
@@ -910,6 +927,48 @@ fn parse_notify_mqtt(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Mqtt(mqtt))
 }
 
+/// An SQS target's keys: its own (`TEIFS_NOTIFY_SQS_ACCESS_KEY_ID`, `…_SECRET_KEY_ID`,
+/// `…_SESSION_TOKEN_ID`, read by `own`), else AWS's variables; none if neither.
+fn sqs_credentials(
+    id: &str,
+    own: impl Fn(&str) -> Option<Zeroizing<String>>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<AwsCredentials>, String> {
+    let aws = |name: &str| {
+        env(name)
+            .filter(|s| !s.trim().is_empty())
+            .map(Zeroizing::new)
+    };
+    let (key, secret) = (own("ACCESS_KEY"), own("SECRET_KEY"));
+    let (key, secret, token) = if key.is_some() || secret.is_some() {
+        (key, secret, own("SESSION_TOKEN"))
+    } else {
+        (
+            aws("AWS_ACCESS_KEY_ID"),
+            aws("AWS_SECRET_ACCESS_KEY"),
+            aws("AWS_SESSION_TOKEN"),
+        )
+    };
+    match (key, secret) {
+        (Some(key), Some(secret)) => Ok(Some(AwsCredentials {
+            access_key: key.trim().to_owned(),
+            secret,
+            session_token: token,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(format!(
+            "the SQS target `{id}` needs both an access key and its secret key"
+        )),
+    }
+}
+
+/// `ID=QUEUE_URL`, with `region=NAME`; its keys come from the environment later.
+fn parse_notify_sqs(text: &str) -> Result<TargetConfig, String> {
+    let (id, address, options) = target_spec(text, "ID=QUEUE_URL,region=NAME", &["region"])?;
+    let sqs = Sqs::new(address, options.get("region").copied())?;
+    TargetConfig::new(id, TargetKind::Sqs(sqs))
+}
+
 /// The notification targets, each with its secrets from the environment
 /// (`TEIFS_NOTIFY_KIND_SECRET_ID`, the ID in capitals and `-` as `_`).
 fn notify_targets(
@@ -948,6 +1007,9 @@ fn notify_targets(
                 }
             }
             TargetKind::Nsq(_) => {}
+            TargetKind::Sqs(sqs) => {
+                sqs.credentials = sqs_credentials(&arn.id, secret, &env)?;
+            }
             TargetKind::Mqtt(mqtt) => {
                 mqtt.password = secret("PASSWORD");
                 if mqtt.password.is_some() && mqtt.user.is_none() {
@@ -1053,7 +1115,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_redis)
                 .chain(args.notify_nsq)
                 .chain(args.notify_nats)
-                .chain(args.notify_mqtt),
+                .chain(args.notify_mqtt)
+                .chain(args.notify_sqs),
             |name| std::env::var(name).ok(),
         )?,
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
@@ -1639,6 +1702,78 @@ mod tests {
         let userless = parse_notify_mqtt("u=broker.local:1883,topic=t").unwrap();
         let env = |name: &str| (name == "TEIFS_NOTIFY_MQTT_PASSWORD_U").then(|| "pw".into());
         assert!(notify_targets(vec![userless], env).is_err());
+    }
+
+    #[test]
+    fn sqs_targets_take_their_keys_from_the_environment() {
+        let sqs_of = |target: &TargetConfig| match &target.kind {
+            TargetKind::Sqs(sqs) => sqs.clone(),
+            _ => panic!("not SQS"),
+        };
+        let queue =
+            parse_notify_sqs("q=https://sqs.eu-west-1.amazonaws.com/123456789012/events").unwrap();
+        assert_eq!(queue.arn().to_string(), "arn:teifs:sqs::q:sqs");
+        assert_eq!(sqs_of(&queue).region, "eu-west-1");
+        let local =
+            parse_notify_sqs("l=http://localhost:9324/000000000000/q,region=eu-north-1").unwrap();
+        assert_eq!(sqs_of(&local).region, "eu-north-1");
+
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let keys_of = |env: &'static [(&'static str, &'static str)]| {
+            notify_targets(vec![queue.clone()], vars(env))
+                .map(|targets| sqs_of(&targets[0]).credentials)
+        };
+        let own = keys_of(&[
+            ("TEIFS_NOTIFY_SQS_ACCESS_KEY_Q", "AKIDOWN"),
+            ("TEIFS_NOTIFY_SQS_SECRET_KEY_Q", "own"),
+            ("AWS_ACCESS_KEY_ID", "AKIDAWS"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("AWS_SESSION_TOKEN", "session"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (
+                own.access_key.as_str(),
+                own.secret.as_str(),
+                own.session_token
+            ),
+            ("AKIDOWN", "own", None),
+            "the target's own keys first"
+        );
+        let shared = keys_of(&[
+            ("AWS_ACCESS_KEY_ID", "AKIDAWS"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("AWS_SESSION_TOKEN", "session"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (shared.access_key.as_str(), shared.secret.as_str()),
+            ("AKIDAWS", "aws")
+        );
+        assert_eq!(
+            shared.session_token.as_deref().map(String::as_str),
+            Some("session")
+        );
+        assert!(keys_of(&[]).unwrap().is_none(), "unsigned");
+        assert!(keys_of(&[("TEIFS_NOTIFY_SQS_ACCESS_KEY_Q", "AKIDOWN")]).is_err());
+        assert!(keys_of(&[("AWS_SECRET_ACCESS_KEY", "aws")]).is_err());
+        for bad in [
+            "q=sqs.eu-west-1.amazonaws.com/1/q",
+            "q=https://sqs.eu-west-1.amazonaws.com/events",
+            "q=https://key:secret@localhost/1/q",
+            "q=https://localhost/1/q,topic=t",
+        ] {
+            assert!(parse_notify_sqs(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

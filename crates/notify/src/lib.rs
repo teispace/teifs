@@ -1,5 +1,5 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
-//! indexes, Redis keys, NSQ topics, NATS subjects and MQTT topics) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
+//! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics and SQS queues) are named by ARN, `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
 //! each target's sender sends its events one at a time, in order, retrying one that
 //! isn't taken with growing pauses until it is: a target that's down, or a restart,
@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod tests;
 
+mod aws;
 mod elasticsearch;
 mod mqtt;
 mod nats;
@@ -16,6 +17,7 @@ mod nkey;
 mod nsq;
 mod queue;
 mod redis;
+mod sqs;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod webhook;
@@ -30,6 +32,7 @@ use std::{
     time::Duration,
 };
 
+pub use aws::{AwsCredentials, region_of};
 pub use elasticsearch::Elasticsearch;
 pub use mqtt::Mqtt;
 pub use nats::Nats;
@@ -37,6 +40,7 @@ pub use net::tls_config;
 pub use nkey::UserKey;
 pub use nsq::Nsq;
 pub use redis::Redis;
+pub use sqs::Sqs;
 use teifs_types::notify::TargetArn;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -73,6 +77,8 @@ pub enum TargetKind {
     Nats(Nats),
     /// An MQTT topic, published each event as JSON.
     Mqtt(Mqtt),
+    /// An SQS queue, sent each event as S3 sends it.
+    Sqs(Sqs),
 }
 
 /// How a target that keeps documents keeps events (`MinIO`'s formats).
@@ -147,6 +153,7 @@ impl TargetConfig {
             TargetKind::Nsq(nsq) => nsq.shown(),
             TargetKind::Nats(nats) => nats.shown(),
             TargetKind::Mqtt(mqtt) => mqtt.shown(),
+            TargetKind::Sqs(sqs) => sqs.shown(),
         }
     }
 }
@@ -162,6 +169,7 @@ impl TargetKind {
             Self::Nsq(_) => "nsq",
             Self::Nats(_) => "nats",
             Self::Mqtt(_) => "mqtt",
+            Self::Sqs(_) => "sqs",
         }
     }
 }
@@ -224,6 +232,7 @@ impl Target {
             TargetKind::Nsq(nsq) => nsq.send(&body).await,
             TargetKind::Nats(nats) => nats.send(&body).await,
             TargetKind::Mqtt(mqtt) => mqtt.send(&body).await,
+            TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
         }
     }
 
@@ -237,6 +246,8 @@ impl Target {
             TargetKind::Nsq(nsq) => nsq.test().await,
             TargetKind::Nats(nats) => nats.test().await,
             TargetKind::Mqtt(mqtt) => mqtt.test().await,
+            // As S3 does: the queue is sent the test event.
+            TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
         }
     }
 }

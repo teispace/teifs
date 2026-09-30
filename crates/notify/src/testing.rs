@@ -966,3 +966,276 @@ async fn mqtt_serve(
         }
     }
 }
+
+/// A request an [`AwsServer`] took.
+#[derive(Debug, Clone)]
+pub struct AwsRequest {
+    /// Its `X-Amz-Target`, for the JSON protocols.
+    pub target: String,
+    /// Its path.
+    pub path: String,
+    /// Its body.
+    pub body: String,
+}
+
+/// A server that answers as AWS's SQS does (`SendMessage` in its JSON protocol), and
+/// takes only requests signed with its keys for its region.
+pub struct AwsServer {
+    url: String,
+    state: Arc<AwsState>,
+}
+
+struct AwsState {
+    region: String,
+    access_key: String,
+    secret: String,
+    requests: Mutex<Vec<AwsRequest>>,
+    missing: Mutex<Vec<String>>,
+    wrong_digest: std::sync::atomic::AtomicBool,
+}
+
+impl AwsServer {
+    /// Starts one for `region` that takes requests signed with `access_key` and
+    /// `secret`.
+    ///
+    /// # Panics
+    ///
+    /// When it can't listen.
+    pub async fn start(region: &str, access_key: &str, secret: &str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let url = format!("http://{}", listener.local_addr().expect("a bound address"));
+        let state = Arc::new(AwsState {
+            region: region.to_owned(),
+            access_key: access_key.to_owned(),
+            secret: secret.to_owned(),
+            requests: Mutex::new(Vec::new()),
+            missing: Mutex::new(Vec::new()),
+            wrong_digest: false.into(),
+        });
+        let served = Arc::clone(&state);
+        let base = url.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (state, base) = (Arc::clone(&served), base.clone());
+                let service = hyper::service::service_fn(move |req| {
+                    aws_answer(Arc::clone(&state), base.clone(), req)
+                });
+                tokio::spawn(
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service),
+                );
+            }
+        });
+        Self { url, state }
+    }
+
+    /// Its URL, `http://HOST:PORT`.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Answers that the queue at `queue_url` doesn't exist.
+    pub fn missing(&self, queue_url: &str) {
+        self.state
+            .missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(queue_url.to_owned());
+    }
+
+    /// Answers with a digest that doesn't match what was sent.
+    pub fn wrong_digest(&self, wrong: bool) {
+        self.state.wrong_digest.store(wrong, Ordering::SeqCst);
+    }
+
+    /// The requests taken, once there are at least `count`.
+    ///
+    /// # Panics
+    ///
+    /// When there aren't within ten seconds.
+    pub async fn requests(&self, count: usize) -> Vec<AwsRequest> {
+        for _ in 0..500 {
+            let taken = self
+                .state
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if taken.len() >= count {
+                return taken;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the AWS server never took {count} requests");
+    }
+}
+
+/// Seconds since 1970 of `YYYYMMDDTHHMMSSZ`.
+fn amz_date(text: &str) -> Option<u64> {
+    let n = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(4..6)?, n(6..8)?);
+    let (hh, mm, ss) = (n(9..11)?, n(11..13)?, n(13..15)?);
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
+/// The `Authorization` a request with these parts would have, signed with `state`'s
+/// keys for `service` in its region at `date`.
+fn aws_expected(
+    state: &AwsState,
+    service: &str,
+    url: &str,
+    headers: &[(String, String)],
+    date: &str,
+    token: Option<&str>,
+    body: &[u8],
+) -> Option<String> {
+    use aws_sigv4::{
+        http_request::{SignableBody, SignableRequest, SigningSettings, sign},
+        sign::v4,
+    };
+    let identity = aws_credential_types::Credentials::new(
+        &state.access_key,
+        &state.secret,
+        token.map(str::to_owned),
+        None,
+        "test",
+    )
+    .into();
+    let time = std::time::UNIX_EPOCH + Duration::from_secs(amz_date(date)?);
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(&state.region)
+        .name(service)
+        .time(time)
+        .settings(SigningSettings::default())
+        .build()
+        .ok()?
+        .into();
+    let signable = SignableRequest::new(
+        "POST",
+        url,
+        headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
+        SignableBody::Bytes(body),
+    )
+    .ok()?;
+    let (instructions, _) = sign(signable, &params).ok()?.into_parts();
+    instructions
+        .headers()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.to_owned())
+}
+
+async fn aws_answer(
+    state: Arc<AwsState>,
+    base: String,
+    req: hyper::Request<hyper::body::Incoming>,
+) -> Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, Infallible> {
+    use md5::Digest as _;
+    let reply = |status: u16, body: String| {
+        Ok(hyper::Response::builder()
+            .status(status)
+            .header("content-type", "application/x-amz-json-1.0")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .expect("a valid response"))
+    };
+    let header = |name: &str| {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (authorization, date, token, target) = (
+        header("authorization"),
+        header("x-amz-date"),
+        header("x-amz-security-token"),
+        header("x-amz-target"),
+    );
+    let signed: Vec<String> = authorization
+        .split("SignedHeaders=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .map(|list| list.split(';').map(str::to_owned).collect())
+        .unwrap_or_default();
+    let headers: Vec<(String, String)> = signed
+        .iter()
+        .filter(|name| !matches!(name.as_str(), "x-amz-date" | "x-amz-security-token"))
+        .map(|name| (name.clone(), header(name)))
+        .collect();
+    let path = req.uri().path().to_owned();
+    let body = req
+        .into_body()
+        .collect()
+        .await
+        .map(|b| b.to_bytes().to_vec())
+        .unwrap_or_default();
+    let service = if target.starts_with("AmazonSQS.") {
+        "sqs"
+    } else {
+        "unknown"
+    };
+    let url = format!("{base}{path}");
+    let token = (!token.is_empty()).then_some(token.as_str());
+    if aws_expected(&state, service, &url, &headers, &date, token, &body).as_deref()
+        != Some(authorization.as_str())
+    {
+        return reply(
+            403,
+            r#"{"__type":"com.amazon.coral.service#InvalidSignatureException","message":"The request signature we calculated does not match the signature you provided."}"#.to_owned(),
+        );
+    }
+    let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    state
+        .requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(AwsRequest {
+            target: target.clone(),
+            path,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
+    if target != "AmazonSQS.SendMessage" {
+        return reply(
+            400,
+            r#"{"__type":"com.amazonaws.sqs#UnsupportedOperation","message":"no"}"#.to_owned(),
+        );
+    }
+    let queue = request["QueueUrl"].as_str().unwrap_or_default();
+    if state
+        .missing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|q| q == queue)
+    {
+        return reply(
+            400,
+            r#"{"__type":"com.amazonaws.sqs#QueueDoesNotExist","message":"The specified queue does not exist."}"#.to_owned(),
+        );
+    }
+    let message = request["MessageBody"].as_str().unwrap_or_default();
+    let mut digest = md5::Md5::digest(message.as_bytes()).to_vec();
+    if state.wrong_digest.load(Ordering::SeqCst) {
+        digest[0] ^= 1;
+    }
+    let hex = digest.iter().fold(String::new(), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    });
+    reply(
+        200,
+        serde_json::json!({ "MD5OfMessageBody": hex, "MessageId": "5fea7756-0ea4-451a-a703-a558b933e274" })
+            .to_string(),
+    )
+}

@@ -22,6 +22,9 @@ serde_json.workspace = true
 sha2.workspace = true
 base64.workspace = true
 aws-lc-rs.workspace = true
+aws-sigv4 = { workspace = true, features = ["sign-http"] }
+aws-credential-types.workspace = true
+md-5.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 tokio-rustls.workspace = true
