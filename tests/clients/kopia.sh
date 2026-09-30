@@ -17,14 +17,20 @@ kopia repository create s3 --bucket="$BUCKET" --endpoint="${ENDPOINT#http://}" \
   --disable-tls --access-key="$AWS_ACCESS_KEY_ID" --secret-access-key="$AWS_SECRET_ACCESS_KEY" \
   --region="$AWS_REGION" --cache-directory="$CLIENT_WORK/cache" \
   --retention-mode=GOVERNANCE --retention-period=24h
-blob=$(s3api list-objects-v2 --bucket "$BUCKET" --query 'Contents[0].Key' --output text)
-[ "$(s3api get-object-retention --bucket "$BUCKET" --key "$blob" \
-  --query 'Retention.Mode' --output text)" = GOVERNANCE ]
+
+step "Kopia's own check of the provider"
+kopia repository validate-provider
 
 step "snapshot twice and verify every file"
 kopia snapshot create tree
 kopia snapshot create tree big.bin
 kopia snapshot verify --verify-files-percent=100
+
+step "data blobs are locked"
+# Pack blobs (p…) hold the data; Kopia writes its own configuration unlocked.
+blob=$(s3api list-objects-v2 --bucket "$BUCKET" --prefix p --query 'Contents[0].Key' --output text)
+[ "$(s3api get-object-retention --bucket "$BUCKET" --key "$blob" \
+  --query 'Retention.Mode' --output text)" = GOVERNANCE ]
 
 step "restore"
 id=$(kopia snapshot list tree --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["id"])')
