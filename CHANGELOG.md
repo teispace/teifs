@@ -156,6 +156,14 @@ behaviour; the on-disk format is always upgraded automatically.
   with the password from the environment. The namespace format keeps a hash with a field
   per object, the access format a list with an entry per event. `tls=true` connects over
   TLS, verified with the system's certificates or, with `ca=PATH`, a CA's PEM file.
+- MySQL and MariaDB notification targets, as MinIO's: `teifs serve --notify-mysql
+  ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=namespace|access]`, with MinIO's
+  tables (made when missing) and statements, prepared once per connection with their
+  values bound. It signs in with `caching_sha2_password` (MySQL 8's default),
+  `mysql_native_password` (MariaDB's) or `sha256_password`. A password that must be sent
+  whole goes only over TLS or encrypted with the server's RSA key
+  (`server_public_key=PATH`, or `get_server_public_key=true` to ask for it). The password
+  comes from `TEIFS_NOTIFY_MYSQL_PASSWORD_ID`.
 - PostgreSQL notification targets, as MinIO's: `teifs serve --notify-postgresql
   ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=namespace|access]`. The
   namespace format keeps a row per object (`key`, `value` as JSONB), set by each event and

@@ -375,11 +375,39 @@ system's certificates or the CA, with `client_cert` and `client_key` for a serve
 asks. Starting to name it checks that the server takes the user and the database and that
 the table is there or can be made. Nightly CI runs it against a real PostgreSQL 17.
 
-Redis, NSQ, NATS, MQTT, Kafka, AMQP and PostgreSQL targets each keep their connections. One the server
-closed while it was idle (nsqd does after missed heartbeats, NATS after missed pings, an
-MQTT broker after its keep alive, Kafka after `connections.max.idle.ms`, Redis with a
-`timeout` set) is made again at once, rather than failing the event and waiting to
-retry it.
+```sh
+teifs serve --notify-mysql db=mysql.internal:3306,database=teifs,table=s3_objects,user=teifs,server_public_key=/etc/teifs/mysql-public_key.pem
+export TEIFS_NOTIFY_MYSQL_PASSWORD_DB=…
+```
+
+A MySQL target, `arn:teifs:sqs::ID:mysql`, keeps events in a MySQL (5.7 or later) or
+MariaDB table, in MinIO's formats and with MinIO's tables: `namespace` (the default) keeps a
+row per object, `key_name` (`bucket/object`), `key_hash` (its SHA-256, the primary key) and
+`value` (`{"Records":[record]}` as JSON), set by each event and deleted when the object is;
+`access` adds a row per event, `event_time` (a `DATETIME`, in UTC) and `event_data` (the
+event as a webhook is sent it). On MariaDB, which takes no generated primary key,
+`key_hash` is a unique key instead. The table is made when it's missing, as for PostgreSQL; a
+name in backquotes keeps its capitals (`` table=`S3Events` ``). Each statement is prepared
+once per connection and run with its values bound.
+
+It signs in as `user=NAME` with the password from `TEIFS_NOTIFY_MYSQL_PASSWORD_ID`, by the
+user's plugin: `caching_sha2_password` (MySQL 8's default), `mysql_native_password`
+(MariaDB's default and older MySQL's) or `sha256_password`; `mysql_clear_password` only over
+TLS. `caching_sha2_password` proves the password without sending it once the server has
+the user cached; the first time after the server starts it wants the password whole, which
+TeiFS sends only over TLS (`tls=true` or `ca=PATH`, with `client_cert` and `client_key` for
+a server that asks) or encrypted with the server's RSA key: `server_public_key=PATH` (a copy
+of the server's `public_key.pem`), or `get_server_public_key=true` to ask the server for it,
+which a machine between them could answer with its own. Without one of these, a target
+that needs it says so. Starting to name it checks that the server takes the user and the
+database and that the table is there or can be made. Nightly CI runs it against real
+MySQL 8.4 and MariaDB 11.4.
+
+Redis, NSQ, NATS, MQTT, Kafka, AMQP, PostgreSQL and MySQL targets each keep their
+connections. One the server closed while it was idle (nsqd does after missed heartbeats,
+NATS after missed pings, an MQTT broker after its keep alive, Kafka after
+`connections.max.idle.ms`, Redis with a `timeout` set, MySQL after `wait_timeout`) is made
+again at once, rather than failing the event and waiting to retry it.
 
 ```sh
 teifs serve --notify-sqs orders=https://sqs.eu-west-1.amazonaws.com/123456789012/orders

@@ -1,6 +1,6 @@
 //! Bucket notifications' delivery. The server's targets (webhooks, Elasticsearch
 //! indexes, Redis keys, NSQ topics, NATS subjects, MQTT topics, Kafka topics, AMQP
-//! exchanges, PostgreSQL tables, SQS queues, SNS topics, Lambda functions and an
+//! exchanges, PostgreSQL and MySQL tables, SQS queues, SNS topics, Lambda functions and an
 //! EventBridge bus) are named by ARN,
 //! `arn:teifs:sqs::ID:TYPE`, and a bucket's rules pick which events go to which.
 //! An event is queued on the drive before the request that made it is answered, and
@@ -18,6 +18,7 @@ mod eventbridge;
 mod kafka;
 mod lambda;
 mod mqtt;
+mod mysql;
 mod nats;
 mod net;
 mod nkey;
@@ -27,6 +28,7 @@ mod queue;
 mod redis;
 mod scram;
 mod sns;
+mod sql;
 mod sqs;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -51,6 +53,7 @@ pub use eventbridge::sends as event_bridge_sends;
 pub use kafka::{Acks, Compression, Kafka, KafkaSasl, SaslMechanism};
 pub use lambda::Lambda;
 pub use mqtt::Mqtt;
+pub use mysql::{Mysql, ServerKey};
 pub use nats::Nats;
 pub use net::tls_config;
 pub use nkey::UserKey;
@@ -100,6 +103,8 @@ pub enum TargetKind {
     Kafka(Kafka),
     /// A PostgreSQL table: a row per object, or a row per event.
     Postgres(Postgres),
+    /// A MySQL table: a row per object, or a row per event.
+    Mysql(Mysql),
     /// An AMQP exchange, published each event as JSON.
     Amqp(Amqp),
     /// An SQS queue, sent each event as S3 sends it.
@@ -195,6 +200,7 @@ impl TargetConfig {
             TargetKind::Kafka(kafka) => kafka.shown(),
             TargetKind::Amqp(amqp) => amqp.shown(),
             TargetKind::Postgres(pg) => pg.shown(),
+            TargetKind::Mysql(db) => db.shown(),
             TargetKind::Sqs(sqs) => sqs.shown(),
             TargetKind::Sns(sns) => sns.shown(),
             TargetKind::Lambda(lambda) => lambda.shown(),
@@ -217,6 +223,7 @@ impl TargetKind {
             Self::Kafka(_) => "kafka",
             Self::Amqp(_) => "amqp",
             Self::Postgres(_) => "postgresql",
+            Self::Mysql(_) => "mysql",
             Self::Sqs(_) => "sqs",
             Self::Sns(_) => "sns",
             Self::Lambda(_) => "lambda",
@@ -297,6 +304,7 @@ impl Target {
             TargetKind::Kafka(kafka) => kafka.send(&body).await,
             TargetKind::Amqp(amqp) => amqp.send(&body).await,
             TargetKind::Postgres(pg) => pg.send(&body).await,
+            TargetKind::Mysql(db) => db.send(&body).await,
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,
             TargetKind::Lambda(lambda) => lambda.send(client, &body).await,
@@ -317,6 +325,7 @@ impl Target {
             TargetKind::Kafka(kafka) => kafka.test().await,
             TargetKind::Amqp(amqp) => amqp.test().await,
             TargetKind::Postgres(pg) => pg.test().await,
+            TargetKind::Mysql(db) => db.test().await,
             // As S3 does: the queue or topic is sent the test event.
             TargetKind::Sqs(sqs) => sqs.send(client, &body).await,
             TargetKind::Sns(sns) => sns.send(client, &body).await,

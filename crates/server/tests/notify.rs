@@ -1028,3 +1028,40 @@ async fn postgresql_rules_keep_a_row_per_object() {
     )
     .await;
 }
+
+/// MySQL rules: the table is made when the rules are set, and each event sets its
+/// object's row.
+#[tokio::test]
+async fn mysql_rules_keep_a_row_per_object() {
+    use teifs_notify::testing::{MysqlServer, MysqlSetup};
+    use teifs_server::{Format, Mysql};
+    let db = MysqlServer::start(MysqlSetup::default()).await;
+    let mut my = Mysql::new(db.address(), "s3", "objects", Format::Namespace, "teifs").unwrap();
+    my.password = Some(zeroize::Zeroizing::new("pw".into()));
+    let target = TargetConfig::new("db", TargetKind::Mysql(my)).unwrap();
+    let server = start_with(|config| config.notify = vec![target]).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("bkt").send().await.unwrap();
+    let rule = QueueConfiguration::builder()
+        .queue_arn("arn:minio:sqs::db:mysql")
+        .events(Event::from("s3:ObjectCreated:*"))
+        .build()
+        .unwrap();
+    configure(&s3, vec![rule]).await.unwrap();
+    assert!(db.table("objects").is_some(), "made when the rule was set");
+    s3.put_object()
+        .bucket("bkt")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    let rows = db.rows("objects", 1).await;
+    assert_eq!(rows[0][0], "bkt/a.txt");
+    target_metrics(
+        &server,
+        "arn:teifs:sqs::db:mysql",
+        &[("sent_total", 1), ("failed_total", 0)],
+    )
+    .await;
+}

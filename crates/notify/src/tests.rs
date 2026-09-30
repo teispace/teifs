@@ -1725,3 +1725,319 @@ async fn postgres_is_reached_over_tls() {
     let err = pg.test().await.unwrap_err();
     assert_eq!(err, "the server doesn't take TLS");
 }
+
+fn mysql(server: &crate::testing::MysqlServer, format: Format) -> Mysql {
+    let mut db = Mysql::new(server.address(), "s3", "events", format, "teifs").unwrap();
+    db.password = Some(Zeroizing::new("pw".into()));
+    db
+}
+
+/// MySQL targets in the `namespace` format: the table is made when the connection is,
+/// with `MinIO`'s columns; each event sets its object's row by a statement prepared once
+/// per connection, its values bound (a key with a quote is only a value), and a removal
+/// deletes it. The server had the user cached, so only a proof of the password was sent.
+#[tokio::test]
+async fn mysql_keeps_a_row_per_object() {
+    use crate::testing::{MyPassword, MysqlServer, MysqlSetup};
+    let server = MysqlServer::start(MysqlSetup::default()).await;
+    let db = mysql(&server, Format::Namespace);
+    db.test().await.unwrap();
+    let (columns, rows) = server.table("events").unwrap();
+    assert!(
+        columns.starts_with("(key_name VARCHAR(3072) NOT NULL, key_hash CHAR(64)"),
+        "{columns}"
+    );
+    assert!(rows.is_empty());
+    for (name, key) in [
+        ("s3:ObjectCreated:Put", "b/it's"),
+        ("s3:ObjectCreated:Put", "b/k"),
+        ("s3:ObjectCreated:Copy", "b/it's"),
+        ("s3:ObjectRemoved:Delete", "b/k"),
+    ] {
+        db.send(&message(name, key)).await.unwrap();
+    }
+    let rows = server.rows("events", 1).await;
+    assert_eq!(rows[0][0], "b/it's");
+    let value: serde_json::Value = serde_json::from_str(&rows[0][1]).unwrap();
+    assert_eq!(value["Records"][0]["eventName"], "ObjectCreated:Copy");
+    assert_eq!(server.prepares(), 2, "one upsert and one delete");
+    let statements = server.statements();
+    assert!(statements.iter().all(|(sql, _)| !sql.contains("it's")));
+    assert_eq!(
+        statements.last().unwrap(),
+        &(
+            "DELETE FROM events WHERE key_hash = SHA2(?, 256);".to_owned(),
+            vec!["b/k".to_owned()]
+        )
+    );
+    let startups = server.startups();
+    assert_eq!(startups.len(), 1);
+    let startup = &startups[0];
+    assert_eq!(
+        (
+            startup.user.as_str(),
+            startup.database.as_str(),
+            startup.collation,
+            startup.plugin.as_str(),
+            startup.password,
+            startup.signed_in,
+            startup.tls
+        ),
+        (
+            "teifs",
+            "s3",
+            45,
+            "caching_sha2_password",
+            MyPassword::Proof,
+            true,
+            false
+        )
+    );
+}
+
+/// On `MariaDB`, which takes no generated primary key, the `namespace` table keys the
+/// object's hash uniquely instead, and rows are set and deleted the same way.
+#[tokio::test]
+async fn mysql_makes_mariadbs_table_its_way() {
+    use crate::testing::{MysqlServer, MysqlSetup};
+    let server = MysqlServer::start(MysqlSetup {
+        mariadb: true,
+        ..MysqlSetup::default()
+    })
+    .await;
+    let db = mysql(&server, Format::Namespace);
+    for (name, key) in [
+        ("s3:ObjectCreated:Put", "b/a"),
+        ("s3:ObjectCreated:Put", "b/k"),
+        ("s3:ObjectRemoved:Delete", "b/a"),
+    ] {
+        db.send(&message(name, key)).await.unwrap();
+    }
+    assert_eq!(server.rows("events", 1).await[0][0], "b/k");
+    let (columns, _) = server.table("events").unwrap();
+    assert!(
+        columns.contains("STORED, value JSON, UNIQUE KEY key_hash (key_hash))"),
+        "{columns}"
+    );
+}
+
+/// MySQL targets in the `access` format, signed in as a `mysql_native_password` user after
+/// the server switches to that plugin: a table that's there is used as it is, and each event
+/// is a row of its time (a `DATETIME`, in UTC) and itself.
+#[tokio::test]
+async fn mysql_adds_a_row_per_event() {
+    use crate::testing::{MyAuth, MysqlServer, MysqlSetup};
+    let server = MysqlServer::start(MysqlSetup {
+        auth: MyAuth::Native,
+        greeting: Some(MyAuth::CachingSha2),
+        tables: [("`S3 Log`".to_owned(), "(given)".to_owned())].into(),
+        ..MysqlSetup::default()
+    })
+    .await;
+    let mut db = mysql(&server, Format::Access);
+    db.table = "`S3 Log`".into();
+    for (name, key) in [
+        ("s3:ObjectCreated:Put", "b/k"),
+        ("s3:ObjectRemoved:Delete", "b/k"),
+    ] {
+        db.send(&message(name, key)).await.unwrap();
+    }
+    let rows = server.rows("`S3 Log`", 2).await;
+    assert_eq!(server.table("`S3 Log`").unwrap().0, "(given)");
+    assert_eq!(rows[1][0], "2026-09-30 12:00:00.000");
+    let event: serde_json::Value = serde_json::from_str(&rows[1][1]).unwrap();
+    assert_eq!(event["EventName"], "s3:ObjectRemoved:Delete");
+    assert_eq!(server.startups()[0].plugin, "mysql_native_password");
+    assert!(
+        !server
+            .statements()
+            .iter()
+            .any(|(sql, _)| sql.starts_with("CREATE"))
+    );
+}
+
+/// A server that wants the whole password without TLS (`caching_sha2_password` before it
+/// has the user cached, `sha256_password`) gets it only encrypted with its RSA key: the one
+/// the operator gave, or one asked for when that's allowed; else the target says how to
+/// fix it. A password in the clear is sent only over TLS.
+#[tokio::test]
+async fn mysql_sends_the_whole_password_only_safely() {
+    use crate::testing::{MyAuth, MyPassword, MysqlServer, MysqlSetup};
+    let server = MysqlServer::start(MysqlSetup {
+        cached: false,
+        ..MysqlSetup::default()
+    })
+    .await;
+    let mut db = mysql(&server, Format::Namespace);
+    let err = db.test().await.unwrap_err();
+    assert!(err.contains("server_public_key=PATH"), "{err}");
+    db.server_key = ServerKey::from_pem(server.public_key_pem().as_bytes()).unwrap();
+    db.test().await.unwrap();
+    // Cached now: the next sign-in is only a proof.
+    db.test().await.unwrap();
+    server.flush_cache();
+    db.server_key = ServerKey::Ask;
+    db.test().await.unwrap();
+    let sent: Vec<MyPassword> = server.startups().iter().map(|s| s.password).collect();
+    // The first try, without a key, hung up without sending it.
+    assert_eq!(
+        sent,
+        [
+            MyPassword::Encrypted { asked_key: false },
+            MyPassword::Proof,
+            MyPassword::Encrypted { asked_key: true },
+        ]
+    );
+    // Another server's key doesn't open it.
+    let other = MysqlServer::start(MysqlSetup::default()).await;
+    server.flush_cache();
+    db.server_key = ServerKey::from_pem(other.public_key_pem().as_bytes()).unwrap();
+    let err = db.test().await.unwrap_err();
+    assert!(err.contains("refused the user or password"), "{err}");
+
+    let sha256 = MysqlServer::start(MysqlSetup {
+        auth: MyAuth::Sha256,
+        ..MysqlSetup::default()
+    })
+    .await;
+    let mut db = mysql(&sha256, Format::Namespace);
+    assert!(db.test().await.unwrap_err().contains("server_public_key"));
+    db.server_key = ServerKey::Ask;
+    db.test().await.unwrap();
+    assert_eq!(
+        sha256.startups()[0].password,
+        MyPassword::Encrypted { asked_key: true }
+    );
+
+    let clear = MysqlServer::start(MysqlSetup {
+        auth: MyAuth::Clear,
+        greeting: Some(MyAuth::Native),
+        ..MysqlSetup::default()
+    })
+    .await;
+    let err = mysql(&clear, Format::Namespace).test().await.unwrap_err();
+    assert!(err.contains("in the clear"), "{err}");
+    assert!(clear.startups().iter().all(|s| !s.signed_in));
+
+    // A plugin TeiFS doesn't speak is named, rather than answered with another's proof.
+    let ed25519 = MysqlServer::start(MysqlSetup {
+        auth: MyAuth::Ed25519,
+        greeting: Some(MyAuth::Native),
+        ..MysqlSetup::default()
+    })
+    .await;
+    let err = mysql(&ed25519, Format::Namespace).test().await.unwrap_err();
+    assert!(err.contains("`client_ed25519`"), "{err}");
+
+    // A server older than MySQL 5.7's handshake is named.
+    let old = MysqlServer::start(MysqlSetup {
+        lacks: crate::mysql::wire::capability::PLUGIN_AUTH,
+        ..MysqlSetup::default()
+    })
+    .await;
+    let err = mysql(&old, Format::Namespace).test().await.unwrap_err();
+    assert!(err.contains("older than MySQL 5.7"), "{err}");
+}
+
+/// What a MySQL server refuses is named: the password, the database, a table it may not
+/// read (not made again), and a statement (which keeps the connection); a connection the
+/// server closed is made again.
+#[tokio::test]
+async fn mysql_names_what_the_server_refuses() {
+    use crate::testing::{MysqlServer, MysqlSetup};
+    let server = MysqlServer::start(MysqlSetup::default()).await;
+    let mut db = mysql(&server, Format::Namespace);
+    db.password = Some(Zeroizing::new("wrong".into()));
+    let err = db.test().await.unwrap_err();
+    assert!(
+        err.contains("refused the user or password") && err.contains("1045"),
+        "{err}"
+    );
+    let mut db = mysql(&server, Format::Namespace);
+    db.database = "other".into();
+    let err = db.test().await.unwrap_err();
+    assert!(err.contains("1049") && err.contains("'other'"), "{err}");
+
+    server.refuse(1);
+    let err = mysql(&server, Format::Namespace).test().await.unwrap_err();
+    assert!(err.contains("1142"), "{err}");
+    assert!(
+        !server
+            .statements()
+            .iter()
+            .any(|(sql, _)| sql.starts_with("CREATE"))
+    );
+
+    let db = mysql(&server, Format::Namespace);
+    db.send(&message("s3:ObjectCreated:Put", "b/1"))
+        .await
+        .unwrap();
+    let connections = server.startups().len();
+    server.refuse(1);
+    let err = db
+        .send(&message("s3:ObjectCreated:Put", "b/2"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("1142") && err.contains("denied"), "{err}");
+    db.send(&message("s3:ObjectCreated:Put", "b/3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        server.startups().len(),
+        connections,
+        "the connection is kept"
+    );
+    server.hang_up();
+    db.send(&message("s3:ObjectCreated:Put", "b/4"))
+        .await
+        .unwrap();
+    assert_eq!(server.startups().len(), connections + 1);
+    assert_eq!(server.rows("events", 3).await.len(), 3);
+}
+
+/// MySQL over TLS: the server is verified with the operator's CA, the whole password is
+/// then sent in the clear, and a server without TLS or one the CA didn't sign is refused.
+#[tokio::test]
+async fn mysql_is_reached_over_tls() {
+    use crate::testing::{MyAuth, MyPassword, MysqlServer, MysqlSetup};
+    let (acceptor, ca_pem) = test_tls();
+    let server = MysqlServer::start(MysqlSetup {
+        cached: false,
+        tls: Some(acceptor.clone()),
+        ..MysqlSetup::default()
+    })
+    .await;
+    let mut db = mysql(&server, Format::Namespace);
+    db.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert!(db.shown().ends_with("(namespace, TLS)"), "{}", db.shown());
+    db.send(&message("s3:ObjectCreated:Put", "b/k"))
+        .await
+        .unwrap();
+    assert_eq!(server.rows("events", 1).await.len(), 1);
+    let startup = &server.startups()[0];
+    assert!(startup.tls && startup.signed_in);
+    assert_eq!(startup.password, MyPassword::Clear);
+
+    // A password longer than a one-byte length, in the first answer.
+    let long = "p".repeat(300);
+    let clear = MysqlServer::start(MysqlSetup {
+        auth: MyAuth::Clear,
+        login: ("teifs".into(), long.clone()),
+        tls: Some(acceptor),
+        ..MysqlSetup::default()
+    })
+    .await;
+    let mut db = mysql(&clear, Format::Namespace);
+    db.password = Some(Zeroizing::new(long));
+    db.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    db.test().await.unwrap();
+
+    db.tls = Some(tls_config(None, None).unwrap());
+    let err = db.test().await.unwrap_err();
+    assert!(err.contains("TLS failed"), "{err}");
+
+    let plain = MysqlServer::start(MysqlSetup::default()).await;
+    let mut db = mysql(&plain, Format::Namespace);
+    db.tls = Some(tls_config(Some(ca_pem.as_bytes()), None).unwrap());
+    assert_eq!(db.test().await.unwrap_err(), "the server doesn't take TLS");
+}

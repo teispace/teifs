@@ -11,7 +11,6 @@ use std::{fmt, future::Future, sync::Arc};
 
 use md5::{Digest as _, Md5};
 use rustls::ClientConfig;
-use teifs_types::notify::EventMessage;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
@@ -20,6 +19,7 @@ use crate::{
     aws::hex,
     net::{self, Kept, Stream},
     scram::{Scram, ScramHash},
+    sql::{self, Change},
 };
 
 /// The protocol, 3.0.
@@ -70,7 +70,7 @@ impl Postgres {
         if !net::is_address(address) {
             return Err(format!("`{address}` isn't HOST:PORT"));
         }
-        if !is_table(table) {
+        if !sql::is_table(table, '"', 63) {
             return Err(format!(
                 "`{table}` isn't a table's name: use letters, digits, `_` and `$` (starting with \
                  a letter or `_`), or a name in double quotes"
@@ -109,34 +109,22 @@ impl Postgres {
 
     /// Writes an event: a row set or removed (`namespace`), or a row added (`access`).
     pub(crate) async fn send(&self, body: &[u8]) -> Result<(), String> {
-        let message: EventMessage =
-            serde_json::from_slice(body).map_err(|e| format!("not an event: {e}"))?;
         let table = &self.table;
-        let statement = match self.format {
-            Format::Namespace if Format::removes(&message.event_name) => Statement {
+        let statement = match Change::of(self.format, body)? {
+            Change::Delete { key } => Statement {
                 sql: format!("DELETE FROM {table} WHERE key = $1;"),
-                values: vec![message.key],
+                values: vec![key],
             },
-            Format::Namespace => Statement {
+            Change::Set { key, value } => Statement {
                 sql: format!(
                     "INSERT INTO {table} (key, value) VALUES ($1, $2) \
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"
                 ),
-                values: vec![
-                    message.key,
-                    serde_json::json!({ "Records": message.records }).to_string(),
-                ],
+                values: vec![key, value],
             },
-            Format::Access => Statement {
+            Change::Add { time, event } => Statement {
                 sql: format!("INSERT INTO {table} (event_time, event_data) VALUES ($1, $2);"),
-                values: vec![
-                    message
-                        .records
-                        .first()
-                        .map(|r| r.event_time.clone())
-                        .unwrap_or_default(),
-                    String::from_utf8(body.to_vec()).map_err(|_| "not an event")?,
-                ],
+                values: vec![time, event],
             },
         };
         // A statement the server refuses keeps the connection; one that failed doesn't.
@@ -177,21 +165,6 @@ impl fmt::Debug for Postgres {
             .field("at", &self.shown())
             .finish_non_exhaustive()
     }
-}
-
-/// Whether `table` is a name `MinIO` takes: unquoted (a letter or `_`, then letters,
-/// digits, `_` and `$`), or anything but `"` in double quotes. It's spliced into SQL, so
-/// nothing else is.
-fn is_table(table: &str) -> bool {
-    if let Some(quoted) = table.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
-        return !quoted.is_empty() && !quoted.contains(['"', '\0']) && quoted.len() <= 63;
-    }
-    let mut chars = table.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-        && table.len() <= 63
 }
 
 /// A statement and the values bound to its parameters, as text.
@@ -515,21 +488,7 @@ mod tests {
             pg.shown(),
             "postgresql://teifs@db.local:5432/s3 table events (namespace)"
         );
-        for good in ["events", "_e$1", "\"Events Table\"", "E"] {
-            assert!(is_table(good), "{good}");
-        }
-        for bad in [
-            "",
-            "1events",
-            "events;drop table x",
-            "a.b",
-            "\"\"",
-            "\"a\"b\"",
-            "\"a",
-            "ev-ents",
-            "ü",
-        ] {
-            assert!(!is_table(bad), "{bad}");
+        for bad in ["events;drop table x", "`t`", &"e".repeat(64)] {
             assert!(Postgres::new("h:5432", "s3", bad, Format::Access, "u").is_err());
         }
         assert!(Postgres::new("h", "s3", "t", Format::Access, "u").is_err());

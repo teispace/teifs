@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest as _, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{SCRAM_SALT, scram_verify};
+use super::{SCRAM_SALT, scram_verify, table_after};
 use crate::{aws::hex, net::Stream};
 
 /// How a [`PostgresServer`] signs people in, as `pg_hba.conf`'s methods.
@@ -467,18 +467,7 @@ fn run(shared: &Shared, sql: &str, values: &[String]) -> Result<String, (&'stati
         state.refusing -= 1;
         return Err(("42501", "permission denied for table".into()));
     }
-    // The table named after `word`: up to a space, or a quoted name whole.
-    let table_after = |word: &str| {
-        let rest = sql
-            .split_once(&format!(" {word} "))
-            .map_or("", |(_, rest)| rest);
-        let end = if let Some(quoted) = rest.strip_prefix('"') {
-            quoted.find('"').map_or(rest.len(), |i| i + 2)
-        } else {
-            rest.find([' ', ';']).unwrap_or(rest.len())
-        };
-        rest[..end].to_owned()
-    };
+    let table_after = |word: &str| table_after(sql, word, '"');
     let missing = |table: &str| ("42P01", format!("relation \"{table}\" does not exist"));
     match sql.split(' ').next() {
         Some("CREATE") => {

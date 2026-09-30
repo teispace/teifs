@@ -58,7 +58,8 @@ crates/notify   teifs-notify   Bucket notifications' delivery: the server's targ
                                (webhooks, Elasticsearch, Redis, NSQ, NATS, MQTT,
                                Kafka (`kafka/`, its wire format in `wire.rs`, SASL
                                SCRAM in `scram.rs`), AMQP 0-9-1 (`amqp/`),
-                               PostgreSQL (`postgres.rs`), and AWS's SQS, SNS, Lambda and
+                               PostgreSQL (`postgres.rs`), MySQL (`mysql/`), both
+                               through `sql.rs`, and AWS's SQS, SNS, Lambda and
                                EventBridge, signed in `aws.rs`), the queue on the drive (events.db, SQLite)
                                and a sender per target; the webhook code the audit log
                                shares; test doubles behind the `testing` feature.

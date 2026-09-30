@@ -43,14 +43,14 @@ async fn events_reach_a_real_kafka_broker() {
     let plain_password = std::env::var("TEIFS_TEST_KAFKA_PLAIN_PASSWORD").unwrap();
     let scram_password = std::env::var("TEIFS_TEST_KAFKA_SCRAM_PASSWORD").unwrap();
     let mut targets = vec![
-        target("k0", &plain, None),
-        target("k1", &secured, Some(("plain", plain_password))),
+        target("kafka0", &plain, None),
+        target("kafka1", &secured, Some(("plain", plain_password))),
         target(
-            "k2",
+            "kafka2",
             &secured,
             Some(("scram-sha-256", scram_password.clone())),
         ),
-        target("k3", &secured, Some(("scram-sha-512", scram_password))),
+        target("kafka3", &secured, Some(("scram-sha-512", scram_password))),
         target("wrong", &secured, Some(("scram-sha-512", "not-it".into()))),
     ];
     if let TargetKind::Kafka(kafka) = &mut targets[0].kind {
@@ -61,7 +61,7 @@ async fn events_reach_a_real_kafka_broker() {
     }
     let server = start_with(|config| config.notify = targets).await;
     let s3 = client(&server, SECRET_KEY);
-    for id in ["k0", "k1", "k2", "k3", "wrong"] {
+    for id in ["kafka0", "kafka1", "kafka2", "kafka3", "wrong"] {
         s3.create_bucket().bucket(id).send().await.unwrap();
         let rule = QueueConfiguration::builder()
             .queue_arn(format!("arn:teifs:sqs::{id}:kafka"))
@@ -101,7 +101,7 @@ async fn events_reach_a_real_kafka_broker() {
             .await
             .unwrap();
     }
-    for id in ["k0", "k1", "k2", "k3"] {
+    for id in ["kafka0", "kafka1", "kafka2", "kafka3"] {
         common::sent(&server, "kafka", id, 3).await;
     }
 }

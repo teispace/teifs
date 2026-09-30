@@ -188,7 +188,7 @@ jobs:
             --from-beginning --max-messages 12 --timeout-ms 30000 --property print.key=true --property key.separator='|' > records.txt
           cut -c1-160 records.txt
           test "$(wc -l < records.txt)" -eq 12
-          for bucket in k0 k1 k2 k3; do
+          for bucket in kafka0 kafka1 kafka2 kafka3; do
             test "$(grep -c "^$bucket/a.txt|" records.txt)" -eq 2
             grep -q "^$bucket/dir/b c.txt|.*s3:ObjectCreated:Put" records.txt
             grep -q "^$bucket/a.txt|.*s3:ObjectRemoved:Delete" records.txt
@@ -271,3 +271,58 @@ jobs:
           test "$($PSQL "SELECT count(*) FROM teifs_log WHERE event_data->>'EventName' = 's3:ObjectRemoved:Delete'")" -eq 1
           test "$($PSQL "SELECT pg_typeof(event_time) FROM teifs_log LIMIT 1")" = "timestamp with time zone"
           test "$($PSQL "SELECT count(*) FROM pg_tables WHERE tablename = 'teifs_wrong'")" -eq 0
+
+  mysql:
+    # Notifications to a real MySQL (caching_sha2_password: the password sent encrypted
+    # with the server's RSA key, given or asked for) and MariaDB (mysql_native_password):
+    # tables TeiFS makes, a row per object and a row per event, a refused password; the
+    # rows are read back with the server's own client.
+    name: MySQL notifications (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: MySQL 8.4
+            image: mysql:8.4
+            client: mysql
+            key: /var/lib/mysql/public_key.pem
+          - name: MariaDB 11.4
+            image: mariadb:11.4
+            client: mariadb
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: root-test-only
+          MYSQL_DATABASE: teifs
+          MYSQL_USER: teifs
+          MYSQL_PASSWORD: mysql-test-only
+        ports:
+          - 3306:3306
+    env:
+      SQL: docker exec -e MYSQL_PWD=mysql-test-only ${{ job.services.db.id }} ${{ matrix.client }} -h127.0.0.1 --protocol=TCP -uteifs teifs -N -B -e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: The server, over TCP
+        run: |
+          for i in $(seq 90); do $SQL "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+          $SQL "SELECT VERSION(), @@default_authentication_plugin" 2>/dev/null || $SQL "SELECT VERSION()"
+      - name: The server's RSA key
+        if: matrix.key
+        run: |
+          docker cp ${{ job.services.db.id }}:${{ matrix.key }} public_key.pem
+          echo "TEIFS_TEST_MYSQL_PUBLIC_KEY=$PWD/public_key.pem" >> "$GITHUB_ENV"
+      - run: cargo test --locked -p teifs-server --test mysql -- --nocapture
+        env:
+          TEIFS_TEST_MYSQL: 127.0.0.1:3306
+          TEIFS_TEST_MYSQL_PASSWORD: mysql-test-only
+      - name: The rows, as the server keeps them
+        run: |
+          $SQL "SELECT key_name, JSON_UNQUOTE(JSON_EXTRACT(value, '$.Records[0].eventName')) FROM teifs_objects"
+          test "$($SQL "SELECT key_name FROM teifs_objects")" = "objects/dir/b c.txt"
+          test "$($SQL "SELECT COUNT(*) FROM teifs_log")" -eq 3
+          test "$($SQL "SELECT COUNT(*) FROM teifs_log WHERE JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.EventName')) = 's3:ObjectRemoved:Delete'")" -eq 1
+          test "$($SQL "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'teifs_wrong'")" -eq 0

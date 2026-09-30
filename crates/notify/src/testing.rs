@@ -1,11 +1,12 @@
 //! Targets on this machine, for tests (the `testing` feature): a webhook receiver that
 //! takes requests (`POST`s, and the others an Elasticsearch target makes), or fails as
 //! many as it's told to first, Redis, NSQ, NATS and MQTT servers, a Kafka cluster, an AMQP
-//! broker, a PostgreSQL server, and a server that answers as AWS's SQS, SNS, Lambda and
+//! broker, PostgreSQL and MySQL servers, and a server that answers as AWS's SQS, SNS, Lambda and
 //! EventBridge do.
 
 mod amqp;
 mod kafka;
+mod mysql;
 mod postgres;
 
 use std::{
@@ -22,6 +23,7 @@ use aws_lc_rs::{digest, hmac, pbkdf2};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use http_body_util::BodyExt;
 pub use kafka::{KafkaRecord, KafkaServer, KafkaSetup};
+pub use mysql::{MyAuth, MyPassword, MyStartup, MysqlServer, MysqlSetup, rsa_public_key_pem};
 pub use postgres::{PgAuth, PgImpostor, PgStartup, PostgresServer, PostgresSetup};
 
 /// One request taken.
@@ -1562,4 +1564,17 @@ pub(crate) fn scram_verify(
         .as_ref()
         .to_vec()
     })
+}
+
+/// The table `sql` names after `word`: up to a space or `;`, or a name in `quote`s whole.
+pub(crate) fn table_after(sql: &str, word: &str, quote: char) -> String {
+    let rest = sql
+        .split_once(&format!(" {word} "))
+        .map_or("", |(_, rest)| rest);
+    let end = if let Some(quoted) = rest.strip_prefix(quote) {
+        quoted.find(quote).map_or(rest.len(), |i| i + 2)
+    } else {
+        rest.find([' ', ';']).unwrap_or(rest.len())
+    };
+    rest[..end].to_owned()
 }

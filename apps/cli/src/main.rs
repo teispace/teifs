@@ -27,9 +27,9 @@ use clap::{Parser, Subcommand};
 use teifs_server::{
     Acks, Amqp, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability,
     Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl, KeyRules,
-    KmsLocation, Lambda, Limits, Mqtt, Nats, Nsq, Postgres, ProxyHeader, Redis, SaslMechanism,
-    Server, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit, TrustedProxies, UserKey,
-    Webhook, credentials, tls_config,
+    KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres, ProxyHeader, Redis,
+    SaslMechanism, Server, ServerKey, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit,
+    TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -371,6 +371,23 @@ pub(crate) struct ServeArgs {
         env = "TEIFS_NOTIFY_POSTGRESQL"
     )]
     notify_postgresql: Vec<TargetConfig>,
+    /// A MySQL (5.7 or later) or `MariaDB` table buckets' notification rules can send events
+    /// to, as `ID=HOST:PORT,database=NAME,table=NAME,user=NAME` (a table's name in
+    /// backquotes keeps its capitals), with `format=namespace` (a row per object: the
+    /// default) or `format=access` (a row per event), `tls=true` or `ca=PATH` with
+    /// `client_cert=PATH` and `client_key=PATH`, and, for a server that wants the whole
+    /// password without TLS, `server_public_key=PATH` (its RSA key, `public_key.pem`) or
+    /// `get_server_public_key=true` (asked for, which a machine in between could swap).
+    /// The table is made if it's missing. Rules name it `arn:teifs:sqs::ID:mysql`. Its
+    /// password, `TEIFS_NOTIFY_MYSQL_PASSWORD_ID`, is read only from the environment.
+    #[arg(
+        long = "notify-mysql",
+        value_name = "ID=HOST:PORT,database=NAME,table=NAME,user=NAME",
+        value_parser = parse_notify_mysql,
+        value_delimiter = ' ',
+        env = "TEIFS_NOTIFY_MYSQL"
+    )]
+    notify_mysql: Vec<TargetConfig>,
     /// An SQS queue buckets' notification rules can send events to, as S3 sends them,
     /// as `ID=QUEUE_URL` (`https://sqs.REGION.amazonaws.com/ACCOUNT/NAME`, or any service
     /// that speaks SQS's API), with region=NAME when its host doesn't name it (repeat for
@@ -928,42 +945,97 @@ fn parse_notify_redis(text: &str) -> Result<TargetConfig, String> {
     TargetConfig::new(id, TargetKind::Redis(redis))
 }
 
-/// A PostgreSQL table, `ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=F]` and
-/// TLS options; its password comes from the environment later.
-fn parse_notify_postgresql(text: &str) -> Result<TargetConfig, String> {
+/// A database target's spec: its ID, address, database, table, user, format and options.
+struct DatabaseSpec<'a> {
+    id: &'a str,
+    address: &'a str,
+    database: &'a str,
+    table: &'a str,
+    user: &'a str,
+    format: Format,
+    options: BTreeMap<&'a str, &'a str>,
+}
+
+/// `ID=HOST:PORT,database=NAME,table=NAME,user=NAME` with `format`, the TLS options and
+/// the options `extra`.
+fn database_spec<'a>(text: &'a str, extra: &[&str]) -> Result<DatabaseSpec<'a>, String> {
     let form = "ID=HOST:PORT,database=NAME,table=NAME,user=NAME";
-    let (id, address, options) = target_spec(
-        text,
-        form,
-        &[
-            "database",
-            "table",
-            "user",
-            "format",
-            "tls",
-            "ca",
-            "client_cert",
-            "client_key",
-        ],
-    )?;
+    let mut allowed = vec![
+        "database",
+        "table",
+        "user",
+        "format",
+        "tls",
+        "ca",
+        "client_cert",
+        "client_key",
+    ];
+    allowed.extend_from_slice(extra);
+    let (id, address, options) = target_spec(text, form, &allowed)?;
     let named = |name: &str| {
         options
             .get(name)
             .copied()
             .ok_or_else(|| format!("name the {name}: {form}"))
     };
-    let format = options
-        .get("format")
-        .map_or(Ok(Format::Namespace), |f| Format::parse(f))?;
-    let mut pg = Postgres::new(
+    Ok(DatabaseSpec {
+        id,
         address,
-        named("database")?,
-        named("table")?,
-        format,
-        named("user")?,
+        database: named("database")?,
+        table: named("table")?,
+        user: named("user")?,
+        format: options
+            .get("format")
+            .map_or(Ok(Format::Namespace), |f| Format::parse(f))?,
+        options,
+    })
+}
+
+/// A PostgreSQL table, `ID=HOST:PORT,database=NAME,table=NAME,user=NAME[,format=F]` and
+/// TLS options; its password comes from the environment later.
+fn parse_notify_postgresql(text: &str) -> Result<TargetConfig, String> {
+    let spec = database_spec(text, &[])?;
+    let mut pg = Postgres::new(
+        spec.address,
+        spec.database,
+        spec.table,
+        spec.format,
+        spec.user,
     )?;
-    pg.tls = target_tls(&options)?;
-    TargetConfig::new(id, TargetKind::Postgres(pg))
+    pg.tls = target_tls(&spec.options)?;
+    TargetConfig::new(spec.id, TargetKind::Postgres(pg))
+}
+
+/// A MySQL table, as a PostgreSQL one, with `server_public_key=PATH` or
+/// `get_server_public_key=true` for sending the password whole without TLS; its password
+/// comes from the environment later.
+fn parse_notify_mysql(text: &str) -> Result<TargetConfig, String> {
+    let spec = database_spec(text, &["server_public_key", "get_server_public_key"])?;
+    let mut db = Mysql::new(
+        spec.address,
+        spec.database,
+        spec.table,
+        spec.format,
+        spec.user,
+    )?;
+    db.tls = target_tls(&spec.options)?;
+    let ask = target_flag(&spec.options, "get_server_public_key")?.unwrap_or(false);
+    db.server_key = match (spec.options.get("server_public_key"), ask) {
+        (Some(_), true) => {
+            return Err(
+                "give the server's key (server_public_key=PATH) or let it be asked for \
+                 (get_server_public_key=true), not both"
+                    .to_owned(),
+            );
+        }
+        (Some(path), false) => {
+            let pem = std::fs::read(path).map_err(|e| format!("can't read `{path}`: {e}"))?;
+            ServerKey::from_pem(&pem).map_err(|e| format!("`{path}`: {e}"))?
+        }
+        (None, true) => ServerKey::Ask,
+        (None, false) => ServerKey::None,
+    };
+    TargetConfig::new(spec.id, TargetKind::Mysql(db))
 }
 
 /// An NSQ topic, `ID=HOST:PORT,topic=NAME`.
@@ -1310,6 +1382,7 @@ fn target_secrets(
         }
         TargetKind::Nsq(_) => {}
         TargetKind::Postgres(pg) => pg.password = secret("PASSWORD"),
+        TargetKind::Mysql(db) => db.password = secret("PASSWORD"),
         TargetKind::Sqs(sqs) => sqs.credentials = aws_credentials(arn, secret, &env)?,
         TargetKind::Sns(sns) => sns.credentials = aws_credentials(arn, secret, &env)?,
         TargetKind::Lambda(lambda) => {
@@ -1449,6 +1522,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .chain(args.notify_kafka)
                 .chain(args.notify_amqp)
                 .chain(args.notify_postgresql)
+                .chain(args.notify_mysql)
                 .chain(args.notify_sqs)
                 .chain(args.notify_sns)
                 .chain(args.notify_lambda)
@@ -1975,6 +2049,62 @@ mod tests {
         ] {
             assert!(parse_notify_postgresql(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn mysql_targets_take_options_their_key_and_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let pem = dir.path().join("public_key.pem");
+        std::fs::write(&pem, teifs_notify::testing::rsa_public_key_pem()).unwrap();
+        let env = |name: &str| (name == "TEIFS_NOTIFY_MYSQL_PASSWORD_DB").then(|| "pw".into());
+        let db = parse_notify_mysql(&format!(
+            "db=my.local:3306,database=s3,table=`S3Events`,user=teifs,format=access,\
+             server_public_key={}",
+            pem.display()
+        ))
+        .unwrap();
+        assert_eq!(db.arn().to_string(), "arn:teifs:sqs::db:mysql");
+        let targets = notify_targets(vec![db], env).unwrap();
+        let TargetKind::Mysql(db) = &targets[0].kind else {
+            panic!("not MySQL")
+        };
+        assert_eq!(
+            (db.table.as_str(), db.format, db.tls.is_some()),
+            ("`S3Events`", Format::Access, false)
+        );
+        assert!(matches!(db.server_key, ServerKey::Given(_)));
+        assert_eq!(db.password.as_deref().map(String::as_str), Some("pw"));
+        let asked = parse_notify_mysql(
+            "x=my.local:3306,database=s3,table=t,user=u,get_server_public_key=true,tls=true",
+        )
+        .unwrap();
+        let TargetKind::Mysql(asked) = &asked.kind else {
+            panic!("not MySQL")
+        };
+        assert_eq!(
+            (&asked.server_key, asked.tls.is_some()),
+            (&ServerKey::Ask, true)
+        );
+        for bad in [
+            "x=my.local:3306,table=t,user=u".to_owned(),
+            "x=my.local:3306,database=s3,table=\"t\",user=u".to_owned(),
+            "x=my.local:3306,database=s3,table=t,user=u,get_server_public_key=maybe".to_owned(),
+            "x=my.local:3306,database=s3,table=t,user=u,server_public_key=/nowhere.pem".to_owned(),
+            format!(
+                "x=my.local:3306,database=s3,table=t,user=u,server_public_key={},\
+                 get_server_public_key=true",
+                pem.display()
+            ),
+        ] {
+            assert!(parse_notify_mysql(&bad).is_err(), "{bad}");
+        }
+        std::fs::write(&pem, "not a key").unwrap();
+        let err = parse_notify_mysql(&format!(
+            "x=my.local:3306,database=s3,table=t,user=u,server_public_key={}",
+            pem.display()
+        ))
+        .unwrap_err();
+        assert!(err.contains("PUBLIC KEY"), "{err}");
     }
 
     #[test]
