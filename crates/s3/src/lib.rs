@@ -28,6 +28,7 @@ mod routes;
 mod sig_v2;
 mod sse;
 mod tagging;
+mod trace;
 
 use std::sync::Arc;
 
@@ -104,10 +105,12 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
         _ => metrics::Scrapers::Anyone,
     };
+    let tracers = Arc::new(trace::Tracers::new());
     let watch = observe::Watch::new(
         metrics::Metrics::new(&store),
         scrapers,
         options.audit,
+        Arc::clone(&tracers),
         store.format().drive.clone(),
     );
     let mut builder = S3ServiceBuilder::new(drive);
@@ -136,6 +139,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             started: std::time::SystemTime::now(),
             config: options.config.map(Arc::new),
             root_keys: options.root_keys,
+            tracers,
         });
     }
     let host = if options.domains.is_empty() {

@@ -1,7 +1,7 @@
 # Operations
 
-Watching a TeiFS server: its request ids, health check, Prometheus metrics and audit
-log.
+Watching a TeiFS server: its request ids, health check, Prometheus metrics, audit log
+and live trace.
 
 ## Request ids
 
@@ -184,3 +184,27 @@ Secrets never reach it: `Authorization`, `Proxy-Authorization`, `Cookie`, sessio
 V2's `Signature`) and SSE-C keys (`…-customer-key`, the copy source's too) are replaced
 by `REDACTED`; a key's MD5 digest, which reveals nothing, is kept.
 `GET /.teifs/admin/v1/config` (`teifs admin config`) says where the log goes.
+
+## Live trace
+
+`teifs admin trace ALIAS` shows each request the server answers, as it answers it, until
+Ctrl-C (as `mc admin trace` shows MinIO's):
+
+```text
+12:50:26.602 200 PutObject pics/a.txt 127.0.0.1 14.9ms ↑6 B ↓0 B
+12:50:26.753 404 GetObject pics/missing 127.0.0.1 681µs ↑0 B ↓166 B NoSuchKey
+```
+
+Filters narrow it on the server, so a narrow trace of a busy server costs little:
+`--errors` (answers from 400 up), `--api PutObject` (repeat for more), `--bucket NAME`,
+`--prefix KEY`, `--status 404` (repeat for more) and `--slower-than 250ms`. With
+`--json` each request is its audit entry (above), secrets redacted the same way. It needs
+`teifs:ServerTrace`, as entries show other users' requests.
+
+A trace is `GET /.teifs/admin/v1/trace`, signed as any admin call, whose answer is the
+entries as JSON lines (`application/x-ndjson`) for as long as the caller reads, with an
+empty line every 10 seconds so proxies keep a quiet trace open; the query holds the
+filters (`errors=true`, `api`, `bucket`, `prefix`, `status`, `slowerThanMs`). The server
+makes entries only while an audit log is kept or someone traces. A trace that reads too
+slowly skips entries rather than slow requests down, and every trace ends when the server
+stops.

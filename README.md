@@ -195,7 +195,8 @@ and each bucket hold; background jobs and what the scrub found)
 to a bearer token that `teifs admin prometheus generate ALIAS` makes, with the scrape
 configuration to paste. `--audit-log FILE` (or `-`) keeps a JSON line per request in
 MinIO's audit format: who asked what, the answer, bytes and time, never a secret;
-`--audit-webhook URL` sends the same to a log collector. See
+`--audit-webhook URL` sends the same to a log collector, and `teifs admin trace` shows
+requests live. See
 [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Commands
@@ -230,6 +231,7 @@ MinIO's audit format: who asked what, the answer, bytes and time, never a secret
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |
 | `teifs admin bucket export ALIAS[/BUCKET] [-o FILE [--force]]` \| `bucket import ALIAS FILE` | Move buckets with their settings (policy, lifecycle, Object Lock, encryption, CORS, tags, ACL, Block Public Access, versioning) to another server, as `mc admin cluster bucket export\|import`; each setting is checked and reported |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |
+| `teifs admin trace ALIAS [--errors] [--api NAME]… [--bucket B] [--prefix P] [--status CODE]… [--slower-than 250ms]` | Show each request the server answers, as it answers it (as `mc admin trace`); `--json` for audit entries |
 | `teifs admin prometheus generate ALIAS [--expires 90d] [--token-file FILE] [--buckets]` | A Prometheus scrape configuration for the server's metrics, with a token its key signs (as `mc admin prometheus generate`) |
 | `teifs admin root-key rotate ALIAS` | Replace a server's generated root key; the alias follows |
 | `teifs admin user add ALIAS NAME --policy readonly\|readwrite\|admin\|FILE [--bucket B]… --save-alias NEW\|-o FILE` | A user with a policy and an access key, in one step; the key goes into an alias or an owner-only file |

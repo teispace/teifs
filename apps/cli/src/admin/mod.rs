@@ -8,6 +8,7 @@ mod oidc;
 mod policy;
 mod prometheus;
 mod roles;
+mod trace;
 mod users;
 
 use std::{
@@ -57,6 +58,10 @@ pub enum AdminAction {
         #[command(subcommand)]
         action: SnapshotAction,
     },
+    /// Show each request a TeiFS server answers, as it answers it, until Ctrl-C (as
+    /// `mc admin trace`): when, status, operation, bucket and key, client, time and
+    /// bytes. `--json` prints each request's audit entry. Needs `teifs:ServerTrace`.
+    Trace(trace::TraceArgs),
     /// A Prometheus scrape configuration for a TeiFS server's metrics, with its token.
     Prometheus {
         #[command(subcommand)]
@@ -170,6 +175,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         } => import(&client(&aliases, &alias)?, &file, adopt_account).await,
         AdminAction::Bucket { action } => buckets::run(&aliases, action).await,
         AdminAction::Prometheus { action } => prometheus::run(&aliases, action),
+        AdminAction::Trace(args) => trace::run(&aliases, args).await,
         AdminAction::Snapshot {
             action: SnapshotAction::Ls { alias },
         } => snapshots(&client(&aliases, &alias)?).await,

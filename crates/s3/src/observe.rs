@@ -23,6 +23,7 @@ use s3s::{HttpResponse, StdError};
 use crate::{
     audit::{self, Asked, AuditSink},
     metrics::{Metrics, Scrapers},
+    trace::Tracers,
 };
 
 /// The operation of a request no hook saw: refused before its signature was accepted.
@@ -187,6 +188,8 @@ pub(crate) struct Watch {
     /// Who may read the metrics.
     pub(crate) scrapers: Scrapers,
     audit: Option<Arc<dyn AuditSink>>,
+    /// Whoever watches live traces.
+    pub(crate) tracers: Arc<Tracers>,
     /// The drive's id, which audit entries carry.
     drive: String,
 }
@@ -196,24 +199,29 @@ impl Watch {
         metrics: Metrics,
         scrapers: Scrapers,
         audit: Option<Arc<dyn AuditSink>>,
+        tracers: Arc<Tracers>,
         drive: String,
     ) -> Self {
         Self {
             metrics,
             scrapers,
             audit,
+            tracers,
             drive,
         }
     }
 
-    /// Whether requests are audited, so what they asked is worth keeping.
-    pub(crate) const fn audits(&self) -> bool {
-        self.audit.is_some()
+    /// Whether requests are audited or traced, so what they asked is worth keeping.
+    pub(crate) fn audits(&self) -> bool {
+        self.audit.is_some() || self.tracers.watched()
     }
 
     fn audit(&self, asked: Option<Asked>, seen: &Seen, answer: &Answer, headers: &HeaderMap) {
-        if let (Some(sink), Some(asked)) = (&self.audit, asked)
-            && !sink.log(audit::entry(&self.drive, asked, seen, answer, headers))
+        let Some(asked) = asked else { return };
+        let entry = audit::entry(&self.drive, asked, seen, answer, headers);
+        self.tracers.show(&entry);
+        if let Some(sink) = &self.audit
+            && !sink.log(entry)
         {
             self.metrics.audit_dropped();
         }
@@ -459,6 +467,7 @@ mod tests {
             Metrics::new(&store),
             Scrapers::Anyone,
             Some(sink),
+            Arc::new(Tracers::new()),
             "drive".into(),
         );
         (dir, Arc::new(watch))

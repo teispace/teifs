@@ -289,6 +289,10 @@ record the request, and to the sink even when the client left before an answer (
 The server's sink (`crates/server/src/audit.rs`) gives each target (a file, standard
 output, a webhook) a bounded queue and a writer task of its own: a file's reopens on
 `SIGHUP`, a webhook's sends batches of JSON lines and retries each until it's taken.
+Live traces (`trace.rs`) get the same entries from a broadcast channel, each watcher
+through a task that applies its filter and feeds its answer's body; entries are made
+while a sink exists or anyone watches, and `Service::stopping` ends every trace when the
+server stops, so shutdown doesn't wait on them.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

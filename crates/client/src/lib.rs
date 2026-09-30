@@ -32,13 +32,14 @@ pub use zeroize::Zeroizing;
 
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY,
-    ADMIN_SNAPSHOTS,
+    ADMIN_SNAPSHOTS, ADMIN_TRACE,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
     ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion, IamExport,
     ImportReport, JobInfo, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
 };
+pub use teifs_types::audit::{AuditEntry, TraceFilter};
 
 /// The region requests are signed for when none is given (TeiFS accepts any).
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -254,6 +255,24 @@ impl Client {
     }
 
     /// Sends a signed request and reads its JSON answer.
+    /// A live trace of the requests the server answers from now on, those `filter`
+    /// shows (`teifs:ServerTrace`): read it with [`Trace::next`].
+    pub async fn trace(&self, filter: &TraceFilter) -> Result<Trace, ClientError> {
+        let query = filter.to_query();
+        let query = (!query.is_empty()).then_some(query.as_str());
+        let response = self
+            .send(Method::GET, ADMIN_TRACE, query, Vec::new())
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_error(status, &response.bytes().await?));
+        }
+        Ok(Trace {
+            response,
+            pending: Vec::new(),
+        })
+    }
+
     async fn call<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -261,6 +280,23 @@ impl Client {
         query: Option<&str>,
         body: Vec<u8>,
     ) -> Result<T, ClientError> {
+        let response = self.send(method, path, query, body).await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            return serde_json::from_slice(&bytes).map_err(|e| ClientError::Answer(e.to_string()));
+        }
+        Err(api_error(status, &bytes))
+    }
+
+    /// Sends a signed request.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response, ClientError> {
         let mut url = self.endpoint.clone();
         url.set_path(path);
         url.set_query(query);
@@ -271,13 +307,7 @@ impl Client {
         for (name, value) in self.signature(&method, &url, &body)? {
             request = request.header(name, value);
         }
-        let response = request.body(body).send().await?;
-        let status = response.status();
-        let bytes = response.bytes().await?;
-        if status.is_success() {
-            return serde_json::from_slice(&bytes).map_err(|e| ClientError::Answer(e.to_string()));
-        }
-        Err(api_error(status, &bytes))
+        Ok(request.body(body).send().await?)
     }
 
     /// The headers that sign a request, its body's hash among them.
@@ -366,6 +396,42 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
         }),
         message: element("Message").unwrap_or_default(),
         request_id: element("RequestId"),
+    }
+}
+
+/// A live trace: the requests a server answers, as it answers them.
+#[derive(Debug)]
+pub struct Trace {
+    response: reqwest::Response,
+    /// What's been read of a line not yet whole.
+    pending: Vec<u8>,
+}
+
+impl Trace {
+    /// The next request's entry, waiting for one; `None` once the server ends the trace
+    /// (it's stopping).
+    ///
+    /// # Errors
+    ///
+    /// The connection failed, or a line isn't an entry.
+    pub async fn next(&mut self) -> Result<Option<AuditEntry>, ClientError> {
+        loop {
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                let line = line.trim_ascii();
+                // Empty lines keep a quiet trace open through proxies.
+                if line.is_empty() {
+                    continue;
+                }
+                return serde_json::from_slice(line)
+                    .map(Some)
+                    .map_err(|e| ClientError::Answer(e.to_string()));
+            }
+            match self.response.chunk().await? {
+                Some(chunk) => self.pending.extend_from_slice(&chunk),
+                None => return Ok(None),
+            }
+        }
     }
 }
 

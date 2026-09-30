@@ -388,6 +388,13 @@ impl Service {
         response
     }
 
+    /// Cancel it when the server stops: it ends the answers that would last until then
+    /// (live traces), so the connections can close.
+    #[must_use]
+    pub fn stopping(&self) -> tokio_util::sync::CancellationToken {
+        self.watch.tracers.stopping()
+    }
+
     async fn handle(self, req: Request<hyper::body::Incoming>) -> Result<HttpResponse, HttpError> {
         let path = req.uri().path();
         if self.virtual_bucket(&req).is_none() {

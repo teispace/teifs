@@ -128,6 +128,11 @@ behaviour; the on-disk format is always upgraded automatically.
   [--token-file F]` makes one, signed with the alias's key as `mc admin prometheus
   generate` does, and prints the scrape configuration. `teifs serve --public-metrics`
   serves them to anyone instead.
+- `teifs admin trace ALIAS` shows each request the server answers, as it answers it
+  (as `mc admin trace`): time, status, operation, bucket and key, client, duration and
+  bytes, or with `--json` the audit entry. Filters (`--errors`, `--api`, `--bucket`,
+  `--prefix`, `--status`, `--slower-than`) apply on the server. It's
+  `GET /.teifs/admin/v1/trace` (JSON lines), which needs `teifs:ServerTrace`.
 - The server's log names the request each line belongs to (`request{id=…}`, the id its
   answer carried), for what the store logs as well as the S3 layer.
 - What the drive holds, in the metrics and in `teifs admin info`: buckets, objects,

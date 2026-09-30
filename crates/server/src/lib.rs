@@ -501,6 +501,12 @@ impl Server {
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let jobs = self.store.start_jobs(&self.jobs);
         let reloads = self.tls.clone().map(|tls| tokio::spawn(tls::watch(tls)));
+        // Live traces last until the server stops: they end when it starts to.
+        let stopping = self.service.stopping();
+        let shutdown = async move {
+            shutdown.await;
+            stopping.cancel();
+        };
         serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
         if let Some(reloads) = reloads {
             reloads.abort();

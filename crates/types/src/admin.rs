@@ -41,6 +41,11 @@ pub const ADMIN_SNAPSHOTS: &str = "/.teifs/admin/v1/snapshots";
 /// `PUT`: imports one, creating missing buckets, answering a [`BucketsImportReport`].
 pub const ADMIN_BUCKETS: &str = "/.teifs/admin/v1/buckets";
 
+/// A live trace of the requests the server answers: an audit entry per request, as a
+/// JSON line, for as long as the caller reads (`teifs:ServerTrace`). The query is a
+/// [`crate::audit::TraceFilter`].
+pub const ADMIN_TRACE: &str = "/.teifs/admin/v1/trace";
+
 /// The format of a [`BucketsExport`]; a server refuses any other.
 pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
 

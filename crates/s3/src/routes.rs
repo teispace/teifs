@@ -19,7 +19,7 @@ use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX,
-    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ServerConfig,
+    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE, ServerConfig,
 };
 
 use crate::{
@@ -28,6 +28,7 @@ use crate::{
     bucket_access::Rules,
     bucket_export, control, iam_api,
     observe::{self, Seen},
+    trace::Tracers,
 };
 
 /// Which API a request is for, told apart before anything else is read.
@@ -94,6 +95,7 @@ enum Handler {
     TakeSnapshot,
     ExportBuckets,
     ImportBuckets,
+    Trace,
 }
 
 impl Handler {
@@ -117,6 +119,7 @@ impl Handler {
             Self::TakeSnapshot => "TakeSnapshot",
             Self::ExportBuckets => "ExportBucketMetadata",
             Self::ImportBuckets => "ImportBucketMetadata",
+            Self::Trace => "ServerTrace",
         }
     }
 }
@@ -249,6 +252,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         api: Api::Admin,
         verb: Verb::Get,
+        path: ADMIN_TRACE,
+        needs: Needs::Action("teifs:ServerTrace", ANY),
+        handler: Handler::Trace,
+        about: "A live trace: each request answered from now on, as its audit entry, one JSON line each (`application/x-ndjson`), until the caller leaves; the query filters it (`errors`, `api`, `bucket`, `prefix`, `status`, `slowerThanMs`)",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
         path: ADMIN_IAM,
         needs: Needs::Action("teifs:ExportIAM", ANY),
         handler: Handler::ExportIam,
@@ -365,6 +376,8 @@ pub(crate) struct Routes {
     pub(crate) config: Option<Arc<ServerConfig>>,
     /// Where the root key is kept, if the admin API may replace it.
     pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
+    /// Whoever watches live traces.
+    pub(crate) tracers: Arc<Tracers>,
 }
 
 #[async_trait::async_trait]
@@ -513,6 +526,7 @@ impl Routes {
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
             Handler::ImportBuckets => bucket_export::import(&self.store, &self.rules, req).await,
+            Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

@@ -78,7 +78,10 @@ either has it, so one setting closes every bucket at once.
 Prometheus metrics (`/.teifs/metrics`) name operations, error codes and the disk's size,
 so they need a bearer token (a JWT signed with an access key's secret, checked against
 that key's current policies for `teifs:GetMetrics`) unless the operator serves them
-with `--public-metrics` (`crates/server/tests/metrics.rs`).
+with `--public-metrics` (`crates/server/tests/metrics.rs`). A live trace
+(`GET /.teifs/admin/v1/trace`) shows every user's requests, so it needs
+`teifs:ServerTrace`; its entries are audit entries, secrets redacted the same way
+(`crates/server/tests/trace.rs`).
 
 ### 2. Every endpoint declares what it authorizes (*built for IAM, STS, S3 Control and the admin API*)
 Everything served besides S3's operations is one table (`crates/s3/src/routes.rs`) in

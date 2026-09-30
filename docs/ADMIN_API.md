@@ -52,6 +52,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/.teifs/admin/v1/snapshots` | Snapshots the drive's metadata now (both databases, kept with the daily ones): `Snapshot` | `teifs:TakeSnapshot` |
 | `GET` | `/.teifs/admin/v1/buckets` | Every bucket (`?bucket=NAME`: one) with its layout, versioning and settings: `BucketsExport` | `teifs:ExportBucketMetadata` |
 | `PUT` | `/.teifs/admin/v1/buckets` | Imports a `BucketsExport`: creates missing buckets and applies the settings given, checked as S3's calls check them: `BucketsImportReport` | `teifs:ImportBucketMetadata` |
+| `GET` | `/.teifs/admin/v1/trace` | A live trace: each request answered from now on, as its audit entry, one JSON line each (`application/x-ndjson`), until the caller leaves; the query filters it (`errors`, `api`, `bucket`, `prefix`, `status`, `slowerThanMs`) | `teifs:ServerTrace` |
 | `GET` | `/.teifs/admin/v1/iam` | The account's IAM, access keys without their secrets: `IamExport` | `teifs:ExportIAM` |
 | `GET` | `/.teifs/admin/v1/iam/secrets` | The account's IAM with access keys' secrets, to move it to another drive | root user |
 | `PUT` | `/.teifs/admin/v1/iam` | Imports an `IamExport` into an empty IAM, all or nothing: `ImportReport`; `?account=adopt` also takes its account id | root user |

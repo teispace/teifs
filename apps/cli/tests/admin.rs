@@ -11,7 +11,7 @@
 mod common;
 mod harness;
 
-use std::fs;
+use std::{fs, time::Duration};
 
 use common::{ACCESS_KEY, SECRET_KEY, start, start_with, user};
 use harness::{Client, records};
@@ -660,4 +660,52 @@ async fn prometheus_scrapes_with_a_generated_configuration() {
     ));
     let config = other.ok(&["admin", "prometheus", "generate", "n"]).await;
     assert_eq!(scrape(&server, &token_in(&config)).await, 403);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trace_prints_requests_until_the_server_stops() {
+    let server = start_with(|config| config.public_metrics = true).await;
+    let endpoint = server.endpoint.clone();
+    let cli = Client::new(&server);
+    let tracing = tokio::spawn(async move {
+        cli.run(&[
+            "--json", "admin", "trace", "t", "--bucket", "traced", "--errors",
+        ])
+        .await
+    });
+    // The trace is a request in flight while it lasts.
+    let scrape = format!("{endpoint}/.teifs/metrics");
+    let mut watched = false;
+    for _ in 0..1000 {
+        let text = reqwest::get(&scrape).await.unwrap().text().await.unwrap();
+        watched = text.contains("teifs_s3_requests_inflight 1");
+        if watched {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(watched, "the trace never started");
+    let s3 = common::client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("traced").send().await.unwrap();
+    s3.get_object()
+        .bucket("traced")
+        .key("gone")
+        .send()
+        .await
+        .unwrap_err();
+    s3.head_bucket()
+        .bucket("elsewhere")
+        .send()
+        .await
+        .unwrap_err();
+    // Entries reach the trace just after their answers.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(server);
+    let run = tracing.await.unwrap();
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let traced = records(&run.stdout);
+    assert_eq!(traced.len(), 1, "{}", run.stdout);
+    assert_eq!(traced[0]["type"], "trace");
+    assert_eq!(traced[0]["api"]["name"], "GetObject");
+    assert_eq!(traced[0]["error"], "NoSuchKey");
 }

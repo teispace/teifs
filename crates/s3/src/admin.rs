@@ -12,11 +12,15 @@ use http::{HeaderMap, HeaderValue, StatusCode, header};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
 use teifs_iam::{Iam, IamError, RootKey};
 use teifs_store::{JobStatus, Store};
-use teifs_types::admin::{
-    AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo,
+use teifs_types::{
+    admin::{AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo},
+    audit::TraceFilter,
 };
 
-use crate::routes::{s3_refusal, signed_body};
+use crate::{
+    routes::{s3_refusal, signed_body},
+    trace::Tracers,
+};
 
 /// Where the root user's access key is kept, when the server may change it: a key the
 /// drive generated, which the server reads from the drive at start.
@@ -166,6 +170,21 @@ async fn usage_info(store: &Store) -> Option<UsageInfo> {
         delete_markers: total.delete_markers,
         bytes: total.bytes,
     })
+}
+
+/// `GET trace`: requests as they're answered, filtered by the query.
+pub(crate) fn trace(tracers: &Tracers, query: Option<&str>) -> S3Result<S3Response<Body>> {
+    let filter = TraceFilter::from_query(query.unwrap_or_default())
+        .map_err(|message| error(StatusCode::BAD_REQUEST, "InvalidArgument", message))?;
+    let mut response = S3Response::new(tracers.follow(filter));
+    response.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// `GET config`.
