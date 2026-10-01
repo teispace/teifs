@@ -17,7 +17,7 @@ use crate::{client::alias::Aliases, error::Error, ui};
 #[derive(Subcommand)]
 pub enum ConfigAction {
     /// Show a sub-system's settings (`identity_ldap`, `identity_openid[:NAME]`,
-    /// `identity_plugin`; every one without it), never their secrets.
+    /// `notify_webhook[:NAME]`…; every one without it), never their secrets.
     Get {
         /// The server's alias.
         alias: String,

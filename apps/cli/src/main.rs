@@ -22,6 +22,7 @@ mod health;
 mod init;
 mod kms;
 mod ldap;
+mod minio_targets;
 mod notify;
 mod openid;
 mod plugin;
@@ -1617,18 +1618,65 @@ fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
     }
 }
 
-async fn serve(args: ServeArgs) -> Result<(), String> {
+/// The audit log's and notifications' targets: the flags', then those MinIO's settings
+/// name that the flags don't, with their secrets.
+fn serve_targets(
+    args: &mut ServeArgs,
+    minio: &minio_targets::MinioTargets,
+) -> Result<(Vec<AuditTarget>, Vec<TargetConfig>), String> {
+    let mut notify: Vec<TargetConfig> = [
+        &mut args.notify_webhooks,
+        &mut args.notify_elasticsearch,
+        &mut args.notify_redis,
+        &mut args.notify_nsq,
+        &mut args.notify_nats,
+        &mut args.notify_mqtt,
+        &mut args.notify_kafka,
+        &mut args.notify_amqp,
+        &mut args.notify_postgresql,
+        &mut args.notify_mysql,
+        &mut args.notify_sqs,
+        &mut args.notify_sns,
+        &mut args.notify_lambda,
+    ]
+    .into_iter()
+    .flat_map(std::mem::take)
+    .chain(args.notify_eventbridge.take())
+    .collect();
+    let flags: Vec<_> = notify.iter().map(TargetConfig::arn).collect();
+    notify.extend(
+        minio
+            .notify
+            .iter()
+            .filter(|t| !flags.contains(&t.arn()))
+            .cloned(),
+    );
+    let mut audit = audit_targets(args.audit_log.take(), args.audit_webhook.take(), |name| {
+        std::env::var(name).ok()
+    });
+    audit.extend(minio.audit.iter().cloned().map(AuditTarget::Webhook));
+    let notify = notify_targets(notify, |name| minio.secret(std::env::var(name).ok(), name))?;
+    Ok((audit, notify))
+}
+
+async fn serve(mut args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
-    let (identity, config_check) = config_kv::identity_and_check(&args)?;
+    let config_kv::Started {
+        identity,
+        targets: minio,
+        variables,
+        check: config_check,
+    } = config_kv::started(&args)?;
     let client_certificates = client_certificates(
         (
             args.identity_tls,
             args.identity_tls_ca.clone(),
             args.identity_tls_skip_verify,
         ),
-        |name| std::env::var(name).ok(),
+        |name| variables.get(name).cloned(),
     )?;
+    let (audit, notify) = serve_targets(&mut args, &minio)?;
     let credentials = match &keys {
         Some(keys) => Some(Credentials {
             access_key: keys.access.clone(),
@@ -1650,27 +1698,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         public_metrics: args.public_metrics,
-        audit: audit_targets(args.audit_log, args.audit_webhook, |name| {
-            std::env::var(name).ok()
-        }),
-        notify: notify_targets(
-            args.notify_webhooks
-                .into_iter()
-                .chain(args.notify_elasticsearch)
-                .chain(args.notify_redis)
-                .chain(args.notify_nsq)
-                .chain(args.notify_nats)
-                .chain(args.notify_mqtt)
-                .chain(args.notify_kafka)
-                .chain(args.notify_amqp)
-                .chain(args.notify_postgresql)
-                .chain(args.notify_mysql)
-                .chain(args.notify_sqs)
-                .chain(args.notify_sns)
-                .chain(args.notify_lambda)
-                .chain(args.notify_eventbridge),
-            |name| std::env::var(name).ok(),
-        )?,
+        audit,
+        notify,
         access_log_interval: Some(args.access_log_interval),
         plain_http_is_secure: args.sse_c_over_http.then_some(true),
         tls,

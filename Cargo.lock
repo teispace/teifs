@@ -4212,6 +4212,7 @@ dependencies = [
  "md-5",
  "mimalloc",
  "mime_guess",
+ "percent-encoding",
  "rcgen",
  "reqwest",
  "rustls",

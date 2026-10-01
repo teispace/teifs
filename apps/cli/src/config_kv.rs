@@ -11,7 +11,14 @@ use teifs_server::{ConfiguredOidcProvider, LdapSettings, PluginSettings};
 use teifs_store::ConfigFiles;
 use teifs_types::config_kv::{ConfigKv, VARIABLE_PREFIX};
 
-use crate::{ServeArgs, error::Error, ldap::LdapArgs, openid::OpenIdArgs, plugin::PluginArgs};
+use crate::{
+    ServeArgs,
+    error::Error,
+    ldap::LdapArgs,
+    minio_targets::{MinioTargets, minio_targets},
+    openid::OpenIdArgs,
+    plugin::PluginArgs,
+};
 
 /// TeiFS's own variables, which name secrets the settings don't
 /// (`TEIFS_LDAP_LOOKUP_BIND_PASSWORD`).
@@ -44,10 +51,7 @@ impl IdentityArgs {
     /// The settings, with `stored` (the drive's configuration's variables) under the
     /// environment's: `MinIO`'s variables and TeiFS's own secrets (`TEIFS_*`).
     pub(crate) fn settings(&self, stored: &BTreeMap<String, String>) -> Result<Identity, Error> {
-        let env: BTreeMap<String, String> = std::env::vars()
-            .filter(|(name, _)| name.starts_with(VARIABLE_PREFIX) || name.starts_with(TEIFS_PREFIX))
-            .collect();
-        self.settings_with(stored, &env)
+        self.settings_with(stored, &env())
     }
 
     fn settings_with(
@@ -77,11 +81,30 @@ impl IdentityArgs {
     /// The check a change to the drive's configuration gets: `serve` must still start.
     pub(crate) fn check(self) -> teifs_server::ConfigCheck {
         teifs_server::ConfigCheck(Arc::new(move |config: &ConfigKv| {
-            self.settings(&config.variables())
-                .map(|_| ())
+            let env = env();
+            self.settings_with(&config.variables(), &env)
+                .map_err(|err| err.to_string())
+                .and_then(|_| targets(config, &env).map(|_| ()))
                 .map_err(|err| format!("TeiFS wouldn't start with it: {err}"))
         }))
     }
+}
+
+/// `MinIO`'s variables and TeiFS's own.
+fn env() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(name, _)| name.starts_with(VARIABLE_PREFIX) || name.starts_with(TEIFS_PREFIX))
+        .collect()
+}
+
+/// The targets `MinIO`'s settings name, checked as `serve` checks them, with their
+/// secrets.
+fn targets(config: &ConfigKv, env: &BTreeMap<String, String>) -> Result<MinioTargets, String> {
+    let mut targets = minio_targets(config, env)?;
+    targets.notify = crate::notify_targets(std::mem::take(&mut targets.notify), |name| {
+        targets.secret(env.get(name).cloned(), name)
+    })?;
+    Ok(targets)
 }
 
 /// The variables the drive's configuration stands for.
@@ -92,21 +115,47 @@ pub(crate) fn stored(drive: &Path) -> Result<BTreeMap<String, String>, String> {
         .map_err(|err| format!("can't read the drive's MinIO configuration: {err}"))
 }
 
-/// How clients sign in to the drive's server, as `serve` would start.
+/// How clients sign in to the drive's server.
 pub(crate) fn identity(args: &ServeArgs) -> Result<Identity, String> {
-    identity_and_check(args).map(|(identity, _)| identity)
+    IdentityArgs::of(args)
+        .settings(&stored(&args.dir)?)
+        .map_err(|err| err.to_string())
 }
 
-/// How clients sign in to the drive's server, and the check its configuration's changes
-/// get.
-pub(crate) fn identity_and_check(
-    args: &ServeArgs,
-) -> Result<(Identity, teifs_server::ConfigCheck), String> {
+/// What the drive's configuration and `MinIO`'s variables start `serve` with.
+pub(crate) struct Started {
+    pub(crate) identity: Identity,
+    /// The targets they name, with their secrets read.
+    pub(crate) targets: MinioTargets,
+    /// `MinIO`'s variables: the environment's, else the configuration's.
+    pub(crate) variables: BTreeMap<String, String>,
+    /// The check the configuration's changes get.
+    pub(crate) check: teifs_server::ConfigCheck,
+}
+
+/// What `serve` starts with from the drive's configuration and `MinIO`'s variables.
+pub(crate) fn started(args: &ServeArgs) -> Result<Started, String> {
+    let config = ConfigFiles::new(&args.dir)
+        .load()
+        .map_err(|err| format!("can't read the drive's MinIO configuration: {err}"))?;
+    let stored = config.variables();
+    let env = env();
     let identity_args = IdentityArgs::of(args);
     let identity = identity_args
-        .settings(&stored(&args.dir)?)
+        .settings_with(&stored, &env)
         .map_err(|err| err.to_string())?;
-    Ok((identity, identity_args.check()))
+    let targets = minio_targets(&config, &env)?;
+    let mut variables = stored;
+    variables.extend(
+        env.into_iter()
+            .filter(|(name, value)| name.starts_with(VARIABLE_PREFIX) && !value.trim().is_empty()),
+    );
+    Ok(Started {
+        identity,
+        targets,
+        variables,
+        check: identity_args.check(),
+    })
 }
 
 #[cfg(test)]

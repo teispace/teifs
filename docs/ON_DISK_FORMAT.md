@@ -173,9 +173,9 @@ A bucket folder without a row is a folder bucket with default settings.
 
 The settings `mc admin config set` and `teifs admin config set` keep, in MinIO's text
 form: one line per target, `SUBSYS[:TARGET] KEY=VALUE …`, values with spaces in double
-quotes, every key of the target listed (`enable=off` for a target that's off). Only
-`identity_openid`, `identity_ldap` and `identity_plugin` are kept. Each value stands for
-MinIO's variable (`MINIO_IDENTITY_LDAP_SERVER_ADDR`, `MINIO_IDENTITY_OPENID_CLIENT_ID_<TARGET>`),
+quotes, every key of the target listed (`enable=off` for a target that's off). Only the
+sub-systems TeiFS has settings for are kept: `identity_*`, `notify_*` and
+`audit_webhook`. Each value stands for MinIO's variable (`MINIO_IDENTITY_LDAP_SERVER_ADDR`, `MINIO_IDENTITY_OPENID_CLIENT_ID_<TARGET>`),
 read at start when nothing else sets it. It may hold passwords and tokens, so it's mode
 `0600`, replaced atomically.
 

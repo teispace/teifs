@@ -231,6 +231,327 @@ const PLUGIN_KEYS: &[Key] = &[
     Key::new("role_id", "string", "the role's id in its ARN"),
 ];
 
+const QUEUED: &str = "kept, not used: TeiFS keeps events waiting on the drive itself";
+const UNUSED: &str = "kept, not used";
+const NO_SKIP: &str = "must stay off: TeiFS always checks the server's certificate (give its CA)";
+const FORMAT: &str =
+    "namespace (one entry per object, replaced by each event) or access (one per event)";
+
+const fn queue_keys() -> [Key; 2] {
+    [
+        Key::new("queue_dir", "path", QUEUED),
+        Key::new("queue_limit", "number", QUEUED).default("0"),
+    ]
+}
+
+const WEBHOOK_KEYS: &[Key] = &[
+    Key::new(
+        "endpoint",
+        "url",
+        "the webhook's URL, which each event is POSTed to",
+    )
+    .required(),
+    Key::new(
+        "auth_token",
+        "string",
+        "its Authorization header: a token, sent as Bearer, or SCHEME TOKEN",
+    )
+    .secret(),
+    queue_keys()[0],
+    queue_keys()[1],
+    Key::new(
+        "client_cert",
+        "path",
+        "a client certificate to show an https webhook that asks",
+    ),
+    Key::new("client_key", "path", "that certificate's private key"),
+];
+
+const AUDIT_WEBHOOK_KEYS: &[Key] = &[
+    Key::new(
+        "endpoint",
+        "url",
+        "the webhook's URL, which each audit entry is POSTed to",
+    )
+    .required(),
+    Key::new(
+        "auth_token",
+        "string",
+        "its Authorization header: a token, sent as Bearer, or SCHEME TOKEN",
+    )
+    .secret(),
+    Key::new(
+        "client_cert",
+        "path",
+        "a client certificate to show an https webhook that asks",
+    ),
+    Key::new("client_key", "path", "that certificate's private key"),
+    Key::new("batch_size", "number", UNUSED).default("1"),
+    Key::new("queue_size", "number", UNUSED).default("100000"),
+    Key::new("queue_dir", "path", UNUSED),
+    Key::new("max_retry", "number", UNUSED).default("0"),
+    Key::new("retry_interval", "duration", UNUSED).default("3s"),
+    Key::new("http_timeout", "duration", UNUSED).default("5s"),
+];
+
+const ELASTICSEARCH_KEYS: &[Key] = &[
+    Key::new("url", "url", "the Elasticsearch server").required(),
+    Key::new("format", "enum", FORMAT)
+        .default("namespace")
+        .required(),
+    Key::new(
+        "index",
+        "string",
+        "the index events go to; made when it's missing",
+    )
+    .required(),
+    queue_keys()[0],
+    queue_keys()[1],
+    Key::new("username", "string", "the user TeiFS signs in as"),
+    Key::new("password", "string", "that user's password").secret(),
+];
+
+const REDIS_KEYS: &[Key] = &[
+    Key::new("address", "address", "the Redis server's host:port").required(),
+    Key::new("format", "enum", FORMAT)
+        .default("namespace")
+        .required(),
+    Key::new(
+        "key",
+        "string",
+        "the hash (namespace) or list (access) events go to",
+    )
+    .required(),
+    Key::new("password", "string", "the server's password").secret(),
+    Key::new("user", "string", "the ACL user TeiFS signs in as"),
+    queue_keys()[0],
+    queue_keys()[1],
+];
+
+const NSQ_KEYS: &[Key] = &[
+    Key::new("nsqd_address", "address", "the nsqd server's host:port").required(),
+    Key::new("topic", "string", "the topic events are published to").required(),
+    Key::new("tls", "on|off", "connect with TLS").default("off"),
+    Key::new("tls_skip_verify", "on|off", NO_SKIP).default("off"),
+    queue_keys()[0],
+    queue_keys()[1],
+];
+
+const NATS_KEYS: &[Key] = &[
+    Key::new("address", "address", "the NATS server's host:port").required(),
+    Key::new("subject", "string", "the subject events are published to").required(),
+    Key::new("username", "string", "the user TeiFS signs in as"),
+    Key::new("password", "string", "that user's password").secret(),
+    Key::new("token", "string", "a token to sign in with instead").secret(),
+    Key::new("tls", "on|off", "connect with TLS").default("off"),
+    Key::new("tls_skip_verify", "on|off", NO_SKIP).default("off"),
+    Key::new(
+        "cert_authority",
+        "path",
+        "the CA that signed the server's certificate",
+    ),
+    Key::new(
+        "client_cert",
+        "path",
+        "a client certificate to show the server",
+    ),
+    Key::new("client_key", "path", "that certificate's private key"),
+    Key::new("ping_interval", "duration", UNUSED).default("0"),
+    Key::new(
+        "jetstream",
+        "on|off",
+        "publish to a JetStream stream, waiting for its acknowledgement",
+    )
+    .default("off"),
+    Key::new(
+        "streaming",
+        "on|off",
+        "NATS Streaming, which NATS retired: must stay off",
+    )
+    .default("off"),
+    Key::new("streaming_async", "on|off", UNUSED).default("off"),
+    Key::new("streaming_max_pub_acks_in_flight", "number", UNUSED).default("0"),
+    Key::new("streaming_cluster_id", "string", UNUSED),
+    queue_keys()[0],
+    queue_keys()[1],
+    Key::new(
+        "nkey_seed",
+        "path",
+        "a file with the NKey seed to sign in with",
+    ),
+    Key::new(
+        "tls_handshake_first",
+        "on|off",
+        "start TLS before NATS's greeting",
+    )
+    .default("off"),
+];
+
+const MQTT_KEYS: &[Key] = &[
+    Key::new(
+        "broker",
+        "uri",
+        "the broker: tcp://, ssl://, ws:// or wss:// and host:port",
+    )
+    .required(),
+    Key::new("topic", "string", "the topic events are published to").required(),
+    Key::new("password", "string", "the user's password").secret(),
+    Key::new("username", "string", "the user TeiFS signs in as"),
+    Key::new("qos", "number", "quality of service: 0, 1 or 2").default("0"),
+    Key::new(
+        "keep_alive_interval",
+        "duration",
+        "how often TeiFS pings the broker, as 10s (0s: its default)",
+    )
+    .default("0s"),
+    Key::new("reconnect_interval", "duration", UNUSED).default("0s"),
+    queue_keys()[0],
+    queue_keys()[1],
+];
+
+const KAFKA_KEYS: &[Key] = &[
+    Key::new("topic", "string", "the topic events are produced to").required(),
+    Key::new("brokers", "csv", "the brokers, host:port, comma-separated").required(),
+    Key::new("sasl_username", "string", "the SASL user TeiFS signs in as"),
+    Key::new("sasl_password", "string", "that user's password").secret(),
+    Key::new("sasl_mechanism", "string", "plain, sha256 or sha512").default("plain"),
+    Key::new(
+        "client_tls_cert",
+        "path",
+        "a client certificate to show the brokers",
+    ),
+    Key::new("client_tls_key", "path", "that certificate's private key"),
+    Key::new("tls_client_auth", "string", UNUSED).default("0"),
+    Key::new("sasl", "on|off", "sign in with SASL").default("off"),
+    Key::new("tls", "on|off", "connect with TLS").default("off"),
+    Key::new("tls_skip_verify", "on|off", NO_SKIP).default("off"),
+    queue_keys()[1],
+    queue_keys()[0],
+    Key::new("version", "string", UNUSED),
+    Key::new("batch_size", "number", UNUSED).default("0"),
+    Key::new("batch_commit_timeout", "duration", UNUSED).default("0s"),
+    Key::new(
+        "compression_codec",
+        "string",
+        "none, snappy, gzip, lz4 or zstd",
+    ),
+    Key::new("compression_level", "number", UNUSED),
+];
+
+const AMQP_KEYS: &[Key] = &[
+    Key::new(
+        "url",
+        "url",
+        "the server, amqp[s]://USER:PASSWORD@HOST:PORT/VHOST",
+    )
+    .required()
+    .secret(),
+    Key::new(
+        "exchange",
+        "string",
+        "the exchange events are published to (the default one when empty)",
+    ),
+    Key::new(
+        "exchange_type",
+        "string",
+        "the exchange's type, when TeiFS declares it: direct, fanout, topic or headers",
+    ),
+    Key::new(
+        "routing_key",
+        "string",
+        "the routing key events are published with",
+    ),
+    Key::new(
+        "mandatory",
+        "on|off",
+        "have the server return events no queue takes",
+    )
+    .default("off"),
+    Key::new("durable", "on|off", "declare the exchange durable").default("off"),
+    Key::new("no_wait", "on|off", UNUSED).default("off"),
+    Key::new("internal", "on|off", "declare the exchange internal").default("off"),
+    Key::new(
+        "auto_deleted",
+        "on|off",
+        "declare the exchange deleted when unused",
+    )
+    .default("off"),
+    Key::new(
+        "delivery_mode",
+        "number",
+        "2 keeps events on disk (persistent), 1 doesn't",
+    )
+    .default("0"),
+    Key::new(
+        "publisher_confirms",
+        "on|off",
+        "kept: TeiFS always waits for the server's confirmation",
+    )
+    .default("off"),
+    queue_keys()[1],
+    queue_keys()[0],
+];
+
+const POSTGRES_KEYS: &[Key] = &[
+    Key::new(
+        "connection_string",
+        "string",
+        "host=… port=… user=… password=… dbname=… sslmode=…, or a postgres:// URL",
+    )
+    .secret(),
+    Key::new(
+        "table",
+        "string",
+        "the table events are written to; made when it's missing",
+    )
+    .required(),
+    Key::new("format", "enum", FORMAT)
+        .default("namespace")
+        .required(),
+    queue_keys()[0],
+    queue_keys()[1],
+    Key::new("max_open_connections", "number", UNUSED).default("2"),
+];
+
+const MYSQL_KEYS: &[Key] = &[
+    Key::new("format", "enum", FORMAT)
+        .default("namespace")
+        .required(),
+    Key::new(
+        "dsn_string",
+        "string",
+        "USER:PASSWORD@tcp(HOST:PORT)/DATABASE",
+    )
+    .secret(),
+    Key::new(
+        "table",
+        "string",
+        "the table events are written to; made when it's missing",
+    )
+    .required(),
+    queue_keys()[0],
+    queue_keys()[1],
+    Key::new("max_open_connections", "number", UNUSED).default("2"),
+];
+
+const IDENTITY_TLS_KEYS: &[Key] = &[Key::new(
+    "skip_verify",
+    "on|off",
+    "take client certificates no trusted CA signed (testing only)",
+)
+.default("off")];
+
+/// A notification sub-system: several targets, each with an `enable`.
+const fn notify(name: &'static str, description: &'static str, keys: &'static [Key]) -> Subsystem {
+    Subsystem {
+        name,
+        description,
+        multiple_targets: true,
+        enable: true,
+        keys,
+    }
+}
+
 /// The sub-systems TeiFS keeps, in the order they're written.
 pub const SUBSYSTEMS: &[Subsystem] = &[
     Subsystem {
@@ -253,6 +574,66 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         multiple_targets: false,
         enable: false,
         keys: PLUGIN_KEYS,
+    },
+    Subsystem {
+        name: "identity_tls",
+        description: "client certificates AssumeRoleWithCertificate takes (on with MINIO_IDENTITY_TLS_ENABLE or --identity-tls)",
+        multiple_targets: false,
+        enable: false,
+        keys: IDENTITY_TLS_KEYS,
+    },
+    notify(
+        "notify_webhook",
+        "webhooks events are sent to",
+        WEBHOOK_KEYS,
+    ),
+    notify(
+        "notify_amqp",
+        "AMQP exchanges events are published to",
+        AMQP_KEYS,
+    ),
+    notify(
+        "notify_kafka",
+        "Kafka topics events are produced to",
+        KAFKA_KEYS,
+    ),
+    notify(
+        "notify_mqtt",
+        "MQTT topics events are published to",
+        MQTT_KEYS,
+    ),
+    notify(
+        "notify_nats",
+        "NATS subjects events are published to",
+        NATS_KEYS,
+    ),
+    notify("notify_nsq", "NSQ topics events are published to", NSQ_KEYS),
+    notify(
+        "notify_mysql",
+        "MySQL tables events are written to",
+        MYSQL_KEYS,
+    ),
+    notify(
+        "notify_postgres",
+        "PostgreSQL tables events are written to",
+        POSTGRES_KEYS,
+    ),
+    notify(
+        "notify_elasticsearch",
+        "Elasticsearch indexes events are written to",
+        ELASTICSEARCH_KEYS,
+    ),
+    notify(
+        "notify_redis",
+        "Redis keys events are written to",
+        REDIS_KEYS,
+    ),
+    Subsystem {
+        name: "audit_webhook",
+        description: "webhooks the audit log is sent to",
+        multiple_targets: true,
+        enable: true,
+        keys: AUDIT_WEBHOOK_KEYS,
     },
 ];
 
@@ -335,7 +716,8 @@ fn set(kvs: &mut Kvs, key: &str, value: String) {
 }
 
 /// An on or off value as `MinIO` takes it.
-fn switch(value: &str) -> Option<bool> {
+#[must_use]
+pub fn switch(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "enable" | "enabled" | "1" => Some(true),
         "off" | "false" | "disable" | "disabled" | "0" => Some(false),
@@ -724,6 +1106,18 @@ impl ConfigKv {
         }
         variables
     }
+
+    /// The targets set for the sub-system `name`, as they're spelled: [`DEFAULT_TARGET`]
+    /// for its first.
+    #[must_use]
+    pub fn target_names(&self, name: &str) -> Vec<String> {
+        self.subsystems
+            .get(name)
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .cloned()
+            .collect()
+    }
 }
 
 impl Written<'_> {
@@ -1092,5 +1486,32 @@ mod tests {
         assert_eq!(json["keysHelp"][0]["type"], "address");
         assert!(help("identity_ldap", "nope", false).is_err());
         assert!(help("api", "", false).is_err());
+    }
+
+    #[test]
+    fn notification_targets_are_kept_by_name() {
+        let config = ConfigKv::parse(
+            "notify_webhook:Primary endpoint=https://hooks.example.com/in auth_token=t0k\n\
+             notify_kafka brokers=a:9092,b:9092 topic=events\n\
+             identity_tls skip_verify=on",
+        )
+        .unwrap();
+        assert_eq!(config.target_names("notify_webhook"), ["Primary"]);
+        assert_eq!(config.target_names("notify_kafka"), [DEFAULT_TARGET]);
+        assert!(config.target_names("notify_redis").is_empty());
+        let variables = config.variables();
+        assert_eq!(
+            variables["MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY"],
+            "https://hooks.example.com/in"
+        );
+        assert_eq!(variables["MINIO_NOTIFY_KAFKA_ENABLE"], "on");
+        assert_eq!(variables["MINIO_IDENTITY_TLS_SKIP_VERIFY"], "on");
+        // Its default isn't a variable.
+        assert!(!variables.contains_key("MINIO_NOTIFY_KAFKA_SASL_MECHANISM"));
+        let got = config.get("notify_webhook", &|_| None).unwrap();
+        assert!(!got.contains("t0k"), "{got}");
+        assert!(ConfigKv::parse("identity_tls:x skip_verify=on").is_err());
+        assert_eq!(switch(" On "), Some(true));
+        assert_eq!(switch("maybe"), None);
     }
 }

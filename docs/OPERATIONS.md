@@ -332,8 +332,10 @@ teifs admin config keys ALIAS identity_ldap    # what it takes (--env: as variab
 teifs admin service restart ALIAS              # takes effect when it starts again
 ```
 
-`identity_openid[:NAME]`, `identity_ldap` and `identity_plugin` are kept; another
-sub-system is refused. Each value stands for MinIO's variable
+`identity_openid[:NAME]`, `identity_ldap`, `identity_plugin`, `identity_tls`, the
+notification targets (`notify_webhook[:NAME]`, `notify_kafka[:NAME]`…, see
+[Bucket notifications](#from-minios-settings)) and `audit_webhook[:NAME]` are kept;
+another sub-system is refused. Each value stands for MinIO's variable
 (`MINIO_IDENTITY_LDAP_SERVER_ADDR`…) and counts only when nothing else sets it: flags,
 `TEIFS_*` variables, the settings file and MinIO's variables all come first. A change
 `teifs serve` wouldn't start with is refused, and nothing is kept. `reset` puts keys
@@ -1383,6 +1385,52 @@ them once its `source` names it. Keys come from `TEIFS_NOTIFY_EVENTBRIDGE_ACCESS
 `events:PutEvents` on the bus; `endpoint=URL` sends to another service. Turning it on
 where the server has no bus is refused (`400 InvalidArgument`), and rules can't name the
 bus.
+
+### From MinIO's settings
+
+The targets MinIO's variables or `mc admin config` name are the server's too, so a
+MinIO deployment's notifications carry over unchanged:
+
+```sh
+export MINIO_NOTIFY_WEBHOOK_ENABLE_PRIMARY=on
+export MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY=https://hooks.example/s3
+export MINIO_NOTIFY_WEBHOOK_AUTH_TOKEN_PRIMARY=…
+teifs admin config set ALIAS notify_kafka:events brokers=k1:9092,k2:9092 topic=s3 \
+  sasl=on sasl_username=teifs sasl_password=…   # then teifs admin service restart ALIAS
+```
+
+Each of `notify_webhook`, `notify_elasticsearch`, `notify_redis`, `notify_nsq`,
+`notify_nats`, `notify_mqtt`, `notify_kafka`, `notify_amqp`, `notify_postgres` and
+`notify_mysql` takes MinIO's keys (`teifs admin config keys ALIAS notify_kafka`). A
+target counts once it's on: a stored one when `enable` is on, which `set` turns on, and
+one only the environment names when its `MINIO_NOTIFY_KIND_ENABLE[_ID]` is. A key's
+variable wins over what's stored. The default target's ID is `_`
+(`arn:teifs:sqs::_:webhook`); a named one keeps its name as it's spelled. A flag's
+target with the same ARN wins, and a `TEIFS_NOTIFY_KIND_WHAT_ID` variable wins over the
+secret the settings give.
+
+They're checked as the flags are, so a change the server wouldn't start with is refused.
+A few of MinIO's keys work differently:
+
+- `tls_skip_verify=on` is refused: TeiFS always checks a server's certificate, so give
+  the CA that signed it (`cert_authority` for NATS). So is NATS Streaming, which NATS
+  retired; `jetstream=on` publishes to a stream.
+- PostgreSQL's `connection_string` (libpq's `host=… user=… dbname=…` or a `postgres://`
+  URL) and MySQL's `dsn_string` (`USER:PASSWORD@tcp(HOST:PORT)/DATABASE`) are read for
+  their host, user, password and database; `sslmode=require` or `verify-…`
+  (`sslrootcert` for its CA) and `tls=true` connect with TLS, verified. TeiFS connects
+  over TCP only.
+- AMQP's user and password come out of its `url`; `delivery_mode=2` keeps events on
+  disk, and an exchange that's named is declared with `durable`, `auto_deleted` and
+  `internal` as given. TeiFS always waits for the server's confirmation.
+- `queue_dir`, `queue_limit` and the keys MinIO's help marks unused are kept but not
+  used: every target's events wait in the server's own queue on the drive.
+- Values can't hold a comma, except Kafka's `brokers`.
+
+`audit_webhook[:NAME]` (`MINIO_AUDIT_WEBHOOK_ENABLE`, `…_ENDPOINT`, `…_AUTH_TOKEN`,
+`…_CLIENT_CERT`, `…_CLIENT_KEY`) sends the [audit log](#audit-log) to more webhooks,
+besides `--audit-webhook`'s. `identity_tls`'s `skip_verify` is read as
+`MINIO_IDENTITY_TLS_SKIP_VERIFY` is.
 
 ### Rules
 

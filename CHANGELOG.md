@@ -358,6 +358,11 @@ behaviour; the on-disk format is always upgraded automatically.
   history of changes to put back) and take effect when the server starts again, under
   every other setting. A change the server wouldn't start with is refused. Each needs
   `admin:ConfigUpdate`.
+- MinIO's notification and audit targets: `MINIO_NOTIFY_*` and `MINIO_AUDIT_WEBHOOK_*`
+  variables, and `notify_webhook`, `notify_kafka`… and `audit_webhook` set with
+  `mc admin config`, start the same targets as the `--notify-*` and `--audit-webhook`
+  flags, so a MinIO deployment's notifications carry over. `identity_tls` can be set the
+  same way.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

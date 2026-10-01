@@ -310,7 +310,23 @@ async fn help_needs_no_decryption() {
         .collect();
     assert_eq!(
         names,
-        ["identity_openid", "identity_ldap", "identity_plugin"]
+        [
+            "identity_openid",
+            "identity_ldap",
+            "identity_plugin",
+            "identity_tls",
+            "notify_webhook",
+            "notify_amqp",
+            "notify_kafka",
+            "notify_mqtt",
+            "notify_nats",
+            "notify_nsq",
+            "notify_mysql",
+            "notify_postgres",
+            "notify_elasticsearch",
+            "notify_redis",
+            "audit_webhook"
+        ]
     );
     let one = call(
         &server,
