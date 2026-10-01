@@ -44,6 +44,16 @@ fn config(
     versions: InventoryIncludedObjectVersions,
     frequency: InventoryFrequency,
 ) -> InventoryConfiguration {
+    formatted(id, target, versions, frequency, InventoryFormat::Csv)
+}
+
+fn formatted(
+    id: &str,
+    target: &str,
+    versions: InventoryIncludedObjectVersions,
+    frequency: InventoryFrequency,
+    format: InventoryFormat,
+) -> InventoryConfiguration {
     InventoryConfiguration::builder()
         .id(id)
         .is_enabled(true)
@@ -53,7 +63,7 @@ fn config(
                 .s3_bucket_destination(
                     InventoryS3BucketDestination::builder()
                         .bucket(format!("arn:aws:s3:::{target}"))
-                        .format(InventoryFormat::Csv)
+                        .format(format)
                         .prefix("inventory")
                         .encryption(
                             InventoryEncryption::builder()
@@ -364,4 +374,77 @@ async fn a_restart_neither_repeats_nor_skips_a_report() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let data = keys(&root, "reports", "inventory/data/weekly/data/").await;
     assert_eq!(data.len(), 1, "{data:?}");
+}
+
+#[tokio::test]
+async fn orc_and_parquet_reports_hold_s3s_columns() {
+    use arrow_array::{Array, RecordBatch, StringArray};
+
+    let (_server, root) = setup(Duration::from_secs(60)).await;
+    for (id, format) in [
+        ("orc", InventoryFormat::Orc),
+        ("parquet", InventoryFormat::Parquet),
+    ] {
+        let config = formatted(
+            id,
+            "reports",
+            InventoryIncludedObjectVersions::All,
+            InventoryFrequency::Daily,
+            format,
+        );
+        configure(&root, config).await;
+    }
+    for (id, name, extension) in [("orc", "ORC", ".orc"), ("parquet", "Parquet", ".parquet")] {
+        let checksum = wait_for(
+            &root,
+            &format!("inventory/data/{id}/"),
+            "/manifest.checksum",
+            1,
+        )
+        .await;
+        let folder = checksum[0].strip_suffix("manifest.checksum").unwrap();
+        let manifest = read(&root, "reports", &format!("{folder}manifest.json")).await;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        assert_eq!(manifest["fileFormat"], name);
+        let key = manifest["files"][0]["key"].as_str().unwrap().to_owned();
+        assert!(key.ends_with(extension), "{key}");
+        let file = bytes::Bytes::from(read(&root, "reports", &key).await);
+        let batches: Vec<RecordBatch> = if id == "orc" {
+            assert!(
+                manifest["fileSchema"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("struct<bucket:string,")
+            );
+            orc_rust::ArrowReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .map(Result::unwrap)
+                .collect()
+        } else {
+            assert!(
+                manifest["fileSchema"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("message s3.inventory {")
+            );
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(batches.len(), 1, "{id}");
+        let batch = &batches[0];
+        let keys = batch.column_by_name("key").unwrap();
+        let keys = keys.as_any().downcast_ref::<StringArray>().unwrap();
+        let keys: Vec<&str> = (0..keys.len()).map(|i| keys.value(i)).collect();
+        // Every version under the prefix, keys as they are.
+        assert_eq!(keys, ["docs/a b", "docs/b", "docs/b"], "{id}");
+        let markers = batch.column_by_name("is_delete_marker").unwrap();
+        assert_eq!(markers.null_count(), 0);
+        let size = batch.column_by_name("size").unwrap();
+        assert_eq!(size.null_count(), 1, "the delete marker has no size");
+    }
 }

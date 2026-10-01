@@ -39,6 +39,12 @@ md-5 = "0.11"
 crc-fast = "1.10"
 # Kafka targets' gzip.
 flate2 = "1.1"
+# Inventory reports in ORC and Parquet: Arrow batches, written by orc-rust (which pins
+# Arrow's version) and parquet with Snappy.
+arrow-array = "59"
+arrow-schema = "59"
+orc-rust = { version = "0.9", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap"] }
 snap = "1.1"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame", "safe-encode", "safe-decode", "checked-decode", "std"] }
 zstd = { version = "0.14", default-features = false }

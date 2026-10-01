@@ -413,7 +413,7 @@ or weekly in files any tool that reads S3 Inventory reads (Athena, Spark, `s3 cp
 
 ```sh
 teifs inventory add local/app daily local/reports --fields size,etag,lastmodifieddate
-teifs inventory add local/app weekly local/reports/inv --all-versions --weekly --fields all
+teifs inventory add local/app weekly local/reports/inv --all-versions --weekly --fields all --format parquet
 teifs inventory ls local/app
 teifs inventory info local/app daily
 teifs inventory rm local/app daily
@@ -428,10 +428,13 @@ The first report is made within 15 minutes of the configuration, the next each d
 (UTC) or each Sunday; a report already made isn't made again after a restart. Each is,
 under `PREFIX/BUCKET/ID/` in the destination:
 
-- `data/UUID.csv.gz`: gzipped CSV without a header, every value quoted, keys
-  URL-encoded, `Bucket, Key` (with `--all-versions`, then `VersionId, IsLatest,
-  IsDeleteMarker`) and the chosen fields in S3's order. Each file holds up to about
-  32 MiB, compressed.
+- `data/UUID.csv.gz`, `.orc` or `.parquet`, in the configuration's format (`--format`):
+  `Bucket, Key` (with `--all-versions`, then `VersionId, IsLatest, IsDeleteMarker`) and
+  the chosen fields in S3's order. CSV is gzipped, without a header, every value quoted
+  and keys URL-encoded; ORC (zlib) and Parquet (Snappy) have S3's typed columns
+  (`bucket`, `key`, `size` as a 64-bit integer, `last_modified_date` as a timestamp in
+  milliseconds…), with nulls where a value doesn't apply. Each file holds up to about
+  32 MiB.
 - `hive/dt=YYYY-MM-DD-HH-MM/symlink.txt`: the data files' `s3://` URLs, for Hive and
   Athena.
 - `YYYY-MM-DDTHH-MMZ/manifest.json`, then `manifest.checksum` (its MD5): the source and
@@ -444,7 +447,7 @@ that doesn't let the service in, or doesn't exist, gets nothing that day (with a
 in the server's log); a failure of the drive is tried again within 15 minutes. Reports
 are written like any other object: encrypted as `--encrypt` or the destination's default
 says (a folder bucket takes no encryption, so give such a destination none), counted in
-its usage, and announced by its notifications. Only CSV is made for now.
+its usage, and announced by its notifications.
 
 ## Static websites
 

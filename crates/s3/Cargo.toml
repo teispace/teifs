@@ -39,7 +39,11 @@ http-body-util.workspace = true
 ipnet.workspace = true
 prometheus-client.workspace = true
 fs4.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
 flate2.workspace = true
+orc-rust.workspace = true
+parquet.workspace = true
 md-5.workspace = true
 
 [dev-dependencies]

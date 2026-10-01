@@ -368,7 +368,9 @@ start. Lifecycle removals are logged through the same `Expirations` hook as thei
 events; the store holds that hook weakly, since it holds a `Drive` that holds the store.
 Inventory reports (`inventory/`): the inventory worker, also one of the `Workers`, looks
 for due configurations 96 times a (drive's) day, lists the bucket a page at a time into
-CSV rows (`inventory/report.rs`) gzipped into data files, and delivers them, the Hive
+rows of typed values (`inventory/report.rs`) into data files in the configuration's
+format (`inventory/files.rs`: gzipped CSV, or ORC and Parquet from Arrow batches), and
+delivers them, the Hive
 symlink, the manifest and its checksum through `Drive::deliver` as `s3.amazonaws.com`.
 The day or week each configuration last had its report is a store note (`Store::note`),
 so restarts neither repeat nor skip one; stopping ends a report after its current page,

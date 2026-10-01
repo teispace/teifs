@@ -7,6 +7,7 @@
 //! AWS. When each configuration last had its report is kept with the drive, so a restart
 //! neither repeats nor skips one.
 
+mod files;
 mod report;
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
@@ -15,10 +16,13 @@ use bytes::Bytes;
 use md5::{Digest, Md5};
 use serde::Serialize;
 use teifs_store::{After, ListQuery, ObjectVersion, Store, VersionsQuery};
-use teifs_types::configs::{Frequency, InventoryConfig, InventoryFormat, ReportEncryption};
+use teifs_types::configs::{Frequency, InventoryConfig, ReportEncryption};
 use tokio_util::sync::CancellationToken;
 
-use self::report::{DataFiles, Entry, Schema};
+use self::{
+    files::DataFiles,
+    report::{Entry, Schema},
+};
 use crate::{
     delivery::{Delivery, Encryption, Undelivered},
     drive::Drive,
@@ -175,11 +179,7 @@ impl Worker {
         stopping: &CancellationToken,
     ) -> Result<(), Undelivered> {
         let destination = &config.destination;
-        if destination.format != InventoryFormat::Csv {
-            return Err(Undelivered::Refused(
-                "only CSV inventory reports are made".to_owned(),
-            ));
-        }
+        let format = destination.format;
         let created_ms = now_ms();
         let encryption = destination.encryption.as_ref().map(|e| match e {
             ReportEncryption::S3 => Encryption::S3,
@@ -198,8 +198,9 @@ impl Worker {
         let schema = Schema::of(config);
         let files = self
             .data((bucket, config, &schema), stopping, |data| {
-                let key = format!("{base}/data/{}.csv.gz", uuid::Uuid::new_v4());
-                let delivery = delivery("application/gzip");
+                let extension = files::extension(format);
+                let key = format!("{base}/data/{}.{extension}", uuid::Uuid::new_v4());
+                let delivery = delivery(files::content_type(format));
                 async move {
                     let file = ManifestFile::of(key, &data);
                     self.drive
@@ -218,8 +219,8 @@ impl Worker {
             destination_bucket: format!("arn:aws:s3:::{}", destination.bucket),
             version: "2016-11-30",
             creation_timestamp: created_ms.to_string(),
-            file_format: "CSV",
-            file_schema: schema.names(),
+            file_format: files::format_name(format),
+            file_schema: schema.file_schema(),
             files,
         };
         let manifest = serde_json::to_vec(&manifest).unwrap_or_default();
@@ -269,16 +270,15 @@ impl Worker {
             .await
             .map_err(store_error)?
             .is_some();
-        let mut data = DataFiles::new(self.data_file_bytes);
+        let mut data = DataFiles::new(schema, self.data_file_bytes);
         let mut files = Vec::new();
         let mut page = Page::Start;
-        let mut rows = String::new();
         loop {
             if stopping.is_cancelled() {
                 return Err(Undelivered::Failed("the server is stopping".to_owned()));
             }
             let (versions, next) = self.page(bucket, config, page).await.map_err(store_error)?;
-            rows.clear();
+            let mut rows = Vec::with_capacity(versions.len());
             for version in &versions {
                 let expiry_ms = if schema.needs_expiry() && !version.delete_marker {
                     let expiry = self.store.expiry(bucket, &version.info).await;
@@ -291,9 +291,9 @@ impl Worker {
                     expiry_ms,
                     locked,
                 };
-                report::row(schema, bucket, &entry, &mut rows);
+                rows.push(schema.row(bucket, &entry));
             }
-            if let Some(file) = data.push(&rows).map_err(failed)? {
+            if let Some(file) = data.push(rows).map_err(failed)? {
                 files.push(deliver(file).await?);
             }
             match next {
@@ -473,7 +473,7 @@ mod tests {
     use teifs_store::{Expiration, Layout, Lifecycle, LifecycleRule, RuleFilter, Versioning};
     use teifs_types::{
         ObjectAttrs,
-        configs::{InventoryDestination, InventoryField},
+        configs::{InventoryDestination, InventoryField, InventoryFormat},
     };
 
     use super::*;

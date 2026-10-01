@@ -220,8 +220,9 @@ behaviour; the on-disk format is always upgraded automatically.
   checks, 1,000 of a kind per bucket and lists of 100 with continuation tokens. Bucket
   exports and `teifs migrate` carry them, and Requester Pays.
 - Inventory reports, as S3 Inventory delivers them: for each enabled inventory
-  configuration, daily or weekly (on Sundays, UTC), gzipped CSV data files of the
-  bucket's current objects or every version with the fields chosen, a Hive
+  configuration, daily or weekly (on Sundays, UTC), data files of the bucket's current
+  objects or every version with the fields chosen (gzipped CSV, or ORC and Parquet with
+  S3's typed columns), a Hive
   `symlink.txt`, and a `manifest.json` with its `manifest.checksum`, written by
   `s3.amazonaws.com` into a destination whose bucket policy lets it in, encrypted as the
   configuration asks. `teifs inventory add|ls|info|rm` manages them and lets S3

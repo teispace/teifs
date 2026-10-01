@@ -1854,6 +1854,8 @@ async fn inventories_are_added_listed_delivered_and_removed() {
         "docs/",
         "--fields",
         "size,etag",
+        "--format",
+        "orc",
     ];
     let text = cli.ok(&add).await;
     assert!(
@@ -1883,6 +1885,7 @@ async fn inventories_are_added_listed_delivered_and_removed() {
             &serde_json::json!(["Size", "ETag"])
         )
     );
+    assert_eq!(got["format"], "ORC");
     let policy = s3
         .get_bucket_policy()
         .bucket("reports")

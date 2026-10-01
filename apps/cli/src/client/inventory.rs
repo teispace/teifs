@@ -46,6 +46,9 @@ pub enum InventoryAction {
         /// Once a week (on Sundays, UTC) instead of every day.
         #[arg(long)]
         weekly: bool,
+        /// The files' format: gzipped `csv`, `orc` or `parquet`.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: Format,
         /// The optional fields, comma-separated, as S3 names them (`Size`, `ETag`,
         /// `LastModifiedDate`, `StorageClass`, `EncryptionStatus`…), or `all`.
         #[arg(long, value_delimiter = ',')]
@@ -83,11 +86,23 @@ pub enum InventoryAction {
     },
 }
 
+/// An inventory report's file format.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Format {
+    /// Gzipped CSV.
+    Csv,
+    /// Apache ORC.
+    Orc,
+    /// Apache Parquet.
+    Parquet,
+}
+
 /// What `teifs inventory add` sets, besides where.
 struct Options {
     prefix: Option<String>,
     all_versions: bool,
     weekly: bool,
+    format: Format,
     fields: Vec<String>,
     encrypt: Option<String>,
     disabled: bool,
@@ -104,6 +119,7 @@ pub(super) async fn inventory(action: InventoryAction, aliases: &Aliases) -> Res
             prefix,
             all_versions,
             weekly,
+            format,
             fields,
             encrypt,
             disabled,
@@ -120,6 +136,7 @@ pub(super) async fn inventory(action: InventoryAction, aliases: &Aliases) -> Res
                 prefix,
                 all_versions,
                 weekly,
+                format,
                 fields,
                 encrypt,
                 disabled,
@@ -194,7 +211,11 @@ fn configuration(
         .transpose()?;
     let mut s3_destination = InventoryS3BucketDestination::builder()
         .bucket(format!("arn:aws:s3:::{target}"))
-        .format(InventoryFormat::Csv)
+        .format(match options.format {
+            Format::Csv => InventoryFormat::Csv,
+            Format::Orc => InventoryFormat::Orc,
+            Format::Parquet => InventoryFormat::Parquet,
+        })
         .set_encryption(encryption);
     if !prefix.is_empty() {
         s3_destination = s3_destination.prefix(prefix);
@@ -457,6 +478,7 @@ mod tests {
             prefix: None,
             all_versions: false,
             weekly: false,
+            format: Format::Csv,
             fields: Vec::new(),
             encrypt: None,
             disabled: false,
@@ -500,6 +522,7 @@ mod tests {
                 prefix: Some("docs/".to_owned()),
                 all_versions: true,
                 weekly: true,
+                format: Format::Parquet,
                 fields: vec!["size".to_owned()],
                 encrypt: Some("my-key".to_owned()),
                 disabled: true,
@@ -509,6 +532,14 @@ mod tests {
         assert_eq!(schedule(&full), "weekly (off)");
         assert_eq!(objects(&full), "all versions of docs/*");
         assert_eq!(destination(&full), "reports/inv");
+        assert_eq!(
+            full.destination()
+                .unwrap()
+                .s3_bucket_destination()
+                .unwrap()
+                .format(),
+            &InventoryFormat::Parquet
+        );
         let encryption = full
             .destination()
             .unwrap()

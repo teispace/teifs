@@ -1,15 +1,12 @@
-//! What an inventory report holds: a row per object or version, as S3 writes it in CSV
-//! (every value quoted, the key URL-encoded, no header), and the gzipped data files the
-//! rows go into.
-
-use std::io::{self, Write};
+//! What an inventory report holds: a row of typed values per object or version, in
+//! S3's columns, and how CSV writes them (every value quoted, the key URL-encoded, no
+//! header).
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use flate2::{Compression, write::GzEncoder};
 use teifs_store::{OWNER_ID, ObjectVersion};
 use teifs_types::{
     Acl, Grantee, SseMode,
-    configs::{InventoryConfig, InventoryField},
+    configs::{InventoryConfig, InventoryField, InventoryFormat},
 };
 
 use crate::checksums;
@@ -40,9 +37,77 @@ const ORDER: [InventoryField; 18] = {
     ]
 };
 
+/// What a column holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Text,
+    Bool,
+    /// A 64-bit integer.
+    Int,
+    /// A time, in milliseconds since the Unix epoch.
+    Time,
+}
+
+/// One column of a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Column {
+    /// S3's name for it in CSV (`LastModifiedDate`); ORC and Parquet use it in snake case.
+    pub name: &'static str,
+    pub kind: Kind,
+    /// Always has a value (the bucket and the key).
+    pub required: bool,
+}
+
+impl Column {
+    const fn new(name: &'static str, kind: Kind) -> Self {
+        Self {
+            name,
+            kind,
+            required: false,
+        }
+    }
+
+    /// Its name in ORC and Parquet: `last_modified_date`, `e_tag`.
+    pub(crate) fn snake_name(&self) -> String {
+        let mut out = String::new();
+        for (i, c) in self.name.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        }
+        out
+    }
+}
+
+/// One value of a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Value {
+    Text(String),
+    Bool(bool),
+    Int(i64),
+    Time(i64),
+    /// Doesn't apply (most fields of a delete marker): empty in CSV, null in ORC and
+    /// Parquet.
+    None,
+}
+
+impl Value {
+    /// Its size, roughly, for when to close a data file.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::None => 1,
+            Self::Bool(_) | Self::Int(_) | Self::Time(_) => 8,
+        }
+    }
+}
+
 /// The columns of a report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Schema {
+    /// The files' format.
+    pub format: InventoryFormat,
     /// Every version (with `VersionId`, `IsLatest` and `IsDeleteMarker`), or only the
     /// current ones.
     pub versions: bool,
@@ -53,6 +118,7 @@ pub(crate) struct Schema {
 impl Schema {
     pub(crate) fn of(config: &InventoryConfig) -> Self {
         Self {
+            format: config.destination.format,
             versions: config.all_versions,
             fields: ORDER
                 .into_iter()
@@ -61,25 +127,117 @@ impl Schema {
         }
     }
 
-    /// The manifest's `fileSchema`: the columns' names, comma separated.
-    pub(crate) fn names(&self) -> String {
-        let fixed: &[&str] = if self.versions {
-            &["Bucket", "Key", "VersionId", "IsLatest", "IsDeleteMarker"]
-        } else {
-            &["Bucket", "Key"]
-        };
-        fixed
-            .iter()
-            .copied()
-            .chain(self.fields.iter().map(|field| field.name()))
-            .collect::<Vec<_>>()
-            .join(", ")
+    /// Its columns, in order.
+    pub(crate) fn columns(&self) -> Vec<Column> {
+        let mut columns = vec![
+            Column {
+                required: true,
+                ..Column::new("Bucket", Kind::Text)
+            },
+            Column {
+                required: true,
+                ..Column::new("Key", Kind::Text)
+            },
+        ];
+        if self.versions {
+            columns.extend([
+                Column::new("VersionId", Kind::Text),
+                Column::new("IsLatest", Kind::Bool),
+                Column::new("IsDeleteMarker", Kind::Bool),
+            ]);
+        }
+        columns.extend(
+            self.fields
+                .iter()
+                .map(|field| Column::new(field.name(), kind(*field))),
+        );
+        columns
+    }
+
+    /// The manifest's `fileSchema`, as S3 writes it for the format: the CSV columns'
+    /// names, ORC's `struct<…>` or Parquet's message type.
+    pub(crate) fn file_schema(&self) -> String {
+        let columns = self.columns();
+        match self.format {
+            InventoryFormat::Csv => columns
+                .iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>()
+                .join(", "),
+            InventoryFormat::Orc => {
+                let fields: Vec<String> = columns
+                    .iter()
+                    .map(|c| {
+                        let kind = match c.kind {
+                            Kind::Text => "string",
+                            Kind::Bool => "boolean",
+                            Kind::Int => "bigint",
+                            Kind::Time => "timestamp",
+                        };
+                        format!("{}:{kind}", c.snake_name())
+                    })
+                    .collect();
+                format!("struct<{}>", fields.join(","))
+            }
+            InventoryFormat::Parquet => {
+                let fields: Vec<String> = columns
+                    .iter()
+                    .map(|c| {
+                        let repetition = if c.required { "required" } else { "optional" };
+                        let kind = match c.kind {
+                            Kind::Text => "binary",
+                            Kind::Bool => "boolean",
+                            Kind::Int | Kind::Time => "int64",
+                        };
+                        let annotation = match c.kind {
+                            Kind::Text => " (UTF8)",
+                            Kind::Time => " (TIMESTAMP_MILLIS)",
+                            Kind::Bool | Kind::Int => "",
+                        };
+                        format!("{repetition} {kind} {}{annotation};", c.snake_name())
+                    })
+                    .collect();
+                format!("message s3.inventory {{ {}}}", fields.join(" "))
+            }
+        }
     }
 
     /// Whether the rows need each object's lifecycle expiry.
     pub(crate) fn needs_expiry(&self) -> bool {
         self.fields
             .contains(&InventoryField::LifecycleExpirationDate)
+    }
+
+    /// `entry`'s row, a value for each column.
+    pub(crate) fn row(&self, bucket: &str, entry: &Entry<'_>) -> Vec<Value> {
+        let info = &entry.version.info;
+        let mut values = vec![
+            Value::Text(bucket.to_owned()),
+            Value::Text(info.key.clone()),
+        ];
+        if self.versions {
+            let version_id = info.version_id.as_deref().filter(|id| *id != "null");
+            values.extend([
+                version_id.map_or(Value::None, |id| Value::Text(id.to_owned())),
+                Value::Bool(entry.version.latest),
+                Value::Bool(entry.version.delete_marker),
+            ]);
+        }
+        values.extend(self.fields.iter().map(|field| value(*field, entry)));
+        values
+    }
+}
+
+/// What a field holds.
+fn kind(field: InventoryField) -> Kind {
+    use InventoryField as F;
+    match field {
+        F::Size => Kind::Int,
+        F::LastModifiedDate | F::ObjectLockRetainUntilDate | F::LifecycleExpirationDate => {
+            Kind::Time
+        }
+        F::IsMultipartUploaded => Kind::Bool,
+        _ => Kind::Text,
     }
 }
 
@@ -93,76 +251,67 @@ pub(crate) struct Entry<'a> {
     pub locked: bool,
 }
 
-/// Appends `entry`'s CSV row to `out`, ending in a newline.
-pub(crate) fn row(schema: &Schema, bucket: &str, entry: &Entry<'_>, out: &mut String) {
-    let info = &entry.version.info;
-    let mut values = vec![bucket.to_owned(), crate::encode::url(&info.key)];
-    if schema.versions {
-        let version_id = info
-            .version_id
-            .as_deref()
-            .filter(|id| *id != "null")
-            .unwrap_or_default();
-        values.extend([
-            version_id.to_owned(),
-            entry.version.latest.to_string(),
-            entry.version.delete_marker.to_string(),
-        ]);
-    }
-    values.extend(schema.fields.iter().map(|field| value(*field, entry)));
-    for (i, value) in values.iter().enumerate() {
+/// Appends a row as CSV to `out`, ending in a newline.
+pub(crate) fn csv(row: &[Value], out: &mut String) {
+    for (i, value) in row.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
+        let text = match value {
+            // The key, URL-encoded.
+            Value::Text(key) if i == 1 => crate::encode::url(key),
+            Value::Text(text) => text.clone(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(n) => n.to_string(),
+            Value::Time(ms) => iso(*ms),
+            Value::None => String::new(),
+        };
         out.push('"');
-        out.push_str(&value.replace('"', "\"\""));
+        out.push_str(&text.replace('"', "\"\""));
         out.push('"');
     }
     out.push('\n');
 }
 
-/// One field's value; empty when it doesn't apply (most fields of a delete marker).
-fn value(field: InventoryField, entry: &Entry<'_>) -> String {
+/// One field's value; none when it doesn't apply (most fields of a delete marker).
+fn value(field: InventoryField, entry: &Entry<'_>) -> Value {
     use InventoryField as F;
     let info = &entry.version.info;
+    let text = |text: &str| Value::Text(text.to_owned());
     match field {
-        F::LastModifiedDate => return iso(millis(info.modified)),
-        F::ObjectOwner => return OWNER_ID.to_owned(),
-        _ if entry.version.delete_marker => return String::new(),
+        F::LastModifiedDate => return Value::Time(millis(info.modified)),
+        F::ObjectOwner => return text(OWNER_ID),
+        _ if entry.version.delete_marker => return Value::None,
         _ => {}
     }
     let retention = info.attrs.retention.as_ref();
     match field {
-        F::Size => info.size.to_string(),
-        F::ETag => info.etag.clone(),
-        F::StorageClass => "STANDARD".to_owned(),
-        F::IsMultipartUploaded => (!info.parts.is_empty()).to_string(),
-        F::EncryptionStatus => match info.sse.as_ref().map(|sse| sse.mode) {
+        F::Size => Value::Int(i64::try_from(info.size).unwrap_or(i64::MAX)),
+        F::ETag => text(&info.etag),
+        F::StorageClass => text("STANDARD"),
+        F::IsMultipartUploaded => Value::Bool(!info.parts.is_empty()),
+        F::EncryptionStatus => text(match info.sse.as_ref().map(|sse| sse.mode) {
             None => "NOT-SSE",
             Some(SseMode::S3) => "SSE-S3",
             Some(SseMode::Kms) => "SSE-KMS",
             Some(SseMode::Dsse) => "DSSE-KMS",
             Some(SseMode::Customer) => "SSE-C",
-        }
-        .to_owned(),
-        F::ObjectLockRetainUntilDate => retention.map(|r| iso(r.until_ms)).unwrap_or_default(),
-        F::ObjectLockMode => retention
-            .map(|r| r.mode.as_str().to_owned())
-            .unwrap_or_default(),
+        }),
+        F::ObjectLockRetainUntilDate => retention.map_or(Value::None, |r| Value::Time(r.until_ms)),
+        F::ObjectLockMode => retention.map_or(Value::None, |r| text(r.mode.as_str())),
         F::ObjectLockLegalHoldStatus => match info.attrs.legal_hold {
-            Some(true) => "ON".to_owned(),
-            _ if entry.locked => "OFF".to_owned(),
-            _ => String::new(),
+            Some(true) => text("ON"),
+            _ if entry.locked => text("OFF"),
+            _ => Value::None,
         },
-        F::BucketKeyStatus => if info.sse.as_ref().is_some_and(|sse| sse.bucket_key) {
+        F::BucketKeyStatus => text(if info.sse.as_ref().is_some_and(|sse| sse.bucket_key) {
             "ENABLED"
         } else {
             "DISABLED"
-        }
-        .to_owned(),
-        F::ChecksumAlgorithm => checksum_algorithm(&info.attrs.checksums),
-        F::ObjectAccessControlList => acl_json(info.attrs.acl.as_ref()),
-        F::LifecycleExpirationDate => entry.expiry_ms.map(iso).unwrap_or_default(),
+        }),
+        F::ChecksumAlgorithm => checksum_algorithm(&info.attrs.checksums).map_or(Value::None, text),
+        F::ObjectAccessControlList => Value::Text(acl_json(info.attrs.acl.as_ref())),
+        F::LifecycleExpirationDate => entry.expiry_ms.map_or(Value::None, Value::Time),
         // Not kept by TeiFS: no replication yet, every object is STANDARD, and Object
         // Lock has no event holds.
         F::ReplicationStatus
@@ -170,19 +319,18 @@ fn value(field: InventoryField, entry: &Entry<'_>) -> String {
         | F::ObjectLockEventHoldStatus
         | F::ObjectLockEventHoldDuration
         | F::LastModifiedDate
-        | F::ObjectOwner => String::new(),
+        | F::ObjectOwner => Value::None,
     }
 }
 
 /// The algorithm of the object's checksum: the one asked for, when it has S3's default
 /// besides.
-fn checksum_algorithm(checksums: &std::collections::BTreeMap<String, String>) -> String {
+fn checksum_algorithm(checksums: &std::collections::BTreeMap<String, String>) -> Option<&str> {
     checksums
         .keys()
         .find(|algorithm| *algorithm != checksums::DEFAULT_ALGORITHM)
         .or_else(|| checksums.keys().next())
-        .cloned()
-        .unwrap_or_default()
+        .map(String::as_str)
 }
 
 /// The object's ACL as S3's inventory gives it: base64 of a JSON document with its
@@ -238,50 +386,13 @@ pub(crate) fn iso(ms: i64) -> String {
     )
 }
 
-/// The gzipped data files a report's rows go into, each closed once it's `roll_at`
-/// bytes.
-pub(crate) struct DataFiles {
-    roll_at: usize,
-    file: Option<GzEncoder<Vec<u8>>>,
-}
-
-impl DataFiles {
-    pub(crate) fn new(roll_at: usize) -> Self {
-        Self {
-            roll_at,
-            file: None,
-        }
-    }
-
-    /// Adds rows; returns a file when it's full.
-    pub(crate) fn push(&mut self, rows: &str) -> io::Result<Option<Vec<u8>>> {
-        let file = self
-            .file
-            .get_or_insert_with(|| GzEncoder::new(Vec::new(), Compression::default()));
-        file.write_all(rows.as_bytes())?;
-        if file.get_ref().len() >= self.roll_at {
-            return self.finish();
-        }
-        Ok(None)
-    }
-
-    /// The last file, if rows were added since the last one.
-    pub(crate) fn finish(&mut self) -> io::Result<Option<Vec<u8>>> {
-        self.file.take().map(GzEncoder::finish).transpose()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::Read,
-        time::{Duration, UNIX_EPOCH},
-    };
+    use std::time::{Duration, UNIX_EPOCH};
 
-    use flate2::read::GzDecoder;
     use teifs_types::{
         AclGrant, LockMode, ObjectAttrs, ObjectInfo, PartInfo, Permission, Retention, SseInfo,
-        configs::{Frequency, InventoryDestination, InventoryFormat},
+        configs::{Frequency, InventoryDestination},
     };
 
     use super::*;
@@ -322,7 +433,7 @@ mod tests {
 
     fn line(schema: &Schema, entry: &Entry<'_>) -> String {
         let mut out = String::new();
-        row(schema, "photos", entry, &mut out);
+        csv(&schema.row("photos", entry), &mut out);
         out
     }
 
@@ -337,7 +448,7 @@ mod tests {
             ],
         ));
         assert_eq!(
-            schema.names(),
+            schema.file_schema(),
             "Bucket, Key, VersionId, IsLatest, IsDeleteMarker, Size, ETag, ObjectOwner"
         );
         assert!(!schema.needs_expiry());
@@ -345,10 +456,52 @@ mod tests {
             false,
             vec![InventoryField::LifecycleExpirationDate],
         ));
-        assert_eq!(current.names(), "Bucket, Key, LifecycleExpirationDate");
+        assert_eq!(
+            current.file_schema(),
+            "Bucket, Key, LifecycleExpirationDate"
+        );
         assert!(current.needs_expiry());
         assert_eq!(ORDER.len(), InventoryField::ALL.len());
         assert!(InventoryField::ALL.iter().all(|f| ORDER.contains(f)));
+    }
+
+    #[test]
+    fn file_schemas_are_s3s() {
+        let mut schema = Schema::of(&config(
+            true,
+            vec![
+                InventoryField::ETag,
+                InventoryField::Size,
+                InventoryField::LastModifiedDate,
+            ],
+        ));
+        schema.format = InventoryFormat::Orc;
+        assert_eq!(
+            schema.file_schema(),
+            "struct<bucket:string,key:string,version_id:string,is_latest:boolean,\
+             is_delete_marker:boolean,size:bigint,last_modified_date:timestamp,e_tag:string>"
+        );
+        schema.format = InventoryFormat::Parquet;
+        assert_eq!(
+            schema.file_schema(),
+            "message s3.inventory { required binary bucket (UTF8); required binary key (UTF8); \
+             optional binary version_id (UTF8); optional boolean is_latest; optional boolean \
+             is_delete_marker; optional int64 size; optional int64 last_modified_date \
+             (TIMESTAMP_MILLIS); optional binary e_tag (UTF8);}"
+        );
+        // Every field, as AWS's example names the ones it shows.
+        let mut every = Schema::of(&config(true, InventoryField::ALL.to_vec()));
+        every.format = InventoryFormat::Orc;
+        assert!(every.file_schema().starts_with(
+            "struct<bucket:string,key:string,version_id:string,is_latest:boolean,\
+             is_delete_marker:boolean,size:bigint,last_modified_date:timestamp,e_tag:string,\
+             storage_class:string,is_multipart_uploaded:boolean,replication_status:string,\
+             encryption_status:string,object_lock_retain_until_date:timestamp,\
+             object_lock_mode:string,object_lock_legal_hold_status:string,\
+             intelligent_tiering_access_tier:string,bucket_key_status:string,\
+             checksum_algorithm:string,object_access_control_list:string,object_owner:string,\
+             lifecycle_expiration_date:timestamp,"
+        ));
     }
 
     #[test]
@@ -506,29 +659,5 @@ mod tests {
                 ],
             })
         );
-    }
-
-    #[test]
-    fn data_files_roll_when_full() {
-        let gunzip = |file: &[u8]| {
-            let mut text = String::new();
-            GzDecoder::new(file).read_to_string(&mut text).unwrap();
-            text
-        };
-        let mut files = DataFiles::new(1);
-        let first = files.push("a\n").unwrap().unwrap();
-        assert_eq!(gunzip(&first), "a\n");
-        assert!(files.finish().unwrap().is_none());
-        let mut files = DataFiles::new(1 << 20);
-        assert!(files.push("a\n").unwrap().is_none());
-        assert!(files.push("b\n").unwrap().is_none());
-        assert_eq!(gunzip(&files.finish().unwrap().unwrap()), "a\nb\n");
-        // A file closes once it's exactly as big as asked.
-        let mut files = DataFiles::new(10);
-        assert!(
-            files.push("a").unwrap().is_some(),
-            "the gzip header alone is 10 bytes"
-        );
-        assert!(files.finish().unwrap().is_none());
     }
 }
