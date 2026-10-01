@@ -6,47 +6,20 @@
 
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
-use serde_json::{Value, json};
 use teifs_client::{Client, HealthCheck};
 use teifs_types::admin::ServerInfo;
 
 use super::{Error, alias::Aliases};
-use crate::{admin::client_for, error::Kind, ui, units};
+use crate::{
+    admin::client_for,
+    checks::{self, Check, State},
+    error::Kind,
+};
 
 /// How far apart the clocks may be before Signature V4 refuses requests.
 const SIGNATURE_SKEW: Duration = Duration::from_mins(15);
 /// How far apart the clocks may be before it's worth fixing.
 const CLOCK_WARNING: Duration = Duration::from_mins(1);
-/// How soon a certificate's expiry is worth a warning.
-const CERTIFICATE_WARNING: Duration = Duration::from_hours(14 * 24);
-
-/// How a check went.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum State {
-    Ok,
-    Warning,
-    Failed,
-}
-
-/// One check of a server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Check {
-    name: &'static str,
-    state: State,
-    detail: String,
-}
-
-impl Check {
-    fn new(name: &'static str, state: State, detail: impl Into<String>) -> Self {
-        Self {
-            name,
-            state,
-            detail: detail.into(),
-        }
-    }
-}
 
 /// `teifs status ALIAS`.
 pub(crate) async fn status(alias: &str) -> Result<(), Error> {
@@ -58,16 +31,7 @@ pub(crate) async fn status(alias: &str) -> Result<(), Error> {
     found.check_usable(alias)?;
     let client = client_for(found)?;
     let checks = checks(&client, &found.url).await;
-    report(&found.url, &checks);
-    let failed = checks.iter().filter(|c| c.state == State::Failed).count();
-    if failed > 0 {
-        return Err(Error::general(format!(
-            "{failed} check{} failed",
-            if failed == 1 { "" } else { "s" }
-        ))
-        .shown());
-    }
-    Ok(())
+    checks::finish(&checks, ("server", &found.url))
 }
 
 /// Every check of the server at `url`, in order; those that need an answer stop at the
@@ -199,47 +163,12 @@ async fn certificate(target: &str, now: SystemTime) -> Check {
         format!("{target}:443")
     };
     match crate::health::certificate(&target).await {
-        Ok(der) => expiry(not_after(&der), now),
+        Ok(der) => Check::named("Certificate", checks::expiry(checks::not_after(&der), now)),
         Err(err) => Check::new(
             "Certificate",
             State::Failed,
             format!("can't read it: {err}"),
         ),
-    }
-}
-
-/// When a certificate (DER) stops being valid, if it can be read.
-fn not_after(der: &[u8]) -> Option<SystemTime> {
-    let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
-    let seconds = certificate.validity().not_after.timestamp();
-    Some(units::from_ms(seconds.saturating_mul(1000)))
-}
-
-/// What a certificate's expiry (`not_after`) means at `now`.
-fn expiry(not_after: Option<SystemTime>, now: SystemTime) -> Check {
-    let Some(not_after) = not_after else {
-        return Check::new(
-            "Certificate",
-            State::Failed,
-            "the server's certificate can't be read",
-        );
-    };
-    let until = units::date(not_after);
-    match not_after.duration_since(now) {
-        Err(_) => Check::new(
-            "Certificate",
-            State::Failed,
-            format!("expired {until}: clients refuse the server; renew it"),
-        ),
-        Ok(left) if left < CERTIFICATE_WARNING => Check::new(
-            "Certificate",
-            State::Warning,
-            format!(
-                "expires {until}, in {} days: renew it",
-                left.as_secs() / (24 * 60 * 60)
-            ),
-        ),
-        Ok(_) => Check::new("Certificate", State::Ok, format!("valid until {until}")),
     }
 }
 
@@ -260,27 +189,8 @@ fn server(info: &ServerInfo) -> Vec<Check> {
         )
     });
     for disk in &info.disks {
-        let size = units::size;
-        let room = disk.free.saturating_sub(disk.reserved);
-        let detail = format!(
-            "{}: {} free of {}",
-            disk.path,
-            size(disk.free),
-            size(disk.total)
-        );
-        checks.push(if room == 0 {
-            Check::new(
-                "Disk",
-                State::Failed,
-                format!(
-                    "{detail}: full, writes are refused (delete objects, or give it more room)"
-                ),
-            )
-        } else if room < disk.total / 20 {
-            Check::new("Disk", State::Warning, format!("{detail}: nearly full"))
-        } else {
-            Check::new("Disk", State::Ok, detail)
-        });
+        let found = checks::disk(&disk.path, disk.total, disk.free, disk.reserved);
+        checks.push(Check::named("Disk", found));
     }
     for (name, job) in &info.jobs {
         if let Some(error) = &job.last_error {
@@ -306,36 +216,6 @@ fn server(info: &ServerInfo) -> Vec<Check> {
         checks.push(Check::new("Scrub", State::Ok, "found no damage"));
     }
     checks
-}
-
-/// Prints the checks: a table, or a record each.
-fn report(url: &str, checks: &[Check]) {
-    let records: Vec<Value> = checks
-        .iter()
-        .map(|check| {
-            let mut record = json!({"type": "check", "server": url});
-            if let (Value::Object(record), Ok(Value::Object(fields))) =
-                (&mut record, serde_json::to_value(check))
-            {
-                record.extend(fields);
-            }
-            record
-        })
-        .collect();
-    let mut table = ui::Table::new(&["CHECK", "STATE", "DETAIL"]);
-    for check in checks {
-        let state = match check.state {
-            State::Ok => "ok",
-            State::Warning => "warning",
-            State::Failed => "failed",
-        };
-        table.row(vec![
-            check.name.to_owned(),
-            state.to_owned(),
-            check.detail.clone(),
-        ]);
-    }
-    ui::rows(&table, &records, "No checks.");
 }
 
 #[cfg(test)]
@@ -370,34 +250,6 @@ mod tests {
             far.detail
         );
         assert_eq!(clock(here - 15 * MINUTE, here).state, State::Failed);
-    }
-
-    #[test]
-    fn certificates_are_told_by_when_they_expire() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        let day = 24 * 60 * MINUTE;
-        assert_eq!(expiry(Some(now + 30 * day), now).state, State::Ok);
-        let soon = expiry(Some(now + 13 * day), now);
-        assert_eq!(soon.state, State::Warning);
-        assert!(
-            soon.detail.ends_with("in 13 days: renew it"),
-            "{}",
-            soon.detail
-        );
-        assert_eq!(expiry(Some(now + 14 * day), now).state, State::Ok);
-        assert_eq!(expiry(Some(now - day), now).state, State::Failed);
-        assert_eq!(expiry(None, now).state, State::Failed);
-    }
-
-    #[test]
-    fn a_certificates_expiry_is_read() {
-        let key = rcgen::KeyPair::generate().unwrap();
-        let mut params = rcgen::CertificateParams::new(vec!["s3.test".to_owned()]).unwrap();
-        params.not_after = rcgen::date_time_ymd(2031, 1, 2);
-        let der = params.self_signed(&key).unwrap().der().to_vec();
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_hours(22_281 * 24);
-        assert_eq!(not_after(&der), Some(expected));
-        assert_eq!(not_after(b"not a certificate"), None);
     }
 
     #[test]

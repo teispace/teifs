@@ -45,7 +45,7 @@ const PATH_OPTIONS: [&str; 6] = [
 ];
 
 /// The subcommands that take `serve`'s settings, by their path from the top.
-const SERVE_COMMANDS: [&[&str]; 2] = [&["serve"], &["config", "show"]];
+const SERVE_COMMANDS: [&[&str]; 3] = [&["serve"], &["config", "show"], &["doctor"]];
 
 /// A drive's own settings file, which `teifs serve DIR` reads when no other is named.
 pub(crate) fn drive_settings(drive: &Path) -> PathBuf {
@@ -103,11 +103,11 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<(Cli, So
 
 /// The matches of whichever subcommand takes `serve`'s settings.
 fn serve_matches(matches: &ArgMatches) -> Option<&ArgMatches> {
-    match matches.subcommand()? {
-        ("serve", serve) => Some(serve),
-        ("config", config) => config.subcommand_matches("show"),
-        _ => None,
-    }
+    SERVE_COMMANDS.iter().find_map(|names| {
+        names
+            .iter()
+            .try_fold(matches, |found, name| found.subcommand_matches(name))
+    })
 }
 
 /// `serve`'s settings (every argument but help and the settings file itself).

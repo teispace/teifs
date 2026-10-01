@@ -12,8 +12,10 @@ use std::{
 
 mod admin;
 mod backup;
+mod checks;
 mod client;
 mod config;
+mod doctor;
 mod error;
 mod health;
 mod init;
@@ -126,6 +128,11 @@ enum Command {
         #[arg(default_value = "local")]
         alias: String,
     },
+    /// Find what would stop `teifs serve` with these settings, or make it serve badly:
+    /// the drive (format, databases, in use, writable), its disk's room, the root keys,
+    /// the keyring, the TLS certificates and the listen address, each with what to do.
+    /// Changes nothing. Exit code 1 when a check fails.
+    Doctor(ServeArgs),
     /// Print the shell completion script for `shell`, for example
     /// `teifs completions zsh > ~/.zfunc/_teifs` or
     /// `teifs completions bash > ~/.local/share/bash-completion/completions/teifs`.
@@ -722,6 +729,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Init(args) => init::init(&args),
         Command::Health(args) => health::health(&args).await,
         Command::Status { alias } => client::status::status(&alias).await,
+        Command::Doctor(args) => doctor::doctor(&args),
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut script = Vec::new();

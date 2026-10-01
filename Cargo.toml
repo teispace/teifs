@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 fs4 = { version = "1.1", default-features = false, features = ["sync"] }
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 teifs-types = { path = "crates/types" }
 teifs-meta = { path = "crates/meta" }
 teifs-crypto = { path = "crates/crypto" }

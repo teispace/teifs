@@ -12,7 +12,9 @@
 mod body;
 mod cache;
 pub mod checksum;
+mod diagnose;
 mod error;
+mod filesystem;
 mod folder;
 mod folder_versions;
 mod folders;
@@ -47,7 +49,9 @@ use std::{
 use teifs_meta::{BucketRecord, Index, System};
 
 pub use body::{BodyReader, ObjectBody};
+pub use diagnose::{Database, Diagnosis, diagnose};
 pub use error::{Result, StoreError};
+pub use filesystem::remote_file_system;
 pub use format::{DriveFormat, FORMAT};
 pub use jobs::{Expirations, JobOptions, JobStatus, Jobs};
 pub use lifecycle::{

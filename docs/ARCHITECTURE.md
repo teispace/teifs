@@ -79,6 +79,10 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                `Alias::credentials` gives every client the alias's
                                keys and session token, and `client/trust.rs` the CA
                                it trusts besides the system's.
+                               `src/checks.rs` reports the checks of `teifs status`
+                               (`client/status.rs`, a server) and `teifs doctor`
+                               (`src/doctor.rs`, a drive, through the store's
+                               `diagnose`, which looks without opening it).
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

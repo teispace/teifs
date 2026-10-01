@@ -203,6 +203,12 @@ behaviour; the on-disk format is always upgraded automatically.
   fast, the drive serving and taking writes, the clocks, the certificate's expiry,
   version, disks, jobs, scrubs), with exit code 1 when one fails. `teifs-client` asks
   the health checks too (`Client::health`).
+- `teifs doctor [DIR]`: a drive on this machine checked with the settings
+  `teifs serve` would use (its options, environment and the drive's settings file):
+  its format, whether a server has it, its databases' integrity, how its file system
+  treats names, whether it's on a network or FUSE file system, whether it can be written, its disk's room, the root keys, the keyring,
+  the TLS certificates and the listen address, each problem with what to do, and exit
+  code 1 when one fails. Nothing on the drive is changed.
 - `teifs admin info` (and the admin API's server info) shows the disks the drive uses:
   its own and those of folder buckets linked from elsewhere, with their free space,
   size and the room kept free for deletes.

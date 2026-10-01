@@ -63,6 +63,44 @@ left beyond what's kept free for deletes fails, and one with less than 5 % of it
 left warns. `--json` prints one `{"type":"check","name","state","detail","server"}`
 record per check.
 
+### Doctor
+
+`teifs doctor [DIR]` looks at a drive on the machine it's on, with the settings
+`teifs serve` would use (the same options, environment and the drive's own
+`.teifs/settings.toml`), for what would stop the server or make it serve badly. Each
+problem says what to do, and it exits with code 1 when a check fails:
+
+```text
+CHECK            STATE    DETAIL
+Drive            ok       /srv/drive: drive 6f1c…
+In use           ok       by nothing
+Index            ok       intact
+System database  ok       intact
+Names            ok       told apart by case
+File system      ok       on this machine
+Writable         ok       yes
+Disk             ok       /srv/drive: 412.3 GiB free of 931.5 GiB
+Root keys        ok       in /srv/drive/.teifs/credentials.json
+Keyring          ok       in /home/teifs/.config/teifs/keys/6f1c….json
+Certificate      ok       /etc/teifs/certs/public.crt: valid until 2027-01-02
+Listen           ok       0.0.0.0:9000 is free
+```
+
+It checks the drive's format (a newer TeiFS's drive fails; an older one is upgraded
+when it's served), whether a running server has it, both databases with SQLite's
+integrity check (a damaged one fails, pointing at `teifs restore --from`), whether two
+names that differ only in case are one file on its file system (they can't both be in a
+folder bucket then), whether it's on a file system over the network or in user space
+(NFS, SMB, FUSE: it warns, since their locks, renames and syncs may not hold as a drive
+needs), whether it can be written, its disk's room as `teifs status`
+judges it, the root keys (given halfway fails; a file others can read warns), the
+keyring (missing for a drive that has one warns: objects encrypted with it can't be read
+without it), each TLS certificate (it loads with its key, and its expiry as
+`teifs status` judges it) and whether the listen address is free. Nothing is changed: a
+folder that isn't a drive yet stays one, and while a server runs the drive, the listen
+address isn't tried. `--json` prints one `{"type":"check","name","state","detail","drive"}`
+record per check.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

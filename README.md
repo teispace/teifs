@@ -251,6 +251,7 @@ requests live. See
 | `teifs sts assume-web SERVER [--role ARN] [--token-file F] … --save-alias NEW\|-o FILE` | A CI job's OpenID Connect token for temporary credentials (reads `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`) |
 | `teifs health [ADDRESS\|URL] [--timeout 5s]` | Check that a server answers its health check, over HTTP or HTTPS |
 | `teifs status [ALIAS]` | Check how a server is doing: answers and how fast, drive serving and taking writes, clocks, certificate expiry, version, disks, jobs, scrubs; exit code 1 when a check fails |
+| `teifs doctor [DIR]` | Check a drive on this machine, with the settings `teifs serve` would use: its format, databases, file system (network or FUSE ones warn), room, keys, keyring, certificates and listen address, each problem with what to do; exit code 1 when a check fails |
 | `teifs completions bash\|zsh\|fish\|powershell\|elvish` | Print a shell completion script |
 | Every command: `--json`, `-q`, `-y`, `--color auto\|always\|never` | JSON Lines, quiet, answer yes, colors |
 

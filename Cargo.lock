@@ -3281,6 +3281,7 @@ dependencies = [
  "futures",
  "md-5",
  "prometheus-client",
+ "rustix",
  "serde",
  "serde_json",
  "sha1",

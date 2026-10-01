@@ -241,6 +241,30 @@ fn pairs(source: &TlsSource) -> Result<Vec<(PathBuf, PathBuf)>, TlsError> {
     Ok(found)
 }
 
+impl TlsSource {
+    /// Each certificate file it names, with the server's own certificate in it (the
+    /// first of its chain), without loading the keys: for checking when they expire.
+    pub fn certificates(&self) -> Result<Vec<(PathBuf, CertificateDer<'static>)>, TlsError> {
+        pairs(self)?
+            .into_iter()
+            .map(|(cert, _)| {
+                let pem = fs::read(&cert).map_err(|source| TlsError::Read {
+                    path: cert.clone(),
+                    source,
+                })?;
+                let leaf = CertificateDer::pem_slice_iter(&pem)
+                    .next()
+                    .and_then(Result::ok)
+                    .ok_or_else(|| TlsError::Invalid {
+                        path: cert.clone(),
+                        message: "has no PEM certificate".into(),
+                    })?;
+                Ok((cert, leaf))
+            })
+            .collect()
+    }
+}
+
 /// The certificate and key in `dir`, if it has both.
 fn pair_in(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     PAIR_NAMES.iter().find_map(|(cert, key)| {
@@ -416,6 +440,30 @@ mod tests {
             tls.config().alpn_protocols,
             [b"h2".to_vec(), b"http/1.1".to_vec()]
         );
+        // Each certificate the folder serves, its own first, as read for its expiry.
+        let found = TlsSource::Dir(dir.path().to_owned())
+            .certificates()
+            .unwrap();
+        let files: Vec<PathBuf> = found.iter().map(|(path, _)| path.clone()).collect();
+        assert_eq!(
+            files,
+            [
+                dir.path().join("a/tls.crt"),
+                dir.path().join("b/public.crt"),
+                dir.path().join("tls.crt")
+            ]
+        );
+        let first = fs::read(dir.path().join("a/tls.crt")).unwrap();
+        let leaf = CertificateDer::pem_slice_iter(&first)
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(found[0].1, leaf);
+        fs::write(dir.path().join("b/public.crt"), "nonsense").unwrap();
+        let err = TlsSource::Dir(dir.path().to_owned())
+            .certificates()
+            .unwrap_err();
+        assert!(err.to_string().contains("has no PEM certificate"), "{err}");
     }
 
     #[test]

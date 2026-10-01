@@ -93,7 +93,8 @@ pub struct Disk {
 }
 
 impl Disk {
-    fn of(path: &Path) -> Result<Self> {
+    /// The disk `path` is on, as the drive sees it.
+    pub fn at(path: &Path) -> Result<Self> {
         let stats = fs4::statvfs(path)?;
         Ok(Self {
             path: path.to_owned(),
@@ -120,7 +121,7 @@ impl Store {
             }
             let mut disks: Vec<Disk> = Vec::new();
             for dir in dirs {
-                let disk = Disk::of(&dir)?;
+                let disk = Disk::at(&dir)?;
                 if !disks.iter().any(|seen| same_disk(seen, &disk)) {
                     disks.push(disk);
                 }
