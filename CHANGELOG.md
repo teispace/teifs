@@ -290,6 +290,11 @@ behaviour; the on-disk format is always upgraded automatically.
   canonicalization and verifier, which refuse signature wrapping, document type
   declarations and entities. The audit log doesn't record a `SAMLAssertion` sent in the
   query.
+- Policies written for MinIO's admin API work: statements of `admin:` and `kms:` actions
+  may leave out `Resource`, as MinIO's `consoleAdmin` and `diagnostics` policies do,
+  and TeiFS's admin actions answer to MinIO's names of the same permission
+  (`admin:ServerInfo` grants `teifs:GetServerInfo`, `admin:ServerTrace` the trace,
+  `admin:Prometheus` the metrics…).
 - `teifs sts assume-saml SERVER --role-arn ARN --principal-arn ARN --assertion-file FILE`
   exchanges a SAML response (base64, or its XML; `-` reads standard input) for a role's
   credentials, saved as an alias or written for `aws`.

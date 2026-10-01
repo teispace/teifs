@@ -32,6 +32,7 @@ mod context;
 mod evaluate;
 mod json;
 mod key;
+pub mod minio;
 mod pattern;
 mod policy;
 mod template;

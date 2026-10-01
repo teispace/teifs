@@ -11,6 +11,7 @@ use crate::{
     evaluate::Request,
     json::Json,
     key::{Key, TagKind},
+    minio,
     pattern::{self, Atom},
     template::Template,
 };
@@ -436,12 +437,18 @@ impl Statement {
             }
         }
         let effect = effect.ok_or_else(|| Error::new("a statement needs an Effect"))?;
-        if kind == Kind::Trust {
-            if resources.is_some() {
-                return Err(Error::new(
-                    "a trust policy names no Resource or NotResource: it's always the role",
-                ));
-            }
+        if kind == Kind::Trust && resources.is_some() {
+            return Err(Error::new(
+                "a trust policy names no Resource or NotResource: it's always the role",
+            ));
+        }
+        // A trust policy's resource is always the role; as on MinIO, a statement of its
+        // admin and KMS actions alone needs none.
+        let minio = |a: &Actions| !a.negated && a.patterns.iter().all(|p| minio_pattern(p));
+        if resources.is_none()
+            && (kind == Kind::Trust
+                || (kind == Kind::Identity && actions.as_ref().is_some_and(minio)))
+        {
             resources = Some(Resources {
                 negated: false,
                 templates: [Template::plain("*")].into(),
@@ -479,8 +486,10 @@ impl Statement {
 
     /// Action, resource and conditions (not the principal).
     fn applies(&self, request: &Request<'_>) -> bool {
-        self.actions.matches(request.action)
-            && self.resources.matches(request.resource, request.context)
+        let Some(resource_ignored) = self.actions.take(request.action) else {
+            return false;
+        };
+        (resource_ignored || self.resources.matches(request.resource, request.context))
             && self.conditions.iter().all(|c| c.holds(request.context))
     }
 }
@@ -645,6 +654,20 @@ impl PrincipalEntry {
     }
 }
 
+/// Whether an action pattern names one of `MinIO`'s admin or KMS actions (`admin:…`,
+/// `kms:…`), by its service.
+fn minio_pattern(pattern: &[Atom]) -> bool {
+    let mut service = String::new();
+    for atom in pattern {
+        match atom {
+            Atom::Char(':') => return minio::resourceless_service(&service),
+            Atom::Char(c) => service.push(*c),
+            Atom::Star | Atom::One => return false,
+        }
+    }
+    false
+}
+
 impl Actions {
     fn parse(json: &Json, negated: bool, kind: Kind) -> Result<Self, Error> {
         if kind == Kind::Trust && negated {
@@ -685,12 +708,33 @@ impl Actions {
         Ok(Self { negated, patterns })
     }
 
-    /// Actions compare without case: `s3:getobject` is `s3:GetObject`.
-    fn matches(&self, action: &str) -> bool {
-        self.patterns
-            .iter()
-            .any(|p| pattern::matches(p, action, true))
-            != self.negated
+    /// Whether the statement takes `action` (by its name, or one of the `MinIO` names of
+    /// the same permission), and if so whether its `Resource` is ignored: when a `MinIO`
+    /// admin or KMS action names it and has no resource of its own. Actions compare
+    /// without case: `s3:getobject` is `s3:GetObject`.
+    fn take(&self, action: &str) -> Option<bool> {
+        let names = std::iter::once(action).chain(minio::minio_names(action).iter().copied());
+        if self.negated {
+            let excluded = names.into_iter().any(|name| {
+                self.patterns
+                    .iter()
+                    .any(|p| pattern::matches(p, name, true))
+            });
+            return (!excluded).then_some(false);
+        }
+        let mut taken = None;
+        for p in &self.patterns {
+            let by_minio = minio_pattern(p);
+            for name in names.clone() {
+                if pattern::matches(p, name, true) {
+                    if by_minio && minio::ignores_resource(action) {
+                        return Some(true);
+                    }
+                    taken = Some(false);
+                }
+            }
+        }
+        taken
     }
 }
 

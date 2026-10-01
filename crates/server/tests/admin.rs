@@ -139,6 +139,14 @@ async fn users_need_teifs_actions() {
     let storage = server.iam.create_access_key("storage").unwrap();
     let storage = (storage.info.id.as_str(), storage.secret.as_str());
     assert_eq!(get(&server, storage, ADMIN_INFO).await.0, 403);
+    // A policy written for MinIO grants by MinIO's names, without a Resource.
+    let minio =
+        r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":["admin:ServerInfo"]}}"#;
+    user(&server, "diagnostics", Some(minio));
+    let diagnostics = server.iam.create_access_key("diagnostics").unwrap();
+    let diagnostics = (diagnostics.info.id.as_str(), diagnostics.secret.as_str());
+    assert_eq!(get(&server, diagnostics, ADMIN_INFO).await.0, 200);
+    assert_eq!(get(&server, diagnostics, ADMIN_CONFIG).await.0, 403);
 }
 
 #[tokio::test]
