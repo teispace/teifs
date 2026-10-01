@@ -114,7 +114,8 @@ jobs:
       - name: The .rpm installs on Fedora
         run: |
           docker run --rm -v "$RUNNER_TEMP/packages:/packages:ro" fedora:42 sh -euc '
-            dnf install -y -q /packages/*.rpm
+            # The image has no systemd: systemd-analyze comes with it.
+            dnf install -y -q systemd /packages/*.rpm
             getent passwd teifs
             test "$(stat -c "%U:%G %a" /etc/teifs/teifs.toml)" = "root:teifs 640"
             teifs --version
