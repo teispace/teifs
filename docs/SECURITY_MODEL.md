@@ -243,7 +243,12 @@ for itself (MinIO's way, without a role) only for a provider an administrator ta
 is deleted, and loses a policy that's deleted. A MinIO role policy (a provider tagged
 `teifs:role-policy`) is given only to a token of that provider for the client whose
 role ARN it names (its `aud` or `azp`), so one client's tokens can't take another's
-role. Tests:
+role. For a provider whose claims come from its userinfo endpoint
+(`teifs:claim-userinfo`), the request's access token is sent there only after the ID
+token checks out, so a made-up token makes TeiFS ask nothing; the userinfo must be for
+the token's subject, or another user's access token could lend its claims (policies
+among them); the claims only add to the token's, never replace them; and the access
+token is redacted from the audit log. Tests:
 `crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/api/tests/web_identity.rs`,
 `crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
 `crates/server/tests/admin.rs`.

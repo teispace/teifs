@@ -259,7 +259,9 @@ behaviour; the on-disk format is always upgraded automatically.
   each of a provider's clients MinIO's role ARN (`arn:minio:iam:::role/…`, shown by
   `teifs admin oidc ls`), and tokens for that client that name it get those policies.
   A role ARN no provider has is ignored when the token names policies in a claim, as on
-  MinIO, and MinIO's `AssumeRoleWithClientGrants` works too.
+  MinIO, and MinIO's `AssumeRoleWithClientGrants` works too. With `--claim-userinfo`,
+  a token's claims are completed from the provider's userinfo endpoint with the access
+  token a request gives (`WebIdentityAccessToken`), as MinIO's `claim_userinfo`.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to

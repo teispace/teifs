@@ -170,7 +170,11 @@ and `Snapshot` resolves them on every request, so a deleted provider ends the se
 and a deleted policy drops out of it. A MinIO role ARN of a client of a provider tagged
 `teifs:role-policy` (`State::oidc_role`, `openid_role_arn`) gives such a session the
 provider's role policies instead. `api/sts/openid.rs` holds both MinIO modes, for
-`AssumeRoleWithWebIdentity` and `AssumeRoleWithClientGrants` alike.
+`AssumeRoleWithWebIdentity` and `AssumeRoleWithClientGrants` alike. For a provider
+tagged `teifs:claim-userinfo`, `Iam::prove` also checks the token and asks the userinfo
+endpoint (`KeyCache::userinfo`, its URL kept from the discovery document with the keys)
+with the request's access token; the answer reaches `web_identity` as
+`Proved::UserInfo`, which adds the claims the token lacks (`WebIdentity::complete`).
 
 MinIO's `AssumeRoleWithLDAPIdentity` (`ldap/`, `ops/ldap.rs`, `api/sts/ldap.rs`) is the
 other self-proving request. `ldap/mod.rs` holds the settings and checks them offline

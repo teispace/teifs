@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 use teifs_policy::{Context, Decision, Json, Kind as PolicyKind, Policy, Principal, StsKey};
 
 use super::{
-    Action, ApiError, On, Out, Run, answer, with_request_tags, with_resource_tags, xml::Xml,
+    Action, ApiError, On, Out, Proved, Run, answer, with_request_tags, with_resource_tags, xml::Xml,
 };
 use crate::{
     IamError, Identity, Issued, Session, SessionKind,
@@ -304,10 +304,33 @@ fn web_identity(r: &Run<'_>, param: &str) -> Result<(oidc::WebIdentity, Vec<Stri
         ));
     }
     let policies = session_policies(r)?;
-    let web = r
+    let mut web = r
         .iam
         .read(|s| Ok(oidc::verify(s, &r.iam.web_keys, token, now_seconds())))?
         .map_err(refused)?;
+    if web.userinfo {
+        if r.p.optional("WebIdentityAccessToken").is_none() {
+            return Err(ApiError::invalid_parameter(
+                "access_token is mandatory if user_info claim is enabled".into(),
+            ));
+        }
+        let info = match r.proved {
+            Some(Proved::UserInfo(Ok(info))) => info.clone(),
+            Some(Proved::UserInfo(Err(why))) => {
+                return Err(refused(oidc::Refused::Unreachable(format!(
+                    "Couldn't get the userinfo of the OpenID Connect provider {}: {why}.",
+                    web.provider
+                ))));
+            }
+            // Only [`crate::Iam::serve_self_proving`] asks the provider.
+            _ => {
+                return Err(refused(oidc::Refused::Unreachable(
+                    "The OpenID Connect provider's userinfo wasn't asked for.".into(),
+                )));
+            }
+        };
+        web.complete(info).map_err(refused)?;
+    }
     Ok((web, policies))
 }
 

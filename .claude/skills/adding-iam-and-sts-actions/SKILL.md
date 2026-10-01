@@ -62,7 +62,7 @@ a table, authorizes it and answers in AWS's XML.
    async part (fetching the provider's keys, asking the directory or the identity
    plugin, in `Iam::prove` after the action's own request check) before the sync handler
    runs as the anonymous identity; their answer reaches the handler as `Run.proved`
-   (`Proved::Ldap`, `Proved::Plugin`), and the connection's client certificates as
+   (`Proved::Ldap`, `Proved::Plugin`, `Proved::UserInfo`), and the connection's client certificates as
    `Run.certificates`
    (from `Call::certificates`). Tests get a local identity provider from
    `oidc::keys::tests::publishing` (plain HTTP) or `publishing_with` and

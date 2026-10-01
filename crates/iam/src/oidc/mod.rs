@@ -32,6 +32,10 @@ pub(crate) const SOURCE_IDENTITY_CLAIM: &str = "https://aws.amazon.com/source_id
 pub(crate) const POLICY_CLAIM_TAG: &str = "teifs:policy-claim";
 const DEFAULT_POLICY_CLAIM: &str = "policy";
 
+/// The tag that completes a provider's tokens' claims from its userinfo endpoint, as
+/// MinIO's `claim_userinfo`: a request then needs `WebIdentityAccessToken`.
+pub(crate) const USERINFO_TAG: &str = "teifs:claim-userinfo";
+
 /// The tag that gives a provider MinIO's role policies: its value names the managed
 /// policies (separated by spaces, since a tag can't hold commas) that every token of each of its clients gets, when
 /// the request names that client's role ([`crate::openid_role_arn`]).
@@ -78,6 +82,9 @@ pub(crate) struct WebIdentity {
     pub(crate) expires: i64,
     /// The client id it's for: `azp`, or else the `aud` that's one of the provider's.
     pub(crate) audience: String,
+    /// Whether its claims are completed from the provider's userinfo endpoint
+    /// ([`USERINFO_TAG`]).
+    pub(crate) userinfo: bool,
     /// Every claim.
     pub(crate) claims: Json,
 }
@@ -98,6 +105,26 @@ impl WebIdentity {
             }
         }
         context.with_claim(&format!("{}:aud", self.prefix), self.audience.as_str())
+    }
+
+    /// Adds the claims of the provider's userinfo answer `info` that the token doesn't
+    /// have, as MinIO does. The answer must be for the token's subject (OpenID Connect
+    /// Core, 5.3.2), or another user's access token could lend its claims.
+    pub(crate) fn complete(&mut self, info: Json) -> Result<(), Refused> {
+        if info.get("sub").and_then(Json::as_str) != Some(self.subject.as_str()) {
+            return Err(Refused::Invalid(
+                "The provider's userinfo is for another subject than the token's.".into(),
+            ));
+        }
+        let (Json::Object(members), Json::Object(extra)) = (&mut self.claims, info) else {
+            return Ok(());
+        };
+        for (name, value) in extra {
+            if !members.iter().any(|(have, _)| *have == name) {
+                members.push((name, value));
+            }
+        }
+        Ok(())
     }
 
     /// The authentication methods the provider says it used (`amr`).
@@ -158,6 +185,15 @@ pub(crate) fn policy_claim(provider: &OidcProvider) -> Option<&str> {
                 claim.as_str()
             }
         })
+}
+
+/// Whether a provider's tokens' claims are completed from its userinfo endpoint
+/// ([`USERINFO_TAG`]).
+pub(crate) fn claim_userinfo(provider: &OidcProvider) -> bool {
+    provider
+        .tags
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case(USERINFO_TAG))
 }
 
 /// The managed policies (by name) a provider's role policy names, if it has one
@@ -288,6 +324,7 @@ pub(crate) fn verify(
         subject: subject.clone(),
         expires: exp,
         audience: audience.clone(),
+        userinfo: claim_userinfo(provider),
         claims: token.claims,
     })
 }
@@ -323,6 +360,7 @@ mod tests {
             subject: "repo:o/r:ref:refs/heads/main".into(),
             expires: 0,
             audience: "app".into(),
+            userinfo: false,
             claims,
         };
         assert_eq!(web.amr(), ["pwd", "mfa"]);
@@ -376,5 +414,47 @@ mod tests {
         ] {
             assert!(!allows(condition), "{condition}");
         }
+    }
+
+    #[test]
+    fn userinfo_adds_the_claims_the_token_lacks_for_its_own_subject() {
+        let claims = Json::parse(r#"{"sub":"alice","email":"a@token"}"#).unwrap();
+        let mut web = WebIdentity {
+            id: "OIDC".into(),
+            policy_claim: None,
+            provider: "arn".into(),
+            prefix: "idp.example.com".into(),
+            subject: "alice".into(),
+            expires: 0,
+            audience: "app".into(),
+            userinfo: true,
+            claims,
+        };
+        let info = |text: &str| Json::parse(text).unwrap();
+        assert!(matches!(
+            web.complete(info(r#"{"sub":"bob","policy":"admin"}"#)),
+            Err(Refused::Invalid(_))
+        ));
+        assert!(matches!(
+            web.complete(info(r#"{"policy":"admin"}"#)),
+            Err(Refused::Invalid(_))
+        ));
+        assert!(web.claims.get("policy").is_none());
+        web.complete(info(
+            r#"{"sub":"alice","email":"a@info","policy":["reader"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            web.claims.get("email").and_then(Json::as_str),
+            Some("a@token")
+        );
+        assert_eq!(strings(web.claims.get("policy")).unwrap(), ["reader"]);
+        let Json::Object(members) = &web.claims else {
+            panic!("{:?}", web.claims);
+        };
+        assert_eq!(
+            members.iter().filter(|(name, _)| name == "email").count(),
+            1
+        );
     }
 }

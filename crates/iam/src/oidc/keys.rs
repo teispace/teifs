@@ -10,6 +10,9 @@
 //! gave are used for up to a day. Only one fetch per provider runs at a time; requests
 //! that arrive meanwhile wait for its answer. The provider's certificate is trusted as
 //! [`super::tls`] says: by the system, or by one of the provider's thumbprints.
+//!
+//! The discovery document's `userinfo_endpoint` is kept with the keys, for a provider
+//! whose tokens' claims are completed from it ([`KeyCache::userinfo`]).
 
 use std::{
     collections::HashMap,
@@ -47,6 +50,16 @@ struct Entry {
     attempted: Instant,
     /// Why the last fetch failed, if it did.
     error: Option<String>,
+    /// The userinfo endpoint its discovery document names, if it does.
+    userinfo: Option<String>,
+}
+
+/// What a fetch from a provider gave.
+struct Fetched {
+    keys: Vec<jwt::Jwk>,
+    /// How long to keep them.
+    lifetime: Duration,
+    userinfo: Option<String>,
 }
 
 impl Entry {
@@ -134,20 +147,22 @@ impl KeyCache {
 
     /// Keeps what a fetch from the provider at `url` gave: its keys and how long to keep
     /// them, or why it failed (the keys it gave before are kept).
-    fn record(&self, url: &str, fetched: Result<(Vec<jwt::Jwk>, Duration), String>, now: Instant) {
+    fn record(&self, url: &str, fetched: Result<Fetched, String>, now: Instant) {
         let mut entries = self.entries();
         let entry = entries.entry(url.to_owned()).or_insert(Entry {
             keys: None,
             fresh_until: now,
             attempted: now,
             error: None,
+            userinfo: None,
         });
         entry.attempted = now;
         match fetched {
-            Ok((keys, lifetime)) => {
-                entry.keys = Some((keys.into(), now));
-                entry.fresh_until = now + lifetime;
+            Ok(fetched) => {
+                entry.keys = Some((fetched.keys.into(), now));
+                entry.fresh_until = now + fetched.lifetime;
                 entry.error = None;
+                entry.userinfo = fetched.userinfo;
             }
             Err(err) => entry.error = Some(err),
         }
@@ -175,20 +190,61 @@ impl KeyCache {
         }
     }
 
+    /// The claims the provider at `url` (with the certificate `thumbprints`) gives for
+    /// `access_token` at the userinfo endpoint its discovery document named when its
+    /// keys were last fetched: a JSON object.
+    pub(crate) async fn userinfo(
+        &self,
+        url: &str,
+        thumbprints: &[String],
+        access_token: &str,
+    ) -> Result<Json, String> {
+        let endpoint = {
+            let entries = self.entries();
+            let Some(entry) = entries.get(url) else {
+                return Err("its keys haven't been fetched".into());
+            };
+            entry
+                .userinfo
+                .clone()
+                .ok_or("its discovery document names no userinfo_endpoint")?
+        };
+        let client = self.client(thumbprints)?;
+        let (text, _) = get(&client, &endpoint, Some(access_token)).await?;
+        match Json::parse(&text) {
+            Ok(info @ Json::Object(_)) => Ok(info),
+            _ => Err(format!(
+                "{endpoint} answered something that isn't a JSON object"
+            )),
+        }
+    }
+
     /// Makes `keys` the provider's at `url`, as if just fetched.
     #[cfg(test)]
     pub(crate) fn insert(&self, url: &str, keys: Vec<jwt::Jwk>) {
-        self.record(url, Ok((keys, DEFAULT)), Instant::now());
+        self.insert_with(url, keys, None);
+    }
+
+    /// Makes `keys` the provider's at `url`, and `userinfo` its userinfo endpoint, as if
+    /// just fetched.
+    #[cfg(test)]
+    pub(crate) fn insert_with(&self, url: &str, keys: Vec<jwt::Jwk>, userinfo: Option<&str>) {
+        let fetched = Fetched {
+            keys,
+            lifetime: DEFAULT,
+            userinfo: userinfo.map(str::to_owned),
+        };
+        self.record(url, Ok(fetched), Instant::now());
     }
 }
 
-/// The keys of the provider at `url`, and how long to keep them.
-async fn fetch(client: &Client, url: &str) -> Result<(Vec<jwt::Jwk>, Duration), String> {
+/// The keys of the provider at `url`, how long to keep them, and its userinfo endpoint.
+async fn fetch(client: &Client, url: &str) -> Result<Fetched, String> {
     let discovery = format!(
         "{}/.well-known/openid-configuration",
         url.trim_end_matches('/')
     );
-    let (text, _) = get(client, &discovery).await?;
+    let (text, _) = get(client, &discovery, None).await?;
     let config = Json::parse(&text).map_err(|e| format!("its discovery document is {e}"))?;
     match config.get("issuer").and_then(Json::as_str) {
         Some(issuer) if same_issuer(issuer, url) => {}
@@ -202,33 +258,43 @@ async fn fetch(client: &Client, url: &str) -> Result<(Vec<jwt::Jwk>, Duration), 
     let Some(jwks_uri) = config.get("jwks_uri").and_then(Json::as_str) else {
         return Err("its discovery document names no jwks_uri".into());
     };
-    key_set_url(jwks_uri)?;
-    let (text, max_age) = get(client, jwks_uri).await?;
+    checked_url("jwks_uri", jwks_uri)?;
+    let userinfo = config
+        .get("userinfo_endpoint")
+        .and_then(Json::as_str)
+        .map(|endpoint| checked_url("userinfo_endpoint", endpoint).map(|()| endpoint.to_owned()))
+        .transpose()?;
+    let (text, max_age) = get(client, jwks_uri, None).await?;
     let keys = jwt::key_set(&text)?;
     if keys.is_empty() {
         return Err(format!(
             "its key set at {jwks_uri} has no key for RS, PS or ES signatures"
         ));
     }
-    Ok((keys, lifetime(max_age)))
+    Ok(Fetched {
+        keys,
+        lifetime: lifetime(max_age),
+        userinfo,
+    })
 }
 
-/// Checks the key set's URL: `https`, or `http` to this computer, with no user name.
-fn key_set_url(text: &str) -> Result<(), String> {
-    let url = Url::parse(text).map_err(|e| format!("its jwks_uri {text} isn't a URL: {e}"))?;
+/// Checks a URL the discovery document names as `what`: `https`, or `http` to this
+/// computer, with no user name.
+fn checked_url(what: &str, text: &str) -> Result<(), String> {
+    let url = Url::parse(text).map_err(|e| format!("its {what} {text} isn't a URL: {e}"))?;
     let secure = match url.scheme() {
         "https" => true,
         "http" => false,
-        _ => return Err(format!("its jwks_uri {text} isn't an https URL")),
+        _ => return Err(format!("its {what} {text} isn't an https URL")),
     };
     let Some(host) = url.host_str() else {
-        return Err(format!("its jwks_uri {text} has no host"));
+        return Err(format!("its {what} {text} has no host"));
     };
     if !secure && !rules::is_loopback(host) {
-        return Err(format!("its jwks_uri {text} isn't an https URL"));
+        return Err(format!("its {what} {text} isn't an https URL"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(format!("its jwks_uri {text} has a user name"));
+        return Err(format!("its {what} {text} has a user name"));
     }
     Ok(())
 }
@@ -255,8 +321,13 @@ fn max_age(value: &str) -> Option<u64> {
     max_age
 }
 
-/// A JSON document at `url`, and its `Cache-Control` `max-age`.
-async fn get(client: &Client, url: &str) -> Result<(String, Option<u64>), String> {
+/// A JSON document at `url`, asked for with the access token `bearer` if given, and
+/// its `Cache-Control` `max-age`.
+async fn get(
+    client: &Client,
+    url: &str,
+    bearer: Option<&str>,
+) -> Result<(String, Option<u64>), String> {
     let failed = |e: reqwest::Error| {
         // reqwest's own message is terse ("error sending request"); its causes say why.
         let e = e.without_url();
@@ -268,12 +339,11 @@ async fn get(client: &Client, url: &str) -> Result<(String, Option<u64>), String
         }
         format!("{url} couldn't be read: {why}")
     };
-    let mut response = client
-        .get(url)
-        .header(header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(failed)?;
+    let mut request = client.get(url).header(header::ACCEPT, "application/json");
+    if let Some(token) = bearer {
+        request = request.bearer_auth(token);
+    }
+    let mut response = request.send().await.map_err(failed)?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -317,10 +387,12 @@ pub(crate) mod tests {
     /// What the provider answers a request for a path with: status, headers, body.
     pub(crate) type Route = Arc<dyn Fn(&str) -> (u16, String, String) + Send + Sync>;
 
-    /// An identity provider on a loopback port; its URL, and how many requests it had.
+    /// An identity provider on a loopback port; its URL, how many requests it had, and
+    /// the `Authorization` headers they had.
     pub(crate) struct Provider {
         pub(crate) url: String,
         pub(crate) requests: Arc<AtomicUsize>,
+        pub(crate) authorizations: Arc<Mutex<Vec<String>>>,
     }
 
     /// Headers a route gives for an answer with no `content-length`.
@@ -346,29 +418,41 @@ pub(crate) mod tests {
         };
         let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
         let requests = Arc::new(AtomicUsize::new(0));
+        let authorizations: Arc<Mutex<Vec<String>>> = Arc::default();
         let count = Arc::clone(&requests);
+        let seen = Arc::clone(&authorizations);
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 count.fetch_add(1, Ordering::SeqCst);
                 let route = Arc::clone(&route);
                 let acceptor = acceptor.clone();
+                let seen = Arc::clone(&seen);
                 tokio::spawn(async move {
                     match acceptor {
                         Some(acceptor) => {
                             if let Ok(socket) = acceptor.accept(socket).await {
-                                answer(socket, &route).await;
+                                answer(socket, &route, &seen).await;
                             }
                         }
-                        None => answer(socket, &route).await,
+                        None => answer(socket, &route, &seen).await,
                     }
                 });
             }
         });
-        Provider { url, requests }
+        Provider {
+            url,
+            requests,
+            authorizations,
+        }
     }
 
-    /// Reads one request from `socket` and answers it as `route` says.
-    async fn answer(mut socket: impl AsyncRead + AsyncWrite + Unpin, route: &Route) {
+    /// Reads one request from `socket` and answers it as `route` says, keeping its
+    /// `Authorization` header in `seen`.
+    async fn answer(
+        mut socket: impl AsyncRead + AsyncWrite + Unpin,
+        route: &Route,
+        seen: &Mutex<Vec<String>>,
+    ) {
         let mut request = Vec::new();
         let mut buffer = [0; 4096];
         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -378,6 +462,13 @@ pub(crate) mod tests {
             }
         }
         let request = String::from_utf8_lossy(&request);
+        if let Some((_, value)) = request
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            seen.lock().unwrap().push(value.trim().to_owned());
+        }
         let path = request.split(' ').nth(1).unwrap_or("/").to_owned();
         let (status, headers, body) = route(&path);
         // `unsized` headers: no length, the body ends when the connection closes.
@@ -477,7 +568,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn providers_that_answer_badly_are_reported() {
-        let cases: [(&str, &str, &str); 7] = [
+        let cases: [(&str, &str, &str); 8] = [
             ("{}", "", "names no issuer"),
             (r#"{"issuer":"https://elsewhere"}"#, "", "another issuer"),
             (r#"{"issuer":"ISSUER"}"#, "", "names no jwks_uri"),
@@ -490,6 +581,11 @@ pub(crate) mod tests {
                 r#"{"issuer":"ISSUER","jwks_uri":"https://u:p@example.com/k"}"#,
                 "",
                 "has a user name",
+            ),
+            (
+                r#"{"issuer":"ISSUER","jwks_uri":"BASE/keys","userinfo_endpoint":"ftp://example.com"}"#,
+                "",
+                "its userinfo_endpoint ftp://example.com isn't an https URL",
             ),
             (
                 r#"{"issuer":"ISSUER","jwks_uri":"BASE/keys"}"#,
@@ -560,7 +656,15 @@ pub(crate) mod tests {
         let url = "https://idp.example.com";
         let t0 = Instant::now();
         assert!(cache.wants(url, None, t0));
-        cache.record(url, Ok((keys(), SHORTEST)), t0);
+        cache.record(
+            url,
+            Ok(Fetched {
+                keys: keys(),
+                lifetime: SHORTEST,
+                userinfo: None,
+            }),
+            t0,
+        );
         assert!(!cache.wants(url, Some("k1"), t0 + RETRY));
         // An unknown key asks again, but not within RETRY of the last fetch.
         assert!(!cache.wants(
@@ -583,7 +687,15 @@ pub(crate) mod tests {
         );
         assert_eq!(cache.keys_at(url, t0 + STALE).unwrap_err(), "down");
         // Recovered.
-        cache.record(url, Ok((keys(), DEFAULT)), t1 + RETRY);
+        cache.record(
+            url,
+            Ok(Fetched {
+                keys: keys(),
+                lifetime: DEFAULT,
+                userinfo: None,
+            }),
+            t1 + RETRY,
+        );
         assert!(cache.entries()[url].error.is_none());
     }
 

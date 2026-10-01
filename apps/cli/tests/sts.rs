@@ -622,6 +622,7 @@ async fn roles_and_providers_in_one_step() {
             "console",
             "--role-policy",
             "readonly,extra",
+            "--claim-userinfo",
         ])
         .await,
     );
@@ -637,6 +638,8 @@ async fn roles_and_providers_in_one_step() {
         serde_json::json!(["readonly", "extra"])
     );
     assert_eq!(console["roleArns"]["console"], console_role.as_str());
+    assert_eq!(console["claimUserinfo"], true);
+    assert_eq!(ours["claimUserinfo"], false);
     cli.ok(&["-y", "admin", "oidc", "rm", "t", "1.idp.example.com"])
         .await;
     server

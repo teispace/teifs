@@ -28,11 +28,13 @@ use crate::{
 };
 
 /// What a self-proving request's proof said, asked before its action runs: the
-/// directory's answer to an LDAP sign-in, or the identity plugin's to a custom token.
+/// directory's answer to an LDAP sign-in, the identity plugin's to a custom token, or
+/// the OpenID Connect provider's userinfo for a web identity's access token.
 #[derive(Debug)]
 pub(crate) enum Proved {
     Ldap(Result<SignedIn, LdapError>),
     Plugin(Result<PluginUser, PluginError>),
+    UserInfo(Result<teifs_policy::Json, String>),
 }
 
 use self::{
@@ -129,36 +131,18 @@ impl Iam {
 
     /// Answers a [`Self::proves_itself`] request, which `call` gives with the anonymous
     /// identity. For a web identity, first fetches the signing keys of the provider its
-    /// token names, if they aren't known or the token is signed with a key that isn't;
-    /// for an LDAP user, first asks the directory, and for a custom token the identity
-    /// plugin, unless the request is refused before.
+    /// token names, if they aren't known or the token is signed with a key that isn't,
+    /// and its userinfo if the provider's claims come from there; for an LDAP user,
+    /// first asks the directory, and for a custom token the identity plugin, unless the
+    /// request is refused before.
     pub async fn serve_self_proving(&self, call: &Call<'_>) -> Reply {
-        if let Some(proved) = self.prove(call).await {
-            return self.serve_sts_with(call, Some(&proved));
-        }
-        if let Ok(params) = Params::parse(call.body)
-            && let Some((iss, kid)) = params
-                .optional("WebIdentityToken")
-                .or_else(|| {
-                    (params.optional("Action") == Some(sts::CLIENT_GRANTS))
-                        .then(|| params.optional("Token"))
-                        .flatten()
-                })
-                .and_then(crate::oidc::issuer)
-            && let Ok(Some((url, thumbprints))) = self.read(|s| {
-                Ok(s.oidc_provider_by_issuer(&iss)
-                    .map(|p| (p.url.clone(), p.thumbprints.clone())))
-            })
-        {
-            self.web_keys
-                .refresh(&url, &thumbprints, kid.as_deref())
-                .await;
-        }
-        self.serve_sts(call)
+        let proved = self.prove(call).await;
+        self.serve_sts_with(call, proved.as_ref())
     }
 
-    /// Asks the directory about an LDAP sign-in, or the identity plugin about a custom
-    /// token: none when the request is neither, or its action refuses it before.
+    /// Asks the directory about an LDAP sign-in, the identity plugin about a custom
+    /// token, or an OpenID Connect provider for its keys and userinfo: none when there's
+    /// nothing to say, or the action refuses the request before.
     async fn prove(&self, call: &Call<'_>) -> Option<Proved> {
         let params = Params::parse(call.body).ok()?;
         if params.optional("Version").is_some_and(|v| v != STS_VERSION) {
@@ -195,8 +179,49 @@ impl Iam {
                     None => Err(PluginError::NotSetUp),
                 }))
             }
+            sts::WEB_IDENTITY => self.web_proof(&run.p, "WebIdentityToken").await,
+            sts::CLIENT_GRANTS => self.web_proof(&run.p, "Token").await,
             _ => None,
         }
+    }
+
+    /// Makes sure the keys of the provider the token in `param` names are known; then,
+    /// if the provider completes its claims from its userinfo endpoint and the token
+    /// checks out, asks that with the request's access token.
+    async fn web_proof(&self, params: &Params, param: &str) -> Option<Proved> {
+        let token = params.optional(param)?;
+        let (iss, kid) = crate::oidc::issuer(token)?;
+        let (url, thumbprints, userinfo) = self
+            .read(|s| {
+                Ok(s.oidc_provider_by_issuer(&iss).map(|p| {
+                    (
+                        p.url.clone(),
+                        p.thumbprints.clone(),
+                        crate::oidc::claim_userinfo(p),
+                    )
+                }))
+            })
+            .ok()??;
+        self.web_keys
+            .refresh(&url, &thumbprints, kid.as_deref())
+            .await;
+        let access = params
+            .optional("WebIdentityAccessToken")
+            .filter(|_| userinfo)?;
+        // Only a token that checks out makes TeiFS ask the provider anything more.
+        self.read(|s| {
+            Ok(crate::oidc::verify(
+                s,
+                &self.web_keys,
+                token,
+                crate::sessions::now_seconds(),
+            ))
+        })
+        .ok()?
+        .ok()?;
+        Some(Proved::UserInfo(
+            self.web_keys.userinfo(&url, &thumbprints, access).await,
+        ))
     }
 
     fn run(

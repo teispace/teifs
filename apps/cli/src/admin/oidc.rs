@@ -18,6 +18,9 @@ const POLICY_CLAIM_TAG: &str = "teifs:policy-claim";
 /// The tag that gives a provider's clients MinIO's role policies (the server's
 /// `teifs:role-policy`): the policies, separated by spaces.
 const ROLE_POLICY_TAG: &str = "teifs:role-policy";
+/// The tag that completes its tokens' claims from its userinfo endpoint (the server's
+/// `teifs:claim-userinfo`).
+const USERINFO_TAG: &str = "teifs:claim-userinfo";
 
 #[derive(Subcommand)]
 pub enum OidcAction {
@@ -44,6 +47,10 @@ pub enum OidcAction {
         /// `role_policy` (repeatable, or comma-separated).
         #[arg(long, value_name = "NAMES", value_delimiter = ',')]
         role_policy: Vec<String>,
+        /// Complete its tokens' claims from its userinfo endpoint, with the access
+        /// token a request gives (`WebIdentityAccessToken`), as MinIO's `claim_userinfo`.
+        #[arg(long)]
+        claim_userinfo: bool,
     },
     /// List the providers.
     Ls {
@@ -77,6 +84,7 @@ pub async fn run(aliases: &crate::client::alias::Aliases, action: OidcAction) ->
             thumbprints,
             policy_claim,
             role_policy,
+            claim_userinfo,
             ..
         } => {
             let role_policy: Vec<String> = role_policy
@@ -98,6 +106,9 @@ pub async fn run(aliases: &crate::client::alias::Aliases, action: OidcAction) ->
             if !role_policy.is_empty() {
                 tags.push(tag(ROLE_POLICY_TAG, &role_policy.join(" "))?);
             }
+            if claim_userinfo {
+                tags.push(tag(USERINFO_TAG, "on")?);
+            }
             let created = iam
                 .create_open_id_connect_provider()
                 .url(&url)
@@ -114,6 +125,7 @@ pub async fn run(aliases: &crate::client::alias::Aliases, action: OidcAction) ->
                 json!({
                     "type": "oidcProvider", "arn": arn, "url": url, "clientIds": client_ids,
                     "policyClaim": claim, "rolePolicy": role_policy, "roleArns": roles,
+                    "claimUserinfo": claim_userinfo,
                 })
             });
             if let Some(claim) = claim {
@@ -266,6 +278,10 @@ async fn list(iam: &Client) -> Result<(), Error> {
             "policyClaim": claim,
             "rolePolicy": role_policy,
             "roleArns": roles,
+            "claimUserinfo": provider
+                .tags()
+                .iter()
+                .any(|t| t.key().eq_ignore_ascii_case(USERINFO_TAG)),
             "createdMs": created,
         }));
     }

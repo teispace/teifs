@@ -1,6 +1,8 @@
 //! `AssumeRoleWithWebIdentity`: tokens checked as AWS checks them, trust policies that
 //! test the provider's keys, and the sessions they start.
 
+use std::sync::{Arc, Mutex};
+
 use teifs_policy::Date;
 
 use super::{ALLOW_ALL, Drive, between, code, drive, enc, ok};
@@ -8,7 +10,7 @@ use crate::{
     Call, Iam, Identity, NewRole, Owner, Reply,
     oidc::{
         jwt::{self, tests::Signer},
-        keys::tests::publishing,
+        keys::tests::{publishing, serve},
     },
     sessions::now_seconds,
 };
@@ -1074,4 +1076,158 @@ async fn a_providers_role_policy_is_its_clients_role_as_minio_has_it() {
         "ValidationError",
         "&apos;token&apos;",
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn claims_come_from_the_userinfo_endpoint_as_minio_has_it() {
+    let d = drive().await;
+    let signer = Signer::rsa();
+    let jwk = signer.jwk("k1", r#""alg":"RS256","use":"sig""#);
+    let info = Arc::new(Mutex::new((
+        200,
+        r#"{"sub":"alice","policy":"reader"}"#.to_owned(),
+    )));
+    let answer = Arc::clone(&info);
+    let base = Arc::new(Mutex::new(String::new()));
+    let own = Arc::clone(&base);
+    let provider = serve(Arc::new(move |path: &str| {
+        let base = own.lock().unwrap().clone();
+        match path {
+            "/.well-known/openid-configuration" => (
+                200,
+                String::new(),
+                format!(
+                    r#"{{"issuer":"{base}","jwks_uri":"{base}/keys","userinfo_endpoint":"{base}/userinfo"}}"#
+                ),
+            ),
+            "/keys" => (200, String::new(), format!(r#"{{"keys":[{jwk}]}}"#)),
+            "/userinfo" => {
+                let (status, body) = answer.lock().unwrap().clone();
+                (status, String::new(), body)
+            }
+            _ => (404, String::new(), String::new()),
+        }
+    }))
+    .await;
+    base.lock().unwrap().clone_from(&provider.url);
+    let url = provider.url.clone();
+    let created = d.oidc(&url);
+    d.iam
+        .tag_oidc_provider(
+            &created.arn,
+            &[
+                (crate::oidc::POLICY_CLAIM_TAG.to_owned(), String::new()),
+                (crate::oidc::USERINFO_TAG.to_owned(), "on".to_owned()),
+            ],
+        )
+        .unwrap();
+    d.iam
+        .create_policy(
+            "reader",
+            None,
+            None,
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#,
+            &[],
+        )
+        .unwrap();
+    let now = now_seconds();
+    let token = |iss: &str| {
+        signer.token(
+            "RS256",
+            r#""kid":"k1""#,
+            &format!(
+                r#"{{"iss":"{iss}","sub":"alice","aud":"app","exp":{}}}"#,
+                now + 600
+            ),
+        )
+    };
+    let good = token(&url);
+    let anonymous = Identity::anonymous();
+    let context = anonymous.context(Date::now());
+    let ask = |extra: &str, token: &str| {
+        let body = format!(
+            "Action=AssumeRoleWithWebIdentity&WebIdentityToken={}{extra}",
+            enc(token)
+        );
+        let iam = &d.iam;
+        let anonymous = &anonymous;
+        let context = &context;
+        async move {
+            iam.serve_self_proving(&Call {
+                identity: anonymous,
+                context,
+                body: body.as_bytes(),
+                request_id: "req-1",
+                certificates: &[],
+            })
+            .await
+        }
+    };
+
+    // The token alone names no policy: the userinfo endpoint does, for the access token.
+    let reply = ask("&WebIdentityAccessToken=access-1", &good).await;
+    let answer = ok(reply, "userinfo");
+    let session = d.session(&answer);
+    assert!(session.allows(
+        &session.context(Date::now()),
+        "s3:GetObject",
+        "arn:aws:s3:::b/k"
+    ));
+    assert_eq!(
+        provider.authorizations.lock().unwrap().as_slice(),
+        ["Bearer access-1"]
+    );
+
+    // Without the access token, as MinIO answers it; the provider isn't asked.
+    let reply = ask("", &good).await;
+    assert_eq!(code(&reply, "no access token"), "InvalidParameterValue");
+    assert!(
+        reply.body.contains("access_token is mandatory"),
+        "{}",
+        reply.body
+    );
+    // Another subject's userinfo lends nothing.
+    info.lock().unwrap().1 = r#"{"sub":"bob","policy":"reader"}"#.to_owned();
+    let reply = ask("&WebIdentityAccessToken=access-2", &good).await;
+    assert_eq!(code(&reply, "bob"), "InvalidIdentityToken");
+    // An answer that isn't a JSON object.
+    *info.lock().unwrap() = (200, r#"["alice"]"#.to_owned());
+    let reply = ask("&WebIdentityAccessToken=access-3", &good).await;
+    assert_eq!(code(&reply, "a list"), "IDPCommunicationError");
+    assert!(
+        reply.body.contains("isn&apos;t a JSON object"),
+        "{}",
+        reply.body
+    );
+    // A provider that can't answer.
+    *info.lock().unwrap() = (401, String::new());
+    let reply = ask("&WebIdentityAccessToken=access-3", &good).await;
+    assert_eq!(code(&reply, "401"), "IDPCommunicationError");
+    assert!(reply.body.contains("401"), "{}", reply.body);
+    // A token that doesn't check out never makes TeiFS ask the provider for userinfo.
+    let asked = provider.authorizations.lock().unwrap().len();
+    let forged = Signer::rsa().token(
+        "RS256",
+        r#""kid":"k1""#,
+        &format!(
+            r#"{{"iss":"{url}","sub":"alice","aud":"app","exp":{}}}"#,
+            now + 600
+        ),
+    );
+    let reply = ask("&WebIdentityAccessToken=access-4", &forged).await;
+    assert_eq!(code(&reply, "forged"), "InvalidIdentityToken");
+    assert_eq!(provider.authorizations.lock().unwrap().len(), asked);
+    // Nor does one of a provider that doesn't use userinfo.
+    d.iam
+        .untag_oidc_provider(&created.arn, &[crate::oidc::USERINFO_TAG.to_owned()])
+        .unwrap();
+    let reply = ask("&WebIdentityAccessToken=access-5", &good).await;
+    assert_eq!(code(&reply, "untagged"), "InvalidParameterValue");
+    assert!(
+        reply.body.contains("policy claim missing"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(provider.authorizations.lock().unwrap().len(), asked);
 }
