@@ -179,3 +179,55 @@ fn serve_announces_where_it_listens_for_programs() {
     assert_eq!(serving["durability"], "strict");
     assert!(serving["accessKey"].as_str().unwrap().starts_with("TF"));
 }
+
+/// Under systemd (`Type=notify`): ready once it listens, stopping on SIGTERM.
+#[cfg(unix)]
+#[test]
+fn serve_tells_systemd_when_it_is_ready_and_stopping() {
+    use std::{os::unix::net::UnixDatagram, time::Duration};
+    let home = tempfile::tempdir().unwrap();
+    let socket = home.path().join("notify");
+    let systemd = UnixDatagram::bind(&socket).unwrap();
+    systemd
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teifs"))
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--kms-keyring",
+        ])
+        .args([home.path().join("keys.json"), home.path().join("drive")])
+        .env_clear()
+        .env("NOTIFY_SOCKET", &socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut got = [0; 64];
+    let n = systemd.recv(&mut got).unwrap();
+    assert_eq!(&got[..n], b"READY=1");
+    // By then it answers.
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let serving: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let endpoint = serving["endpoint"].as_str().unwrap();
+    assert!(
+        teifs(home.path(), &["-q", "health", endpoint])
+            .status
+            .success()
+    );
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let n = systemd.recv(&mut got).unwrap();
+    assert_eq!(&got[..n], b"STOPPING=1");
+    assert!(child.wait().unwrap().success());
+}

@@ -99,3 +99,17 @@ jobs:
         env:
           CLIENTS_REQUIRE: "1"
           CLIENTS_WORK: ${{ runner.temp }}/clients
+      - name: Linux packages
+        run: packaging/linux/build.sh 0.0.0-ci amd64 target/release/teifs "$RUNNER_TEMP/packages"
+      - name: The .deb installs, serves as a hardened service and uninstalls
+        run: sudo packaging/linux/test-deb.sh "$RUNNER_TEMP"/packages/*.deb
+      - name: The .rpm installs on Fedora
+        run: |
+          docker run --rm -v "$RUNNER_TEMP/packages:/packages:ro" fedora:42 sh -euc '
+            dnf install -y -q /packages/*.rpm
+            getent passwd teifs
+            test "$(stat -c "%U:%G %a" /etc/teifs/teifs.toml)" = "root:teifs 640"
+            teifs --version
+            systemd-analyze verify /usr/lib/systemd/system/teifs.service
+            dnf remove -y -q teifs
+            ! test -e /usr/bin/teifs'

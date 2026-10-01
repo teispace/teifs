@@ -1,0 +1,13 @@
+# TeiFS's settings, as the service runs them (`teifs serve --help` lists every one;
+# each is a flag's name). The service's own defaults are in teifs.service:
+# the drive at /var/lib/teifs/drive and its keyring at /var/lib/teifs/keyring.json.
+# After a change: systemctl restart teifs.
+
+# Where clients reach it. The default only answers this machine.
+# listen = "0.0.0.0:9000"
+
+# HTTPS, with public.crt and private.key in this folder (reloaded on change).
+# certs-dir = "/etc/teifs/certs"
+
+# Virtual-hosted-style requests (bucket.s3.example.com).
+# domain = ["s3.example.com"]

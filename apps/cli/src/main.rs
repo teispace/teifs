@@ -19,6 +19,7 @@ mod doctor;
 mod error;
 mod health;
 mod init;
+mod notify;
 mod repair;
 mod sts;
 mod ui;
@@ -1652,7 +1653,13 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     }
     let address = server.local_addr().map_err(|e| e.to_string())?;
     announce(&server, address, keys.as_ref(), args.durability.into());
-    server.run(shutdown_signal()).await;
+    notify::notify("READY=1");
+    server
+        .run(async {
+            shutdown_signal().await;
+            notify::notify("STOPPING=1");
+        })
+        .await;
     ui::note("Stopped.");
     Ok(())
 }

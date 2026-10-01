@@ -1,0 +1,2 @@
+# The user TeiFS runs as (systemd-sysusers).
+u teifs - "TeiFS" /var/lib/teifs

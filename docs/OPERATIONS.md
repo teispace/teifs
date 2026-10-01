@@ -3,6 +3,40 @@
 Watching a TeiFS server: its request ids, health check, Prometheus metrics, audit log
 and live trace.
 
+## Running as a service
+
+The Linux packages (`.deb` and `.rpm` on every release) install:
+
+| What | Where |
+|---|---|
+| The program | `/usr/bin/teifs`, with bash, zsh and fish completions |
+| The service | `/usr/lib/systemd/system/teifs.service`, run as the `teifs` system user |
+| Its settings | `/etc/teifs/teifs.toml` (the `teifs serve` settings) and `/etc/teifs/teifs.env` (`TEIFS_*` variables), both `root:teifs 0640`; an upgrade never replaces them |
+| The drive | `/var/lib/teifs/drive`, and its encryption keyring `/var/lib/teifs/keyring.json` (the folder is `0700`, the service's own) |
+
+Installing doesn't start it. `sudo systemctl enable --now teifs` does; on its first
+start it creates the drive, its keys (`sudo -u teifs teifs credentials
+/var/lib/teifs/drive` shows them) and the keyring. Back up both the drive and the
+keyring: objects can't be read without it. To choose the keys, set
+`TEIFS_ACCESS_KEY` and `TEIFS_SECRET_KEY` in `teifs.env` before the first start.
+
+The service is `Type=notify`: `systemctl start` returns once the server listens, and
+`systemctl stop` waits for requests in flight. `systemctl reload teifs` reopens the
+audit log and reloads the TLS certificates. It runs with systemd's sandboxing (no
+capabilities, a read-only system, no home folders, private `/tmp` and devices, a
+system-call filter); `systemd-analyze security teifs` scores it. It answers only this
+machine until `listen` in `teifs.toml` says otherwise. To keep the drive
+elsewhere, set `TEIFS_DIR` in `teifs.env` and allow its folder with `systemctl edit teifs`:
+
+```ini
+[Service]
+ReadWritePaths=/srv/drive
+```
+
+To listen on a port below 1024, add `AmbientCapabilities=CAP_NET_BIND_SERVICE` and
+`CapabilityBoundingSet=CAP_NET_BIND_SERVICE` the same way. Removing the package stops
+the service and keeps `/var/lib/teifs`; delete it yourself when it's no longer needed.
+
 ## Request ids
 
 Every answer has an `x-amz-request-id` header: 16 hex digits, unique on the server, as

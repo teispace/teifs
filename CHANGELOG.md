@@ -213,6 +213,12 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs cp` and `teifs mirror` between endpoints keep every header a copy by the
   server keeps (`Cache-Control`, `Content-Disposition`, `Content-Encoding`,
   `Content-Language`, `Expires`, website redirect), not only the type and metadata.
+- Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,
+  installing `teifs`, its shell completions, a `teifs` system user and a hardened
+  systemd service (`systemctl enable --now teifs`) that serves `/var/lib/teifs/drive`
+  with settings in `/etc/teifs`. Removing the package keeps the drive.
+- `teifs serve` tells systemd when it's ready and when it's stopping (`Type=notify`,
+  through `NOTIFY_SOCKET`).
 - `teifs doctor [DIR]`: a drive on this machine checked with the settings
   `teifs serve` would use (its options, environment and the drive's settings file):
   its format, whether a server has it, its databases' integrity, how its file system

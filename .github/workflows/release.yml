@@ -17,6 +17,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - xtask/src/release.rs
+      - packaging/linux/**
   workflow_dispatch:
 
 permissions:
@@ -188,9 +189,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  packages:
+    name: Linux packages (.deb and .rpm)
+    needs: [notes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.notes.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bin-*-unknown-linux-musl
+          path: bins
+          merge-multiple: true
+      - name: Package the static binaries
+        run: |
+          set -euo pipefail
+          for target in x86_64 aarch64; do
+            tar -xzf "bins/teifs-$VERSION-$target-unknown-linux-musl.tar.gz" -C bins
+          done
+          # The completions from the binary that runs here; they're the same for both.
+          export COMPLETIONS="$RUNNER_TEMP/completions"
+          mkdir -p "$COMPLETIONS"
+          x86="bins/teifs-$VERSION-x86_64-unknown-linux-musl/teifs"
+          "$x86" completions bash > "$COMPLETIONS/teifs.bash"
+          "$x86" completions zsh > "$COMPLETIONS/_teifs"
+          "$x86" completions fish > "$COMPLETIONS/teifs.fish"
+          packaging/linux/build.sh "$VERSION" amd64 "$x86" dist
+          packaging/linux/build.sh "$VERSION" arm64 \
+            "bins/teifs-$VERSION-aarch64-unknown-linux-musl/teifs" dist
+      - name: The .deb installs, serves as a hardened service and uninstalls
+        run: sudo packaging/linux/test-deb.sh dist/*_amd64.deb
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-linux
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Checksums, provenance and the draft release
-    needs: [notes, build]
+    needs: [notes, build, packages]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -206,6 +245,10 @@ jobs:
           pattern: bin-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pkg-linux
+          path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: notes

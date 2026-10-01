@@ -39,6 +39,16 @@ runs on any distribution), or build it with `cargo build --release`. Every relea
 has a checksum in `SHA256SUMS.txt` and build provenance you can check with
 `gh attestation verify FILE --repo teispace/teifs`.
 
+On Debian, Ubuntu, Fedora, RHEL and the like, install the `.deb` or `.rpm` from the
+release instead: it adds a `teifs` system user and a hardened systemd service.
+
+```sh
+sudo apt install ./teifs_X.Y.Z_amd64.deb      # or: sudo dnf install ./teifs-X.Y.Z-1.x86_64.rpm
+sudo systemctl enable --now teifs             # serves /var/lib/teifs/drive on 127.0.0.1:9000
+```
+
+See [Running as a service](docs/OPERATIONS.md#running-as-a-service) for its settings.
+
 ## Quick start
 
 ```sh

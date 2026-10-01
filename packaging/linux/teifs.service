@@ -1,0 +1,67 @@
+# TeiFS as a systemd service, as the .deb and .rpm packages install it.
+#
+# Settings go in /etc/teifs/teifs.toml (or as TEIFS_* variables in /etc/teifs/teifs.env);
+# change how the service runs with `systemctl edit teifs`. The drive is
+# /var/lib/teifs/drive and its keyring /var/lib/teifs/keyring.json: back up both.
+# A drive elsewhere: set TEIFS_DIR in teifs.env and add its folder with ReadWritePaths= in
+# `systemctl edit teifs` (folders under /home need ProtectHome=read-only too).
+
+[Unit]
+Description=TeiFS, an S3-compatible server for a drive
+Documentation=https://github.com/teispace/teifs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Ready once it listens; stopping drains the requests in flight.
+Type=notify
+NotifyAccess=main
+User=teifs
+Group=teifs
+Environment=TEIFS_CONFIG=/etc/teifs/teifs.toml
+Environment=TEIFS_DIR=/var/lib/teifs/drive
+Environment=TEIFS_KMS_KEYRING=/var/lib/teifs/keyring.json
+EnvironmentFile=-/etc/teifs/teifs.env
+ExecStart=/usr/bin/teifs serve
+# Reopens the audit log and reloads the TLS certificates.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5min
+LimitNOFILE=1048576
+StateDirectory=teifs
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening: the server needs its drive, the network and nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

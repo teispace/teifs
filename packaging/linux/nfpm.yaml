@@ -1,0 +1,83 @@
+# The .deb and .rpm packages, built by nfpm from a release's static (musl) binary:
+#   VERSION=0.1.0 ARCH=amd64 BINARY=path/to/teifs COMPLETIONS=dir \
+#     nfpm package -f packaging/linux/nfpm.yaml -p deb -t dist/
+# ARCH is amd64 or arm64; COMPLETIONS holds teifs.bash, _teifs and teifs.fish.
+name: teifs
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: net
+priority: optional
+maintainer: Teispace <info@teispace.com>
+description: |
+  An S3-compatible server for a drive, and a command line for any S3 service.
+  TeiFS serves a folder over the S3 API, with AWS's behaviour: versioning, Object
+  Lock, lifecycle rules, encryption, IAM, notifications and static websites.
+vendor: Teispace
+homepage: https://github.com/teispace/teifs
+license: MIT OR Apache-2.0
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/teifs
+    expand: true
+    file_info:
+      mode: 0755
+  - src: packaging/linux/teifs.service
+    dst: /usr/lib/systemd/system/teifs.service
+    file_info:
+      mode: 0644
+  - src: packaging/linux/teifs.sysusers
+    dst: /usr/lib/sysusers.d/teifs.conf
+    file_info:
+      mode: 0644
+  - dst: /etc/teifs
+    type: dir
+    file_info:
+      mode: 0750
+  - src: packaging/linux/teifs.toml
+    dst: /etc/teifs/teifs.toml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+  - src: packaging/linux/teifs.env
+    dst: /etc/teifs/teifs.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+  - src: ${COMPLETIONS}/teifs.bash
+    dst: /usr/share/bash-completion/completions/teifs
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${COMPLETIONS}/_teifs
+    dst: /usr/share/zsh/site-functions/_teifs
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${COMPLETIONS}/teifs.fish
+    dst: /usr/share/fish/vendor_completions.d/teifs.fish
+    expand: true
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/teifs/README.md
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/teifs/CHANGELOG.md
+  - src: LICENSE-MIT
+    dst: /usr/share/doc/teifs/LICENSE-MIT
+  - src: LICENSE-APACHE
+    dst: /usr/share/doc/teifs/LICENSE-APACHE
+  - src: NOTICE
+    dst: /usr/share/doc/teifs/NOTICE
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+  preremove: packaging/linux/preremove.sh
+  postremove: packaging/linux/postremove.sh
+overrides:
+  deb:
+    recommends:
+      - systemd
+  rpm:
+    recommends:
+      - systemd

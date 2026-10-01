@@ -85,6 +85,12 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                (`client/status.rs`, a server) and `teifs doctor`
                                (`src/doctor.rs`, a drive, through the store's
                                `diagnose`, which looks without opening it).
+                               `src/notify.rs` tells systemd `serve` is ready or
+                               stopping (`NOTIFY_SOCKET`).
+packaging/      —              The Linux packages: `linux/` has
+                               the systemd service, its sysusers entry, settings,
+                               scripts and `nfpm.yaml`; `build.sh` makes the .deb and
+                               .rpm, and `test-deb.sh` installs one and checks it.
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.
