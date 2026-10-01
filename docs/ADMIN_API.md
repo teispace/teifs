@@ -113,6 +113,9 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/list-access-keys-bulk` | The service accounts of `?users=` (repeated), every user's with `all=true` (which needs `admin:ListUsers`), or the caller's, by `listType` (`users-only`, `sts-only`, `svcacc-only`, `all`), encrypted: `mc admin accesskey ls` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
 | `GET` | `/minio/admin/v3/info-access-key` | Access key `?accessKey=` (the caller's by default) when it's a service account, encrypted: `mc admin accesskey info` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
 | `GET` | `/minio/admin/v3/temporary-account-info` | Temporary credentials `?accessKey=`: TeiFS keeps nothing about a session, so always `XMinioAdminNoSuchAccessKey` | `admin:ListTemporaryAccounts` |
+| `GET` | `/minio/admin/v3/info` | The server as `madmin.InfoMessage`: one server with one pool of one set, its drives the disks the drive uses, what it holds, and whether its KMS and LDAP directory answer: `mc admin info` | `admin:ServerInfo` |
+| `GET` | `/minio/admin/v3/storageinfo` | The drive's disks and their room as `madmin.StorageInfo` | `admin:StorageInfo` |
+| `GET` | `/minio/admin/v3/datausageinfo` | What each bucket holds as `madmin.DataUsageInfo`, with the disks' room when `?capacity=true`: `mc admin info`, the console's dashboard | `admin:DataUsageInfo` |
 
 <!-- end generated -->
 

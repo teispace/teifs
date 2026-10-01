@@ -32,7 +32,7 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_iam, minio_service_accounts,
+    iam_api, listen, minio_iam, minio_info, minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -151,6 +151,7 @@ enum Handler {
     ListAccessKeysBulk,
     InfoAccessKey,
     TemporaryAccountInfo,
+    MinioInfo(minio_info::Kind),
 }
 
 impl Handler {
@@ -206,6 +207,7 @@ impl Handler {
             Self::ListAccessKeysBulk => "ListAccessKeysBulk",
             Self::InfoAccessKey => "InfoAccessKey",
             Self::TemporaryAccountInfo => "TemporaryAccountInfo",
+            Self::MinioInfo(kind) => kind.name(),
         }
     }
 }
@@ -625,6 +627,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::TemporaryAccountInfo,
         about: "Temporary credentials `?accessKey=`: TeiFS keeps nothing about a session, so always `XMinioAdminNoSuchAccessKey`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/info",
+        needs: Needs::Action("admin:ServerInfo", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Server),
+        about: "The server as `madmin.InfoMessage`: one server with one pool of one set, its drives the disks the drive uses, what it holds, and whether its KMS and LDAP directory answer: `mc admin info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/storageinfo",
+        needs: Needs::Action("admin:StorageInfo", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Storage),
+        about: "The drive's disks and their room as `madmin.StorageInfo`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/datausageinfo",
+        needs: Needs::Action("admin:DataUsageInfo", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::DataUsage),
+        about: "What each bucket holds as `madmin.DataUsageInfo`, with the disks' room when `?capacity=true`: `mc admin info`, the console's dashboard",
+    },
 ];
 
 /// `MinIO`'s admin API, as its clients reach it.
@@ -1033,6 +1059,7 @@ impl Routes {
                 minio_service_accounts::info_access_key(&self.iam, identity, privileged, &req).await
             }
             Handler::TemporaryAccountInfo => minio_service_accounts::temporary_account_info(&req),
+            Handler::MinioInfo(kind) => kind.call(self, &req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

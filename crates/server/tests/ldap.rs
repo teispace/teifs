@@ -16,6 +16,7 @@ use teifs_iam::{
 };
 
 mod common;
+mod signing;
 
 use common::{ACCESS_KEY, SECRET_KEY, Server, client, code, start_with};
 
@@ -23,6 +24,22 @@ const READ_PHOTOS: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"All
   "Action":"s3:GetObject","Resource":"arn:aws:s3:::photos/*"}]}"#;
 const PROJECT_A: &str = "cn=projecta,ou=groups,dc=min,dc=io";
 const LIZA: &str = "uid=liza,ou=people,dc=min,dc=io";
+
+/// What `mc admin info` says of the directory: `online` or `offline`.
+async fn ldap_status(server: &Server) -> serde_json::Value {
+    let (status, text) = signing::signed(
+        server,
+        (ACCESS_KEY, SECRET_KEY),
+        "GET",
+        "/minio/admin/v3/info",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let info: serde_json::Value = serde_json::from_str(&text).unwrap();
+    info["services"]["ldap"]["status"].clone()
+}
 
 fn admin(server: &Server, access_key: &str, secret: &str) -> Admin {
     Admin::new(
@@ -224,6 +241,7 @@ async fn a_user_gone_from_the_directory_loses_its_sessions() {
     fake.add(group("projectc", &["liza"]));
     let settings = fake.settings();
     let server = start_with(|config| config.ldap = Some(settings)).await;
+    assert_eq!(ldap_status(&server).await, "online");
     photos(&server).await;
     let root = admin(&server, ACCESS_KEY, SECRET_KEY);
     root.attach_ldap_policies(&LdapPolicyRequest {
@@ -306,6 +324,7 @@ async fn a_directory_that_cant_be_asked_is_said_so() {
     };
     assert_eq!((api_code(&err), *status), ("ServiceUnavailable", 503));
     assert!(message.contains("can't reach the LDAP server"), "{message}");
+    assert_eq!(ldap_status(&server).await, "offline");
 }
 
 /// MinIO's test directory: `uid=dillon,ou=people,ou=swengg,dc=min,dc=io`, password

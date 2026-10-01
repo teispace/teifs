@@ -372,7 +372,10 @@ service account is a user principal with an allow-all policy, never the root use
 its session policy still narrows it. Their routes are `Needs::OrOwnAccount`: anything
 but an explicit deny passes the table, which tells the handler whether the caller holds
 the action; without it, the handler allows only the accounts of the user the caller
-acts as (`Iam::minio_parent`). Quotas are
+acts as (`Iam::minio_parent`); a caller signing with session keys adds or deletes
+service accounts only with the action. `mc admin info`'s calls (`minio_info.rs`) describe
+the drive in madmin's types from the store's disks and usage counters, asking the KMS
+(`Store::kms`) and the LDAP directory with a timeout. Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and

@@ -138,6 +138,7 @@ func main() {
 	check(quota.Size == 0 && quota.Quota == 0, fmt.Sprintf("the quota cleared: %+v", quota))
 
 	minioIAM(ctx, adm)
+	serverInfo(ctx, adm, *bucket)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -270,4 +271,23 @@ func minioIAM(ctx context.Context, adm *madmin.AdminClient) {
 	_, err = adm.GetUserInfo(ctx, "go-user")
 	var gone madmin.ErrorResponse
 	check(errors.As(err, &gone) && gone.Code == "XMinioAdminNoSuchUser", fmt.Sprintf("a removed user: %v", err))
+}
+
+// serverInfo is mc admin info: one server, its drives, and what the bucket holds.
+func serverInfo(ctx context.Context, adm *madmin.AdminClient, bucket string) {
+	step("the server, its drives and what it holds, as mc admin info reads them")
+	info, err := adm.ServerInfo(ctx)
+	must(err)
+	check(info.Mode == "online" && info.BackendType() == madmin.FS && len(info.Servers) == 1 &&
+		len(info.Servers[0].Disks) >= 1 && info.Servers[0].Disks[0].TotalSpace > 0 &&
+		info.Buckets.Count >= 1, fmt.Sprintf("the server's info: %+v", info))
+	storage, err := adm.StorageInfo(ctx)
+	must(err)
+	check(storage.Backend.Type == madmin.FS && len(storage.Disks) >= 1,
+		fmt.Sprintf("the storage info: %+v", storage))
+	usage, err := adm.DataUsageInfo(ctx)
+	must(err)
+	_, has := usage.BucketsUsage[bucket]
+	check(has && usage.TotalCapacity > 0 && usage.TotalCapacity >= usage.TotalUsedCapacity,
+		fmt.Sprintf("the data usage: %+v", usage))
 }

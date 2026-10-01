@@ -110,6 +110,10 @@ async fn config_reports_how_the_server_started_without_secrets() {
         config.max_connections,
         teifs_server::Limits::default().max_connections
     );
+    // `mc admin info` names the same domains.
+    let (_, info) = minio(&server, ROOT, "info").await;
+    assert_eq!(info["domain"], serde_json::json!(["s3.test"]));
+    assert_eq!(info["servers"][0]["scheme"], "http");
 }
 
 #[tokio::test]
@@ -1034,4 +1038,182 @@ async fn an_import_keeps_to_block_public_access_and_object_ownership() {
         .map(|i| i.item.as_str())
         .collect();
     assert_eq!(refused, ["ownership", "acl"], "{report:?}");
+}
+
+/// A `MinIO` admin answer as JSON.
+async fn minio(server: &Server, key: (&str, &str), path: &str) -> (u16, serde_json::Value) {
+    let (status, text) = get(server, key, &format!("/minio/admin/v3/{path}")).await;
+    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    (status, value)
+}
+
+#[tokio::test]
+async fn mc_admin_info_sees_one_server_its_drives_and_what_it_holds() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("photos").send().await.unwrap();
+    for key in ["a.txt", "b.txt"] {
+        root.put_object()
+            .bucket("photos")
+            .key(key)
+            .body(ByteStream::from_static(b"hello"))
+            .send()
+            .await
+            .unwrap();
+    }
+    root.create_bucket().bucket("empty").send().await.unwrap();
+
+    let (_, own) = get(&server, ROOT, ADMIN_INFO).await;
+    let drive_id = serde_json::from_str::<ServerInfo>(&own).unwrap().drive;
+    let (status, info) = minio(&server, ROOT, "info").await;
+    assert_eq!(status, 200, "{info}");
+    assert_eq!(info["mode"], "online");
+    assert_eq!(info["region"], "us-east-1");
+    assert_eq!(info["deploymentID"], drive_id.as_str());
+    assert_eq!(info["buckets"]["count"], 2);
+    assert_eq!(info["objects"]["count"], 2);
+    assert_eq!(info["versions"]["count"], 2);
+    assert_eq!(info["deletemarkers"]["count"], 0);
+    assert_eq!(info["usage"]["size"], 10);
+    assert_eq!(info["backend"]["backendType"], "FS");
+    assert_eq!(info["backend"]["offlineDisks"], 0);
+    // The keyring answers.
+    assert_eq!(
+        info["services"]["kmsStatus"],
+        serde_json::json!([{"status": "online", "endpoint": "local"}])
+    );
+    assert!(info["services"].get("ldap").is_none());
+    let host = server.endpoint.trim_start_matches("http://");
+    let servers = info["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    let one = &servers[0];
+    assert_eq!(
+        (&one["state"], &one["endpoint"], &one["scheme"]),
+        (&"online".into(), &host.into(), &"http".into())
+    );
+    assert_eq!(one["network"][host], "online");
+    assert_eq!(one["version"], env!("CARGO_PKG_VERSION"));
+    let drives = one["drives"].as_array().unwrap();
+    assert_eq!(info["backend"]["onlineDisks"], drives.len());
+    let drive = &drives[0];
+    assert_eq!(drive["state"], "ok");
+    assert_eq!(drive["uuid"], drive_id.as_str());
+    let (total, used, free) = (
+        drive["totalspace"].as_u64().unwrap(),
+        drive["usedspace"].as_u64().unwrap(),
+        drive["availspace"].as_u64().unwrap(),
+    );
+    assert!(total > 0 && used + free == total, "{drive}");
+    let set = &info["pools"]["0"]["0"];
+    assert_eq!(
+        (&set["objectsCount"], &set["usage"], &set["rawCapacity"]),
+        (&2.into(), &10.into(), &drive["totalspace"])
+    );
+
+    let (status, storage) = minio(&server, ROOT, "storageinfo").await;
+    assert_eq!(status, 200);
+    assert_eq!(storage["Backend"]["Type"], 1);
+    assert_eq!(storage["Disks"][0]["totalspace"], total);
+    let path = storage["Disks"][0]["endpoint"].as_str().unwrap();
+    assert_eq!(storage["Backend"]["OnlineDisks"][path], 1);
+
+    let (status, usage) = minio(&server, ROOT, "datausageinfo").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        (
+            &usage["bucketsCount"],
+            &usage["objectsCount"],
+            &usage["objectsTotalSize"]
+        ),
+        (&2.into(), &2.into(), &10.into())
+    );
+    let photos = &usage["bucketsUsageInfo"]["photos"];
+    assert_eq!(
+        (&photos["objectsCount"], &photos["size"]),
+        (&2.into(), &10.into())
+    );
+    assert_eq!(usage["bucketsUsageInfo"]["empty"]["objectsCount"], 0);
+    assert_eq!(usage["capacity"], 0);
+    assert!(usage["lastUpdate"].as_str().unwrap().ends_with('Z'));
+    let (_, usage) = minio(&server, ROOT, "datausageinfo?capacity=false").await;
+    assert_eq!(usage["capacity"], 0);
+    let (_, usage) = minio(&server, ROOT, "datausageinfo?capacity=true").await;
+    assert_eq!(usage["capacity"], total);
+    // The disk's room, which others on it change between calls.
+    let free = usage["freeCapacity"].as_u64().unwrap();
+    assert!(free > 0, "{usage}");
+    assert_eq!(usage["usedCapacity"].as_u64().unwrap() + free, total);
+}
+
+#[tokio::test]
+async fn mc_admin_info_counts_versions_and_delete_markers_apart() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("kept").send().await.unwrap();
+    root.put_bucket_versioning()
+        .bucket("kept")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    for key in ["a.txt", "a.txt", "a.txt", "b.txt"] {
+        root.put_object()
+            .bucket("kept")
+            .key(key)
+            .body(ByteStream::from_static(b"hello"))
+            .send()
+            .await
+            .unwrap();
+    }
+    root.delete_object()
+        .bucket("kept")
+        .key("b.txt")
+        .send()
+        .await
+        .unwrap();
+    let (_, info) = minio(&server, ROOT, "info").await;
+    let counts = |name: &str| info[name]["count"].as_u64().unwrap();
+    let (objects, versions, markers) = (
+        counts("objects"),
+        counts("versions"),
+        counts("deletemarkers"),
+    );
+    assert_eq!(markers, 1, "{info}");
+    assert!(versions > objects, "{info}");
+    assert_eq!(info["servers"][0]["is_leader"], true);
+    let (_, usage) = minio(&server, ROOT, "datausageinfo").await;
+    assert_eq!(usage["objectsCount"], objects);
+    assert_eq!(usage["versionsCount"], versions);
+    assert_eq!(usage["deleteMarkersCount"], markers);
+}
+
+#[tokio::test]
+async fn mc_admin_info_needs_its_admin_actions() {
+    let server = start().await;
+    let policy =
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:ServerInfo"}]}"#;
+    user(&server, "watcher", Some(policy));
+    let key = server.iam.create_access_key("watcher").unwrap();
+    let watcher = (key.info.id.as_str(), key.secret.as_str());
+    user(&server, "nobody", None);
+    let key = server.iam.create_access_key("nobody").unwrap();
+    let nobody = (key.info.id.as_str(), key.secret.as_str());
+    for (path, watcher_may) in [
+        ("info", true),
+        ("storageinfo", false),
+        ("datausageinfo", false),
+    ] {
+        let (status, _) = minio(&server, watcher, path).await;
+        assert_eq!(status == 200, watcher_may, "{path}");
+        let (status, answer) = minio(&server, nobody, path).await;
+        assert_eq!(
+            (status, &answer["Code"]),
+            (403, &"AccessDenied".into()),
+            "{path}"
+        );
+    }
 }

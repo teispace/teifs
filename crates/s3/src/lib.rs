@@ -30,6 +30,7 @@ mod listen;
 mod logging;
 mod metrics;
 mod minio_iam;
+mod minio_info;
 mod minio_service_accounts;
 mod notification;
 mod object_lock;

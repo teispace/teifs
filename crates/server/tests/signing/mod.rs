@@ -30,6 +30,7 @@ pub async fn signed_response(
     body: &[u8],
 ) -> reqwest::Response {
     send(
+        &reqwest::Client::new(),
         server,
         key,
         (method, path),
@@ -38,6 +39,28 @@ pub async fn signed_response(
         PercentEncodingMode::Double,
     )
     .await
+}
+
+/// [`signed`], sent by `client` (one that trusts a test CA, say).
+pub async fn signed_over(
+    client: &reqwest::Client,
+    server: &crate::common::Server,
+    key: (&str, &str),
+    method: &str,
+    path: &str,
+) -> (u16, String) {
+    let response = send(
+        client,
+        server,
+        key,
+        (method, path),
+        &[],
+        b"",
+        PercentEncodingMode::Double,
+    )
+    .await;
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
 }
 
 /// [`signed`], with the path signed as sent, as botocore signs S3's (AWS's other SDKs
@@ -51,6 +74,7 @@ pub async fn signed_as_sent(
     body: &[u8],
 ) -> (u16, String) {
     let response = send(
+        &reqwest::Client::new(),
         server,
         key,
         (method, path),
@@ -64,6 +88,7 @@ pub async fn signed_as_sent(
 }
 
 async fn send(
+    client: &reqwest::Client,
     server: &crate::common::Server,
     (access_key, secret): (&str, &str),
     (method, path): (&str, &str),
@@ -76,7 +101,11 @@ async fn send(
         sign::v4,
     };
     let url = format!("{}{path}", server.endpoint);
-    let host = server.endpoint.trim_start_matches("http://").to_owned();
+    let host = server
+        .endpoint
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_owned();
     let mut all: Vec<(&str, &str)> = headers.to_vec();
     if !headers
         .iter()
@@ -101,7 +130,7 @@ async fn send(
     let signable =
         SignableRequest::new(method, &url, all.iter().copied(), SignableBody::Bytes(body)).unwrap();
     let (instructions, _) = sign(signable, &params).unwrap().into_parts();
-    let mut request = reqwest::Client::new()
+    let mut request = client
         .request(
             reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
             &url,

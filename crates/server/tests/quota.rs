@@ -135,7 +135,7 @@ async fn a_bucket_named_minio_keeps_its_keys() {
     let server = start().await;
     let root = client(&server, SECRET_KEY);
     root.create_bucket().bucket("minio").send().await.unwrap();
-    let key = "admin/v3/info";
+    let key = "admin/v3/not-a-call";
     root.put_object()
         .bucket("minio")
         .key(key)

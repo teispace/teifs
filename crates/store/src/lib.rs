@@ -485,7 +485,8 @@ impl Store {
         }
     }
 
-    fn kms(&self) -> Option<&dyn Kms> {
+    /// The KMS the drive's keys are sealed with, once it has one.
+    pub fn kms(&self) -> Option<&dyn Kms> {
         self.inner.kms.get().map(AsRef::as_ref)
     }
 

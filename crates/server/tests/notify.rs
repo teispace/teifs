@@ -7,6 +7,7 @@
 )]
 
 mod common;
+mod signing;
 
 use aws_sdk_s3::{
     Client,
@@ -191,6 +192,23 @@ async fn a_write_is_sent_as_s3_describes_it() {
     );
     assert!(object.version_id.is_none(), "an unversioned bucket's");
     assert!(record.event_time.ends_with('Z') && record.event_time.len() == 24);
+
+    // `mc admin info` lists the target.
+    let (status, answer) = signing::signed(
+        &server,
+        (ACCESS_KEY, SECRET_KEY),
+        "GET",
+        "/minio/admin/v3/info",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    let info: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    assert_eq!(
+        info["sqsARN"],
+        serde_json::json!(["arn:teifs:sqs::primary:webhook"])
+    );
 
     target_metrics(
         &server,

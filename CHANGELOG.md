@@ -329,6 +329,11 @@ behaviour; the on-disk format is always upgraded automatically.
   denies it; another user's need MinIO's admin actions. Service accounts get no
   temporary credentials from STS, and IAM exports and imports carry them. Unlike MinIO,
   an update that leaves out the policy keeps it rather than dropping it.
+- MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
+  dashboard): one server with one pool of one set, its drives the disks the drive uses
+  with their room, what the drive and each bucket hold, and whether the KMS and the
+  LDAP directory answer. Each needs MinIO's admin action (`admin:ServerInfo`,
+  `admin:StorageInfo`, `admin:DataUsageInfo`).
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

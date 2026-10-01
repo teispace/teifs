@@ -8,6 +8,7 @@
 )]
 
 mod common;
+mod signing;
 
 use std::{fs, net::SocketAddr, path::Path};
 
@@ -179,6 +180,18 @@ async fn https_requests_are_secure_transport() {
         .send()
         .await
         .unwrap();
+    // `mc admin info` says so too.
+    let (status, text) = signing::signed_over(
+        &ca.reqwest(),
+        &server,
+        (common::ACCESS_KEY, common::SECRET_KEY),
+        "GET",
+        "/minio/admin/v3/info",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let info: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(info["servers"][0]["scheme"], "https");
 
     // The same policy on plain HTTP denies everyone, the root user too.
     let plain = common::start().await;

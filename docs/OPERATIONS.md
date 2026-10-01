@@ -125,6 +125,17 @@ left beyond what's kept free for deletes fails, and one with less than 5 % of it
 left warns. `--json` prints one `{"type":"check","name","state","detail","server"}`
 record per check.
 
+`mc admin info` reads the same server through `MinIO`'s admin API (`info`,
+`storageinfo` and `datausageinfo`): one server with one pool of one set, whose drives
+are the disks the drive uses (its own, and those of folder buckets kept elsewhere),
+what it holds, and whether the KMS and the LDAP directory answer, each asked for at most
+10 seconds. It needs `admin:ServerInfo`; `storageinfo` needs `admin:StorageInfo` and
+`datausageinfo` `admin:DataUsageInfo`.
+
+```sh
+mc admin info teifs
+```
+
 ### Doctor
 
 `teifs doctor [DIR]` looks at a drive on the machine it's on, with the settings

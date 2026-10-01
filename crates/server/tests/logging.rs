@@ -454,10 +454,15 @@ async fn requests_are_delivered_as_s3_logs_them() {
         .send()
         .await
         .unwrap();
+    // Read to its end: a client that leaves early is logged with what it got.
     root.get_object()
         .bucket("app")
         .key("a b.txt")
         .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
         .await
         .unwrap();
     root.head_object()
