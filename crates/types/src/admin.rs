@@ -374,6 +374,24 @@ pub struct ServerInfo {
     /// What the drive holds; none from a server that doesn't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageInfo>,
+    /// The disks the drive uses: its own, and those of folder buckets kept elsewhere.
+    /// None from a server that doesn't say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<DiskInfo>,
+}
+
+/// A disk a drive uses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskInfo {
+    /// A folder on it: the drive's, or a folder bucket's.
+    pub path: String,
+    /// Its size, in bytes.
+    pub total: u64,
+    /// The bytes free for the drive.
+    pub free: u64,
+    /// The bytes kept free for deletes and metadata: writes stop before they'd use them.
+    pub reserved: u64,
 }
 
 /// What a drive holds, in all its buckets.
@@ -592,15 +610,21 @@ mod tests {
                 delete_markers: 4,
                 ..UsageInfo::default()
             }),
+            disks: vec![DiskInfo {
+                reserved: 5,
+                ..DiskInfo::default()
+            }],
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["startedMs"], 1);
         assert_eq!(json["usage"]["deleteMarkers"], 4);
+        assert_eq!(json["disks"][0]["reserved"], 5);
         assert_eq!(json["scrub"]["current"]["startedMs"], 3);
         // A server from before scrubs is still understood.
         let mut older = json.clone();
         older.as_object_mut().unwrap().remove("scrub");
         older.as_object_mut().unwrap().remove("usage");
+        older.as_object_mut().unwrap().remove("disks");
         assert_eq!(
             serde_json::from_value::<ServerInfo>(older).unwrap().scrub,
             crate::verify::ScrubReport::default()

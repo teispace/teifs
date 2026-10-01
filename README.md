@@ -234,7 +234,7 @@ requests live. See
 | `teifs restore [DIR] --from FOLDER\|SNAPSHOT` | Put a backup or one of the drive's daily snapshots back (asks first; what it replaces is kept) |
 | `teifs repair [DIR] [--apply] [--forget-missing]` | Find where a drive's metadata and files disagree (after restoring an older snapshot, say) and, with `--apply`, set right what's safe to: objects written since get their versions back; lost ones are forgotten only with `--forget-missing` |
 | `teifs verify [--bucket B] [--dir DRIVE] [--kms-keyring PATH]` | Read every stored version back and check it against its checksums and ETag (encrypted ones as they decrypt); exit code 1 when something is damaged |
-| `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, jobs and what its scrubs found; how it was started |
+| `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, disks (free, size, kept free), jobs and what its scrubs found; how it was started |
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |
 | `teifs admin bucket export ALIAS[/BUCKET] [-o FILE [--force]]` \| `bucket import ALIAS FILE` | Move buckets with their settings (policy, lifecycle, Object Lock, encryption, CORS, tags, ACL, Block Public Access, versioning) to another server, as `mc admin cluster bucket export\|import`; each setting is checked and reported |
 | `teifs admin iam export ALIAS [-o FILE [--secrets] [--force]]` \| `iam import ALIAS FILE [--adopt-account]` | Move a server's IAM to another |

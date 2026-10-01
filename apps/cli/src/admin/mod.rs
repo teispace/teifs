@@ -296,6 +296,9 @@ async fn info(client: &Client) -> Result<(), Error> {
             ),
         ));
     }
+    for disk in &info.disks {
+        fields.push(("Disk", disk_line(disk)));
+    }
     fields.extend(scrub_details(&info.scrub));
     ui::details(&fields, || Value::Null);
     let mut table = ui::Table::new(&["JOB", "STEPS", "ITEMS", "LAST PROGRESS", "LAST ERROR"]);
@@ -320,6 +323,18 @@ async fn info(client: &Client) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// A disk the drive uses, as `teifs admin info` shows it.
+fn disk_line(disk: &teifs_types::admin::DiskInfo) -> String {
+    let size = crate::units::size;
+    format!(
+        "{}: {} free of {} ({} kept free for deletes)",
+        disk.path,
+        size(disk.free),
+        size(disk.total),
+        size(disk.reserved)
+    )
 }
 
 /// What a server's scrubs found, as details: the last pass and the one under way.

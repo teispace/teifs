@@ -223,7 +223,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: ADMIN_INFO,
         needs: Needs::Action("teifs:GetServerInfo", ANY),
         handler: Handler::Info,
-        about: "Version, drive, account, uptime, what the drive holds, background jobs and what scrubs found: `ServerInfo`",
+        about: "Version, drive, account, uptime, what the drive holds, its disks' room, background jobs and what scrubs found: `ServerInfo`",
     },
     Endpoint {
         api: Api::Admin,

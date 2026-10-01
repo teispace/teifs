@@ -13,7 +13,10 @@ use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
 use teifs_iam::{Iam, IamError, RootKey};
 use teifs_store::{JobStatus, Store};
 use teifs_types::{
-    admin::{AdminError, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo},
+    admin::{
+        AdminError, DiskInfo, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo,
+        UsageInfo,
+    },
     audit::TraceFilter,
 };
 
@@ -209,7 +212,26 @@ pub(crate) async fn info(
             .collect(),
         scrub,
         usage: usage_info(store).await,
+        disks: disks_info(store).await,
     }))
+}
+
+/// The disks the drive uses, or none (logged) when they can't be read.
+async fn disks_info(store: &Store) -> Vec<DiskInfo> {
+    let disks = store
+        .disks()
+        .await
+        .inspect_err(|err| tracing::error!(error = %err, "can't read the drive's disks"))
+        .unwrap_or_default();
+    disks
+        .into_iter()
+        .map(|disk| DiskInfo {
+            path: disk.path.display().to_string(),
+            total: disk.total,
+            free: disk.available,
+            reserved: disk.reserve,
+        })
+        .collect()
 }
 
 /// What the drive holds, or none (logged) when it can't be read.

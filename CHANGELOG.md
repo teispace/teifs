@@ -199,6 +199,9 @@ behaviour; the on-disk format is always upgraded automatically.
   rules, redirects of every request and of single objects, S3's HTML error pages,
   ranges, conditional requests and CORS. Access logs record these requests as
   `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- `teifs admin info` (and the admin API's server info) shows the disks the drive uses:
+  its own and those of folder buckets linked from elsewhere, with their free space,
+  size and the room kept free for deletes.
 - `MinIO`'s health checks, as a single-drive `MinIO` answers them:
   `/minio/health/live`, `/minio/health/ready`, `/minio/health/cluster` and
   `/minio/health/cluster/read`, so probes set up for `MinIO` work unchanged.

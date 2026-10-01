@@ -27,10 +27,20 @@ async fn info_and_configuration_for_people_and_programs() {
         "{out}"
     );
     assert!(out.contains("housekeeping") || out.contains("JOB"), "{out}");
+    let drive = std::fs::canonicalize(server.dir.path()).unwrap();
+    assert!(
+        out.contains("Disk") && out.contains(&format!("{}: ", drive.display())),
+        "{out}"
+    );
+    assert!(out.contains("kept free for deletes"), "{out}");
     let info = records(&cli.ok(&["--json", "admin", "info", "t"]).await);
     assert_eq!(info[0]["type"], "server");
     assert_eq!(info[0]["account"], server.iam.account());
     assert_eq!(info[0]["usage"]["buckets"], 0);
+    let disk = &info[0]["disks"][0];
+    assert_eq!(disk["path"], drive.display().to_string());
+    assert!(disk["total"].as_u64().unwrap() >= disk["free"].as_u64().unwrap());
+    assert!(disk["reserved"].as_u64().unwrap() >= 64 << 20);
     let out = cli.ok(&["admin", "config", "t"]).await;
     assert!(
         out.contains("given by environment") && out.contains("folder"),

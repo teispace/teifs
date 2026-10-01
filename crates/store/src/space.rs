@@ -47,6 +47,19 @@ impl Inner {
     }
 }
 
+/// Whether two disks are one: the same device, where that can be told, or else the same
+/// size and room.
+fn same_disk(a: &Disk, b: &Disk) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(&a.path), std::fs::metadata(&b.path)) {
+            return a.dev() == b.dev();
+        }
+    }
+    a.total == b.total && a.available == b.available
+}
+
 pub(crate) fn fits(dir: &Path, len: u64) -> Result<()> {
     let stats = fs4::statvfs(dir)?;
     if has_room(stats.available_space(), stats.total_space(), len) {
@@ -66,7 +79,57 @@ pub struct Health {
     pub writable: bool,
 }
 
+/// A disk the drive uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disk {
+    /// A folder on it: the drive's, or a folder bucket's kept elsewhere.
+    pub path: std::path::PathBuf,
+    /// Its size, in bytes.
+    pub total: u64,
+    /// The bytes free for the drive.
+    pub available: u64,
+    /// The bytes kept free for deletes and metadata.
+    pub reserve: u64,
+}
+
+impl Disk {
+    fn of(path: &Path) -> Result<Self> {
+        let stats = fs4::statvfs(path)?;
+        Ok(Self {
+            path: path.to_owned(),
+            total: stats.total_space(),
+            available: stats.available_space(),
+            reserve: reserve(stats.total_space()),
+        })
+    }
+}
+
 impl Store {
+    /// The disks the drive uses: its own, then those of folder buckets kept outside it
+    /// (linked folders), each once.
+    pub async fn disks(&self) -> Result<Vec<Disk>> {
+        self.blocking(|inner| {
+            let mut dirs = vec![inner.root.clone()];
+            for bucket in inner.buckets()? {
+                if bucket.layout == crate::Layout::Folder
+                    && let Ok(Bucket::Folder(FolderBucket { dir, .. })) = inner.bucket(&bucket.name)
+                    && !dir.starts_with(&inner.root)
+                {
+                    dirs.push(dir);
+                }
+            }
+            let mut disks: Vec<Disk> = Vec::new();
+            for dir in dirs {
+                let disk = Disk::of(&dir)?;
+                if !disks.iter().any(|seen| same_disk(seen, &disk)) {
+                    disks.push(disk);
+                }
+            }
+            Ok(disks)
+        })
+        .await
+    }
+
     /// Whether the drive can serve reads and take writes. A disk that went away (an
     /// unmounted volume, a removed folder) can't serve either.
     pub async fn health(&self) -> Health {
@@ -134,6 +197,54 @@ mod tests {
         assert!(!has_room(10 * GIB, total, 10 * GIB - 50 * MIB));
         assert!(!has_room(90 * MIB, total, 1));
         assert!(!has_room(10 * GIB, total, u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn each_disk_the_drive_uses_is_told_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create_bucket("here", crate::Layout::Folder)
+            .await
+            .unwrap();
+        // A folder bucket kept elsewhere (here on the same disk), linked in.
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("linked")).unwrap();
+            let buckets = store.list_buckets().await.unwrap();
+            assert!(buckets.iter().any(|b| b.name == "linked"));
+            assert_eq!(store.disks().await.unwrap().len(), 1);
+        }
+        let disks = store.disks().await.unwrap();
+        assert_eq!(disks.len(), 1);
+        let disk = &disks[0];
+        assert_eq!(disk.path, std::fs::canonicalize(dir.path()).unwrap());
+        assert!(disk.total > 0 && disk.available <= disk.total);
+        assert_eq!(disk.reserve, reserve(disk.total));
+    }
+
+    #[test]
+    fn disks_are_told_apart() {
+        let disk = |path: &str, total, available| Disk {
+            path: path.into(),
+            total,
+            available,
+            reserve: 0,
+        };
+        // Folders that can't be looked at: by their size and room.
+        assert!(same_disk(
+            &disk("/nothing/a", 10, 5),
+            &disk("/nothing/b", 10, 5)
+        ));
+        assert!(!same_disk(
+            &disk("/nothing/a", 10, 5),
+            &disk("/nothing/b", 10, 4)
+        ));
+        assert!(!same_disk(
+            &disk("/nothing/a", 10, 5),
+            &disk("/nothing/b", 11, 5)
+        ));
     }
 
     // Windows can't move a folder with open files in it.
