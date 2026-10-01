@@ -205,8 +205,8 @@ pub struct Service {
     /// The connection's peer.
     client: crate::Client,
     watch: Arc<Watch>,
-    /// The access log's worker, until the server takes it to run.
-    access_log: Arc<std::sync::Mutex<Option<crate::AccessLogWorker>>>,
+    /// The background jobs, until the server takes them to run.
+    workers: Arc<std::sync::Mutex<Option<crate::Workers>>>,
     /// What the store tells the lifecycle's removals, kept while the service is.
     expirations: Option<Arc<dyn teifs_store::Expirations>>,
     /// The domains buckets' websites are served on.
@@ -231,7 +231,7 @@ impl Service {
     ) -> Self {
         Self {
             watch: Arc::new(watch),
-            access_log: Arc::default(),
+            workers: Arc::default(),
             expirations: None,
             websites: Arc::default(),
             s3,
@@ -244,19 +244,19 @@ impl Service {
         }
     }
 
-    /// The service with the access log's worker, for the server to take and run, and
-    /// what logs the lifecycle's removals.
+    /// The service with its background jobs, for the server to take and run, and what
+    /// logs the lifecycle's removals.
     #[must_use]
-    pub(crate) fn with_access_log(
+    pub(crate) fn with_workers(
         mut self,
-        worker: crate::AccessLogWorker,
+        workers: crate::Workers,
         expirations: Arc<dyn teifs_store::Expirations>,
     ) -> Self {
         self.expirations = Some(expirations);
         *self
-            .access_log
+            .workers
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(workers);
         self
     }
 
@@ -267,11 +267,11 @@ impl Service {
         self
     }
 
-    /// The access log's worker, which delivers buckets' access logs while it runs: the
-    /// first call has it, later ones none.
+    /// The background jobs, which deliver buckets' access logs and make their inventory
+    /// reports while they run: the first call has them, later ones none.
     #[must_use]
-    pub fn access_log(&self) -> Option<crate::AccessLogWorker> {
-        self.access_log
+    pub fn workers(&self) -> Option<crate::Workers> {
+        self.workers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()

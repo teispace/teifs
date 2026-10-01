@@ -18,7 +18,7 @@ use teifs_store::{
     Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
     SseMode, Staged, Store, Upload, Versioning, VersionsQuery,
 };
-use teifs_types::{configs::Kind, logging::LoggingConfig};
+use teifs_types::configs::Kind;
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -28,7 +28,9 @@ use crate::{
     bucket_access::{self, Rules},
     caps::{self, Caps},
     checksums::{self, Sums, checksum_of, set_checksums},
-    configs, cors, encode,
+    configs, cors,
+    delivery::{self, Delivery, Undelivered},
+    encode,
     errors::{StoreResultExt, from_body},
     events::{Events, Happened},
     lifecycle, logging, notification,
@@ -341,61 +343,59 @@ impl Drive {
         self.store.head_version(bucket, key, version_id).await.s3()
     }
 
-    /// Writes a log object for S3's log delivery into `config`'s target, as the logging
-    /// service: only if the target's policy or ACL lets it in (when IAM decides
-    /// requests), with the target's default encryption, the configuration's target
-    /// grants, and the event a write sends. The write isn't itself logged.
-    pub(crate) async fn deliver_log(
+    /// Writes an object for one of S3's deliveries (an access log, an inventory report)
+    /// into its target, as its service: only if the target's policy or ACL lets the
+    /// service in (when IAM decides requests), encrypted as the delivery asks over the
+    /// target's default, and with the event a write sends. The write isn't itself logged.
+    pub(crate) async fn deliver(
         &self,
-        source: &str,
-        config: &LoggingConfig,
+        delivery: &Delivery<'_>,
         key: &str,
         data: Bytes,
-    ) -> Result<ObjectInfo, access_log::Undelivered> {
-        use access_log::Undelivered;
-        let target = config.target_bucket.as_str();
-        let refused = |why: String| Undelivered::Refused(why);
-        let rules = self.rules.of(target).await.map_err(Undelivered::from)?;
+    ) -> Result<ObjectInfo, Undelivered> {
+        let target = delivery.target;
+        let rules = self.rules.of(target).await?;
         if let Some(account) = self.account.as_deref()
-            && !logging::delivery_allowed(account, source, (target, key), &rules)
+            && !delivery.allowed(account, key, &rules)
         {
-            return Err(refused(format!(
-                "the bucket {target}'s policy and ACL don't let the logging service write {key}"
+            return Err(Undelivered::Refused(format!(
+                "the bucket {target}'s policy and ACL don't let {} write {key}",
+                delivery.service
             )));
         }
-        let encryption = self
-            .write_encryption(target, sse::WriteRequest::default())
-            .await
-            .map_err(Undelivered::from)?;
+        let sse = delivery.encryption.map(|encryption| match encryption {
+            delivery::Encryption::S3 => {
+                dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AES256)
+            }
+            delivery::Encryption::Kms(_) => {
+                dto::ServerSideEncryption::from_static(dto::ServerSideEncryption::AWS_KMS)
+            }
+        });
+        let request = sse::WriteRequest {
+            sse: sse.as_ref(),
+            kms_key: match delivery.encryption {
+                Some(delivery::Encryption::Kms(key)) => Some(key),
+                _ => None,
+            },
+            ..sse::WriteRequest::default()
+        };
+        let encryption = self.write_encryption(target, request).await?;
         let len = i64::try_from(data.len()).ok();
-        self.check_write(target, Some(key), len)
-            .await
-            .map_err(Undelivered::from)?;
-        let mut staged = self
-            .store
-            .stage_for(target, &encryption)
-            .await
-            .s3()
-            .map_err(Undelivered::from)?;
-        let mut hasher = checksums::hasher(&Sums::new(), [checksums::DEFAULT_ALGORITHM])
-            .map_err(Undelivered::from)?;
+        self.check_write(target, Some(key), len).await?;
+        let mut staged = self.store.stage_for(target, &encryption).await.s3()?;
+        let mut hasher = checksums::hasher(&Sums::new(), [checksums::DEFAULT_ALGORITHM])?;
         hasher.update(&data);
-        staged.write(&data).await.s3().map_err(Undelivered::from)?;
-        let mut attrs = ObjectAttrs {
-            content_type: Some("text/plain".to_owned()),
+        staged.write(&data).await.s3()?;
+        let attrs = ObjectAttrs {
+            content_type: Some(delivery.content_type.to_owned()),
+            acl: delivery.acl.clone(),
             ..NewAttrs::default().into_attrs(hasher.finish())
         };
-        if !config.grants.is_empty() {
-            let mut acl = Acl::private();
-            acl.grants.extend(config.grants.iter().copied());
-            attrs.acl = Some(acl);
-        }
         let info = self
             .store
             .commit(target, key, staged, attrs, Precondition::default())
             .await
-            .s3()
-            .map_err(Undelivered::from)?;
+            .s3()?;
         self.notify(
             &http::Extensions::new(),
             "ObjectCreated:Put",

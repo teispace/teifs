@@ -39,9 +39,10 @@ http-body-util.workspace = true
 ipnet.workspace = true
 prometheus-client.workspace = true
 fs4.workspace = true
+flate2.workspace = true
+md-5.workspace = true
 
 [dev-dependencies]
-md-5.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

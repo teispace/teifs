@@ -358,12 +358,21 @@ with its settings. While any bucket logs, `cors::Service` keeps each request's a
 adds the requester, the signature and the records a request adds besides its own (a
 copy's source, each key of a multi-object delete: `observe::also`), and `Watch::done`
 turns them into records (`access_log/record.rs`: S3's fields and operation names) on a
-bounded queue. The `AccessLogWorker`, which the server runs, appends them to a spool per
+bounded queue. The `AccessLogWorker`, which the server runs with the service's other
+background jobs (`Workers`), appends them to a spool per
 bucket in the drive's `access-logs/` folder and rolls each into a log object
-(`Drive::deliver_log`, which decides the delivery for the service principal again) on
+(`Drive::deliver` with `logging::delivery`, which decides the delivery for the service
+principal again: `delivery.rs`) on
 the interval, at 1 MiB or on a new day; spools left by a stop are delivered at the next
 start. Lifecycle removals are logged through the same `Expirations` hook as their
 events; the store holds that hook weakly, since it holds a `Drive` that holds the store.
+Inventory reports (`inventory/`): the inventory worker, also one of the `Workers`, looks
+for due configurations 96 times a (drive's) day, lists the bucket a page at a time into
+CSV rows (`inventory/report.rs`) gzipped into data files, and delivers them, the Hive
+symlink, the manifest and its checksum through `Drive::deliver` as `s3.amazonaws.com`.
+The day or week each configuration last had its report is a store note (`Store::note`),
+so restarts neither repeat nor skip one; stopping ends a report after its current page,
+never in the middle of a store call.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

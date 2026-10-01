@@ -406,6 +406,46 @@ records of the last second before a crash can be lost. A request to a
 [website](#static-websites) is recorded as S3 records it: `WEBSITE.GET.OBJECT` or
 `WEBSITE.HEAD.OBJECT`, on the object it answered with.
 
+## Inventory reports
+
+A bucket's inventory, as S3 Inventory makes it, lists its objects (or every version) daily
+or weekly in files any tool that reads S3 Inventory reads (Athena, Spark, `s3 cp`).
+
+```sh
+teifs inventory add local/app daily local/reports --fields size,etag,lastmodifieddate
+teifs inventory add local/app weekly local/reports/inv --all-versions --weekly --fields all
+teifs inventory ls local/app
+teifs inventory info local/app daily
+teifs inventory rm local/app daily
+```
+
+`teifs inventory add` also adds a statement to the destination's bucket policy that lets
+S3 Inventory (`s3.amazonaws.com`) write there for this bucket, as the S3 console does;
+with `--no-policy`, grant it yourself. Like any other configuration it can be set through
+S3 (`PutBucketInventoryConfiguration`).
+
+The first report is made within 15 minutes of the configuration, the next each day
+(UTC) or each Sunday; a report already made isn't made again after a restart. Each is,
+under `PREFIX/BUCKET/ID/` in the destination:
+
+- `data/UUID.csv.gz`: gzipped CSV without a header, every value quoted, keys
+  URL-encoded, `Bucket, Key` (with `--all-versions`, then `VersionId, IsLatest,
+  IsDeleteMarker`) and the chosen fields in S3's order. Each file holds up to about
+  32 MiB, compressed.
+- `hive/dt=YYYY-MM-DD-HH-MM/symlink.txt`: the data files' `s3://` URLs, for Hive and
+  Athena.
+- `YYYY-MM-DDTHH-MMZ/manifest.json`, then `manifest.checksum` (its MD5): the source and
+  destination, the schema, and each data file's key, size and MD5. A report is complete
+  once its checksum is there.
+
+Every object is `STANDARD`, there's no replication yet, and Object Lock has no event
+holds, so those fields are empty or `STANDARD`; `ObjectOwner` is `teifs`. A destination
+that doesn't let the service in, or doesn't exist, gets nothing that day (with a warning
+in the server's log); a failure of the drive is tried again within 15 minutes. Reports
+are written like any other object: encrypted as `--encrypt` or the destination's default
+says (a folder bucket takes no encryption, so give such a destination none), counted in
+its usage, and announced by its notifications. Only CSV is made for now.
+
 ## Static websites
 
 A bucket with a website configuration is a static website, as on S3's website endpoint,

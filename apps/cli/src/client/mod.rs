@@ -8,11 +8,13 @@ mod copy;
 mod encrypt;
 mod event;
 mod ilm;
+mod inventory;
 mod listing;
 mod lock;
 mod logging;
 mod migrate;
 mod quota;
+mod service_policy;
 mod sse;
 pub(crate) mod status;
 mod target;
@@ -163,6 +165,12 @@ pub enum Command {
     Logging {
         #[command(subcommand)]
         action: LoggingAction,
+    },
+    /// Report a bucket's objects daily or weekly into another bucket (or itself), as
+    /// S3 Inventory does: add, list, show or remove its inventory configurations.
+    Inventory {
+        #[command(subcommand)]
+        action: inventory::InventoryAction,
     },
     /// Serve a bucket as a static website (its index and error documents and
     /// redirects, as S3's website hosting), or show or remove its configuration.

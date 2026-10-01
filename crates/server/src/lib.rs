@@ -543,11 +543,14 @@ impl Server {
     /// Serves requests, and runs the background jobs, until `shutdown` resolves; then
     /// lets open requests finish for up to [`DRAIN`] and stops the jobs.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
+        // `SIGHUP` reloads what can be reloaded (the TLS certificates, the audit log), and
+        // otherwise does nothing: it never stops the server, as it would by default.
+        let _hangups = signals::Hangups::new();
         let jobs = self.store.start_jobs(&self.jobs);
         let reloads = self.tls.clone().map(|tls| tokio::spawn(tls::watch(tls)));
-        let (access_log_stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let access_log = self.service.access_log().map(|worker| {
-            tokio::spawn(worker.run(async move {
+        let (workers_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let workers = self.service.workers().map(|workers| {
+            tokio::spawn(workers.run(async move {
                 let _ = stopped.await;
             }))
         });
@@ -562,10 +565,11 @@ impl Server {
             reloads.abort();
         }
         jobs.stop().await;
-        // The connections are gone: what's spooled is delivered after the next start.
-        drop(access_log_stop);
-        if let Some(access_log) = access_log {
-            let _ = access_log.await;
+        // The connections are gone: what's spooled is delivered after the next start, and
+        // a report being made is made again.
+        drop(workers_stop);
+        if let Some(workers) = workers {
+            let _ = workers.await;
         }
         // What's still queued is sent after the next start.
         self.notifier.stop().await;

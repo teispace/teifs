@@ -29,7 +29,6 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderMap, Request, header};
 use prometheus_client::metrics::counter::Counter;
-use s3s::{S3Error, S3ErrorCode};
 use teifs_iam::Identity;
 use teifs_policy::PrincipalKind;
 use teifs_store::{Expirations, OWNER_ID, Store, StoreError};
@@ -38,6 +37,7 @@ use tokio::sync::mpsc;
 pub(crate) use self::record::{Record, copy_source_operation};
 use crate::{
     access::Client,
+    delivery::Undelivered,
     drive::{Drive, REGION},
     events::Events,
     observe::{self, Answer, Seen},
@@ -362,30 +362,6 @@ const fn http_version(version: http::Version) -> &'static str {
     }
 }
 
-/// Why a log object wasn't delivered.
-#[derive(Debug)]
-pub(crate) enum Undelivered {
-    /// The target won't take it: its records are dropped.
-    Refused(String),
-    /// It may yet: tried again later.
-    Failed(String),
-}
-
-/// What an error writing the log object means for its records.
-impl From<S3Error> for Undelivered {
-    fn from(err: S3Error) -> Self {
-        let why = err
-            .message()
-            .map_or_else(|| err.code().as_str().to_owned(), str::to_owned);
-        match err.code() {
-            S3ErrorCode::InternalError
-            | S3ErrorCode::ServiceUnavailable
-            | S3ErrorCode::SlowDown => Self::Failed(why),
-            _ => Self::Refused(why),
-        }
-    }
-}
-
 /// One source bucket's spool being written.
 #[derive(Debug)]
 struct Spool {
@@ -643,7 +619,11 @@ impl Worker {
         );
         match self
             .drive
-            .deliver_log(bucket, &config, &key, Bytes::from(data))
+            .deliver(
+                &crate::logging::delivery(bucket, &config),
+                &key,
+                Bytes::from(data),
+            )
             .await
         {
             Ok(_) => {
@@ -679,8 +659,6 @@ mod tests {
         clippy::unwrap_used,
         reason = "test helpers fail the test on any error"
     )]
-
-    use s3s::s3_error;
 
     use super::*;
 
@@ -726,26 +704,6 @@ mod tests {
         headers.insert(header::CONTENT_RANGE, "bytes 0-9/100".parse().unwrap());
         assert_eq!(arrival("GET").object_size(&headers), Some(100));
         assert_eq!(arrival("GET").object_size(&HeaderMap::new()), None);
-    }
-
-    #[test]
-    fn only_passing_failures_are_tried_again() {
-        assert!(matches!(
-            Undelivered::from(s3_error!(InternalError, "disk")),
-            Undelivered::Failed(why) if why == "disk"
-        ));
-        assert!(matches!(
-            Undelivered::from(s3_error!(SlowDown)),
-            Undelivered::Failed(_)
-        ));
-        assert!(matches!(
-            Undelivered::from(s3_error!(NoSuchBucket)),
-            Undelivered::Refused(_)
-        ));
-        assert!(matches!(
-            Undelivered::from(s3_error!(AccessDenied, "locked")),
-            Undelivered::Refused(_)
-        ));
     }
 
     #[test]

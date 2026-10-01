@@ -14,12 +14,14 @@ mod configs;
 mod control;
 mod cors;
 mod crc_combine;
+mod delivery;
 mod drive;
 mod encode;
 mod errors;
 mod events;
 mod health;
 mod iam_api;
+mod inventory;
 mod lifecycle;
 mod limits;
 mod lines;
@@ -38,6 +40,7 @@ mod sse;
 mod tagging;
 mod trace;
 mod website;
+mod workers;
 
 use std::sync::Arc;
 
@@ -59,6 +62,7 @@ pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
 pub use proxy::{ProxyHeader, TrustedProxies};
 pub use routes::{Api, EndpointInfo, endpoints};
+pub use workers::Workers;
 
 /// How the S3 endpoint accepts requests.
 #[derive(Debug, Clone, Default)]
@@ -139,6 +143,10 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             .access_log_interval
             .unwrap_or(access_log::DEFAULT_INTERVAL),
     );
+    let workers = Workers {
+        access_log: worker,
+        inventory: inventory::Worker::new(drive.clone(), store.clone()),
+    };
     let events = drive.events();
     // A store serves one service: a second is told nothing new.
     let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
@@ -206,6 +214,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.trusted_proxies,
         watch,
     )
-    .with_access_log(worker, expirations)
+    .with_workers(workers, expirations)
     .with_website_domains(&options.website_domains))
 }

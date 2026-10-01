@@ -219,6 +219,15 @@ behaviour; the on-disk format is always upgraded automatically.
   (`Put/Get/Delete/ListBucket…Configuration`), kept and answered as given with S3's
   checks, 1,000 of a kind per bucket and lists of 100 with continuation tokens. Bucket
   exports and `teifs migrate` carry them, and Requester Pays.
+- Inventory reports, as S3 Inventory delivers them: for each enabled inventory
+  configuration, daily or weekly (on Sundays, UTC), gzipped CSV data files of the
+  bucket's current objects or every version with the fields chosen, a Hive
+  `symlink.txt`, and a `manifest.json` with its `manifest.checksum`, written by
+  `s3.amazonaws.com` into a destination whose bucket policy lets it in, encrypted as the
+  configuration asks. `teifs inventory add|ls|info|rm` manages them and lets S3
+  Inventory into the destination.
+- `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
+  reload; it used to stop.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,
   installing `teifs`, its shell completions, a `teifs` system user and a hardened
   systemd service (`systemctl enable --now teifs`) that serves `/var/lib/teifs/drive`

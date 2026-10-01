@@ -1825,6 +1825,156 @@ async fn access_logs_are_set_shown_delivered_and_removed() {
 }
 
 #[tokio::test]
+async fn inventories_are_added_listed_delivered_and_removed() {
+    let server = start_with(|config| {
+        config.lifecycle_day = Some(std::time::Duration::from_secs(60));
+    })
+    .await;
+    let cli = Client::new(&server);
+    for bucket in ["t/app", "t/reports"] {
+        cli.ok(&["mb", bucket]).await;
+    }
+    let s3 = client(&server, SECRET_KEY);
+    s3.put_object()
+        .bucket("app")
+        .key("docs/a")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+    let ls = async || records(&cli.ok(&["--json", "inventory", "ls", "t/app"]).await);
+    assert!(ls().await.is_empty());
+    let add = [
+        "inventory",
+        "add",
+        "t/app",
+        "docs",
+        "t/reports/inv",
+        "--prefix",
+        "docs/",
+        "--fields",
+        "size,etag",
+    ];
+    let text = cli.ok(&add).await;
+    assert!(
+        text.contains("Inventory docs of t/app: to t/reports/inv"),
+        "{text}"
+    );
+    // Adding again replaces it, and lets S3 Inventory in once.
+    cli.ok(&add).await;
+    let listed = ls().await;
+    assert_eq!(listed.len(), 1);
+    let got = &listed[0];
+    assert_eq!(
+        (
+            &got["id"],
+            &got["frequency"],
+            &got["prefix"],
+            &got["destinationBucket"],
+            &got["destinationPrefix"],
+            &got["fields"]
+        ),
+        (
+            &"docs".into(),
+            &"Daily".into(),
+            &"docs/".into(),
+            &"reports".into(),
+            &"inv".into(),
+            &serde_json::json!(["Size", "ETag"])
+        )
+    );
+    let policy = s3
+        .get_bucket_policy()
+        .bucket("reports")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        policy
+            .policy()
+            .unwrap()
+            .matches("TeiFSInventory-app")
+            .count(),
+        1
+    );
+    let info = cli.ok(&["inventory", "info", "t/app", "docs"]).await;
+    assert!(
+        info.contains("current of docs/*") && info.contains("Size, ETag"),
+        "{info}"
+    );
+    // The report comes.
+    let mut manifest = None;
+    for _ in 0..100 {
+        let listed = s3
+            .list_objects_v2()
+            .bucket("reports")
+            .prefix("inv/app/docs/")
+            .send()
+            .await
+            .unwrap();
+        manifest = listed
+            .contents()
+            .iter()
+            .filter_map(|o| o.key())
+            .find(|key| key.ends_with("/manifest.json"))
+            .map(str::to_owned);
+        if manifest.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(manifest.is_some(), "no report was delivered");
+
+    // Listings go on past a page of 100.
+    let got = s3
+        .get_bucket_inventory_configuration()
+        .bucket("app")
+        .id("docs")
+        .send()
+        .await
+        .unwrap();
+    let mut off = got.inventory_configuration().unwrap().clone();
+    off.is_enabled = false;
+    for i in 0..100 {
+        let id = format!("off-{i:03}");
+        off.id.clone_from(&id);
+        s3.put_bucket_inventory_configuration()
+            .bucket("app")
+            .id(id)
+            .inventory_configuration(off.clone())
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(ls().await.len(), 101);
+    let text = cli.ok(&["inventory", "rm", "t/app", "docs"]).await;
+    assert!(text.contains("Inventory docs of t/app: removed"), "{text}");
+    assert_eq!(ls().await.len(), 100);
+    let err = cli.fails(&["inventory", "info", "t/app", "docs"], 5).await;
+    assert!(
+        err.contains("can't read the inventory docs of t/app"),
+        "{err}"
+    );
+    let err = cli
+        .fails(
+            &[
+                "inventory",
+                "add",
+                "t/app",
+                "x",
+                "t/reports",
+                "--fields",
+                "colour",
+            ],
+            2,
+        )
+        .await;
+    assert!(err.contains("colour isn't an inventory field"), "{err}");
+    cli.fails(&["inventory", "add", "t/app", "x", "other/reports"], 2)
+        .await;
+}
+
+#[tokio::test]
 async fn websites_are_set_shown_and_removed() {
     let server = start().await;
     let cli = Client::new(&server);

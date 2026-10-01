@@ -165,7 +165,10 @@ log delivery grant in the target's ACL. So whoever may configure one bucket's lo
 can't write into a bucket that didn't agree, and removing the permission stops
 deliveries (the records are dropped, as on S3). A `Service` principal names one
 service, never a wildcard, and no signed request is ever that principal
-(`crates/server/tests/logging.rs`).
+(`crates/server/tests/logging.rs`). Inventory reports are written the same way, as
+`s3.amazonaws.com`, which must be allowed `s3:PutObject` with those conditions and
+`s3:x-amz-acl` `bucket-owner-full-control` before each file
+(`crates/server/tests/inventory.rs`).
 
 Every request signed with an IAM user's key is decided before its operation runs
 (`crates/s3/src/access.rs`), for exactly the bucket, key and copy or rename source the

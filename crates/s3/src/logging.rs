@@ -2,15 +2,13 @@
 //! read from S3's XML with S3's checks, and answered as it was given.
 
 use s3s::{S3Error, S3Result, dto, s3_error};
-use teifs_iam::Identity;
-use teifs_policy::{Date, bucket_arn, object_arn};
 use teifs_store::{Store, StoreError};
 use teifs_types::{
-    AclGrant, Permission,
+    Acl, AclGrant, Permission,
     logging::{DateSource, KeyFormat, LoggingConfig, SERVICE},
 };
 
-use crate::{access, acl, bucket_access::Rules, drive::REGION, errors::from_store};
+use crate::{acl, bucket_access::Rules, delivery::Delivery, errors::from_store};
 
 /// The configuration a `BucketLoggingStatus` gives: `None` (an empty status) turns
 /// logging off.
@@ -144,12 +142,7 @@ pub(crate) async fn check(
     let Some(account) = account else {
         return Ok(());
     };
-    if !delivery_allowed(
-        account,
-        source,
-        (target, &config.target_prefix),
-        &target_rules,
-    ) {
+    if !delivery(source, config).allowed(account, &config.target_prefix, &target_rules) {
         return Err(invalid_target(
             "You must either provide the necessary permissions to the logging service using \
              a bucket policy or give the log-delivery group WRITE and READ_ACP permissions to \
@@ -159,28 +152,24 @@ pub(crate) async fn check(
     Ok(())
 }
 
-/// Whether the logging service may write `key` in `target` for `source`'s log: what the
-/// target's policy and ACL (in `rules`) say of `s3:PutObject` by `logging.s3.amazonaws.com`
-/// with `aws:SourceArn` the source bucket and `aws:SourceAccount` the account.
-pub(crate) fn delivery_allowed(
-    account: &str,
-    source: &str,
-    (target, key): (&str, &str),
-    rules: &crate::bucket_access::BucketRules,
-) -> bool {
-    let identity = Identity::service(SERVICE);
-    let context = identity
-        .context(Date::now())
-        .with_source(&bucket_arn(source), account)
-        .with_region(REGION)
-        .with_resource_account(account);
-    access::allows(
-        &identity,
-        &context,
-        "s3:PutObject",
-        &object_arn(target, key),
-        Some(rules),
-    )
+/// How `source`'s log objects are delivered into `config`'s target: by
+/// `logging.s3.amazonaws.com`, as plain text, with the configuration's target grants
+/// and the target's default encryption.
+pub(crate) fn delivery<'a>(source: &'a str, config: &'a LoggingConfig) -> Delivery<'a> {
+    let acl = (!config.grants.is_empty()).then(|| {
+        let mut acl = Acl::private();
+        acl.grants.extend(config.grants.iter().copied());
+        acl
+    });
+    Delivery {
+        service: SERVICE,
+        source,
+        target: &config.target_bucket,
+        content_type: "text/plain",
+        canned_acl: None,
+        acl,
+        encryption: None,
+    }
 }
 
 fn invalid_target(message: &'static str) -> S3Error {

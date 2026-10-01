@@ -173,3 +173,21 @@ async fn a_drive_that_went_away_is_not_ready() {
     let back = request(endpoint, "GET", "127.0.0.1", "/minio/health/cluster").await;
     assert!(back.starts_with("HTTP/1.1 200"), "{back}");
 }
+
+/// `systemctl reload` sends `SIGHUP`: a server with nothing to reload (no TLS, no audit
+/// file) keeps serving, rather than stopping as a process does by default.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hangup_never_stops_the_server() {
+    let server = start_with(|_| {}).await;
+    let health = format!("{}{HEALTH_PATH}", server.endpoint);
+    // Serving, so the server is running.
+    assert!(reqwest::get(&health).await.unwrap().status().is_success());
+    let sent = std::process::Command::new("kill")
+        .args(["-HUP", &std::process::id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(reqwest::get(&health).await.unwrap().status().is_success());
+}

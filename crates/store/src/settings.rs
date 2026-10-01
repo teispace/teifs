@@ -17,6 +17,9 @@ use crate::{
     lock::ObjectLock, now_ms,
 };
 
+/// What the names of background tasks' notes start with, apart from other settings.
+const NOTE: &str = "note.";
+
 /// Why a bucket's tags can't be replaced or deleted as a whole.
 const ABAC_TAGS: &str = "The bucket's tags decide access (ABAC is enabled): change them with \
                          TagResource and UntagResource";
@@ -531,6 +534,28 @@ impl Store {
     /// Sets the most bytes a bucket may hold; `None` removes its quota.
     pub async fn set_bucket_quota(&self, bucket: &str, quota: Option<u64>) -> Result<()> {
         self.change_config(bucket, move |config| config.quota = quota)
+            .await
+    }
+
+    /// How long a day is for the drive's schedules (lifecycle rules, reports): a real
+    /// day, except on drives opened for tests with a shorter one.
+    #[must_use]
+    pub fn day_ms(&self) -> i64 {
+        self.inner.day_ms
+    }
+
+    /// A note a background task keeps with the drive's metadata (when it last did
+    /// something, say), by name; `None` when there's none.
+    pub async fn note(&self, name: &str) -> Result<Option<String>> {
+        let name = format!("{NOTE}{name}");
+        self.blocking(move |inner| Ok(inner.system().setting(&name)?))
+            .await
+    }
+
+    /// Keeps a background task's note; `None` removes it.
+    pub async fn set_note(&self, name: &str, value: Option<String>) -> Result<()> {
+        let name = format!("{NOTE}{name}");
+        self.blocking(move |inner| Ok(inner.system().set_setting(&name, value.as_deref())?))
             .await
     }
 
