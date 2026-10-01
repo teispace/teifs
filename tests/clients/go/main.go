@@ -220,8 +220,12 @@ func minioIAM(ctx context.Context, adm *madmin.AdminClient) {
 
 	account, err := adm.AccountInfo(ctx, madmin.AccountOpts{})
 	must(err)
-	check(account.AccountName == os.Getenv("AWS_ACCESS_KEY_ID") && len(account.Buckets) == 1 &&
-		account.Buckets[0].Access.Read && account.Buckets[0].Access.Write,
+	// Other clients' buckets may be there too: this one's is checked.
+	mine := false
+	for _, b := range account.Buckets {
+		mine = mine || (b.Name == os.Getenv("BUCKET") && b.Access.Read && b.Access.Write)
+	}
+	check(account.AccountName == os.Getenv("AWS_ACCESS_KEY_ID") && mine,
 		fmt.Sprintf("the account's info: %+v", account))
 
 	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", Members: []string{"go-user"}, IsRemove: true}))
