@@ -34,13 +34,14 @@ const SECRET_HEADERS: [&str; 6] = [
 
 /// Query parameters that are: a presigned link's signature is the link's whole power,
 /// and MinIO's clients send STS's proofs in the query (a password, a token).
-const SECRET_QUERY: [&str; 7] = [
+const SECRET_QUERY: [&str; 8] = [
     "x-amz-signature",
     "x-amz-security-token",
     "signature",
     "ldappassword",
     "webidentitytoken",
     "webidentityaccesstoken",
+    "samlassertion",
     "token",
 ];
 
@@ -200,7 +201,7 @@ mod tests {
 
         let kept = query(Some(
             "X-Amz-Signature=abc&x-amz-security-token=t&Signature=v2&AWSAccessKeyId=AK&X-Amz-Credential=AK%2F20260930&prefix=a%20b\
-             &LDAPUsername=ann&LDAPPassword=pw&WebIdentityToken=jwt&Token=custom&WebIdentityAccessToken=at",
+             &LDAPUsername=ann&LDAPPassword=pw&WebIdentityToken=jwt&Token=custom&WebIdentityAccessToken=at&SAMLAssertion=PHNhbWw",
         ));
         for name in [
             "X-Amz-Signature",
@@ -209,6 +210,7 @@ mod tests {
             "LDAPPassword",
             "WebIdentityToken",
             "WebIdentityAccessToken",
+            "SAMLAssertion",
             "Token",
         ] {
             assert_eq!(kept[name], REDACTED, "{name}");

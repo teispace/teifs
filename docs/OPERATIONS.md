@@ -357,6 +357,19 @@ metadata document, when the provider's certificates change, is `update … --met
 FILE` (`-` reads standard input). Private keys are stored sealed under the drive's IAM
 key, never shown, and carried by `teifs admin iam export` only with `--secrets`.
 
+Users then exchange the provider's response for a role's credentials with
+`AssumeRoleWithSAML`, as on AWS: tools that sign in to AWS with SAML (they post the
+response the provider gives the browser) work against TeiFS's endpoint. Configure the
+provider for AWS as its documentation says (audience `urn:amazon:webservices`, the
+`https://signin.aws.amazon.com/saml` endpoint, the `Role` and `RoleSessionName`
+attributes), with role ARNs of the drive's account, and trust the provider in the role:
+
+```json
+{"Effect": "Allow", "Principal": {"Federated": "arn:aws:iam::ACCOUNT:saml-provider/Okta"},
+ "Action": "sts:AssumeRoleWithSAML",
+ "Condition": {"StringEquals": {"saml:aud": "https://signin.aws.amazon.com/saml"}}}
+```
+
 ## Identity plugin sign-in
 
 An identity plugin is your own web service that decides who an opaque token belongs to:

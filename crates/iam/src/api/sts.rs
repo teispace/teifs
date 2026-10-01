@@ -1,7 +1,8 @@
 //! STS as AWS has it: temporary credentials for a role (`AssumeRole`), for a user's own
 //! permissions (`GetSessionToken`) or for a federated user (`GetFederationToken`), and
 //! who is calling (`GetCallerIdentity`, `GetAccessKeyInfo`); and a role's session for
-//! someone an OpenID Connect provider vouches for (`AssumeRoleWithWebIdentity`).
+//! someone an OpenID Connect provider vouches for (`AssumeRoleWithWebIdentity`) or a
+//! SAML provider does (`AssumeRoleWithSAML`).
 //!
 //! `AssumeRole` without an AWS role ARN is MinIO's: credentials with the calling user's
 //! own permissions, narrowed by a session policy, for up to a year.
@@ -10,6 +11,7 @@ mod certificate;
 mod custom;
 mod ldap;
 mod openid;
+mod saml;
 
 use std::ops::RangeInclusive;
 
@@ -45,6 +47,16 @@ pub(super) use certificate::CERTIFICATE;
 pub(super) use custom::{CUSTOM_TOKEN, request as custom_request};
 pub(super) use ldap::{LDAP_IDENTITY, request as ldap_request};
 pub(super) use openid::CLIENT_GRANTS;
+pub(super) use saml::SAML;
+
+/// The condition keys `AssumeRoleWithSAML` sets besides the `saml:` keys of the response.
+const ASSUME_ROLE_WITH_SAML: &[&str] = &[
+    "aws:RequestTag/${TagKey}",
+    "aws:TagKeys",
+    "sts:RoleSessionName",
+    "sts:SourceIdentity",
+    "sts:TransitiveTagKeys",
+];
 
 /// The condition keys `AssumeRoleWithWebIdentity` sets besides the provider's own
 /// (`idp.example.com:sub`), which [`crate::oidc::WebIdentity::with_keys`] sets.
@@ -69,6 +81,12 @@ pub(super) const ACTIONS: &[Action] = &[
         on: On::Role,
         keys: ASSUME_ROLE_WITH_WEB_IDENTITY,
         run: assume_role_with_web_identity,
+    },
+    Action {
+        name: SAML,
+        on: On::Role,
+        keys: ASSUME_ROLE_WITH_SAML,
+        run: saml::assume_role_with_saml,
     },
     Action {
         name: LDAP_IDENTITY,
@@ -123,12 +141,12 @@ pub(super) const ACTIONS: &[Action] = &[
 /// The STS actions a session made in some way may call, as on AWS: a role's any but
 /// `GetSessionToken` and `GetFederationToken`; `GetSessionToken`'s only `AssumeRole`
 /// and `GetCallerIdentity`; a federated user's only `GetCallerIdentity`. Anyone may
-/// call `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity` and
-/// `AssumeRoleWithCertificate`, which prove who is asking themselves.
+/// call `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, `AssumeRoleWithLDAPIdentity`
+/// and `AssumeRoleWithCertificate`, which prove who is asking themselves.
 pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
     if matches!(
         action,
-        WEB_IDENTITY | LDAP_IDENTITY | CERTIFICATE | CUSTOM_TOKEN | CLIENT_GRANTS
+        WEB_IDENTITY | SAML | LDAP_IDENTITY | CERTIFICATE | CUSTOM_TOKEN | CLIENT_GRANTS
     ) {
         return true;
     }

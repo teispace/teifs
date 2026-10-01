@@ -421,7 +421,25 @@ pub(crate) mod tests {
             format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
         }
 
-        fn sign(&self, alg: &str, message: &[u8]) -> Vec<u8> {
+        /// Its public key.
+        pub(crate) fn public(&self) -> PublicKey {
+            match self {
+                Self::Rsa(key) => {
+                    let public = key.public_key();
+                    PublicKey::Rsa {
+                        n: public.modulus().big_endian_without_leading_zero().to_vec(),
+                        e: public.exponent().big_endian_without_leading_zero().to_vec(),
+                    }
+                }
+                Self::Ec(key, curve) => PublicKey::Ec {
+                    curve: *curve,
+                    point: key.public_key().as_ref().to_vec(),
+                },
+            }
+        }
+
+        /// `message` signed as JOSE's `alg` signs (ECDSA: with the curve's hash).
+        pub(crate) fn sign(&self, alg: &str, message: &[u8]) -> Vec<u8> {
             let rng = SystemRandom::new();
             match self {
                 Self::Rsa(key) => {

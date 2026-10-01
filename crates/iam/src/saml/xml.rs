@@ -92,10 +92,6 @@ impl Element {
     }
 
     /// Its only child element that's `name` in `ns`, if it has exactly one.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for reading SAML responses, which come next")
-    )]
     pub(crate) fn one(&self, ns: &str, name: &str) -> Result<Option<&Element>, XmlError> {
         let mut found = self.elements().filter(|e| e.is(ns, name));
         let first = found.next();

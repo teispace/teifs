@@ -57,6 +57,9 @@ pub(crate) struct Claims {
     /// The web identity that started it (`AssumeRoleWithWebIdentity`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) web: Option<WebClaims>,
+    /// The SAML response that started it (`AssumeRoleWithSAML`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) saml: Option<SamlClaims>,
     /// Filler that makes the token as long as the caller asked
     /// (`MinimumSessionTokenSize`); it means nothing.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -86,6 +89,21 @@ impl WebClaims {
             .split_once(":oidc-provider/")
             .map_or("", |(_, name)| name)
     }
+}
+
+/// What a role session keeps of the SAML response that started it: the `saml:` keys its
+/// requests have, as on AWS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SamlClaims {
+    /// The SAML provider's ARN (`aws:FederatedProvider`).
+    pub(crate) provider: String,
+    /// `saml:sub`: the `NameID`.
+    pub(crate) sub: String,
+    /// `saml:sub_type`.
+    pub(crate) sub_type: String,
+    /// `saml:namequalifier`.
+    pub(crate) namequalifier: String,
 }
 
 /// Whom a session acts as, by unique id.
@@ -142,6 +160,7 @@ impl Claims {
             transitive: Vec::new(),
             source: None,
             web: None,
+            saml: None,
             pad: String::new(),
         }
     }

@@ -14,7 +14,7 @@ use teifs_policy::{
 use zeroize::Zeroizing;
 
 use crate::{
-    sessions::{Claims, WebClaims, Who},
+    sessions::{Claims, SamlClaims, WebClaims, Who},
     state::{LdapSeen, State},
 };
 
@@ -45,6 +45,8 @@ pub struct Session {
     transitive: Box<[(String, String)]>,
     /// The web identity that started it, whose provider's keys its requests have.
     web: Option<Box<WebClaims>>,
+    /// The SAML response that started it, whose `saml:` keys its requests have.
+    saml: Option<Box<SamlClaims>>,
     /// The directory user it acts for, whose `ldap:` keys its requests have.
     ldap: Option<Box<LdapClaims>>,
 }
@@ -228,6 +230,12 @@ impl Identity {
                 if !web.amr.is_empty() {
                     context = context.with_claim(&key("amr"), web.amr.clone());
                 }
+            }
+            if let Some(saml) = &session.saml {
+                context = context
+                    .with_claim("saml:namequalifier", saml.namequalifier.as_str())
+                    .with_claim("saml:sub", saml.sub.as_str())
+                    .with_claim("saml:sub_type", saml.sub_type.as_str());
             }
             if let Some(ldap) = &session.ldap {
                 context = context
@@ -590,6 +598,7 @@ impl Snapshot {
             source_identity: claims.source.as_deref().map(Into::into),
             transitive: transitive.clone(),
             web: claims.web.clone().map(Box::new),
+            saml: claims.saml.clone().map(Box::new),
             ldap: None,
         };
         Some(match &claims.who {
@@ -603,6 +612,9 @@ impl Snapshot {
                     Principal::session(&self.account, &role.path, &role.name, &role.id, name);
                 if let Some(web) = &claims.web {
                     principal = principal.with_federated_provider(&web.provider);
+                }
+                if let Some(saml) = &claims.saml {
+                    principal = principal.with_federated_provider(&saml.provider);
                 }
                 Identity {
                     principal,

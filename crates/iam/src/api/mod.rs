@@ -121,6 +121,7 @@ impl Iam {
                 p.optional("Action"),
                 Some(
                     sts::WEB_IDENTITY
+                        | sts::SAML
                         | sts::LDAP_IDENTITY
                         | sts::CERTIFICATE
                         | sts::CUSTOM_TOKEN

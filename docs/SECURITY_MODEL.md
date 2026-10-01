@@ -188,6 +188,11 @@ id) under an IAM key the drive's KMS seals, so `system.db` alone (or a snapshot 
 they're never logged, and shown once, when the key is created. SAML providers' private
 keys are sealed the same way and never shown at all; errors about a key or a metadata
 document name the parameter, never its value.
+A SAML response is read without a document type declaration or entities (no XXE or
+entity expansion), and only what a verified signature covers is used: the signature must
+be in the element it signs and reference that element's `ID`, which no other element may
+have, so a signed assertion can't be wrapped or moved next to a forged one (a response
+must have exactly one assertion); only the provider's metadata's keys count.
 Changing IAM is itself an IAM permission: every action of the IAM API is authorized
 before it runs, as on AWS, so a user can manage only what its policies grant, and
 delegated administrators can be held to specific policies and boundaries

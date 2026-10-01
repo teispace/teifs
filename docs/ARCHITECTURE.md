@@ -159,6 +159,16 @@ entities, more than one root, and deep nesting. Private keys (`saml/private_key.
 PKCS#8 or PKCS#1 PEM) are stored as PKCS#8 sealed under the IAM key, bound to their key
 id, like access keys' secrets.
 
+`AssumeRoleWithSAML` (`api/sts/saml.rs`) reads a response with `saml/response.rs`, which
+checks it against the provider and returns only what a signed element says.
+`saml/dsig.rs` verifies an enveloped XML signature as SAML's profile allows it and no
+other way (one reference, to the `ID` of the element the signature is in, unique in the
+document; enveloped-signature then exclusive canonicalization), with aws-lc-rs and only
+the metadata's keys; `saml/c14n.rs` is exclusive canonicalization over the tree
+`saml/xml.rs` reads, which keeps each element's prefixes and namespaces in scope for it.
+The role session keeps the response's `saml:` keys (`sessions::SamlClaims`) as a web
+identity's keeps its provider's.
+
 `AssumeRoleWithWebIdentity` (`oidc/`) checks such a token before the trust policy sees
 it. `oidc/jwt.rs` reads the token strictly (a JSON member named twice is refused) and
 verifies its signature with aws-lc-rs, only with asymmetric algorithms and only with a

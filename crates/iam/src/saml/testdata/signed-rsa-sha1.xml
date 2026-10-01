@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" Version="2.0" IssueInstant="2026-10-01T12:00:00Z" Destination="https://signin.aws.amazon.com/saml">
+  <saml:Issuer>https://idp.example.com/saml</saml:Issuer>
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ID="_a1" Version="2.0" IssueInstant="2026-10-01T12:00:00Z">
+    <saml:Issuer>https://idp.example.com/saml</saml:Issuer>
+    <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+      <ds:SignedInfo>
+        <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+        <ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1"/>
+        <ds:Reference URI="#_a1">
+          <ds:Transforms>
+            <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+            <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"><ec:InclusiveNamespaces xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#" PrefixList="xs"/></ds:Transform>
+          </ds:Transforms>
+          <ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/>
+          <ds:DigestValue>yRqFd8L0RSnA+0dvEXqFRparLMI=</ds:DigestValue>
+        </ds:Reference>
+      </ds:SignedInfo>
+      <ds:SignatureValue>gTjLiBaBu+0WEU8JLWv7HZWPf9FnPFQRuZ1nuTpj1299mnLwaQC7vlyoMe9KwobR
+a7s++eW6rCDNQmkeuv6wIS/a4rr7+LoQj6FfizYv7GDRDa6FJWTdUxYY/jLytxTH
+kg42fUhDhtj61sL+0sdMR4zX83KejnNNC/2T8jK13VfniQsj5pO1KLs0R9AdWD8H
+GT+AucZdwq8HlcvxDDz8ZIkGWcEGigDvxfq6uLA1MuLOkYHYcc/aQ9yoAmI052/v
+MqA/HYFovPpEc1V60mU4ZGK6Q56IVgh/pHwZ+dYgNzgyEsyBXBUpqNrVNSek7fAE
+zYT1CTXIoBC3YjHaDcuRDQ==</ds:SignatureValue>
+    </ds:Signature>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">alice &amp; co &lt;x&gt;</saml:NameID>
+      <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+        <saml:SubjectConfirmationData NotOnOrAfter="2026-10-01T12:05:00Z" Recipient="https://signin.aws.amazon.com/saml"/>
+      </saml:SubjectConfirmation>
+    </saml:Subject>
+    <!-- a comment the digest leaves out -->
+    <saml:AttributeStatement>
+      <saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName">
+        <saml:AttributeValue xsi:type="xs:string">alice	tab&#13;cr "q"</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>

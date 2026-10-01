@@ -276,6 +276,19 @@ behaviour; the on-disk format is always upgraded automatically.
   them only with `--secrets`. A role's trust policy can name a SAML provider of the
   account as its `Federated` principal once it exists. `teifs admin saml
   add|ls|update|rm` manages them.
+- `AssumeRoleWithSAML`, as on AWS: a SAML 2.0 response of one of the account's SAML
+  providers, signed by a key its metadata names (the response, its assertion or both),
+  for AWS's sign-in endpoint and audience and within its times, gets the session of a
+  role its `Role` attribute pairs with the provider, when the role's trust policy allows
+  it with the `saml:` keys (`saml:aud`, `saml:iss`, `saml:sub`, `saml:sub_type`,
+  `saml:namequalifier`, `saml:doc`, the eduPerson attributes). `RoleSessionName`,
+  `SessionDuration`, `SourceIdentity`, `PrincipalTag:*` and `TransitiveTagKeys` work as
+  on AWS, and the answer has `Subject`, `SubjectType`, `Issuer`, `Audience` and
+  `NameQualifier`. The session's requests have `saml:sub`, `saml:sub_type` and
+  `saml:namequalifier`. XML signatures are checked by TeiFS's own exclusive
+  canonicalization and verifier, which refuse signature wrapping, document type
+  declarations and entities. The audit log doesn't record a `SAMLAssertion` sent in the
+  query.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to

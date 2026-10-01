@@ -1120,6 +1120,7 @@ async fn role_condition_keys_hold_back_escalation() {
     d.ok(&caller, "Action=DeleteRole&RoleName=unbounded");
 }
 
+mod assume_saml;
 mod oidc;
 mod saml;
 mod sessions;
