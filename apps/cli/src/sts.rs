@@ -1,6 +1,7 @@
 //! `teifs sts`: temporary credentials, over AWS's STS API as `aws sts` speaks it — who an
 //! alias signs as, a role's session (or, without a role, MinIO's session for the user's
-//! own permissions), and a role's session for an OpenID Connect ID token (a CI job's).
+//! own permissions), a role's session for an OpenID Connect ID token (a CI job's), and
+//! a session for an LDAP user's name and password (MinIO's `AssumeRoleWithLDAPIdentity`).
 //!
 //! The credentials go into an alias (with their session token and when they expire), or
 //! to an owner-only file or standard output in the AWS CLI's `credential_process` format,
@@ -37,6 +38,28 @@ pub enum StsAction {
     /// role's session, or without a role the policies the token names, where the
     /// server allows it. Needs no keys.
     AssumeWeb(WebArgs),
+    /// Sign in with an LDAP user's name and password for temporary credentials with
+    /// the policies mapped to the user and its groups. Needs no keys.
+    AssumeLdap(LdapArgs),
+}
+
+/// `sts assume-ldap`'s arguments.
+#[derive(Args)]
+pub struct LdapArgs {
+    /// The server, like `https://s3.example.com`, or an alias for it.
+    server: String,
+    /// The LDAP user's name, as the directory knows it.
+    #[arg(long, short)]
+    username: String,
+    /// Read the password from standard input (else `TEIFS_LDAP_PASSWORD`, else it's
+    /// asked for).
+    #[arg(long)]
+    password_stdin: bool,
+    /// The region to sign for.
+    #[arg(long, default_value = alias::DEFAULT_REGION)]
+    region: String,
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 /// `sts assume`'s arguments.
@@ -127,6 +150,7 @@ pub async fn run(action: StsAction) -> Result<(), Error> {
         }
         StsAction::Assume(args) => assume(args, &mut aliases).await,
         StsAction::AssumeWeb(args) => assume_web(args, &mut aliases).await,
+        StsAction::AssumeLdap(args) => assume_ldap(args, &mut aliases).await,
     }
 }
 
@@ -179,16 +203,17 @@ async fn assume(args: AssumeArgs, aliases: &mut Aliases) -> Result<(), Error> {
     deliver(&server, &credentials, &args.session.output, aliases)
 }
 
-async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
-    // Only the server: an alias's keys have no part.
-    let server = if let Some((found, _)) = aliases.get(&args.server) {
+/// The server an unsigned sign-in goes to: an alias's, or a URL. Only the server: an
+/// alias's keys have no part.
+fn unsigned_server(aliases: &Aliases, server: &str, region: String) -> Result<Alias, Error> {
+    let server = if let Some((found, _)) = aliases.get(server) {
         found.clone()
     } else {
         let mut server = Alias {
-            url: alias::check_url(&args.server).map_err(Error::usage)?,
+            url: alias::check_url(server).map_err(Error::usage)?,
             access_key: String::new(),
             secret_key: String::new(),
-            region: args.region,
+            region,
             path_style: true,
             session_token: None,
             expires: None,
@@ -202,6 +227,11 @@ async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
         .trust
         .check()
         .map_err(|e| Error::usage(e).with_hint("fix the file TEIFS_CA_CERT or the alias names"))?;
+    Ok(server)
+}
+
+async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
+    let server = unsigned_server(aliases, &args.server, args.region)?;
     args.session.output.check(aliases)?;
     let policy = args.session.policy()?;
     let path = &args.token_file;
@@ -230,6 +260,65 @@ async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
         .credentials
         .ok_or_else(|| Error::general("the server answered without credentials"))?;
     deliver(&server, &credentials, &args.session.output, aliases)
+}
+
+async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error> {
+    let server = unsigned_server(aliases, &args.server, args.region)?;
+    args.session.output.check(aliases)?;
+    let policy = args.session.policy()?;
+    let password = ldap_password(args.password_stdin)?;
+    let client = teifs_client::Client::new(&server.url, "", Zeroizing::new(String::new()))
+        .and_then(|client| match server.trust.pem() {
+            Some(pem) => client.with_root_certificates(pem),
+            None => Ok(client),
+        })
+        .map_err(|e| Error::admin("can't reach the server", &e))?;
+    let answer = client
+        .assume_role_with_ldap_identity(
+            &args.username,
+            &password,
+            policy.as_deref(),
+            args.session.seconds()?,
+        )
+        .await
+        .map_err(|e| Error::admin(format_args!("can't sign {} in", args.username), &e))?;
+    let credentials = Credentials::builder()
+        .access_key_id(answer.access_key)
+        .secret_access_key(answer.secret_key.as_str())
+        .session_token(answer.session_token.as_str())
+        .expiration(aws_sdk_sts::primitives::DateTime::from(answer.expires))
+        .build()
+        .map_err(|e| Error::general(e.to_string()))?;
+    deliver(&server, &credentials, &args.session.output, aliases)
+}
+
+/// The LDAP password: from standard input, `TEIFS_LDAP_PASSWORD`, or a hidden prompt.
+fn ldap_password(from_stdin: bool) -> Result<Zeroizing<String>, Error> {
+    let password = if from_stdin {
+        let mut line = Zeroizing::new(String::new());
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| Error::general(format!("can't read the password: {e}")))?;
+        Zeroizing::new(line.trim_end_matches(['\n', '\r']).to_owned())
+    } else if let Some(password) = crate::config::env("TEIFS_LDAP_PASSWORD") {
+        Zeroizing::new(password)
+    } else if ui::interactive() {
+        Zeroizing::new(
+            inquire::Password::new("LDAP password:")
+                .without_confirmation()
+                .with_display_mode(inquire::PasswordDisplayMode::Hidden)
+                .prompt()
+                .map_err(|e| Error::usage(e.to_string()))?,
+        )
+    } else {
+        return Err(Error::usage(
+            "give the password with --password-stdin or TEIFS_LDAP_PASSWORD",
+        ));
+    };
+    if password.is_empty() {
+        return Err(Error::usage("the LDAP password is empty"));
+    }
+    Ok(password)
 }
 
 /// The alias `name`, to sign with.

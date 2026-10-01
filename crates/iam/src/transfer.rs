@@ -8,11 +8,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
     ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole, ExportedUser,
-    ExportedVersion, IAM_FORMAT, IamExport, ImportReport, Tag,
+    ExportedVersion, IAM_FORMAT, IamExport, ImportReport, LdapPolicyMapping, Tag,
 };
 
 use crate::{
-    ACCOUNT, Draft, Iam, IamError, NewOidcProvider, NewRole, Owner, Result,
+    ACCOUNT, Draft, Iam, IamError, LdapEntity, NewOidcProvider, NewRole, Owner, Result, ldap,
     rules::MAX_KEYS_PER_USER,
     state::{Key, State},
 };
@@ -148,7 +148,47 @@ fn export(state: &State, secrets: bool) -> IamExport {
         users,
         roles,
         oidc_providers,
+        ldap_policies: export_ldap(state),
     }
+}
+
+/// The policies mapped to LDAP users and groups, by name.
+fn export_ldap(state: &State) -> Vec<LdapPolicyMapping> {
+    // In order of DN: the state keeps them so.
+    state
+        .ldap_policies
+        .values()
+        .map(|m| LdapPolicyMapping {
+            dn: m.dn.clone(),
+            entity: m.entity.as_str().to_owned(),
+            policies: policy_names(state, m.policies.iter()),
+        })
+        .collect()
+}
+
+/// Maps the export's policies to its LDAP users and groups, checked as the admin API
+/// checks them (but for the directory, which the import doesn't ask).
+fn import_ldap(
+    d: &mut Draft<'_>,
+    mappings: &[LdapPolicyMapping],
+    arn: &impl Fn(&str) -> Result<String>,
+) -> Result<()> {
+    for mapping in mappings {
+        let dn = ldap::dn::normalize(&mapping.dn).map_err(IamError::InvalidInput)?;
+        let entity = LdapEntity::parse(&mapping.entity).ok_or_else(|| {
+            IamError::InvalidInput(format!(
+                "{} is an LDAP {:?}: give user or group.",
+                mapping.dn, mapping.entity
+            ))
+        })?;
+        let policies = mapping
+            .policies
+            .iter()
+            .map(|name| arn(name))
+            .collect::<Result<Vec<_>>>()?;
+        d.map_ldap_policies(&dn, entity, &policies, true)?;
+    }
+    Ok(())
 }
 
 /// Whether `account` is an AWS account id: 12 digits.
@@ -184,7 +224,8 @@ impl Iam {
                 && s.groups.is_empty()
                 && s.roles.is_empty()
                 && s.policies.is_empty()
-                && s.oidc_providers.is_empty())
+                && s.oidc_providers.is_empty()
+                && s.ldap_policies.is_empty())
             {
                 return Err(IamError::EntityAlreadyExists(
                     "IAM already has users, groups, roles, policies or OpenID Connect \
@@ -220,6 +261,7 @@ impl Iam {
                 users: export.users.len(),
                 roles: export.roles.len(),
                 oidc_providers: export.oidc_providers.len(),
+                ldap_policies: export.ldap_policies.len(),
                 access_keys: 0,
                 keys_without_secrets: Vec::new(),
             };
@@ -259,6 +301,7 @@ impl Iam {
                 })?;
             }
             import_roles(d, &export.roles, &arn)?;
+            import_ldap(d, &export.ldap_policies, &arn)?;
             Ok(report)
         })
     }

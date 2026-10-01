@@ -11,6 +11,7 @@
 mod api;
 mod bearer;
 mod ids;
+pub mod ldap;
 mod oidc;
 mod ops;
 mod rules;
@@ -30,9 +31,11 @@ use teifs_meta::{IamWrite, MetaError, System};
 
 pub use api::{Call, Reply};
 pub use bearer::metrics_token;
+pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
-    AccessKeyInfo, AttachedPolicy, GroupInfo, NewAccessKey, NewOidcProvider, NewRole,
-    OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo, RoleInfo, UserInfo,
+    AccessKeyInfo, AttachedPolicy, GroupInfo, LdapEntity, LdapPolicies, LdapPolicyChange,
+    NewAccessKey, NewOidcProvider, NewRole, OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo,
+    RoleInfo, UserInfo,
 };
 pub use sessions::{AuthError, Issued};
 pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};
@@ -57,6 +60,9 @@ pub enum IamError {
     /// A parameter is invalid.
     #[error("{0}")]
     InvalidInput(String),
+    /// The LDAP directory couldn't be asked.
+    #[error("{0}")]
+    Directory(String),
     /// A policy document is invalid.
     #[error("{0}")]
     MalformedPolicyDocument(String),
@@ -89,6 +95,7 @@ impl IamError {
             Self::InvalidInput(_) => "InvalidInput",
             Self::MalformedPolicyDocument(_) => "MalformedPolicyDocument",
             Self::PackedPolicyTooLarge => "PackedPolicyTooLarge",
+            Self::Directory(_) => "ServiceUnavailable",
             Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => {
                 "ServiceFailure"
             }
@@ -104,6 +111,7 @@ impl IamError {
             Self::InvalidInput(_)
             | Self::MalformedPolicyDocument(_)
             | Self::PackedPolicyTooLarge => 400,
+            Self::Directory(_) => 503,
             Self::Stored(_) | Self::Storage(_) | Self::Crypto(_) | Self::Persist(_) => 500,
         }
     }
@@ -124,6 +132,8 @@ pub struct Iam {
     tokens: DataKey,
     /// The OpenID Connect providers' signing keys.
     web_keys: oidc::KeyCache,
+    /// The LDAP directory users sign in with, if there's one.
+    ldap: Option<Arc<ldap::Directory>>,
 }
 
 struct Inner {
@@ -190,7 +200,21 @@ impl Iam {
             }),
             snapshot: RwLock::new(Arc::new(snapshot)),
             web_keys: oidc::KeyCache::default(),
+            ldap: None,
         })
+    }
+
+    /// Signs users in with `directory` (`AssumeRoleWithLDAPIdentity`).
+    #[must_use]
+    pub fn with_ldap(mut self, directory: ldap::Directory) -> Self {
+        self.ldap = Some(Arc::new(directory));
+        self
+    }
+
+    /// The LDAP directory users sign in with, if there's one.
+    #[must_use]
+    pub fn ldap(&self) -> Option<&Arc<ldap::Directory>> {
+        self.ldap.as_ref()
     }
 
     /// The account id: 12 digits, random per drive.

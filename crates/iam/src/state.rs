@@ -9,12 +9,13 @@ use std::{
 
 use teifs_crypto::DataKey;
 use teifs_meta::{
-    AccessKeyRow, IamRows, InlineRow, OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow,
+    AccessKeyRow, IamRows, InlineRow, LdapPolicyRow, LdapSessionRow, OidcProviderRow, PolicyRow,
+    PolicyVersionRow, RoleRow,
 };
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
 
-use crate::{IamError, Result};
+use crate::{IamError, LdapEntity, Result};
 
 /// A policy document: the text as given (returned as is) and what it says.
 #[derive(Debug, Clone)]
@@ -163,6 +164,35 @@ impl OidcProvider {
     }
 }
 
+/// The managed policies mapped to an LDAP user's or group's DN.
+#[derive(Debug, Clone)]
+pub(crate) struct LdapMapping {
+    /// The DN, written in one form.
+    pub(crate) dn: String,
+    pub(crate) entity: LdapEntity,
+    /// The policies, by id.
+    pub(crate) policies: BTreeSet<String>,
+}
+
+/// A directory user with live sessions, as the directory last said.
+#[derive(Debug, Clone)]
+pub(crate) struct LdapSeen {
+    /// Its DN, written in one form.
+    pub(crate) dn: String,
+    /// The name it signed in with, which group filters may use.
+    pub(crate) username: String,
+    /// Its groups' DNs.
+    pub(crate) groups: Vec<String>,
+    /// When the directory last said, in milliseconds since the Unix epoch.
+    pub(crate) checked_ms: i64,
+    /// When its last session expires: the record goes then.
+    pub(crate) expires_ms: i64,
+    /// Sessions of an older generation are revoked.
+    pub(crate) generation: u32,
+    /// Whether the directory no longer has it.
+    pub(crate) gone: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Version {
     pub(crate) document: Document,
@@ -219,6 +249,10 @@ pub(crate) struct State {
     pub(crate) oidc_providers: BTreeMap<String, Arc<OidcProvider>>,
     pub(crate) policies: BTreeMap<String, Arc<Managed>>,
     pub(crate) keys: BTreeMap<String, Arc<Key>>,
+    /// The policies mapped to LDAP DNs, by DN.
+    pub(crate) ldap_policies: BTreeMap<String, Arc<LdapMapping>>,
+    /// Directory users with live sessions, by DN.
+    pub(crate) ldap_sessions: BTreeMap<String, Arc<LdapSeen>>,
 }
 
 impl State {
@@ -229,6 +263,8 @@ impl State {
             policies: load_policies(rows.policies, rows.versions, rows.policy_tags)?,
             keys: load_keys(rows.keys, key)?,
             oidc_providers: load_oidc_providers(rows.oidc_providers, rows.oidc_provider_tags)?,
+            ldap_policies: load_ldap_policies(rows.ldap_policies)?,
+            ldap_sessions: load_ldap_sessions(rows.ldap_sessions)?,
             ..Self::default()
         };
         let mut users: BTreeMap<String, User> = rows
@@ -416,6 +452,14 @@ impl State {
                 .count()
     }
 
+    /// How many LDAP users and groups a managed policy is mapped to.
+    pub(crate) fn ldap_uses(&self, policy: &str) -> usize {
+        self.ldap_policies
+            .values()
+            .filter(|m| m.policies.contains(policy))
+            .count()
+    }
+
     /// How many users and roles have a managed policy as their permissions boundary.
     pub(crate) fn boundary_uses(&self, policy: &str) -> usize {
         self.users
@@ -475,6 +519,50 @@ impl State {
             .find(|(a, _)| a == arn)
             .map(|(_, id)| id.as_str())
     }
+}
+
+fn load_ldap_policies(rows: Vec<LdapPolicyRow>) -> Result<BTreeMap<String, Arc<LdapMapping>>> {
+    let mut mappings: BTreeMap<String, LdapMapping> = BTreeMap::new();
+    for row in rows {
+        let entity = LdapEntity::parse(&row.entity).ok_or_else(|| {
+            IamError::Stored(format!(
+                "the LDAP mapping of {} is a {}",
+                row.dn, row.entity
+            ))
+        })?;
+        mappings
+            .entry(row.dn.clone())
+            .or_insert_with(|| LdapMapping {
+                dn: row.dn,
+                entity,
+                policies: BTreeSet::new(),
+            })
+            .policies
+            .insert(row.policy_id);
+    }
+    Ok(mappings
+        .into_iter()
+        .map(|(dn, m)| (dn, Arc::new(m)))
+        .collect())
+}
+
+fn load_ldap_sessions(rows: Vec<LdapSessionRow>) -> Result<BTreeMap<String, Arc<LdapSeen>>> {
+    rows.into_iter()
+        .map(|row| {
+            let groups = serde_json::from_str(&row.groups)
+                .map_err(|e| IamError::Stored(format!("the LDAP groups of {}: {e}", row.dn)))?;
+            let seen = LdapSeen {
+                dn: row.dn.clone(),
+                username: row.username,
+                groups,
+                checked_ms: row.checked_ms,
+                expires_ms: row.expires_ms,
+                generation: row.generation,
+                gone: row.gone,
+            };
+            Ok((row.dn, Arc::new(seen)))
+        })
+        .collect()
 }
 
 fn load_policies(

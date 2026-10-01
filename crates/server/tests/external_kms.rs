@@ -137,7 +137,13 @@ async fn objects_are_sealed_by_the_transit_engine() {
         mount,
         namespace: None,
     });
-    objects_are_sealed(external, "teifs-default", "photos", true).await;
+    Box::pin(objects_are_sealed(
+        external,
+        "teifs-default",
+        "photos",
+        true,
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -154,7 +160,13 @@ async fn objects_are_sealed_by_kes() {
     let (kms, location) = teifs_server::open_external(&external).await.unwrap();
     assert!(location.describe().contains("identity"));
     drop::<Arc<dyn Kms>>(kms);
-    objects_are_sealed(external, &fresh("default"), &fresh("photos"), false).await;
+    Box::pin(objects_are_sealed(
+        external,
+        &fresh("default"),
+        &fresh("photos"),
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -167,5 +179,11 @@ async fn objects_are_sealed_by_aws_kms() {
         region: Some("us-east-1".to_owned()),
         endpoint: Some(endpoint),
     });
-    objects_are_sealed(external, &fresh("default"), &fresh("photos"), true).await;
+    Box::pin(objects_are_sealed(
+        external,
+        &fresh("default"),
+        &fresh("photos"),
+        true,
+    ))
+    .await;
 }

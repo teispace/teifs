@@ -54,12 +54,17 @@ a table, authorizes it and answers in AWS's XML.
    `Snapshot::build_session`, and a `SessionKind` that both places above must handle.
    Every action that issues credentials takes `min_token_size(r)?` and issues with
    `Iam::issue_at_least`, so `MinimumSessionTokenSize` works everywhere.
-   An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`)
-   is answered unsigned: `Iam::is_web_identity` picks it out in
-   `crates/s3/src/iam_api.rs`, and `Iam::serve_web_identity` fetches what it needs
-   (the provider's keys, async) before the sync handler runs as the anonymous identity.
-   Tests get a local identity provider from `oidc::keys::tests::publishing` (plain
-   HTTP) or `publishing_with` and `oidc::tls::tests::Authority` (TLS, own CA).
+   An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`,
+   MinIO's `AssumeRoleWithLDAPIdentity`) is answered unsigned: `Iam::proves_itself`
+   picks it out in `crates/s3/src/iam_api.rs`, and `Iam::serve_self_proving` does the
+   async part (fetching the provider's keys, signing in with the directory) before the
+   sync handler runs as the anonymous identity; the directory's answer reaches the
+   handler as `Run.ldap`. Tests get a local identity provider from
+   `oidc::keys::tests::publishing` (plain HTTP) or `publishing_with` and
+   `oidc::tls::tests::Authority` (TLS, own CA), and a directory from
+   `ldap::fake::FakeLdap` (feature `fake-ldap` outside the crate).
+   A MinIO action AWS doesn't have goes in `check_reference`'s `minio` list in
+   `crates/iam/src/api/tests.rs`, which checks the others against AWS's reference.
 6. **Tests**:
    - `every_parameter` in `crates/iam/src/api/tests.rs` needs the action's parameters,
      so `every_action_is_authorized` refuses it to a user without permissions;

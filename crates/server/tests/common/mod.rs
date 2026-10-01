@@ -61,6 +61,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         public_metrics: false,
         audit: Vec::new(),
         limits: teifs_server::Limits::default(),
+        ldap: None,
     }
 }
 

@@ -6,6 +6,8 @@
 //! `AssumeRole` without an AWS role ARN is MinIO's: credentials with the calling user's
 //! own permissions, narrowed by a session policy, for up to a year.
 
+mod ldap;
+
 use std::ops::RangeInclusive;
 
 use teifs_policy::{Context, Decision, Json, Kind as PolicyKind, Policy, Principal, StsKey};
@@ -36,6 +38,8 @@ const ASSUME_ROLE: &[&str] = &[
 /// The action that exchanges a web identity token for a role's session.
 pub(super) const WEB_IDENTITY: &str = "AssumeRoleWithWebIdentity";
 
+pub(super) use ldap::{LDAP_IDENTITY, request as ldap_request};
+
 /// The condition keys `AssumeRoleWithWebIdentity` sets besides the provider's own
 /// (`idp.example.com:sub`), which [`crate::oidc::WebIdentity::with_keys`] sets.
 const ASSUME_ROLE_WITH_WEB_IDENTITY: &[&str] = &[
@@ -59,6 +63,12 @@ pub(super) const ACTIONS: &[Action] = &[
         on: On::Role,
         keys: ASSUME_ROLE_WITH_WEB_IDENTITY,
         run: assume_role_with_web_identity,
+    },
+    Action {
+        name: LDAP_IDENTITY,
+        on: On::Any,
+        keys: &[],
+        run: ldap::assume_role_with_ldap_identity,
     },
     Action {
         name: "GetSessionToken",
@@ -89,13 +99,14 @@ pub(super) const ACTIONS: &[Action] = &[
 /// The STS actions a session made in some way may call, as on AWS: a role's any but
 /// `GetSessionToken` and `GetFederationToken`; `GetSessionToken`'s only `AssumeRole`
 /// and `GetCallerIdentity`; a federated user's only `GetCallerIdentity`. Anyone may
-/// call `AssumeRoleWithWebIdentity`, whose token says who is asking.
+/// call `AssumeRoleWithWebIdentity` and `AssumeRoleWithLDAPIdentity`, which prove who
+/// is asking themselves.
 pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
-    if action == WEB_IDENTITY {
+    if action == WEB_IDENTITY || action == LDAP_IDENTITY {
         return true;
     }
     match kind {
-        SessionKind::Role { .. } | SessionKind::User | SessionKind::Web => {
+        SessionKind::Role { .. } | SessionKind::User | SessionKind::Web | SessionKind::Ldap => {
             !matches!(action, "GetSessionToken" | "GetFederationToken")
         }
         SessionKind::SessionToken => matches!(action, "AssumeRole" | "GetCallerIdentity"),
@@ -165,7 +176,7 @@ fn assume_role(r: &Run<'_>) -> Out {
     // A web identity's session is a role's for chaining, as on AWS.
     let chained = matches!(
         caller.map(Session::kind),
-        Some(SessionKind::Role { .. } | SessionKind::Web)
+        Some(SessionKind::Role { .. } | SessionKind::Web | SessionKind::Ldap)
     );
     let Inherited {
         tags: inherited,

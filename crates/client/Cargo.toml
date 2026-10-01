@@ -21,6 +21,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 httpdate.workspace = true
+form_urlencoded.workspace = true
+time = { workspace = true, features = ["parsing"] }
 
 [dev-dependencies]
 tokio.workspace = true

@@ -159,7 +159,8 @@ verifier (`oidc/tls.rs`) tries the system's trust store and then the pinned
 certificates; `oidc/mod.rs` matches the issuer to a provider and checks
 audience, subject and times, and turns the claims into the provider's condition keys.
 Fetching is async and the STS API is not, so the S3 layer calls
-`Iam::serve_web_identity`, which makes sure the keys the token needs are known before it
+`Iam::serve_self_proving` (for every request `Iam::proves_itself` says carries its own
+proof), which makes sure the keys the token needs are known before it
 answers the request as any other STS call. The request is served as the anonymous
 identity whatever signed it: the trust policy's `Federated` principal matches a
 `WebIdentityUser` principal of that provider, and nothing else. Without a `RoleArn`,
@@ -167,6 +168,23 @@ for a provider tagged `teifs:policy-claim` (`oidc::policy_claim`), the session i
 MinIO's: `Who::Web` keeps the provider's and the named managed policies' unique ids,
 and `Snapshot` resolves them on every request, so a deleted provider ends the session
 and a deleted policy drops out of it.
+
+MinIO's `AssumeRoleWithLDAPIdentity` (`ldap/`, `ops/ldap.rs`, `api/sts/ldap.rs`) is the
+other self-proving request. `ldap/mod.rs` holds the settings and checks them offline
+(filters parse, DNs parse, base DNs don't overlap); `ldap/dn.rs` parses DNs (RFC 4514)
+and writes them in one form, which is how mappings are kept and compared;
+`ldap/client.rs` (ldap3, with rustls) opens a connection per operation, binds as the
+lookup account, finds the user, binds as it, finds its groups, and unbinds, each step
+under a timeout; SRV records are looked up with hickory-resolver. `serve_self_proving`
+signs the user in first, then the sync STS action checks that the user's DN or a group's
+has a mapping, records the user (`iam_ldap_sessions`: its groups, the latest expiry of
+its sessions, and a generation) and issues `Who::Ldap { dn, username, generation }`.
+`Snapshot` gives such a session the policies mapped (`iam_ldap_policies`) to its DN and
+its recorded groups, and only while its generation is the record's:
+`Iam::check_ldap_users`, which the server runs every ten minutes, refreshes each
+recorded user's groups and bumps the generation of one the directory lost, which ends
+its sessions. `ldap/fake.rs` (ldap3_proto, behind the `fake-ldap` feature) is a small
+LDAP server for tests.
 
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is

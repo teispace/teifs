@@ -20,6 +20,7 @@ mod error;
 mod health;
 mod init;
 mod kms;
+mod ldap;
 mod notify;
 mod repair;
 mod sts;
@@ -217,6 +218,8 @@ pub(crate) struct ServeArgs {
     kms_keyring: Option<PathBuf>,
     #[command(flatten)]
     kms: kms::KmsArgs,
+    #[command(flatten)]
+    ldap: ldap::LdapArgs,
     /// Allow SSE-C (customer-provided keys) on buckets that don't set it themselves;
     /// AWS blocks it by default since April 2026.
     #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
@@ -1568,6 +1571,7 @@ fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
 async fn serve(args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
+    let ldap = args.ldap.settings().map_err(|e| e.to_string())?;
     let credentials = match &keys {
         Some(keys) => Some(Credentials {
             access_key: keys.access.clone(),
@@ -1628,6 +1632,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             body_timeout: args.body_timeout,
             max_connections: args.max_connections,
         },
+        ldap,
     })
     .await
     .map_err(|e| e.to_string())?;

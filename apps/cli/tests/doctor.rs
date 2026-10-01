@@ -334,3 +334,54 @@ fn an_external_kms_is_asked() {
         "{detail}"
     );
 }
+
+#[test]
+fn the_ldap_directory_is_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let f = folder.to_str().unwrap();
+    let gone = std::net::TcpListener::bind(FREE).unwrap();
+    let server = gone.local_addr().unwrap().to_string();
+    drop(gone);
+    let ldap = [
+        "--ldap-server",
+        &server,
+        "--ldap-insecure",
+        "--ldap-lookup-bind-dn",
+        "cn=admin,dc=min,dc=io",
+        "--ldap-user-base-dn",
+        "ou=people,dc=min,dc=io",
+        "--ldap-user-filter",
+        "(uid=%s)",
+    ];
+    let args: Vec<&str> = [f, "--listen", FREE].into_iter().chain(ldap).collect();
+    let (code, checks) = doctor(
+        home.path(),
+        &args,
+        &[("TEIFS_LDAP_LOOKUP_BIND_PASSWORD", "admin")],
+    );
+    assert_eq!(code, 1);
+    let (state, detail) = check(&checks, "LDAP");
+    assert_eq!(state, "failed");
+    assert!(
+        detail.starts_with(&format!("LDAP at {server}: can't reach the LDAP server")),
+        "{detail}"
+    );
+    // Settings that can't work say so without asking.
+    let args: Vec<&str> = [f, "--listen", FREE]
+        .into_iter()
+        .chain(ldap[..7].iter().copied())
+        .collect();
+    let (_, checks) = doctor(
+        home.path(),
+        &args,
+        &[("TEIFS_LDAP_LOOKUP_BIND_PASSWORD", "admin")],
+    );
+    let (state, detail) = check(&checks, "LDAP");
+    assert_eq!(state, "failed");
+    assert!(detail.contains("filter"), "{detail}");
+    // Without LDAP, there's no check.
+    let (_, checks) = doctor(home.path(), &[f, "--listen", FREE], &[]);
+    assert!(checks.iter().all(|c| c["name"] != "LDAP"));
+}

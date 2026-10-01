@@ -1,5 +1,6 @@
 //! IAM's operations, with AWS's rules and messages.
 
+mod ldap;
 mod oidc;
 mod roles;
 
@@ -19,6 +20,8 @@ use crate::{
     state::{Document, Group, Key, Managed, Role, State, User, Version},
 };
 
+pub(crate) use ldap::LdapSignIn;
+pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
 pub use oidc::{NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
 
@@ -1215,6 +1218,11 @@ impl Iam {
             if d.state.boundary_uses(id) > 0 {
                 return Err(IamError::DeleteConflict(
                     "Cannot delete a policy used as a permissions boundary.".into(),
+                ));
+            }
+            if d.state.ldap_uses(id) > 0 {
+                return Err(IamError::DeleteConflict(
+                    "Cannot delete a policy mapped to LDAP users or groups.".into(),
                 ));
             }
             if policy.versions.len() > 1 {

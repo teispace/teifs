@@ -4,6 +4,7 @@
 //! --endpoint-url …` speaks too).
 
 mod buckets;
+mod ldap;
 mod oidc;
 mod policy;
 mod prometheus;
@@ -86,6 +87,12 @@ pub enum AdminAction {
     Oidc {
         #[command(subcommand)]
         action: oidc::OidcAction,
+    },
+    /// Map managed policies to LDAP users and groups, whose sessions (`teifs sts
+    /// assume-ldap`) get them.
+    Ldap {
+        #[command(subcommand)]
+        action: ldap::LdapAction,
     },
 }
 
@@ -188,6 +195,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         AdminAction::User { action } => users::run(aliases, action).await,
         AdminAction::Role { action } => roles::run(&aliases, action).await,
         AdminAction::Oidc { action } => oidc::run(&aliases, action).await,
+        AdminAction::Ldap { action } => ldap::run(&aliases, action).await,
     }
 }
 
@@ -434,6 +442,7 @@ async fn config(client: &Client) -> Result<(), Error> {
                     None => "none".to_owned(),
                 },
             ),
+            ("LDAP", ldap_words(config.ldap.as_ref())),
             ("SSE-C allowed", yes_no(config.allow_sse_c)),
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),
@@ -490,6 +499,21 @@ async fn config(client: &Client) -> Result<(), Error> {
         || record("serverConfig", &config),
     );
     Ok(())
+}
+
+/// The LDAP directory users sign in with, in words.
+fn ldap_words(ldap: Option<&teifs_client::LdapConfig>) -> String {
+    ldap.map_or_else(
+        || "none".to_owned(),
+        |ldap| {
+            format!(
+                "{} ({}), users in {}",
+                ldap.server,
+                ldap.transport,
+                ldap.user_bases.join("; ")
+            )
+        },
+    )
 }
 
 /// Where the server's KMS keys are, in words.

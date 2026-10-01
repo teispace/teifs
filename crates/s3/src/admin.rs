@@ -10,12 +10,12 @@ use std::{
 
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
-use teifs_iam::{Iam, IamError, RootKey};
+use teifs_iam::{Iam, IamError, LdapEntity, RootKey};
 use teifs_store::{JobStatus, Store};
 use teifs_types::{
     admin::{
-        AdminError, DiskInfo, IamExport, JobInfo, RootKeyRotated, ServerConfig, ServerInfo,
-        UsageInfo,
+        AdminError, DiskInfo, IamExport, JobInfo, LdapPolicyChanged, LdapPolicyMapping,
+        LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo,
     },
     audit::TraceFilter,
 };
@@ -78,7 +78,8 @@ pub(crate) fn error(status: StatusCode, code: &str, message: impl Into<String>) 
 /// An IAM error, with IAM's code and status.
 fn iam_error(err: IamError) -> S3Error {
     let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    if status.is_server_error() {
+    // What the directory said is the caller's to fix, so it's shown.
+    if status.is_server_error() && !matches!(err, IamError::Directory(_)) {
         tracing::error!(error = %err, "an admin request failed in IAM");
         return S3Error::internal_error(err);
     }
@@ -332,6 +333,90 @@ pub(crate) async fn import(iam: &Arc<Iam>, mut req: S3Request<Body>) -> S3Result
     Ok(json(&report))
 }
 
+/// The largest LDAP policy change accepted.
+const MAX_LDAP_REQUEST: usize = 64 * 1024;
+
+/// `GET ldap/policies`: every DN with policies, or `?dn=DN`'s (in any spelling).
+pub(crate) fn ldap_policies(iam: &Iam, query: Option<&str>) -> S3Result<S3Response<Body>> {
+    let dn = query_dn(query)?;
+    let mappings: Vec<LdapPolicyMapping> = iam
+        .ldap_policies(dn.as_deref())
+        .map_err(iam_error)?
+        .into_iter()
+        .map(|m| LdapPolicyMapping {
+            dn: m.dn,
+            entity: m.entity.as_str().to_owned(),
+            policies: m.policies,
+        })
+        .collect();
+    Ok(json(&mappings))
+}
+
+/// The DN a query names, when `dn=DN` is all it says, written in one form.
+fn query_dn(query: Option<&str>) -> S3Result<Option<String>> {
+    let mut dn = None;
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if name != "dn" || dn.is_some() {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "The only parameter is dn=DN.",
+            ));
+        }
+        dn = Some(
+            teifs_iam::ldap::normalize(&value)
+                .map_err(|e| error(StatusCode::BAD_REQUEST, "InvalidArgument", e))?,
+        );
+    }
+    Ok(dn)
+}
+
+/// `POST ldap/attach` and `ldap/detach`.
+pub(crate) async fn change_ldap_policies(
+    iam: &Iam,
+    mut req: S3Request<Body>,
+    attach: bool,
+) -> S3Result<S3Response<Body>> {
+    let body = signed_body(&mut req, MAX_LDAP_REQUEST)
+        .await
+        .map_err(s3_refusal)?;
+    let request: LdapPolicyRequest = serde_json::from_slice(&body).map_err(|e| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "MalformedJSON",
+            format!("The body isn't an LDAP policy change: {e}"),
+        )
+    })?;
+    let (dn, entity) = match (request.user, request.group) {
+        (Some(dn), None) => (dn, LdapEntity::User),
+        (None, Some(dn)) => (dn, LdapEntity::Group),
+        _ => {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Give one of user and group.",
+            ));
+        }
+    };
+    let change = iam
+        .change_ldap_policies(&dn, entity, &request.policies, attach)
+        .await
+        .map_err(iam_error)?;
+    tracing::info!(
+        dn = change.dn,
+        entity = change.entity.as_str(),
+        changed = ?change.changed,
+        attach,
+        "an LDAP user's or group's policies changed"
+    );
+    Ok(json(&LdapPolicyChanged {
+        dn: change.dn,
+        entity: change.entity.as_str().to_owned(),
+        changed: change.changed,
+        policies: change.policies,
+    }))
+}
+
 /// `GET snapshots`.
 pub(crate) async fn snapshots(store: &Store) -> S3Result<S3Response<Body>> {
     let snapshots = store.snapshots().await.map_err(crate::errors::from_store)?;
@@ -393,6 +478,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_str(value).unwrap());
         headers
+    }
+
+    #[test]
+    fn a_listing_names_one_dn_at_most() {
+        assert_eq!(query_dn(None).unwrap(), None);
+        assert_eq!(
+            query_dn(Some("dn=CN%3Da%2C%20DC%3Db")).unwrap().as_deref(),
+            Some("cn=a,dc=b")
+        );
+        for bad in ["dn=cn%3Da&dn=cn%3Db", "user=cn%3Da", "dn=nope"] {
+            assert!(query_dn(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

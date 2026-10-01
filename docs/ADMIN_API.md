@@ -60,6 +60,9 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/.teifs/admin/v1/iam/secrets` | The account's IAM with access keys' secrets, to move it to another drive | root user |
 | `PUT` | `/.teifs/admin/v1/iam` | Imports an `IamExport` into an empty IAM, all or nothing: `ImportReport`; `?account=adopt` also takes its account id | root user |
 | `POST` | `/.teifs/admin/v1/root-key` | Replaces a root key the drive generated and answers the new one: `RootKeyRotated` | root user |
+| `GET` | `/.teifs/admin/v1/ldap/policies` | The managed policies mapped to LDAP users' and groups' DNs (`?dn=DN`: one): `LdapPolicyMapping`s | `teifs:ListLDAPPolicies` |
+| `POST` | `/.teifs/admin/v1/ldap/attach` | Maps managed policies to an LDAP user's or group's DN, which the directory must have (`LdapPolicyRequest`): `LdapPolicyChanged` | `teifs:AttachLDAPPolicy` |
+| `POST` | `/.teifs/admin/v1/ldap/detach` | Removes managed policies from an LDAP user's or group's DN (`LdapPolicyRequest`): `LdapPolicyChanged` | `teifs:DetachLDAPPolicy` |
 
 ### S3 Control
 

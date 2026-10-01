@@ -35,6 +35,8 @@ const MIGRATIONS: &[&str] = &[
     // 7: a bucket's versioning (`enabled`, `suspended`; NULL until first configured),
     //    read with its record on every request.
     "ALTER TABLE buckets ADD COLUMN versioning TEXT;",
+    // 8: IAM's LDAP sign-in: policies mapped to DNs, and directory users' records.
+    crate::iam::LDAP_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

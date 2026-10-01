@@ -19,9 +19,9 @@ use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3
 use teifs_iam::{Iam, Identity};
 use teifs_store::Store;
 use teifs_types::admin::{
-    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_PREFIX,
-    ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
-    ServerConfig,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
+    ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_PREFIX, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
+    ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA, ServerConfig,
 };
 
 use crate::{
@@ -103,6 +103,9 @@ enum Handler {
     ExportIamSecrets,
     ImportIam,
     RotateRootKey,
+    LdapPolicies,
+    AttachLdapPolicies,
+    DetachLdapPolicies,
     Snapshots,
     TakeSnapshot,
     ExportBuckets,
@@ -129,6 +132,9 @@ impl Handler {
             Self::ExportIamSecrets => "ExportIAMSecrets",
             Self::ImportIam => "ImportIAM",
             Self::RotateRootKey => "RotateRootKey",
+            Self::LdapPolicies => "ListLDAPPolicies",
+            Self::AttachLdapPolicies => "AttachLDAPPolicy",
+            Self::DetachLdapPolicies => "DetachLDAPPolicy",
             Self::Snapshots => "ListSnapshots",
             Self::TakeSnapshot => "TakeSnapshot",
             Self::ExportBuckets => "ExportBucketMetadata",
@@ -306,6 +312,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Root,
         handler: Handler::RotateRootKey,
         about: "Replaces a root key the drive generated and answers the new one: `RootKeyRotated`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Get,
+        path: ADMIN_LDAP_POLICIES,
+        needs: Needs::Action("teifs:ListLDAPPolicies", ANY),
+        handler: Handler::LdapPolicies,
+        about: "The managed policies mapped to LDAP users' and groups' DNs (`?dn=DN`: one): `LdapPolicyMapping`s",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Post,
+        path: ADMIN_LDAP_ATTACH,
+        needs: Needs::Action("teifs:AttachLDAPPolicy", ANY),
+        handler: Handler::AttachLdapPolicies,
+        about: "Maps managed policies to an LDAP user's or group's DN, which the directory must have (`LdapPolicyRequest`): `LdapPolicyChanged`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Post,
+        path: ADMIN_LDAP_DETACH,
+        needs: Needs::Action("teifs:DetachLDAPPolicy", ANY),
+        handler: Handler::DetachLdapPolicies,
+        about: "Removes managed policies from an LDAP user's or group's DN (`LdapPolicyRequest`): `LdapPolicyChanged`",
     },
     Endpoint {
         api: Api::Minio,
@@ -623,6 +653,9 @@ impl Routes {
             Handler::RotateRootKey => {
                 admin::rotate_root_key(&self.iam, self.root_keys.as_ref()).await
             }
+            Handler::LdapPolicies => admin::ldap_policies(&self.iam, req.uri.query()),
+            Handler::AttachLdapPolicies => admin::change_ldap_policies(&self.iam, req, true).await,
+            Handler::DetachLdapPolicies => admin::change_ldap_policies(&self.iam, req, false).await,
             Handler::Snapshots => admin::snapshots(&self.store).await,
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,

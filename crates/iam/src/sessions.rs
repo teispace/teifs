@@ -113,6 +113,15 @@ pub(crate) enum Who {
         sub: String,
         policies: Vec<String>,
     },
+    /// MinIO's `AssumeRoleWithLDAPIdentity`: a directory user (its DN, written in one
+    /// form) and the name it signed in with. Its policies are those mapped to its DN and
+    /// its groups' now; a session of an older `generation` than the user's record is
+    /// revoked.
+    Ldap {
+        dn: String,
+        username: String,
+        generation: u32,
+    },
 }
 
 impl Claims {

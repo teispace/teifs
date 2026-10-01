@@ -29,11 +29,12 @@ fn strings(value: &serde_json::Value) -> BTreeSet<String> {
 
 /// The actions of `actions` are the service's, on the resources and with the condition
 /// keys its reference gives, but for the keys of other identity providers (`saml:…`,
-/// `accounts.google.com:…`), which no request signed with IAM credentials has.
-fn check_reference(service: &serde_json::Value, actions: &[Action]) {
+/// `accounts.google.com:…`), which no request signed with IAM credentials has. The
+/// actions in `minio` are MinIO's own, which AWS doesn't have.
+fn check_reference(service: &serde_json::Value, actions: &[Action], minio: &[&str]) {
     let names: BTreeSet<&str> = actions.iter().map(|a| a.name).collect();
     assert_eq!(names.len(), actions.len(), "an action is listed twice");
-    for action in actions {
+    for action in actions.iter().filter(|a| !minio.contains(&a.name)) {
         let entry = &service["actions"][action.name];
         assert!(
             entry.is_object(),
@@ -67,8 +68,12 @@ fn check_reference(service: &serde_json::Value, actions: &[Action]) {
 #[test]
 fn actions_match_aws_service_reference() {
     let reference: serde_json::Value = serde_json::from_str(REFERENCE).unwrap();
-    check_reference(&reference, ACTIONS);
-    check_reference(&reference["sts"], super::sts::ACTIONS);
+    check_reference(&reference, ACTIONS, &[]);
+    check_reference(
+        &reference["sts"],
+        super::sts::ACTIONS,
+        &[super::sts::LDAP_IDENTITY],
+    );
     let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
     for action in ACTIONS {
         // What else the operation needs (`CreateUser` with tags needs `TagUser`) is an

@@ -118,6 +118,25 @@ pub(crate) const OIDC_MIGRATION: &str = "
         PRIMARY KEY (provider_id, key)
     ) WITHOUT ROWID;";
 
+/// LDAP sign-in: migration 8. The managed policies mapped to directory users' and
+/// groups' DNs, and a record of each directory user with live sessions.
+pub(crate) const LDAP_MIGRATION: &str = "
+    CREATE TABLE iam_ldap_policies (
+        dn        TEXT NOT NULL,
+        entity    TEXT NOT NULL,
+        policy_id TEXT NOT NULL REFERENCES iam_policies (id),
+        PRIMARY KEY (dn, policy_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE iam_ldap_sessions (
+        dn         TEXT    PRIMARY KEY,
+        username   TEXT    NOT NULL,
+        groups     TEXT    NOT NULL,
+        checked_ms INTEGER NOT NULL,
+        expires_ms INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        gone       INTEGER NOT NULL
+    ) WITHOUT ROWID;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -172,6 +191,36 @@ pub struct OidcProviderRow {
     pub thumbprints: String,
     /// When it was created, in milliseconds since the Unix epoch.
     pub created_ms: i64,
+}
+
+/// A managed policy mapped to an LDAP user's or group's DN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LdapPolicyRow {
+    /// The DN, written in one form (`teifs-iam` owns it).
+    pub dn: String,
+    /// `user` or `group`.
+    pub entity: String,
+    /// The policy's id.
+    pub policy_id: String,
+}
+
+/// A directory user with live sessions, as the directory last said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LdapSessionRow {
+    /// Its DN, written in one form.
+    pub dn: String,
+    /// The name it signed in with.
+    pub username: String,
+    /// Its groups' DNs (JSON, which `teifs-iam` owns).
+    pub groups: String,
+    /// When the directory last said, in milliseconds since the Unix epoch.
+    pub checked_ms: i64,
+    /// When its last session expires.
+    pub expires_ms: i64,
+    /// Sessions of an older generation are revoked.
+    pub generation: u32,
+    /// Whether the directory no longer has it.
+    pub gone: bool,
 }
 
 /// A group.
@@ -291,6 +340,10 @@ pub struct IamRows {
     pub attached: Vec<(String, String)>,
     /// Access keys.
     pub keys: Vec<AccessKeyRow>,
+    /// Policies mapped to LDAP DNs.
+    pub ldap_policies: Vec<LdapPolicyRow>,
+    /// LDAP users with live sessions.
+    pub ldap_sessions: Vec<LdapSessionRow>,
 }
 
 /// One change to IAM's tables. `Put…` inserts or updates in place (never deletes and
@@ -355,6 +408,14 @@ pub enum IamWrite {
     PutKey(AccessKeyRow),
     /// Deletes an access key.
     DeleteKey(String),
+    /// Maps a managed policy to an LDAP DN: (DN, `user` or `group`, policy id).
+    PutLdapPolicy(String, String, String),
+    /// Removes a mapping: (DN, policy id).
+    DeleteLdapPolicy(String, String),
+    /// Adds or updates an LDAP user's record.
+    PutLdapSession(LdapSessionRow),
+    /// Deletes an LDAP user's record.
+    DeleteLdapSession(String),
 }
 
 impl System {
@@ -463,6 +524,33 @@ impl System {
                     secret: r.get(2)?,
                     active: r.get(3)?,
                     created_ms: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+            ldap_policies: all(
+                "SELECT dn, entity, policy_id FROM iam_ldap_policies ORDER BY dn, policy_id",
+            )?
+            .query_map([], |r| {
+                Ok(LdapPolicyRow {
+                    dn: r.get(0)?,
+                    entity: r.get(1)?,
+                    policy_id: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+            ldap_sessions: all(
+                "SELECT dn, username, groups, checked_ms, expires_ms, generation, gone
+                 FROM iam_ldap_sessions ORDER BY dn",
+            )?
+            .query_map([], |r| {
+                Ok(LdapSessionRow {
+                    dn: r.get(0)?,
+                    username: r.get(1)?,
+                    groups: r.get(2)?,
+                    checked_ms: r.get(3)?,
+                    expires_ms: r.get(4)?,
+                    generation: r.get(5)?,
+                    gone: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -683,6 +771,28 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
             params![k.id, k.user_id, k.secret, k.active, k.created_ms],
         ),
         IamWrite::DeleteKey(id) => run("DELETE FROM iam_access_keys WHERE id = ?1", params![id]),
+        IamWrite::PutLdapPolicy(dn, entity, policy) => run(
+            "INSERT INTO iam_ldap_policies (dn, entity, policy_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT (dn, policy_id) DO UPDATE SET entity = excluded.entity",
+            params![dn, entity, policy],
+        ),
+        IamWrite::DeleteLdapPolicy(dn, policy) => run(
+            "DELETE FROM iam_ldap_policies WHERE dn = ?1 AND policy_id = ?2",
+            params![dn, policy],
+        ),
+        IamWrite::PutLdapSession(s) => run(
+            "INSERT INTO iam_ldap_sessions
+               (dn, username, groups, checked_ms, expires_ms, generation, gone)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (dn) DO UPDATE SET username = excluded.username,
+               groups = excluded.groups, checked_ms = excluded.checked_ms,
+               expires_ms = excluded.expires_ms, generation = excluded.generation,
+               gone = excluded.gone",
+            params![s.dn, s.username, s.groups, s.checked_ms, s.expires_ms, s.generation, s.gone],
+        ),
+        IamWrite::DeleteLdapSession(dn) => {
+            run("DELETE FROM iam_ldap_sessions WHERE dn = ?1", params![dn])
+        }
     }
 }
 
@@ -927,6 +1037,80 @@ mod tests {
             .unwrap();
         let rows = system.iam_rows().unwrap();
         assert!(rows.oidc_providers.is_empty() && rows.oidc_provider_tags.is_empty());
+    }
+
+    #[test]
+    fn ldap_mappings_and_sessions_round_trip() {
+        let (_dir, mut system) = open();
+        system
+            .iam_apply(&[IamWrite::PutPolicy(PolicyRow {
+                id: "P1".into(),
+                name: "read".into(),
+                path: "/".into(),
+                description: String::new(),
+                default_version: 1,
+                latest_version: 1,
+                created_ms: 1,
+                updated_ms: 1,
+            })])
+            .unwrap();
+        let dn = "uid=a,dc=io".to_owned();
+        let session = LdapSessionRow {
+            dn: dn.clone(),
+            username: "a".into(),
+            groups: r#"["cn=g,dc=io"]"#.into(),
+            checked_ms: 5,
+            expires_ms: 9,
+            generation: 0,
+            gone: false,
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutLdapPolicy(dn.clone(), "user".into(), "P1".into()),
+                IamWrite::PutLdapPolicy(dn.clone(), "user".into(), "P1".into()),
+                IamWrite::PutLdapSession(session.clone()),
+            ])
+            .unwrap();
+        let changed = LdapSessionRow {
+            generation: 2,
+            gone: true,
+            groups: "[]".into(),
+            checked_ms: 6,
+            expires_ms: 10,
+            username: "A".into(),
+            ..session
+        };
+        system
+            .iam_apply(&[IamWrite::PutLdapSession(changed.clone())])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(
+            rows.ldap_policies,
+            [LdapPolicyRow {
+                dn: dn.clone(),
+                entity: "user".into(),
+                policy_id: "P1".into(),
+            }]
+        );
+        assert_eq!(rows.ldap_sessions, [changed]);
+        assert!(
+            system
+                .iam_apply(&[IamWrite::PutLdapPolicy(
+                    dn.clone(),
+                    "user".into(),
+                    "P9".into()
+                )])
+                .is_err(),
+            "only policies that exist"
+        );
+        system
+            .iam_apply(&[
+                IamWrite::DeleteLdapPolicy(dn.clone(), "P1".into()),
+                IamWrite::DeleteLdapSession(dn),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert!(rows.ldap_policies.is_empty() && rows.ldap_sessions.is_empty());
     }
 
     #[test]

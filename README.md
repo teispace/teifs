@@ -219,7 +219,7 @@ requests live. See
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--website-domain D] [--default-layout object\|folder] [--kms-keyring PATH \| --kms-transit URL \| --kms-kes URL \| --kms-aws] [--kms-default-key NAME] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--website-domain D] [--default-layout object\|folder] [--kms-keyring PATH \| --kms-transit URL \| --kms-kes URL \| --kms-aws] [--kms-default-key NAME] [--ldap-server HOST --ldap-lookup-bind-dn DN --ldap-user-base-dn DN --ldap-user-filter F …] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -265,9 +265,11 @@ requests live. See
 | `teifs admin role add ALIAS NAME --trust account\|user:NAME\|github:OWNER/REPO\|oidc:HOST --sub S\|FILE --policy … [--max-session 12h]` | A role with a policy, in one step, trusting the account, a user, a GitHub repository's workflows or an OpenID Connect provider's subjects |
 | `teifs admin role ls\|rm\|policy\|trust ALIAS …` | List roles and whom they trust, delete them (their sessions end), change their policy or trust |
 | `teifs admin oidc add ALIAS URL --client-id ID [--thumbprint HEX] [--policy-claim [CLAIM]]` \| `oidc ls\|rm ALIAS …` | OpenID Connect providers whose tokens get credentials, with MinIO's policy claim if asked for |
+| `teifs admin ldap policy attach\|detach ALIAS POLICY… --user DN\|--group DN` \| `ldap policy ls ALIAS [--user DN\|--group DN]` | Managed policies for LDAP users and groups, whose sessions get them (MinIO's `mc idp ldap policy`) |
 | `teifs sts whoami ALIAS` | Whom an alias signs as |
 | `teifs sts assume ALIAS [ROLE] [--session-name N] [--duration 1h] [--policy FILE] [--external-id ID] [--tag K=V]… --save-alias NEW\|-o FILE` | Temporary credentials: a role's session, or without a role (MinIO's way) the user's own permissions narrowed; saved as an alias that knows when it expires, or as the AWS CLI's `credential_process` output |
 | `teifs sts assume-web SERVER [--role ARN] [--token-file F] … --save-alias NEW\|-o FILE` | A CI job's OpenID Connect token for temporary credentials (reads `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`) |
+| `teifs sts assume-ldap SERVER -u NAME [--password-stdin] … --save-alias NEW\|-o FILE` | An LDAP user's name and password for temporary credentials (MinIO's `AssumeRoleWithLDAPIdentity`; the password from standard input, `TEIFS_LDAP_PASSWORD` or a prompt) |
 | `teifs health [ADDRESS\|URL] [--timeout 5s]` | Check that a server answers its health check, over HTTP or HTTPS |
 | `teifs status [ALIAS]` | Check how a server is doing: answers and how fast, drive serving and taking writes, clocks, certificate expiry, version, disks, jobs, scrubs; exit code 1 when a check fails |
 | `teifs doctor [DIR]` | Check a drive on this machine, with the settings `teifs serve` would use: its format, databases, file system (network or FUSE ones warn), room, keys, keyring, certificates and listen address, each problem with what to do; exit code 1 when a check fails |
@@ -288,7 +290,7 @@ requests live. See
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode; stored bytes read back and checked against them every 30 days (`--scrub-every`), or on demand with `teifs verify` |
 | Auth | Signature V4 (headers, presigned URLs and POST forms); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, roles, OpenID Connect providers, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS on the S3 endpoint (`aws iam --endpoint-url …`) |
-| Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `AssumeRoleWithWebIdentity` for OpenID Connect ID tokens (GitHub Actions, GitLab, Kubernetes, Keycloak…); `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRole` for a user's own permissions and `AssumeRoleWithWebIdentity` with the policies a token's claim names; signed S3 requests, presigned links and browser uploads with the session token |
+| Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `AssumeRoleWithWebIdentity` for OpenID Connect ID tokens (GitHub Actions, GitLab, Kubernetes, Keycloak…); `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRoleWithLDAPIdentity` for users of an LDAP directory (Active Directory, OpenLDAP) with the policies mapped to them and their groups; MinIO's `AssumeRole` for a user's own permissions and `AssumeRoleWithWebIdentity` with the policies a token's claim names; signed S3 requests, presigned links and browser uploads with the session token |
 | Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list; account-wide Block Public Access (`aws s3control put-public-access-block`) |
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
@@ -311,6 +313,14 @@ keys, DSSE-KMS (two layers: a named key's and the drive's), and SSE-C with your 
 `TEIFS_KMS_KES_API_KEY`; MinIO's `MINIO_KMS_KES_*` variables work too) or AWS KMS
 (`--kms-aws`, credentials as AWS's tools find them). **Back the keyring up**: encrypted
 objects can't be read without it. See [Operations](docs/OPERATIONS.md#encryption-keys).
+
+**LDAP sign-in**, as MinIO's: `teifs serve --ldap-server ldap.example.com
+--ldap-lookup-bind-dn … --ldap-user-base-dn … --ldap-user-filter '(uid=%s)'` (the lookup
+password from `TEIFS_LDAP_LOOKUP_BIND_PASSWORD`; MinIO's `MINIO_IDENTITY_LDAP_*` variables
+work too) lets a directory's users get temporary credentials with their name and password
+(`teifs sts assume-ldap`, `mc idp ldap`-style clients), with the managed policies mapped to
+them and their groups (`teifs admin ldap policy attach`). See
+[Operations](docs/OPERATIONS.md#ldap-sign-in).
 
 **Bucket notifications**, as S3's and MinIO's: `teifs serve --notify-webhook
 orders=https://hooks.example/s3` (or `--notify-elasticsearch`, `--notify-redis`, `--notify-nsq`, `--notify-nats`, `--notify-mqtt`, `--notify-kafka`, `--notify-amqp`, `--notify-postgresql`, `--notify-mysql`, `--notify-sqs`, `--notify-sns`, `--notify-lambda`, `--notify-eventbridge`) gives the server a target, and a bucket's rules

@@ -1,7 +1,8 @@
 //! `teifs doctor`: what would stop `teifs serve`, or make it serve badly, with the same
 //! settings: the drive (its format, its databases, whether it's in use, whether it can be
 //! written, whether it's on this machine), its disk's room, how its file system treats names, the root keys, the
-//! keyring (or the external KMS, which is asked), the TLS certificates and the listen address. Each problem says what to do.
+//! keyring (or the external KMS, which is asked), the LDAP directory (asked too), the TLS
+//! certificates and the listen address. Each problem says what to do.
 //! Nothing is changed: an older drive isn't upgraded, and checks that would get in a
 //! running server's way are skipped while it runs. Exit code 1 when a check fails.
 
@@ -12,7 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use teifs_server::{ExternalKms, Tls, credentials, default_keyring};
+use teifs_server::{Directory, ExternalKms, Tls, credentials, default_keyring};
 use teifs_store::DEFAULT_KEY;
 use teifs_store::{Database, Diagnosis, Disk, FORMAT, SYSTEM_DIR};
 
@@ -22,8 +23,8 @@ use crate::{
     config, error, tls_source,
 };
 
-/// How long an external KMS may take to answer.
-const KMS_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an external KMS or the LDAP directory may take to answer.
+const ASK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `teifs doctor`.
 pub(crate) async fn doctor(args: &ServeArgs) -> Result<(), error::Error> {
@@ -32,7 +33,8 @@ pub(crate) async fn doctor(args: &ServeArgs) -> Result<(), error::Error> {
         Some(external) => Some(external_kms(&external, args.kms.default_key(keyring)).await),
         None => None,
     };
-    let checks = checks(args, kms, |name| std::env::var(name).ok());
+    let mut checks = checks(args, kms, |name| std::env::var(name).ok());
+    checks.extend(ldap(args).await);
     checks::finish(&checks, ("drive", &args.dir.display().to_string()))
 }
 
@@ -247,7 +249,7 @@ fn credentials_check(args: &ServeArgs, env: &impl Fn(&str) -> Option<String>) ->
 /// TeiFS uses by default (SSE-S3 and the drive's own secrets need it).
 async fn external_kms(external: &ExternalKms, default_key: Option<String>) -> Check {
     let words = external.describe();
-    let listed = tokio::time::timeout(KMS_TIMEOUT, async {
+    let listed = tokio::time::timeout(ASK_TIMEOUT, async {
         let (kms, _) = teifs_server::open_external(external)
             .await
             .map_err(|e| e.to_string())?;
@@ -262,6 +264,30 @@ async fn external_kms(external: &ExternalKms, default_key: Option<String>) -> Ch
     let default = default_key.unwrap_or_else(|| DEFAULT_KEY.to_owned());
     let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
     default_key_check(&words, &names, &default)
+}
+
+/// The LDAP directory users sign in with, if there's one: it's reached, the lookup
+/// account signs in, and the base DNs exist.
+async fn ldap(args: &ServeArgs) -> Option<Check> {
+    let failed = |detail: String| Some(Check::new("LDAP", State::Failed, detail));
+    let settings = match args.ldap.settings() {
+        Ok(settings) => settings?,
+        Err(err) => return failed(err.to_string()),
+    };
+    let words = format!("LDAP at {}", settings.server);
+    let directory = match Directory::new(settings) {
+        Ok(directory) => directory,
+        Err(err) => return failed(format!("{words}: {err}")),
+    };
+    match tokio::time::timeout(ASK_TIMEOUT, directory.check()).await {
+        Ok(Ok(())) => Some(Check::new(
+            "LDAP",
+            State::Ok,
+            format!("{words}: the lookup account signs in and the base DNs exist"),
+        )),
+        Ok(Err(err)) => failed(format!("{words}: {err}")),
+        Err(_) => failed(format!("{words}: it didn't answer in time")),
+    }
 }
 
 /// Whether a KMS with keys `names` has the key TeiFS uses by default.

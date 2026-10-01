@@ -51,7 +51,7 @@ field the form sends. Its fields are read before any decision, at most 64 KiB of
 and the upload is authorized on the key the form names, as a PutObject would be; a form
 that couldn't be read is refused, never decided as if it had no fields. Error messages
 that quote a request are XML-escaped.
-The one unsigned request besides `AssumeRoleWithWebIdentity` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
+The one unsigned request besides `AssumeRoleWithWebIdentity` and `AssumeRoleWithLDAPIdentity` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
 ordinary key that needs a signature. `MinIO`'s health checks (`/minio/health/live`,
@@ -245,6 +245,25 @@ is deleted, and loses a policy that's deleted. Tests:
 `crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
 `crates/server/tests/admin.rs`.
 
+MinIO's `AssumeRoleWithLDAPIdentity` is answered unsigned too, and only the directory
+decides who is asking. Both the name and the password are needed: an empty password is
+refused before the directory is asked, since LDAP takes it as an unauthenticated bind
+that always succeeds. The name is escaped before it goes into a search filter (RFC 4515),
+so `*` or `)(uid=*` finds no one; a filter that finds two users is refused. An unknown
+user and a wrong password get the same answer. TeiFS reaches the directory over TLS
+unless told otherwise (`--ldap-starttls`, or `--ldap-insecure`, which sends passwords as
+they are), checks its certificate against the system's authorities or the CA file given,
+and gives each step a timeout. The lookup account's password is read only from the
+environment, and neither it nor a user's password is ever logged or stored (the lookup
+password is wiped from memory when dropped). Sessions get only the managed
+policies an administrator mapped to the user's DN or its groups' (none means no session),
+and mapping takes `teifs:AttachLDAPPolicy`, with the DN looked up in the directory first.
+A session has its policies decided at each request, from mappings as they are then; a
+user the directory no longer has (checked every ten minutes) loses its sessions, through
+a generation number that a new sign-in can't bring back. Tests:
+`crates/iam/src/ldap/directory_tests.rs`, `crates/iam/src/ldap/sign_in_tests.rs`,
+`crates/server/tests/ldap.rs`, `crates/server/tests/security/logs.rs`.
+
 ### 5. No default secrets
 There is no built-in access key or password. The first run generates random credentials
 (256-bit secret) into `.teifs/credentials.json`, created with mode `0600`
@@ -256,7 +275,7 @@ of the settings; `teifs config show` names its source and never prints it (teste
 
 ### 6. Secrets never reach logs
 Types holding secrets leave them out of `Debug` output (credentials, access keys,
-sessions, KMS keys, transit tokens and KES API keys, IAM state), and secrets are wiped from memory when
+sessions, KMS keys, transit tokens and KES API keys, LDAP settings, IAM state), and secrets are wiped from memory when
 dropped (`Zeroizing`). The S3 layer logs every response at `DEBUG`, so answers that carry
 secrets (IAM and STS answers with access keys or session tokens, the admin API's IAM
 exports) are sent as bodies that log only their size. A test runs a full cycle at

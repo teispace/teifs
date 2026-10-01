@@ -620,9 +620,9 @@ async fn unsigned_requests_fetch_the_providers_keys_first() {
         ),
     );
     let body = assuming(&d, "ci", &token, "");
-    assert!(Iam::is_web_identity(body.as_bytes()));
-    assert!(!Iam::is_web_identity(b"Action=AssumeRole&RoleArn=x"));
-    assert!(!Iam::is_web_identity(b"\xff"));
+    assert!(Iam::proves_itself(body.as_bytes()));
+    assert!(!Iam::proves_itself(b"Action=AssumeRole&RoleArn=x"));
+    assert!(!Iam::proves_itself(b"\xff"));
 
     let anonymous = Identity::anonymous();
     let context = anonymous.context(Date::now());
@@ -632,14 +632,14 @@ async fn unsigned_requests_fetch_the_providers_keys_first() {
         body: body.as_bytes(),
         request_id: "req-1",
     };
-    let answer = ok(d.iam.serve_web_identity(&call).await, &body);
+    let answer = ok(d.iam.serve_self_proving(&call).await, &body);
     assert!(
         answer.contains("<SubjectFromWebIdentityToken>alice<"),
         "{answer}"
     );
     // The keys are kept: a second token needs no fetch.
     let before = provider.requests.load(std::sync::atomic::Ordering::SeqCst);
-    ok(d.iam.serve_web_identity(&call).await, &body);
+    ok(d.iam.serve_self_proving(&call).await, &body);
     assert_eq!(
         provider.requests.load(std::sync::atomic::Ordering::SeqCst),
         before
@@ -875,7 +875,7 @@ async fn providers_are_reached_through_the_certificates_they_pin() {
             body: body.as_bytes(),
             request_id: "req-1",
         };
-        let reply = d.iam.serve_web_identity(&call).await;
+        let reply = d.iam.serve_self_proving(&call).await;
         if reached {
             ok(reply, &body);
         } else {

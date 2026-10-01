@@ -208,6 +208,66 @@ material. The identity needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey` and
 `teifs doctor` asks an external KMS: whether it answers, takes TeiFS's credentials, and
 has the default key (with the command that makes it when it hasn't).
 
+## LDAP sign-in
+
+Users of an LDAP directory (Active Directory, OpenLDAP, FreeIPA…) can get temporary
+credentials with their name and password, as with MinIO's `AssumeRoleWithLDAPIdentity`.
+Their sessions have the managed policies mapped to their DN and to the DNs of their
+groups.
+
+```sh
+TEIFS_LDAP_LOOKUP_BIND_PASSWORD=… teifs serve /srv/drive \
+  --ldap-server ldap.example.com \
+  --ldap-lookup-bind-dn 'cn=teifs,ou=services,dc=example,dc=com' \
+  --ldap-user-base-dn 'ou=people,dc=example,dc=com' \
+  --ldap-user-filter '(uid=%s)' \
+  --ldap-group-base-dn 'ou=groups,dc=example,dc=com' \
+  --ldap-group-filter '(&(objectclass=groupOfNames)(member=%d))'
+```
+
+| Setting | What it is |
+|---|---|
+| `--ldap-server HOST[:PORT]` | The directory; port 636 when none is given. With `--ldap-srv-record on\|ldap\|ldaps`, a domain whose DNS SRV records list the servers |
+| `--ldap-starttls`, `--ldap-insecure` | StartTLS on the plain port, or plain LDAP (passwords cross the network as they are); LDAP over TLS by default |
+| `--ldap-ca FILE`, `--ldap-tls-skip-verify` | The certificate authorities the server's certificate is checked against (default: the system's), or no check at all (testing only) |
+| `--ldap-lookup-bind-dn DN` | The account TeiFS searches with; its password comes from `TEIFS_LDAP_LOOKUP_BIND_PASSWORD` only |
+| `--ldap-user-base-dn DN[;DN…]`, `--ldap-user-filter F` | Where users are, and the filter that finds one: `%s` is the name signed in with |
+| `--ldap-user-attributes A[,A…]` | User attributes to read at sign-in |
+| `--ldap-group-base-dn DN[;DN…]`, `--ldap-group-filter F` | Where groups are, and the filter that finds a user's: `%s` is the name, `%d` the user's DN. Without a filter, groups aren't looked up |
+
+Each is also an environment variable (`TEIFS_LDAP_SERVER`, …) and a settings file key.
+When `--ldap-server` isn't given, MinIO's variables work as they are:
+`MINIO_IDENTITY_LDAP_SERVER_ADDR`, `_SRV_RECORD_NAME`, `_SERVER_INSECURE`,
+`_SERVER_STARTTLS`, `_TLS_SKIP_VERIFY`, `_LOOKUP_BIND_DN`, `_LOOKUP_BIND_PASSWORD`,
+`_USER_DN_SEARCH_BASE_DN`, `_USER_DN_SEARCH_FILTER`, `_USER_DN_ATTRIBUTES`,
+`_GROUP_SEARCH_BASE_DN` and `_GROUP_SEARCH_FILTER` (and `_ENABLE=off` turns them off).
+TeiFS checks the settings when it starts (filters, DNs, base DNs that overlap) and says
+how to fix what's wrong; `teifs doctor` also connects, signs the lookup account in and
+looks for each base DN.
+
+Map policies to users and groups, by DN in any spelling: TeiFS looks the DN up in the
+directory and keeps it as the directory spells it.
+
+```sh
+teifs admin ldap policy attach local readwrite --group 'cn=engineers,ou=groups,dc=example,dc=com'
+teifs admin ldap policy attach local home --user 'uid=dillon,ou=people,dc=example,dc=com'
+teifs admin ldap policy ls local
+teifs sts assume-ldap local -u dillon --save-alias dillon   # asks for the password
+```
+
+`teifs sts assume-ldap` reads the password from standard input with `--password-stdin`,
+else from `TEIFS_LDAP_PASSWORD`, else asks. Any client of MinIO's API works too: the call
+is an unsigned `POST /` with `Action=AssumeRoleWithLDAPIdentity`, `LDAPUsername`,
+`LDAPPassword`, and optionally `Policy` (a session policy that narrows it) and
+`DurationSeconds` (15 minutes to 365 days, an hour by default).
+
+A mapping's change reaches existing sessions at their next request. Every ten minutes
+the server asks the directory about each user with live sessions: a user it no longer
+has loses them all, and the others' sessions follow their groups as they are now.
+Policies can use `${ldap:username}`, `${ldap:user}` (the DN) and `ldap:groups` in
+conditions. A policy mapped to a user or group can't be deleted until it's detached.
+The mappings move with the IAM export (`teifs admin iam export`).
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

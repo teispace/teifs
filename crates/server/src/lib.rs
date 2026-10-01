@@ -19,7 +19,7 @@ use std::{
 use std::sync::Arc;
 use teifs_iam::{Iam, RootKey};
 use teifs_s3::Options;
-use teifs_types::admin::{KmsConfig, NotifyTarget, ServerConfig};
+use teifs_types::admin::{KmsConfig, LdapConfig, NotifyTarget, ServerConfig};
 
 use teifs_store::{BucketEncryption, Layout, Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
@@ -32,6 +32,7 @@ pub use kms::{
     with_default_key,
 };
 pub use serve::{DRAIN, Limits, serve};
+pub use teifs_iam::{Directory, LdapSettings, SrvRecord, Transport};
 use teifs_notify::Notifier;
 pub use teifs_notify::{
     Acks, Amqp, AwsCredentials, Compression, Elasticsearch, EventBridge, Exchange, Format, Kafka,
@@ -107,7 +108,14 @@ pub struct Config {
     pub access_log_interval: Option<std::time::Duration>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
+    /// The LDAP directory users sign in with (`AssumeRoleWithLDAPIdentity`); none by
+    /// default.
+    pub ldap: Option<LdapSettings>,
 }
+
+/// How often the directory is asked about LDAP users with live sessions, whose sessions
+/// end when it no longer has them (as MinIO's do).
+const LDAP_CHECK_EVERY: std::time::Duration = std::time::Duration::from_mins(10);
 
 /// Why the server couldn't start.
 #[derive(Debug, thiserror::Error)]
@@ -148,6 +156,9 @@ pub enum ServerError {
         /// Why.
         source: teifs_store::CryptoError,
     },
+    /// The LDAP settings are wrong.
+    #[error("the LDAP settings are wrong: {0}")]
+    Ldap(String),
     /// The audit log couldn't be opened.
     #[error("can't open the audit log {target}: {source}")]
     Audit {
@@ -353,7 +364,36 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         trusted_proxies: config.trusted_proxies.networks(),
         proxy_header: (!config.trusted_proxies.is_empty())
             .then(|| config.trusted_proxies.header().name().to_owned()),
+        ldap: config.ldap.as_ref().map(|ldap| LdapConfig {
+            server: ldap.server.clone(),
+            transport: ldap.transport.as_str().to_owned(),
+            lookup_dn: ldap.lookup_dn.clone(),
+            user_bases: ldap.user_bases.clone(),
+            user_filter: ldap.user_filter.clone(),
+            group_bases: ldap.group_bases.clone(),
+            group_filter: ldap.group_filter.clone(),
+        }),
     }
+}
+
+/// Opens the drive's IAM, signing users in with `directory` if there's one.
+async fn open_iam(
+    store: &Store,
+    kms: &dyn teifs_store::Kms,
+    root: RootKey,
+    directory: Option<Directory>,
+) -> Result<Iam, ServerError> {
+    let iam = Iam::open(&store.system_db(), &store.format().drive, kms, Some(root))
+        .await
+        .map_err(ServerError::Iam)?;
+    let Some(directory) = directory else {
+        return Ok(iam);
+    };
+    // A directory that's down now may be up when someone signs in.
+    if let Err(err) = directory.check().await {
+        tracing::warn!(error = %err, "the LDAP directory can't be used yet");
+    }
+    Ok(iam.with_ldap(directory))
 }
 
 /// Listens on `address`: the listener, and the address it got (its port, for port 0).
@@ -375,6 +415,12 @@ impl Server {
             .transpose()
             .map_err(ServerError::Tls)?
             .map(Arc::new);
+        let directory = config
+            .ldap
+            .clone()
+            .map(Directory::new)
+            .transpose()
+            .map_err(ServerError::Ldap)?;
         let (store, kms, location) = open_drive(&config).await?;
         let (listener, listen) = listen(config.listen).await?;
         let admin_config = admin_config(&config, &location, listen);
@@ -393,16 +439,7 @@ impl Server {
             access_key: credentials.access_key,
             secret: Zeroizing::new(credentials.secret_key),
         };
-        let iam = Arc::new(
-            Iam::open(
-                &store.system_db(),
-                &store.format().drive,
-                kms.as_ref(),
-                Some(root),
-            )
-            .await
-            .map_err(ServerError::Iam)?,
-        );
+        let iam = Arc::new(open_iam(&store, kms.as_ref(), root, directory).await?);
         let (audit, audit_writers) = start_audit(&config.audit)?;
         let notifier = Arc::new(
             Notifier::start(&store.events_db(), config.notify).map_err(ServerError::Notify)?,
@@ -518,6 +555,20 @@ impl Server {
         let _hangups = signals::Hangups::new();
         let jobs = self.store.start_jobs(&self.jobs);
         let reloads = self.tls.clone().map(|tls| tokio::spawn(tls::watch(tls)));
+        let ldap_checks = self.iam.ldap().is_some().then(|| {
+            let iam = Arc::clone(&self.iam);
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(LDAP_CHECK_EVERY);
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                every.tick().await;
+                loop {
+                    every.tick().await;
+                    if let Err(err) = iam.check_ldap_users().await {
+                        tracing::warn!(error = %err, "can't check the LDAP users");
+                    }
+                }
+            })
+        });
         let (workers_stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let workers = self.service.workers().map(|workers| {
             tokio::spawn(workers.run(async move {
@@ -533,6 +584,9 @@ impl Server {
         serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
         if let Some(reloads) = reloads {
             reloads.abort();
+        }
+        if let Some(checks) = ldap_checks {
+            checks.abort();
         }
         jobs.stop().await;
         // The connections are gone: what's spooled is delivered after the next start, and

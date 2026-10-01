@@ -197,6 +197,69 @@ async fn user_and_session(server: &Server) -> (String, Secrets) {
     )
 }
 
+/// Signs an LDAP user in, wrongly then rightly, and uses the session: the user's
+/// password, the lookup account's, and the session's secret and token.
+async fn ldap_sign_in(server: &Server, fake: &teifs_iam::ldap::fake::FakeLdap) -> Secrets {
+    server
+        .iam
+        .create_policy(
+            "read-vault",
+            None,
+            None,
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::vault"}]}"#,
+            &[],
+        )
+        .unwrap();
+    server
+        .iam
+        .map_ldap_policies(
+            "uid=dillon,ou=people,dc=min,dc=io",
+            teifs_iam::LdapEntity::User,
+            &["read-vault".to_owned()],
+            true,
+        )
+        .unwrap();
+    let unsigned = teifs_client::Client::new(
+        &server.endpoint,
+        "",
+        teifs_client::Zeroizing::new(String::new()),
+    )
+    .unwrap();
+    assert!(
+        unsigned
+            .assume_role_with_ldap_identity("dillon", "not-dillons-password", None, None)
+            .await
+            .is_err()
+    );
+    let session = unsigned
+        .assume_role_with_ldap_identity("dillon", "dillon-password", None, None)
+        .await
+        .unwrap();
+    s3(
+        server,
+        Credentials::new(
+            &session.access_key,
+            session.secret_key.as_str(),
+            Some(session.session_token.to_string()),
+            None,
+            "tests",
+        ),
+    )
+    .list_objects_v2()
+    .bucket("vault")
+    .send()
+    .await
+    .unwrap();
+    let lookup = fake.settings().lookup_password.unwrap();
+    vec![
+        ("an LDAP user's password", "dillon-password".to_owned()),
+        ("a wrong LDAP password", "not-dillons-password".to_owned()),
+        ("the LDAP lookup password", lookup.to_string()),
+        ("an LDAP session's key", session.secret_key.to_string()),
+        ("an LDAP session token", session.session_token.to_string()),
+    ]
+}
+
 /// Exports IAM with every secret and imports it into another drive.
 async fn export_and_import(server: &Server) {
     let client = |endpoint: &str| {
@@ -218,8 +281,8 @@ async fn export_and_import(server: &Server) {
 /// CVE-2026-45040, CVE-2026-24762 and CVE-2026-22782 (RustFS: session tokens, secret
 /// keys and shared secrets written to debug logs): a full cycle logged at TRACE (the
 /// root key, a user's key made through IAM, a session's secret and token, an SSE-C key,
-/// an IAM export with secrets, a wrong signature) leaves none of them, nor the signing
-/// keys they give, in the log.
+/// an LDAP sign-in, an IAM export with secrets, a wrong signature) leaves none of them,
+/// nor the signing keys they give, in the log.
 #[tokio::test]
 async fn secrets_never_reach_the_logs() {
     let log = Captured::default();
@@ -238,7 +301,13 @@ async fn secrets_never_reach_the_logs() {
         .try_init()
         .expect("this test is the only one to log");
 
-    let server = start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
+    let fake = teifs_iam::ldap::fake::FakeLdap::start().await;
+    let ldap = fake.settings();
+    let server = start_with(|config| {
+        config.default_layout = teifs_store::Layout::Object;
+        config.ldap = Some(ldap);
+    })
+    .await;
     let mut secrets = vec![
         ("the root key", SECRET_KEY.to_owned()),
         ("the root key's signing key", signing_key(SECRET_KEY)),
@@ -246,6 +315,7 @@ async fn secrets_never_reach_the_logs() {
     secrets.extend(sse_c(&server).await);
     let (carol, theirs) = user_and_session(&server).await;
     secrets.extend(theirs);
+    secrets.extend(ldap_sign_in(&server, &fake).await);
     export_and_import(&server).await;
     let wrong = client_as(&server, &carol, "a-wrong-secret-of-the-right-length-40ch");
     assert!(wrong.list_buckets().send().await.is_err());

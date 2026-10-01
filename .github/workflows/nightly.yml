@@ -170,6 +170,28 @@ jobs:
           AWS_SECRET_ACCESS_KEY: dummy-test-secret
           AWS_REGION: us-east-1
 
+  ldap:
+    # LDAP sign-in (AssumeRoleWithLDAPIdentity) against a real OpenLDAP: MinIO's test
+    # image, which seeds its users and groups a few seconds after it starts.
+    name: LDAP sign-in (OpenLDAP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      openldap:
+        image: quay.io/minio/openldap:latest
+        env:
+          LDAP_ORGANIZATION: MinIO Inc
+          LDAP_DOMAIN: min.io
+          LDAP_ADMIN_PASSWORD: admin
+        ports:
+          - 389:389
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked -p teifs-server --test ldap -- --nocapture
+        env:
+          TEIFS_TEST_LDAP_SERVER: 127.0.0.1:389
+
   kafka:
     # Notifications to a real Kafka broker: plain, SASL PLAIN and SCRAM, gzip; the records
     # are read back with Kafka's own consumer.

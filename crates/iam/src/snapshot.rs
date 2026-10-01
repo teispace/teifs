@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     sessions::{Claims, WebClaims, Who},
-    state::State,
+    state::{LdapSeen, State},
 };
 
 /// Who signed a request, and the policies that decide what they may do.
@@ -45,6 +45,17 @@ pub struct Session {
     transitive: Box<[(String, String)]>,
     /// The web identity that started it, whose provider's keys its requests have.
     web: Option<Box<WebClaims>>,
+    /// The directory user it acts for, whose `ldap:` keys its requests have.
+    ldap: Option<Box<LdapClaims>>,
+}
+
+/// What an LDAP session's requests know of its user: MinIO's `ldap:user` (the DN),
+/// `ldap:username` and `ldap:groups`.
+#[derive(Debug, Clone)]
+struct LdapClaims {
+    dn: String,
+    username: String,
+    groups: Vec<String>,
 }
 
 /// How a session was made, which decides the APIs it may call.
@@ -67,6 +78,9 @@ pub enum SessionKind {
     /// identity token's policy claim names, narrowed by the session policy if there is
     /// one.
     Web,
+    /// MinIO's `AssumeRoleWithLDAPIdentity`: the managed policies mapped to the
+    /// directory user and its groups, narrowed by the session policy if there is one.
+    Ldap,
 }
 
 impl Session {
@@ -106,7 +120,7 @@ impl Session {
     pub const fn may_manage(&self) -> bool {
         matches!(
             self.kind,
-            SessionKind::Role { .. } | SessionKind::User | SessionKind::Web
+            SessionKind::Role { .. } | SessionKind::User | SessionKind::Web | SessionKind::Ldap
         )
     }
 }
@@ -203,6 +217,12 @@ impl Identity {
                 if !web.amr.is_empty() {
                     context = context.with_claim(&key("amr"), web.amr.clone());
                 }
+            }
+            if let Some(ldap) = &session.ldap {
+                context = context
+                    .with_claim("ldap:user", ldap.dn.as_str())
+                    .with_claim("ldap:username", ldap.username.as_str())
+                    .with_claim("ldap:groups", ldap.groups.clone());
             }
         }
         context
@@ -379,6 +399,10 @@ pub(crate) struct Snapshot {
     managed: HashMap<Box<str>, Arc<Policy>>,
     /// Every OpenID Connect provider's unique id.
     providers: std::collections::HashSet<Box<str>>,
+    /// The policies mapped to each LDAP DN.
+    ldap_policies: HashMap<Box<str>, Box<[Arc<Policy>]>>,
+    /// Directory users with live sessions, by DN.
+    ldap_users: HashMap<Box<str>, Arc<LdapSeen>>,
     root: Arc<Identity>,
     /// Sessions' identities by access key id, until IAM next changes (a new snapshot).
     sessions: RwLock<HashMap<Box<str>, Cached>>,
@@ -462,6 +486,24 @@ impl Snapshot {
             .keys()
             .map(|id| id.as_str().into())
             .collect();
+        let ldap_policies = state
+            .ldap_policies
+            .values()
+            .map(|m| {
+                let policies: Box<[Arc<Policy>]> = m
+                    .policies
+                    .iter()
+                    .filter_map(|id| state.policies.get(id))
+                    .map(|p| p.default_document().policy.clone())
+                    .collect();
+                (m.dn.as_str().into(), policies)
+            })
+            .collect();
+        let ldap_users = state
+            .ldap_sessions
+            .values()
+            .map(|seen| (seen.dn.as_str().into(), Arc::clone(seen)))
+            .collect();
         Self {
             account: Arc::clone(&state.account),
             keys,
@@ -469,6 +511,8 @@ impl Snapshot {
             roles,
             managed,
             providers,
+            ldap_policies,
+            ldap_users,
             root: root_identity,
             sessions: RwLock::default(),
         }
@@ -535,6 +579,7 @@ impl Snapshot {
             source_identity: claims.source.as_deref().map(Into::into),
             transitive: transitive.clone(),
             web: claims.web.clone().map(Box::new),
+            ldap: None,
         };
         Some(match &claims.who {
             Who::Role {
@@ -580,6 +625,13 @@ impl Snapshot {
                 session: Some(session(SessionKind::Web, false)),
                 ..self.web_identity(provider, sub, policies, claims.web.as_ref()?)?
             },
+            Who::Ldap {
+                dn,
+                username,
+                generation,
+            } => {
+                self.ldap_identity(dn, username, *generation, session(SessionKind::Ldap, false))?
+            }
             Who::Federated { user, name } => {
                 let (policies, boundary, tags) = match user {
                     Some(user) => {
@@ -605,6 +657,42 @@ impl Snapshot {
     /// the web identity `sub` of the provider with unique id `provider`, with the
     /// managed policies (by unique id) its token named. A deleted provider takes its
     /// sessions with it; a deleted policy only its own permissions.
+    /// An LDAP user's session: the policies mapped to its DN and to its groups' as the
+    /// directory last said, while it's of the user's current generation.
+    fn ldap_identity(
+        &self,
+        dn: &str,
+        username: &str,
+        generation: u32,
+        base: Session,
+    ) -> Option<Identity> {
+        let seen = self.ldap_users.get(dn)?;
+        if seen.generation != generation {
+            return None;
+        }
+        let policies = std::iter::once(dn)
+            .chain(seen.groups.iter().map(String::as_str))
+            .filter_map(|dn| self.ldap_policies.get(dn))
+            .flat_map(|p| p.iter().cloned())
+            .collect();
+        Some(Identity {
+            principal: Principal::federated(&self.account, username),
+            root: false,
+            tags: Box::default(),
+            policies,
+            boundary: None,
+            entity: None,
+            session: Some(Session {
+                ldap: Some(Box::new(LdapClaims {
+                    dn: dn.to_owned(),
+                    username: username.to_owned(),
+                    groups: seen.groups.clone(),
+                })),
+                ..base
+            }),
+        })
+    }
+
     fn web_identity(
         &self,
         provider: &str,

@@ -54,6 +54,7 @@ tempfile.workspace = true
 rcgen.workspace = true
 aws-smithy-http-client.workspace = true
 teifs-notify = { workspace = true, features = ["testing"] }
+teifs-iam = { workspace = true, features = ["fake-ldap"] }
 
 [lints]
 workspace = true

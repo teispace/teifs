@@ -35,13 +35,15 @@ use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
 
 use teifs_types::admin::{
-    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_ROOT_KEY,
-    ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
+    ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE,
+    MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
     ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion, IamExport,
-    ImportReport, JobInfo, KmsConfig, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
+    ImportReport, JobInfo, KmsConfig, LdapConfig, LdapPolicyChanged, LdapPolicyMapping,
+    LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
 pub use teifs_types::notify::{EventRecord, ListenFilter, event_key_decoded};
@@ -246,6 +248,101 @@ impl Client {
     pub async fn rotate_root_key(&self) -> Result<RootKeyRotated, ClientError> {
         self.call(Method::POST, ADMIN_ROOT_KEY, None, Vec::new())
             .await
+    }
+
+    /// The managed policies mapped to LDAP users' and groups' DNs, or to `dn` alone, in
+    /// any spelling (`teifs:ListLDAPPolicies`).
+    pub async fn ldap_policies(
+        &self,
+        dn: Option<&str>,
+    ) -> Result<Vec<LdapPolicyMapping>, ClientError> {
+        let query = dn.map(|dn| {
+            form_urlencoded::Serializer::new(String::new())
+                .append_pair("dn", dn)
+                .finish()
+        });
+        self.call(
+            Method::GET,
+            ADMIN_LDAP_POLICIES,
+            query.as_deref(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Maps managed policies to an LDAP user's or group's DN, which the server's
+    /// directory must have (`teifs:AttachLDAPPolicy`).
+    pub async fn attach_ldap_policies(
+        &self,
+        request: &LdapPolicyRequest,
+    ) -> Result<LdapPolicyChanged, ClientError> {
+        let body = serde_json::to_vec(request).map_err(|e| ClientError::Answer(e.to_string()))?;
+        self.call(Method::POST, ADMIN_LDAP_ATTACH, None, body).await
+    }
+
+    /// Removes managed policies from an LDAP user's or group's DN
+    /// (`teifs:DetachLDAPPolicy`).
+    pub async fn detach_ldap_policies(
+        &self,
+        request: &LdapPolicyRequest,
+    ) -> Result<LdapPolicyChanged, ClientError> {
+        let body = serde_json::to_vec(request).map_err(|e| ClientError::Answer(e.to_string()))?;
+        self.call(Method::POST, ADMIN_LDAP_DETACH, None, body).await
+    }
+
+    /// Signs an LDAP user in with its name and password (MinIO's
+    /// `AssumeRoleWithLDAPIdentity`), unsigned: the credentials of a session with the
+    /// policies mapped to the user and its groups, narrowed by `policy`.
+    pub async fn assume_role_with_ldap_identity(
+        &self,
+        username: &str,
+        password: &str,
+        policy: Option<&str>,
+        seconds: Option<i32>,
+    ) -> Result<TemporaryCredentials, ClientError> {
+        let seconds = seconds.map(|s| s.to_string());
+        let mut form = vec![
+            ("Action", "AssumeRoleWithLDAPIdentity"),
+            ("Version", "2011-06-15"),
+            ("LDAPUsername", username),
+            ("LDAPPassword", password),
+        ];
+        form.extend(policy.map(|p| ("Policy", p)));
+        form.extend(seconds.as_deref().map(|s| ("DurationSeconds", s)));
+        let body = Zeroizing::new(
+            form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(form)
+                .finish(),
+        );
+        let response = self
+            .http
+            .post(self.endpoint.clone())
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            return Err(api_error(status, &bytes));
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let field = |name: &str| {
+            xml_element(&text, name)
+                .ok_or_else(|| ClientError::Answer(format!("the answer has no {name}")))
+        };
+        let expiration = field("Expiration")?;
+        Ok(TemporaryCredentials {
+            access_key: field("AccessKeyId")?,
+            secret_key: Zeroizing::new(field("SecretAccessKey")?),
+            session_token: Zeroizing::new(field("SessionToken")?),
+            expires: time::OffsetDateTime::parse(
+                &expiration,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .map_err(|_| ClientError::Answer(format!("the expiration {expiration} isn't a date")))?
+            .into(),
+        })
     }
 
     /// The drive's metadata snapshots, oldest first (`teifs:ListSnapshots`).
@@ -470,18 +567,7 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
         };
     }
     let text = String::from_utf8_lossy(body);
-    let element = |name: &str| {
-        let start = text.find(&format!("<{name}>"))? + name.len() + 2;
-        let end = start + text[start..].find(&format!("</{name}>"))?;
-        Some(
-            text[start..end]
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'")
-                .replace("&amp;", "&"),
-        )
-    };
+    let element = |name: &str| xml_element(&text, name);
     ClientError::Api {
         status: status.as_u16(),
         code: element("Code").unwrap_or_else(|| {
@@ -495,7 +581,42 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
     }
 }
 
-/// A bucket's quota, as `MinIO`'s admin API takes and answers it.
+/// The text of the first `<name>` element in `text`, unescaped: enough for the flat
+/// answers of S3 errors and STS.
+fn xml_element(text: &str, name: &str) -> Option<String> {
+    let start = text.find(&format!("<{name}>"))? + name.len() + 2;
+    let end = start + text[start..].find(&format!("</{name}>"))?;
+    Some(
+        text[start..end]
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// Temporary credentials STS answered.
+pub struct TemporaryCredentials {
+    /// The access key id.
+    pub access_key: String,
+    /// The secret access key.
+    pub secret_key: Zeroizing<String>,
+    /// The session token.
+    pub session_token: Zeroizing<String>,
+    /// When they expire.
+    pub expires: SystemTime,
+}
+
+impl fmt::Debug for TemporaryCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TemporaryCredentials")
+            .field("access_key", &self.access_key)
+            .field("expires", &self.expires)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A server's health checks, as `MinIO`'s probes name them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthCheck {
@@ -530,6 +651,7 @@ pub struct Health {
     pub date: Option<SystemTime>,
 }
 
+/// A bucket's quota, as `MinIO`'s admin API takes and answers it.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct BucketQuota {
     /// The limit as older clients send it.

@@ -46,6 +46,18 @@ pub const ADMIN_BUCKETS: &str = "/.teifs/admin/v1/buckets";
 /// [`crate::audit::TraceFilter`].
 pub const ADMIN_TRACE: &str = "/.teifs/admin/v1/trace";
 
+/// `GET`: the managed policies mapped to LDAP users' and groups' DNs
+/// (`Vec<LdapPolicyMapping>`); `?dn=DN` for one.
+pub const ADMIN_LDAP_POLICIES: &str = "/.teifs/admin/v1/ldap/policies";
+
+/// `POST`: maps managed policies to an LDAP user's or group's DN, which the directory
+/// must have (an [`LdapPolicyRequest`]), answering an [`LdapPolicyChanged`].
+pub const ADMIN_LDAP_ATTACH: &str = "/.teifs/admin/v1/ldap/attach";
+
+/// `POST`: removes managed policies from an LDAP user's or group's DN (an
+/// [`LdapPolicyRequest`]), answering an [`LdapPolicyChanged`].
+pub const ADMIN_LDAP_DETACH: &str = "/.teifs/admin/v1/ldap/detach";
+
 /// `MinIO`'s admin API: `PUT` sets `?bucket=NAME`'s quota (`admin:SetBucketQuota`), as
 /// `mc quota set` and `clear` do.
 pub const MINIO_SET_BUCKET_QUOTA: &str = "/minio/admin/v3/set-bucket-quota";
@@ -169,6 +181,49 @@ pub struct IamExport {
     /// OpenID Connect providers.
     #[serde(default)]
     pub oidc_providers: Vec<ExportedOidcProvider>,
+    /// The managed policies mapped to LDAP users' and groups' DNs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ldap_policies: Vec<LdapPolicyMapping>,
+}
+
+/// The managed policies mapped to an LDAP user's or group's DN.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LdapPolicyMapping {
+    /// The DN, written in one form.
+    pub dn: String,
+    /// `user` or `group`.
+    pub entity: String,
+    /// The policies' names.
+    pub policies: Vec<String>,
+}
+
+/// A change to the policies of an LDAP user or group: one of `user` and `group`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LdapPolicyRequest {
+    /// The user's DN, in any spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The group's DN, in any spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The managed policies: names or ARNs.
+    pub policies: Vec<String>,
+}
+
+/// What a change to an LDAP user's or group's policies did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LdapPolicyChanged {
+    /// The DN, as the directory spells it, written in one form.
+    pub dn: String,
+    /// `user` or `group`.
+    pub entity: String,
+    /// The policies attached or detached, by name.
+    pub changed: Vec<String>,
+    /// The policies it has now.
+    pub policies: Vec<String>,
 }
 
 /// A customer-managed policy.
@@ -346,6 +401,9 @@ pub struct ImportReport {
     /// OpenID Connect providers created.
     #[serde(default)]
     pub oidc_providers: usize,
+    /// LDAP users and groups given policies.
+    #[serde(default)]
+    pub ldap_policies: usize,
     /// Access keys imported.
     pub access_keys: usize,
     /// Access keys skipped because the export has no secret for them.
@@ -511,6 +569,32 @@ pub struct ServerConfig {
     /// The header they name clients in, when any is trusted.
     #[serde(default)]
     pub proxy_header: Option<String>,
+    /// The LDAP directory users sign in with; none when there's none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ldap: Option<LdapConfig>,
+}
+
+/// The LDAP directory a server signs users in with (never the lookup account's
+/// password).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LdapConfig {
+    /// The server's address, or the name its SRV records are looked up by.
+    pub server: String,
+    /// How it's reached: `tls`, `starttls` or `plain`.
+    pub transport: String,
+    /// The lookup account's DN.
+    pub lookup_dn: String,
+    /// Where users are searched for.
+    pub user_bases: Vec<String>,
+    /// The filter that finds a user.
+    pub user_filter: String,
+    /// Where groups are searched for.
+    #[serde(default)]
+    pub group_bases: Vec<String>,
+    /// The filter that finds a user's groups; none when groups aren't looked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_filter: Option<String>,
 }
 
 /// Where a server's KMS keys are.
