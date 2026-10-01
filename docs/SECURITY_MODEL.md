@@ -192,7 +192,12 @@ A SAML response is read without a document type declaration or entities (no XXE 
 entity expansion), and only what a verified signature covers is used: the signature must
 be in the element it signs and reference that element's `ID`, which no other element may
 have, so a signed assertion can't be wrapped or moved next to a forged one (a response
-must have exactly one assertion); only the provider's metadata's keys count.
+must have exactly one assertion); only the provider's metadata's keys count. Encryption
+doesn't stand in for a signature: an encrypted assertion is read only when the response
+(which then covers its ciphertext) or the decrypted assertion is signed, and its IDs
+must be unique with the response's. Every decryption failure gives the same answer, so
+answers can't be used as a padding or key oracle, and only RSA-OAEP key transport is
+taken (never RSA PKCS#1 v1.5).
 Changing IAM is itself an IAM permission: every action of the IAM API is authorized
 before it runs, as on AWS, so a user can manage only what its policies grant, and
 delegated administrators can be held to specific policies and boundaries

@@ -225,7 +225,7 @@ fn millis(time: Option<&aws_sdk_iam::primitives::DateTime>) -> i64 {
 }
 
 async fn list(iam: &Client) -> Result<(), Error> {
-    let mut table = ui::Table::new(&["NAME", "ISSUER", "ENCRYPTION", "KEYS", "CREATED"]);
+    let mut table = ui::Table::new(&["NAME", "UUID", "ISSUER", "ENCRYPTION", "KEYS", "CREATED"]);
     let mut records = Vec::new();
     for arn in arns(iam).await? {
         let provider = iam
@@ -248,8 +248,10 @@ async fn list(iam: &Client) -> Result<(), Error> {
             .map(|k| json!({"id": k.key_id(), "addedMs": millis(k.timestamp())}))
             .collect();
         let created = millis(provider.create_date());
+        let uuid = provider.saml_provider_uuid().unwrap_or_default();
         table.row(vec![
             name.to_owned(),
+            uuid.to_owned(),
             issuer.clone(),
             encryption.clone().unwrap_or_default(),
             provider
@@ -264,7 +266,7 @@ async fn list(iam: &Client) -> Result<(), Error> {
             "type": "samlProvider",
             "arn": arn,
             "name": name,
-            "uuid": provider.saml_provider_uuid(),
+            "uuid": uuid,
             "issuer": issuer,
             "encryption": encryption,
             "privateKeys": keys,

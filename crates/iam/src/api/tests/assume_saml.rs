@@ -5,8 +5,12 @@ use teifs_policy::Date;
 
 use super::{ALLOW_ALL, Drive, between, code, drive, enc, ok};
 use crate::{
-    Identity, NewRole, NewSamlProvider, Owner, Reply,
-    saml::response::tests::{ENTITY_ID, Idp, SIGN_IN, Saml, Signed},
+    Identity, NewRole, NewSamlProvider, Owner, Reply, SamlProviderUpdate,
+    saml::{
+        encryption::tests::OAEP256_AES128_GCM,
+        private_key::tests::new_pem,
+        response::tests::{ENTITY_ID, Idp, SIGN_IN, Saml, Signed},
+    },
     sessions::now_seconds,
 };
 
@@ -531,5 +535,55 @@ async fn responses_and_their_attributes_keep_to_aws_rules() {
     assert_eq!(
         between(&answer, "<Subject>", "</Subject>"),
         "alice@example.com"
+    );
+}
+
+#[tokio::test]
+async fn encrypted_assertions_are_decrypted_with_the_providers_keys() {
+    let d = drive().await;
+    let idp = Idp::new();
+    setup(&d, &idp, "r", &[], "");
+    let arn = d.saml_arn("Okta");
+    let update =
+        |update: SamlProviderUpdate<'_>| d.iam.update_saml_provider(&arn, &update).unwrap();
+    update(SamlProviderUpdate {
+        encryption: Some("Required"),
+        add_key: Some(&idp.private_key_pem),
+        ..SamlProviderUpdate::default()
+    });
+    let uuid = d.iam.saml_provider(&arn).unwrap().uuid;
+    let encrypted = Saml {
+        recipient: format!("{SIGN_IN}/acs/{uuid}"),
+        encrypted: Some(OAEP256_AES128_GCM),
+        ..for_role(&d, "r")
+    };
+    let body = |saml: &Saml| assuming(&d, "r", &idp.response(saml), "");
+    ok(d.saml(&body(&encrypted)), "encrypted");
+    refused(
+        &d,
+        &body(&Saml {
+            encrypted: None,
+            ..encrypted.clone()
+        }),
+        "InvalidIdentityToken",
+        "requires encrypted assertions",
+    );
+    // A newer key is tried first, and the older one still decrypts.
+    update(SamlProviderUpdate {
+        add_key: Some(&new_pem()),
+        ..SamlProviderUpdate::default()
+    });
+    ok(d.saml(&body(&encrypted)), "after a new key");
+    // Without the key it was encrypted for, it can't be read.
+    let keys = d.iam.saml_provider(&arn).unwrap().keys;
+    update(SamlProviderUpdate {
+        remove_key: Some(&keys[0].0),
+        ..SamlProviderUpdate::default()
+    });
+    refused(
+        &d,
+        &body(&encrypted),
+        "InvalidIdentityToken",
+        "can&apos;t be decrypted with the SAML provider&apos;s private keys",
     );
 }

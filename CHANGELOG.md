@@ -289,6 +289,13 @@ behaviour; the on-disk format is always upgraded automatically.
   canonicalization and verifier, which refuse signature wrapping, document type
   declarations and entities. The audit log doesn't record a `SAMLAssertion` sent in the
   query.
+- Encrypted SAML assertions, as AWS takes them: an `EncryptedAssertion` whose key is
+  encrypted with RSA-OAEP for one of the provider's private keys (the newest tried
+  first) and whose assertion is encrypted with AES-128/256-CBC or AES-128/256-GCM is
+  decrypted, then checked like a plain one. A provider whose `AssertionEncryptionMode`
+  is `Required` refuses plain assertions and takes only its own sign-in endpoint
+  (`…/saml/acs/` and its UUID) as the `Recipient`, which `teifs admin saml ls` now
+  shows.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to

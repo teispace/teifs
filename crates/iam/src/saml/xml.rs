@@ -141,6 +141,16 @@ impl Element {
 
 /// Reads `text`: a document whose root element is returned.
 pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
+    read(text, None)
+}
+
+/// Reads `text`, an element that was in another document where `scope`'s namespaces
+/// were in scope for it (as a decrypted element was where it was encrypted).
+pub(crate) fn parse_in(text: &str, scope: &Scope) -> Result<Element, XmlError> {
+    read(text, Some(scope))
+}
+
+fn read(text: &str, outer: Option<&Scope>) -> Result<Element, XmlError> {
     if text.starts_with('\u{feff}') {
         return bad("it starts with a byte order mark");
     }
@@ -166,11 +176,11 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
                 if stack.len() >= MAX_DEPTH {
                     return bad(format!("its elements nest more than {MAX_DEPTH} deep"));
                 }
-                let scope = stack.last().map(|e| Arc::clone(&e.scope));
+                let scope = stack.last().map(|e| &e.scope).or(outer).map(Arc::clone);
                 stack.push(element(&start, scope)?);
             }
             Event::Empty(start) => {
-                let scope = stack.last().map(|e| Arc::clone(&e.scope));
+                let scope = stack.last().map(|e| &e.scope).or(outer).map(Arc::clone);
                 let done = element(&start, scope)?;
                 close(&mut stack, &mut root, done);
             }
@@ -341,6 +351,17 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests fail on any error")]
 
     use super::*;
+
+    #[test]
+    fn an_element_from_another_document_keeps_its_namespaces() {
+        let outer = parse(r#"<a:R xmlns:a="urn:a" xmlns="urn:d"><a:E/></a:R>"#).unwrap();
+        let inner = parse_in(r#"<a:B><C/><D xmlns="urn:e"/></a:B>"#, &outer.scope).unwrap();
+        assert!(inner.is("urn:a", "B"));
+        let ns: Vec<_> = inner.elements().map(|e| e.ns.as_deref()).collect();
+        assert_eq!(ns, [Some("urn:d"), Some("urn:e")]);
+        assert!(parse_in("<a:B/>", &outer.scope).unwrap().is("urn:a", "B"));
+        assert!(parse("<a:B/>").is_err());
+    }
 
     #[test]
     fn namespaces_prefixes_and_values_are_read_as_written() {

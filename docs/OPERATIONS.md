@@ -362,7 +362,10 @@ Users then exchange the provider's response for a role's credentials with
 response the provider gives the browser) work against TeiFS's endpoint. Configure the
 provider for AWS as its documentation says (audience `urn:amazon:webservices`, the
 `https://signin.aws.amazon.com/saml` endpoint, the `Role` and `RoleSessionName`
-attributes), with role ARNs of the drive's account, and trust the provider in the role:
+attributes), with role ARNs of the drive's account, and trust the provider in the role.
+To encrypt assertions, give the provider the certificate of the private key added to
+TeiFS and the endpoint `https://signin.aws.amazon.com/saml/acs/UUID` (the UUID `teifs
+admin saml ls` shows), which `--encryption required` insists on:
 
 ```json
 {"Effect": "Allow", "Principal": {"Federated": "arn:aws:iam::ACCOUNT:saml-provider/Okta"},

@@ -133,7 +133,8 @@ const SEALED_KEY: &str = "key";
 pub struct Iam {
     inner: Mutex<Inner>,
     snapshot: RwLock<Arc<Snapshot>>,
-    /// IAM's key, which seals session tokens and derives their secrets.
+    /// IAM's key, which seals session tokens and derives their secrets (and opens the
+    /// SAML providers' private keys it sealed).
     tokens: DataKey,
     /// The OpenID Connect providers' signing keys.
     web_keys: oidc::KeyCache,

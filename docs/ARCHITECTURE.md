@@ -166,6 +166,10 @@ other way (one reference, to the `ID` of the element the signature is in, unique
 document; enveloped-signature then exclusive canonicalization), with aws-lc-rs and only
 the metadata's keys; `saml/c14n.rs` is exclusive canonicalization over the tree
 `saml/xml.rs` reads, which keeps each element's prefixes and namespaces in scope for it.
+`saml/encryption.rs` decrypts an `EncryptedAssertion` (RSA-OAEP key transport, AES-CBC
+or AES-GCM content, aws-lc-rs) with the provider's private keys, unsealed for the call
+only; `xml::parse_in` reads the decrypted assertion with the namespaces in scope where
+it was, as XML Encryption says, so its own signature canonicalizes as it was signed.
 The role session keeps the response's `saml:` keys (`sessions::SamlClaims`) as a web
 identity's keeps its provider's.
 

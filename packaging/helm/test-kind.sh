@@ -18,6 +18,8 @@ key() {
     kubectl get secret t-teifs -o "jsonpath={.data.$1}" | base64 -d
 }
 forward() {
+    # After a pod is deleted, its StatefulSet makes it again a moment later.
+    for _ in $(seq 60); do kubectl get pod t-teifs-0 >/dev/null 2>&1 && break; sleep 1; done
     kubectl wait --for=condition=Ready pod/t-teifs-0 --timeout 120s
     kubectl port-forward svc/t-teifs 9000:9000 >/dev/null &
     forwarded=$!

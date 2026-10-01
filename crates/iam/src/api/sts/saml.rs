@@ -3,9 +3,12 @@
 //! (`crate::saml::response`); its `Role` attribute must name the role with the
 //! provider; then the role's trust policy decides, with the `saml:` keys.
 
+use std::sync::Arc;
+
 use aws_lc_rs::digest;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use teifs_policy::{Context, Principal, StsKey};
+use zeroize::Zeroizing;
 
 use super::{
     ARN_CHARS, ARN_PATTERN, ApiError, NAME_CHARS, Out, ROLE_LONGEST, Run, SHORTEST, answer, claims,
@@ -17,7 +20,7 @@ use crate::{
     rules,
     saml::response::{self, Assertion, Provider, Refused},
     sessions::{SamlClaims, Who, now_seconds},
-    state::{Role, SamlProvider},
+    state::{Encryption, Role, SamlProvider},
 };
 
 /// The action that exchanges a SAML response for a role's session.
@@ -327,6 +330,47 @@ fn saml_assertion<'p>(r: &'p Run<'_>) -> Result<&'p str, ApiError> {
     Ok(encoded)
 }
 
+/// The SAML provider `provider_arn`, and what its response `encoded` says.
+fn read_response(
+    r: &Run<'_>,
+    provider_arn: &str,
+    encoded: &str,
+    now: i64,
+) -> Result<(Arc<SamlProvider>, Assertion), ApiError> {
+    let Ok(provider) = r
+        .iam
+        .read(|s| s.saml_provider_by_arn(provider_arn).cloned())
+    else {
+        return Err(super::invalid_token(format!(
+            "The SAML provider {provider_arn} doesn't exist."
+        )));
+    };
+    let private_keys = private_keys(r, &provider);
+    let assertion = response::read(
+        encoded,
+        &Provider {
+            metadata: &provider.parsed,
+            uuid: &provider.uuid,
+            private_keys: &private_keys,
+            encrypted_only: provider.encryption == Some(Encryption::Required),
+        },
+        now,
+    )
+    .map_err(refused)?;
+    Ok((provider, assertion))
+}
+
+/// The provider's private keys, unsealed, newest first, as AWS tries them (any of them
+/// decrypts; the newest likely does).
+fn private_keys(r: &Run<'_>, provider: &SamlProvider) -> Vec<Zeroizing<Vec<u8>>> {
+    provider
+        .keys
+        .iter()
+        .rev()
+        .filter_map(|k| r.iam.tokens.open_secret(k.id.as_bytes(), &k.sealed).ok())
+        .collect()
+}
+
 pub(in crate::api) fn assume_role_with_saml(r: &Run<'_>) -> Out {
     let min_token = min_token_size(r)?;
     let arn = text(r, "RoleArn", 20..=2048, ARN_CHARS, ARN_PATTERN)?
@@ -336,24 +380,8 @@ pub(in crate::api) fn assume_role_with_saml(r: &Run<'_>) -> Out {
     let encoded = saml_assertion(r)?;
     let requested = duration(r, SHORTEST..=ROLE_LONGEST)?;
     let policies = session_policies(r)?;
-    let Ok(provider) = r
-        .iam
-        .read(|s| s.saml_provider_by_arn(provider_arn).cloned())
-    else {
-        return Err(super::invalid_token(format!(
-            "The SAML provider {provider_arn} doesn't exist."
-        )));
-    };
     let now = now_seconds();
-    let assertion = response::read(
-        encoded,
-        &Provider {
-            metadata: &provider.parsed,
-            uuid: &provider.uuid,
-        },
-        now,
-    )
-    .map_err(refused)?;
+    let (provider, assertion) = read_response(r, provider_arn, encoded, now)?;
     let not_authorized = || super::not_authorized(SAML);
     if !attribute(&assertion, "Role")
         .unwrap_or_default()

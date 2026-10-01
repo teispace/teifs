@@ -774,9 +774,11 @@ async fn saml_providers_are_added_changed_and_deleted() {
         .as_str()
         .unwrap()
         .to_owned();
+    let uuid = listed[0]["uuid"].as_str().unwrap().to_owned();
+    assert!(uuid.len() >= 22, "{uuid}");
     let table = cli.ok(&["admin", "saml", "ls", "t"]).await;
     assert!(
-        table.contains(&first) && table.contains("Required"),
+        table.contains(&first) && table.contains("Required") && table.contains(&uuid),
         "{table}"
     );
 

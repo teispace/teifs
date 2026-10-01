@@ -4,15 +4,18 @@
 //! the user is and what they may assume.
 //!
 //! What's read comes only from a signed element: the assertion is read when it, or the
-//! response it's in, is the element a signature verified.
+//! response it's in, is the element a signature verified. An encrypted assertion is
+//! decrypted with the provider's private keys first; the response's signature then
+//! covers its ciphertext.
 
 use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use zeroize::Zeroizing;
 
 use super::{
-    dsig,
+    dsig, encryption,
     metadata::Metadata,
     xml::{self, Element},
 };
@@ -87,6 +90,10 @@ pub(crate) struct Provider<'a> {
     pub(crate) metadata: &'a Metadata,
     /// Its `SAMLProviderUUID`, which a sign-in endpoint for it may end in.
     pub(crate) uuid: &'a str,
+    /// Its private keys (PKCS#8), newest first, which decrypt encrypted assertions.
+    pub(crate) private_keys: &'a [Zeroizing<Vec<u8>>],
+    /// Whether its assertions must be encrypted (`AssertionEncryptionMode` `Required`).
+    pub(crate) encrypted_only: bool,
 }
 
 /// A `xs:dateTime` attribute, in seconds since the Unix epoch.
@@ -167,7 +174,6 @@ pub(crate) fn read(encoded: &str, provider: &Provider<'_>, now: i64) -> Result<A
     if root.attr("Version") != Some("2.0") {
         return invalid("The SAML response isn't SAML 2.0");
     }
-    dsig::unique_ids(&root).or_else(|e| invalid(format!("Response signature invalid: {e}")))?;
     let status = root
         .one(PROTOCOL, "Status")
         .ok()
@@ -186,18 +192,35 @@ pub(crate) fn read(encoded: &str, provider: &Provider<'_>, now: i64) -> Result<A
     {
         return invalid("Issuer not present in specified provider");
     }
-    let mut assertions = root.all(ASSERTION, "Assertion");
-    let (Some(assertion), None) = (assertions.next(), assertions.next()) else {
-        return invalid("The SAML response must have exactly one assertion");
+    let plain: Vec<&Element> = root.all(ASSERTION, "Assertion").collect();
+    let encrypted: Vec<&Element> = root.all(ASSERTION, "EncryptedAssertion").collect();
+    let unique = |roots: &[&Element]| {
+        dsig::unique_ids(roots).or_else(|e| invalid(format!("Response signature invalid: {e}")))
     };
-    if root
-        .one(ASSERTION, "EncryptedAssertion")
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return invalid("The SAML response must have exactly one assertion");
-    }
+    let decrypted;
+    let assertion = match (plain.as_slice(), encrypted.as_slice()) {
+        ([_], []) if provider.encrypted_only => {
+            return invalid(
+                "The SAML provider requires encrypted assertions, and the response's \
+                 assertion isn't encrypted",
+            );
+        }
+        ([assertion], []) => {
+            unique(&[&root])?;
+            *assertion
+        }
+        ([], [encrypted]) => {
+            let text = encryption::decrypt(encrypted, provider.private_keys).or_else(invalid)?;
+            decrypted = xml::parse_in(&text, &encrypted.scope)
+                .or_else(|e| invalid(format!("The encrypted assertion is malformed: {e}")))?;
+            if !decrypted.is(ASSERTION, "Assertion") {
+                return invalid("The encrypted assertion isn't an Assertion");
+            }
+            unique(&[&root, &decrypted])?;
+            &decrypted
+        }
+        _ => return invalid("The SAML response must have exactly one assertion"),
+    };
     let keys = &provider.metadata.keys;
     let signature =
         |e: dsig::BadSignature| Refused::Invalid(format!("Response signature invalid: {e}"));
@@ -338,6 +361,15 @@ fn read_subject(
         return Err(early("SubjectConfirmationData NotBefore"));
     }
     let recipient = data.attr("Recipient").unwrap_or_default().to_owned();
+    // AWS asks for the provider's own endpoint when its assertions must be encrypted.
+    if provider.encrypted_only && !recipient.contains("/saml/acs/") {
+        return invalid(format!(
+            "The SubjectConfirmationData Recipient {recipient:?} must be the SAML provider's \
+             own sign-in endpoint (https://signin.aws.amazon.com/saml/acs/{}), as its \
+             assertions are encrypted.",
+            provider.uuid
+        ));
+    }
     if !sign_in_endpoint(&recipient, provider.uuid) {
         return invalid(format!(
             "The SubjectConfirmationData Recipient {recipient:?} isn't an AWS sign-in endpoint \
@@ -384,7 +416,12 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         oidc::jwt::tests::Signer,
-        saml::{dsig::tests::sign, metadata::tests::document},
+        saml::{
+            dsig::tests::sign,
+            encryption::tests::{MGF1P_AES256_CBC, OAEP256_AES128_GCM, Scheme, encrypt},
+            metadata::tests::document,
+            private_key::{pkcs8, tests::new_pem},
+        },
         sessions::now_seconds,
     };
 
@@ -423,6 +460,8 @@ pub(crate) mod tests {
         pub(crate) status: String,
         pub(crate) attributes: Vec<(String, Vec<String>)>,
         pub(crate) signed: Signed,
+        /// How the assertion is encrypted for the provider's private key, if it is.
+        pub(crate) encrypted: Option<Scheme>,
     }
 
     impl Default for Saml {
@@ -442,6 +481,7 @@ pub(crate) mod tests {
                 status: "urn:oasis:names:tc:SAML:2.0:status:Success".into(),
                 attributes: Vec::new(),
                 signed: Signed::Assertion,
+                encrypted: None,
             }
         }
     }
@@ -487,10 +527,13 @@ pub(crate) mod tests {
         xml
     }
 
-    /// A SAML identity provider that signs with an RSA key its metadata names.
+    /// A SAML identity provider that signs with an RSA key its metadata names, and
+    /// encrypts for the private key it gave the SAML provider.
     pub(crate) struct Idp {
         pub(crate) metadata: String,
         signer: Signer,
+        /// The SAML provider's private key, as `AddPrivateKey` takes it.
+        pub(crate) private_key_pem: String,
     }
 
     impl Idp {
@@ -503,6 +546,7 @@ pub(crate) mod tests {
             Self {
                 metadata: document(ENTITY_ID, &[cert.der()]),
                 signer: Signer::Rsa(RsaKeyPair::from_pkcs8(&key.serialize_der()).unwrap()),
+                private_key_pem: new_pem(),
             }
         }
 
@@ -572,11 +616,29 @@ pub(crate) mod tests {
             } else {
                 document
             };
+            let document = match saml.encrypted {
+                Some(scheme) => self.encrypted(&document, scheme, str::to_owned),
+                None => document,
+            };
             if response_signed {
                 sign(&document, "_response", &self.signer, "RS256")
             } else {
                 document
             }
+        }
+
+        /// `document` with its assertion, changed by `change`, encrypted with `scheme`.
+        pub(crate) fn encrypted(
+            &self,
+            document: &str,
+            scheme: Scheme,
+            change: impl FnOnce(&str) -> String,
+        ) -> String {
+            let start = document.find("<saml:Assertion").unwrap();
+            let end = document.find("</saml:Assertion>").unwrap() + "</saml:Assertion>".len();
+            let key = pkcs8(&self.private_key_pem).unwrap();
+            let encrypted = encrypt(&change(&document[start..end]), &key, scheme);
+            format!("{}{encrypted}{}", &document[..start], &document[end..])
         }
 
         /// The response `saml` describes, as `SAMLAssertion` takes it (base64).
@@ -586,12 +648,21 @@ pub(crate) mod tests {
     }
 
     fn checked(idp: &Idp, xml: &str) -> Result<Assertion, Refused> {
+        read_by(idp, xml, false)
+    }
+
+    /// `xml` read by a provider with `idp`'s metadata and private key, which requires
+    /// encrypted assertions if `encrypted_only`.
+    fn read_by(idp: &Idp, xml: &str, encrypted_only: bool) -> Result<Assertion, Refused> {
         let metadata = crate::saml::metadata::parse(&idp.metadata).unwrap();
+        let other = pkcs8(&new_pem()).unwrap();
         read(
             &STANDARD.encode(xml),
             &Provider {
                 metadata: &metadata,
                 uuid: "SAMLUUID",
+                private_keys: &[other, pkcs8(&idp.private_key_pem).unwrap()],
+                encrypted_only,
             },
             now_seconds(),
         )
@@ -726,6 +797,14 @@ pub(crate) mod tests {
             checked(&idp, &idp.xml(&nameless)),
             Err(Refused::Denied(_))
         ));
+        // IDs are unique.
+        let twice = idp
+            .xml(&good)
+            .replace("ID=\"_assertion\"", "ID=\"_response\"");
+        assert!(matches!(
+            checked(&idp, &twice),
+            Err(Refused::Invalid(m)) if m.contains("the ID _response appears more than once")
+        ));
         // Changed after signing.
         let xml = idp
             .xml(&good)
@@ -767,11 +846,142 @@ pub(crate) mod tests {
                 "!!",
                 &Provider {
                     metadata: &crate::saml::metadata::parse(&idp.metadata).unwrap(),
-                    uuid: ""
+                    uuid: "",
+                    private_keys: &[],
+                    encrypted_only: false,
                 },
                 0
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn encrypted_assertions_are_decrypted_then_read() {
+        let idp = Idp::new();
+        for signed in [Signed::Response, Signed::Assertion, Signed::Both] {
+            for scheme in [MGF1P_AES256_CBC, OAEP256_AES128_GCM] {
+                let saml = Saml {
+                    signed,
+                    encrypted: Some(scheme),
+                    ..Saml::default()
+                }
+                .with("RoleSessionName", &["alice"]);
+                let read = checked(&idp, &idp.xml(&saml)).unwrap();
+                assert_eq!(read.subject, "alice@example.com", "{signed:?} {scheme:?}");
+                assert_eq!(
+                    read.attribute("https://aws.amazon.com/SAML/Attributes/RoleSessionName"),
+                    Some(&["alice".to_owned()][..])
+                );
+            }
+        }
+        // A provider that requires encryption takes only encrypted assertions, sent
+        // to its own sign-in endpoint.
+        let own = Saml {
+            recipient: format!("{SIGN_IN}/acs/samluuid"),
+            encrypted: Some(OAEP256_AES128_GCM),
+            ..Saml::default()
+        };
+        assert!(read_by(&idp, &idp.xml(&own), true).is_ok());
+        let refused = |saml: &Saml, why: &str| {
+            let err = read_by(&idp, &idp.xml(saml), true).unwrap_err();
+            assert!(
+                matches!(&err, Refused::Invalid(m) if m.contains(why)),
+                "{why}: {err:?}"
+            );
+        };
+        refused(
+            &Saml {
+                encrypted: None,
+                ..own.clone()
+            },
+            "requires encrypted assertions",
+        );
+        refused(
+            &Saml {
+                recipient: SIGN_IN.into(),
+                ..own.clone()
+            },
+            "own sign-in endpoint (https://signin.aws.amazon.com/saml/acs/SAMLUUID)",
+        );
+    }
+
+    #[test]
+    fn encrypted_assertions_get_no_trust_of_their_own() {
+        let idp = Idp::new();
+        let invalid = |xml: &str, why: &str| {
+            let err = checked(&idp, xml).unwrap_err();
+            assert!(
+                matches!(&err, Refused::Invalid(m) if m.contains(why)),
+                "{why}: {err:?}"
+            );
+        };
+        let encrypted = |signed| Saml {
+            signed,
+            encrypted: Some(OAEP256_AES128_GCM),
+            ..Saml::default()
+        };
+        // Encryption isn't a signature.
+        invalid(
+            &idp.xml(&encrypted(Signed::Neither)),
+            "neither the response nor its assertion is signed",
+        );
+        let plain = idp.xml(&Saml {
+            signed: Signed::Neither,
+            ..Saml::default()
+        });
+        let scheme = MGF1P_AES256_CBC;
+        // Only the provider's keys decrypt.
+        let start = plain.find("<saml:Assertion").unwrap();
+        let end = plain.find("</samlp:Response>").unwrap();
+        let elsewhere = encrypt(&plain[start..end], &pkcs8(&new_pem()).unwrap(), scheme);
+        invalid(
+            &format!("{}{elsewhere}{}", &plain[..start], &plain[end..]),
+            "can't be decrypted with the SAML provider's private keys",
+        );
+        // What's decrypted must be one well-formed assertion, whose IDs are the
+        // document's own.
+        invalid(
+            &idp.encrypted(&plain, scheme, |_| "<saml:Subject/>".into()),
+            "isn't an Assertion",
+        );
+        invalid(
+            &idp.encrypted(&plain, scheme, |_| "<saml:Assertion>".into()),
+            "The encrypted assertion is malformed",
+        );
+        invalid(
+            &idp.encrypted(&plain, scheme, |a| {
+                a.replace("ID=\"_assertion\"", "ID=\"_response\"")
+            }),
+            "the ID _response appears more than once",
+        );
+        // One assertion, encrypted or not.
+        let both = idp.encrypted(&plain, scheme, |a| format!("{a}{a}"));
+        invalid(&both, "more than one root element");
+        let assertion = &plain[start..end];
+        let extra = idp.encrypted(&plain, scheme, str::to_owned);
+        let extra = extra.replace(
+            "</samlp:Response>",
+            &format!("{assertion}</samlp:Response>"),
+        );
+        invalid(&extra, "exactly one assertion");
+        // The response's signature covers the ciphertext: another can't be put in.
+        let signed = idp.xml(&encrypted(Signed::Response));
+        let forged = idp.encrypted(&plain, scheme, |a| a.replace("alice@", "mallory@"));
+        let (from, to) = (
+            signed.find("<saml:EncryptedAssertion").unwrap(),
+            signed.find("</saml:EncryptedAssertion>").unwrap() + "</saml:EncryptedAssertion>".len(),
+        );
+        let (forged_from, forged_to) = (
+            forged.find("<saml:EncryptedAssertion").unwrap(),
+            forged.find("</saml:EncryptedAssertion>").unwrap() + "</saml:EncryptedAssertion>".len(),
+        );
+        let swapped = format!(
+            "{}{}{}",
+            &signed[..from],
+            &forged[forged_from..forged_to],
+            &signed[to..]
+        );
+        invalid(&swapped, "digest");
     }
 }

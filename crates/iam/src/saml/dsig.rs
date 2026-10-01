@@ -234,10 +234,11 @@ fn canonicalization(element: &Element) -> Result<Option<(bool, Vec<String>)>, Ba
     Ok(Some((comments, prefixes)))
 }
 
-/// Every `ID` attribute value in `root`'s document, which must each be unique.
-pub(crate) fn unique_ids(root: &Element) -> Result<(), BadSignature> {
+/// Every `ID` attribute value in `roots` (a document, and any element decrypted from
+/// it), which must each be unique.
+pub(crate) fn unique_ids(roots: &[&Element]) -> Result<(), BadSignature> {
     let mut seen = std::collections::BTreeSet::new();
-    for element in root.descendants() {
+    for element in roots.iter().flat_map(|root| root.descendants()) {
         if let Some(id) = element.attr("ID")
             && !seen.insert(id)
         {
@@ -444,7 +445,7 @@ pub(crate) mod tests {
 
     fn check(document: &str, keys: &[PublicKey]) -> Result<bool, BadSignature> {
         let root = xml::parse(document).map_err(|e| BadSignature(e.to_string()))?;
-        unique_ids(&root)?;
+        unique_ids(&[&root])?;
         let assertion = root
             .descendants()
             .into_iter()
