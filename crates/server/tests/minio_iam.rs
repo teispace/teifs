@@ -13,7 +13,11 @@ use teifs_crypto::madmin;
 mod common;
 mod signing;
 
-use common::{ACCESS_KEY, SECRET_KEY, Server, client_as, code, start};
+use aws_sdk_s3::types::{
+    BucketVersioningStatus, DefaultRetention, ObjectLockConfiguration, ObjectLockEnabled,
+    ObjectLockRetentionMode, ObjectLockRule, VersioningConfiguration,
+};
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, client_as, code, start};
 use signing::{signed, signed_response};
 
 const ROOT: (&str, &str) = (ACCESS_KEY, SECRET_KEY);
@@ -539,4 +543,172 @@ async fn an_admin_can_remove_or_disable_others_but_not_itself() {
     );
     let (_, info) = call(&server, ROOT, "GET", "user-info?accessKey=admin1", b"").await;
     assert_eq!(info["status"], "enabled");
+}
+
+/// Buckets with something to show: `photos` with an object and a quota, `vault` with
+/// Object Lock and a default retention, `old` with versioning suspended.
+async fn buckets(server: &Server) {
+    let root = client(server, SECRET_KEY);
+    for bucket in ["old", "photos"] {
+        root.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    for status in [
+        BucketVersioningStatus::Enabled,
+        BucketVersioningStatus::Suspended,
+    ] {
+        root.put_bucket_versioning()
+            .bucket("old")
+            .versioning_configuration(VersioningConfiguration::builder().status(status).build())
+            .send()
+            .await
+            .unwrap();
+    }
+    root.create_bucket()
+        .bucket("vault")
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+    let retention = DefaultRetention::builder()
+        .mode(ObjectLockRetentionMode::Governance)
+        .days(3)
+        .build();
+    root.put_object_lock_configuration()
+        .bucket("vault")
+        .object_lock_configuration(
+            ObjectLockConfiguration::builder()
+                .object_lock_enabled(ObjectLockEnabled::Enabled)
+                .rule(
+                    ObjectLockRule::builder()
+                        .default_retention(retention)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    root.put_object()
+        .bucket("photos")
+        .key("cat.jpg")
+        .body(b"meow".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    let quota = br#"{"quota":4096,"quotatype":"hard"}"#;
+    let path = "/minio/admin/v3/set-bucket-quota?bucket=photos";
+    assert_eq!(signed(server, ROOT, "PUT", path, &[], quota).await.0, 200);
+}
+
+/// The buckets `accountinfo` lists for `key`: names and access.
+async fn account_buckets(server: &Server, key: (&str, &str)) -> (Value, Vec<(Value, Value)>) {
+    let (status, info) = call(server, key, "GET", "accountinfo", b"").await;
+    assert_eq!(status, 200);
+    let buckets = info["Buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| (b["name"].clone(), b["access"].clone()))
+        .collect();
+    (info, buckets)
+}
+
+#[tokio::test]
+async fn account_info_shows_the_root_user_every_bucket_and_what_it_has() {
+    let server = start().await;
+    buckets(&server).await;
+    let (info, names) = account_buckets(&server, ROOT).await;
+    assert_eq!(info["AccountName"], ACCESS_KEY);
+    assert_eq!(info["Server"]["Type"], 1);
+    assert!(info["Policy"]["Statement"].to_string().contains("admin:*"));
+    let both = json!({"read": true, "write": true});
+    assert_eq!(
+        names,
+        [
+            (json!("old"), both.clone()),
+            (json!("photos"), both.clone()),
+            (json!("vault"), both)
+        ]
+    );
+    let [old, photos, vault] = [0, 1, 2].map(|i| info["Buckets"][i]["details"].clone());
+    assert_eq!(
+        (
+            &old["versioning"],
+            &old["versioningSuspended"],
+            &old["locking"]
+        ),
+        (&json!(false), &json!(true), &json!(false))
+    );
+    let photos_held = &info["Buckets"][1];
+    assert_eq!(
+        (&photos_held["size"], &photos_held["objects"]),
+        (&json!(4), &json!(1))
+    );
+    assert_eq!(
+        (&photos["quota"]["size"], &photos["versioning"]),
+        (&json!(4096), &json!(false))
+    );
+    assert_eq!(
+        (&vault["locking"], &vault["versioning"]),
+        (&json!(true), &json!(true))
+    );
+    assert_eq!(vault["retention"], json!({"mode": "GOVERNANCE", "days": 3}));
+}
+
+#[tokio::test]
+async fn account_info_shows_a_user_its_policies_and_the_buckets_it_may_use() {
+    let server = start().await;
+    buckets(&server).await;
+    assert_eq!(
+        add_user(&server, ROOT, "alice", "alice-secret").await.0,
+        200
+    );
+    let alice = ("alice", "alice-secret");
+    let (info, names) = account_buckets(&server, alice).await;
+    assert_eq!(info["AccountName"], "alice");
+    assert_eq!(info["Policy"]["Statement"], json!([]));
+    assert!(names.is_empty());
+
+    // Its policies and its enabled groups'.
+    let reader = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::photos"}}"#;
+    let path = "add-canned-policy?name=photo-lister";
+    assert_eq!(
+        call(&server, ROOT, "PUT", path, reader.as_bytes()).await.0,
+        200
+    );
+    let attach = json!({"policies": ["photo-lister"], "user": "alice"});
+    let path = "idp/builtin/policy/attach";
+    assert_eq!(
+        secret_call(&server, ROOT, "POST", path, Some(&attach))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(members(&server, &["alice"], false).await.0, 200);
+    let attach = json!({"policies": ["writeonly"], "group": "devs"});
+    assert_eq!(
+        secret_call(&server, ROOT, "POST", path, Some(&attach))
+            .await
+            .0,
+        200
+    );
+    let (info, names) = account_buckets(&server, alice).await;
+    let write = json!({"read": false, "write": true});
+    assert_eq!(
+        names,
+        [
+            (json!("old"), write.clone()),
+            (json!("photos"), json!({"read": true, "write": true})),
+            (json!("vault"), write)
+        ]
+    );
+    assert_eq!(info["Policy"]["Statement"].as_array().unwrap().len(), 2);
+    let path = "set-group-status?group=devs&status=disabled";
+    assert_eq!(call(&server, ROOT, "PUT", path, b"").await.0, 200);
+    let (info, names) = account_buckets(&server, alice).await;
+    assert_eq!(info["Policy"]["Statement"][0]["Action"], "s3:ListBucket");
+    assert_eq!(
+        names,
+        [(json!("photos"), json!({"read": true, "write": false}))]
+    );
 }

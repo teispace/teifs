@@ -88,6 +88,8 @@ Secrets in these bodies are encrypted with the caller's secret key, as madmin en
 them: any change to the stream, a reorder or a cut is refused, and a body that doesn't
 open is refused before anything changes. Argon2id's 64 MiB runs one at a time. A
 disabled user's keys and sessions don't sign, and a disabled group grants nothing.
+`accountinfo` needs only a signature: it tells the caller its own policies and only the
+buckets those (and the buckets' policies) let it list or write.
 
 ACLs are disabled on every new bucket (Object Ownership `BucketOwnerEnforced`, as on
 AWS): a request with an ACL other than the bucket owner's full control is refused, and

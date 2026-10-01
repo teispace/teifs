@@ -319,6 +319,9 @@ behaviour; the on-disk format is always upgraded automatically.
   (`XMinioAdminNoSuchUser`, `XMinioIAMPolicyInUse`…), and each call is decided with
   MinIO's admin action (`admin:CreateUser`, `admin:UpdatePolicyAssociation`…); a user
   may read itself and change its own secret unless a policy denies it.
+- MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
+  caller gets its name, its policies merged into one document, and the buckets it may
+  read or write with their size, objects, versions, quota, versioning and Object Lock.
 - Users and groups can be disabled, as on MinIO: a disabled user's keys and sessions
   don't sign, and a disabled group's policies don't count for its members. IAM exports
   and imports keep the status, and an import takes secrets of 8 characters or more, as

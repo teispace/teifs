@@ -87,6 +87,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 |---|---|---|---|
 | `PUT` | `/minio/admin/v3/set-bucket-quota` | Sets `?bucket=NAME`'s hard quota in bytes (`{"size":N,"quotatype":"hard"}`, or `quota` for `size`), or clears it with none: `mc quota set` and `clear` | `admin:SetBucketQuota` |
 | `GET` | `/minio/admin/v3/get-bucket-quota` | `?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info` | `admin:GetBucketQuota` |
+| `GET` | `/minio/admin/v3/accountinfo` | The caller's name and policy, and the buckets it may read (`s3:ListBucket`) or write (`s3:PutObject`) with what each holds and has turned on: `mc admin accountinfo`, the console's buckets | anyone who signs, about themselves |
 | `PUT` | `/minio/admin/v3/add-user` | Makes user `?accessKey=` (an IAM user of that name, signing with a key of that id) or changes its secret and status; the body is an encrypted `AddOrUpdateUserReq`: `mc admin user add` | `admin:CreateUser`, or anyone on their own key unless denied |
 | `POST` | `/minio/admin/v3/change-my-password` | A new secret (an encrypted `AddOrUpdateUserReq`) for the access key that signs the request | `admin:ChangeMyPassword`, or anyone on their own key unless denied |
 | `DELETE` | `/minio/admin/v3/remove-user` | Deletes user `?accessKey=` with its keys, policies and memberships: `mc admin user rm` | `admin:DeleteUser` |

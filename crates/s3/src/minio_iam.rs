@@ -12,12 +12,19 @@ use std::collections::BTreeMap;
 use http::StatusCode;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
-use teifs_iam::{GroupPolicies, Iam, MinioError, MinioGroup, MinioUser, MinioUserChange, Owner};
+use teifs_iam::{
+    GroupPolicies, Iam, Identity, MinioError, MinioGroup, MinioUser, MinioUserChange, Owner,
+};
+use teifs_policy::Context;
+use teifs_store::{RetentionPeriod, Store, Versioning};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zeroize::Zeroizing;
 
 use crate::{
+    access::allows,
     admin,
+    bucket_access::Rules,
+    errors::StoreResultExt,
     routes::{s3_refusal, signed_body},
 };
 
@@ -556,4 +563,151 @@ pub(crate) async fn policy_entities(
             .collect(),
     };
     encrypted(req, &result).await
+}
+
+/// `madmin.AccountInfo`: Go's field names, as madmin reads them.
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct AccountInfo {
+    account_name: String,
+    server: BackendInfo,
+    policy: serde_json::Value,
+    buckets: Vec<BucketAccessInfo>,
+}
+
+/// `madmin.BackendInfo`: one drive, which MinIO calls a filesystem backend.
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct BackendInfo {
+    #[serde(rename = "Type")]
+    kind: u8,
+}
+
+/// MinIO's `madmin.FS`.
+const FS_BACKEND: u8 = 1;
+
+/// `madmin.BucketAccessInfo`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BucketAccessInfo {
+    name: String,
+    size: u64,
+    objects: u64,
+    versions: u64,
+    delete_markers: u64,
+    details: BucketDetails,
+    created: String,
+    access: Access,
+}
+
+/// `madmin.BucketDetails`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "madmin's fields, each a feature turned on or off"
+)]
+struct BucketDetails {
+    versioning: bool,
+    versioning_suspended: bool,
+    locking: bool,
+    replication: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention: Option<serde_json::Value>,
+}
+
+/// `madmin.AccountAccess`.
+#[derive(Serialize)]
+struct Access {
+    read: bool,
+    write: bool,
+}
+
+/// `GET accountinfo`: the caller's name and policy, and the buckets it may read or
+/// write (`s3:ListBucket`, `s3:PutObject`), with what each holds.
+pub(crate) async fn account_info(
+    (iam, store, rules): (&Iam, &Store, &Rules),
+    identity: &Identity,
+    context: &Context,
+    req: &S3Request<Body>,
+) -> S3Result<S3Response<Body>> {
+    let account = iam.minio_account(identity, caller_key(req).unwrap_or_default());
+    let usage = store.usage().await.s3()?;
+    let mut buckets = Vec::new();
+    for bucket in store.list_buckets().await.s3()? {
+        let name = &bucket.name;
+        // A bucket removed meanwhile is left out.
+        let Ok(bucket_rules) = rules.of(name).await else {
+            continue;
+        };
+        let access = Access {
+            read: allows(
+                identity,
+                context,
+                "s3:ListBucket",
+                &teifs_policy::bucket_arn(name),
+                Some(&bucket_rules),
+            ),
+            write: allows(
+                identity,
+                context,
+                "s3:PutObject",
+                &teifs_policy::object_arn(name, ""),
+                Some(&bucket_rules),
+            ),
+        };
+        if !(access.read || access.write) {
+            continue;
+        }
+        let Ok(details) = details(store, name).await else {
+            continue;
+        };
+        let held = usage
+            .iter()
+            .find(|u| u.name == *name)
+            .map(|u| u.usage)
+            .unwrap_or_default();
+        buckets.push(BucketAccessInfo {
+            name: name.clone(),
+            size: held.bytes,
+            objects: held.objects,
+            versions: held.versions,
+            delete_markers: held.delete_markers,
+            details,
+            created: time(admin::millis(bucket.created)),
+            access,
+        });
+    }
+    Ok(admin::json(&AccountInfo {
+        account_name: account.name,
+        server: BackendInfo { kind: FS_BACKEND },
+        policy: document(&account.policy)?,
+        buckets,
+    }))
+}
+
+/// What's turned on in a bucket.
+async fn details(store: &Store, bucket: &str) -> teifs_store::Result<BucketDetails> {
+    let versioning = store.bucket_versioning(bucket).await?;
+    let lock = store.bucket_object_lock(bucket).await?;
+    let quota = store.bucket_quota(bucket).await?;
+    Ok(BucketDetails {
+        versioning: versioning == Versioning::Enabled,
+        versioning_suspended: versioning == Versioning::Suspended,
+        locking: lock.is_some(),
+        replication: false,
+        quota: quota.map(|bytes| {
+            serde_json::json!({"quota": bytes, "size": bytes, "rate": 0, "requests": 0, "quotatype": "hard"})
+        }),
+        retention: lock.and_then(|l| l.default_retention).map(|r| match r.period {
+            RetentionPeriod::Days(days) => {
+                serde_json::json!({"mode": r.mode.as_str(), "days": days})
+            }
+            RetentionPeriod::Years(years) => {
+                serde_json::json!({"mode": r.mode.as_str(), "years": years})
+            }
+        }),
+    })
 }

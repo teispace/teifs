@@ -218,6 +218,12 @@ func minioIAM(ctx context.Context, adm *madmin.AdminClient) {
 	must(adm.SetGroupStatus(ctx, "go-group", madmin.GroupDisabled))
 	check(!lists(ctx, "go-user", "go-user-secret"), "a disabled group's policy counts")
 
+	account, err := adm.AccountInfo(ctx, madmin.AccountOpts{})
+	must(err)
+	check(account.AccountName == os.Getenv("AWS_ACCESS_KEY_ID") && len(account.Buckets) == 1 &&
+		account.Buckets[0].Access.Read && account.Buckets[0].Access.Write,
+		fmt.Sprintf("the account's info: %+v", account))
+
 	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", Members: []string{"go-user"}, IsRemove: true}))
 	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", IsRemove: true}))
 	must(adm.RemoveCannedPolicy(ctx, "go-lister"))

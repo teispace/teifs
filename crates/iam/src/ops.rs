@@ -25,8 +25,8 @@ use crate::{
 pub(crate) use ldap::LdapSignIn;
 pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
 pub use minio::{
-    GroupPolicies, MinioError, MinioGroup, MinioPolicy, MinioUser, MinioUserChange, PolicyEntities,
-    PolicyHolders, UserPolicies,
+    GroupPolicies, MinioAccount, MinioError, MinioGroup, MinioPolicy, MinioUser, MinioUserChange,
+    PolicyEntities, PolicyHolders, UserPolicies,
 };
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};

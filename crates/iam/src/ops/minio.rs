@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use super::Owner;
 use crate::{
-    Draft, Iam, IamError, builtin,
+    Draft, Iam, IamError, Identity, builtin,
     rules::{self, MAX_KEYS_PER_USER, MAX_VERSIONS},
     state::{Group, Key, Managed, State, User},
 };
@@ -797,4 +797,84 @@ fn policy_entities(
         .policies
         .sort_by_cached_key(|p| p.policy.to_ascii_lowercase());
     entities
+}
+
+/// Who `accountinfo` describes: the caller's name and the policy that grants it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinioAccount {
+    /// The user's name; a session's or the root user's access key.
+    pub name: String,
+    /// Its policies' statements in one document: the user's and its enabled groups', a
+    /// session's role's, or `consoleAdmin`'s for the root user.
+    pub policy: String,
+}
+
+impl Iam {
+    /// The account a caller signing with `access_key` as `identity` has
+    /// (`accountinfo`).
+    #[must_use]
+    pub fn minio_account(&self, identity: &Identity, access_key: &str) -> MinioAccount {
+        if identity.is_root() {
+            let console = builtin::BUILTINS
+                .iter()
+                .find(|b| b.name == "consoleAdmin")
+                .expect("consoleAdmin is built in");
+            return MinioAccount {
+                name: access_key.to_owned(),
+                policy: merged([console.document]),
+            };
+        }
+        self.view(|s| {
+            let id = identity.entity().map(|(_, id)| id);
+            if let Some(user) = id.and_then(|id| s.users.get(id)) {
+                let groups = s.groups_of(&user.id).filter(|g| !g.disabled);
+                let documents = documents(s, &user.inline, &user.attached)
+                    .chain(groups.flat_map(|g| documents(s, &g.inline, &g.attached)));
+                MinioAccount {
+                    name: user.name.clone(),
+                    policy: merged(documents),
+                }
+            } else {
+                let role = id.and_then(|id| s.roles.get(id));
+                MinioAccount {
+                    name: access_key.to_owned(),
+                    policy: merged(
+                        role.into_iter()
+                            .flat_map(|r| documents(s, &r.inline, &r.attached)),
+                    ),
+                }
+            }
+        })
+    }
+}
+
+/// The texts of inline policies and of the attached ones' versions in effect.
+fn documents<'a>(
+    state: &'a State,
+    inline: &'a std::collections::BTreeMap<String, crate::state::Document>,
+    attached: &'a BTreeSet<String>,
+) -> impl Iterator<Item = &'a str> {
+    inline.values().map(|d| &*d.text).chain(
+        attached
+            .iter()
+            .filter_map(|id| state.policies.get(id))
+            .map(|p| &*p.default_document().text),
+    )
+}
+
+/// One policy of every statement of `documents`, as `MinIO` merges a user's policies.
+fn merged<'a>(documents: impl IntoIterator<Item = &'a str>) -> String {
+    let mut statements = Vec::new();
+    for text in documents {
+        // IAM checked every document when it was stored.
+        let Ok(serde_json::Value::Object(mut document)) = serde_json::from_str(text) else {
+            continue;
+        };
+        match document.remove("Statement") {
+            Some(serde_json::Value::Array(list)) => statements.extend(list),
+            Some(one) => statements.push(one),
+            None => {}
+        }
+    }
+    serde_json::json!({"Version": "2012-10-17", "Statement": statements}).to_string()
 }

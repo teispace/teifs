@@ -41,10 +41,10 @@ pub use bearer::metrics_token;
 pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
     AccessKeyInfo, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo, GroupPolicies,
-    LdapEntity, LdapPolicies, LdapPolicyChange, MinioError, MinioGroup, MinioPolicy, MinioUser,
-    MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider, OidcProviderInfo,
-    Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo, RoleInfo,
-    SamlProviderInfo, SamlProviderUpdate, UserInfo, UserPolicies,
+    LdapEntity, LdapPolicies, LdapPolicyChange, MinioAccount, MinioError, MinioGroup, MinioPolicy,
+    MinioUser, MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider,
+    OidcProviderInfo, Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo,
+    RoleInfo, SamlProviderInfo, SamlProviderUpdate, UserInfo, UserPolicies,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};

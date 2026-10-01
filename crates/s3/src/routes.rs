@@ -17,7 +17,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3Route};
 use teifs_iam::{Iam, Identity};
-use teifs_policy::Decision;
+use teifs_policy::{Context, Decision};
 use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
@@ -71,6 +71,8 @@ pub(crate) enum Needs {
     OrOwnKey(&'static str),
     /// Anything but an explicit deny of this action: a call on the caller's own key.
     NotDenied(&'static str),
+    /// Any caller who signs: the call answers about the caller alone.
+    Signed,
     /// The Query APIs name an action in each call's body, and IAM decides it.
     PerCall,
     /// Only the account's root user, whatever policies say.
@@ -137,6 +139,7 @@ enum Handler {
     AttachPolicy,
     DetachPolicy,
     PolicyEntities,
+    AccountInfo,
 }
 
 impl Handler {
@@ -183,6 +186,7 @@ impl Handler {
             Self::AttachPolicy => "AttachPolicy",
             Self::DetachPolicy => "DetachPolicy",
             Self::PolicyEntities => "ListPolicyMappingEntities",
+            Self::AccountInfo => "AccountInfo",
         }
     }
 }
@@ -396,6 +400,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/accountinfo",
+        needs: Needs::Signed,
+        handler: Handler::AccountInfo,
+        about: "The caller's name and policy, and the buckets it may read (`s3:ListBucket`) or write (`s3:PutObject`) with what each holds and has turned on: `mc admin accountinfo`, the console's buckets",
+    },
+    Endpoint {
+        api: Api::Minio,
         verb: Verb::Put,
         path: "/minio/admin/v3/add-user",
         needs: Needs::OrOwnKey("admin:CreateUser"),
@@ -584,10 +596,13 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OnQueryBucket(action)
             | Needs::OrOwnKey(action)
             | Needs::NotDenied(action) => Some(action),
-            Needs::PerCall | Needs::Root => None,
+            Needs::PerCall | Needs::Root | Needs::Signed => None,
         },
         root_only: e.needs == Needs::Root,
-        own_key: matches!(e.needs, Needs::OrOwnKey(_) | Needs::NotDenied(_)),
+        own_key: matches!(
+            e.needs,
+            Needs::OrOwnKey(_) | Needs::NotDenied(_) | Needs::Signed
+        ),
         api: e.api,
         about: e.about,
     })
@@ -802,6 +817,7 @@ impl Routes {
                 identity.decide(&context(), action, ANY, None) != Decision::ExplicitDeny
             }
             Needs::Root => identity.is_root(),
+            Needs::Signed => true,
             Needs::PerCall => false,
         };
         if !allowed {
@@ -810,8 +826,15 @@ impl Routes {
         if api == Api::Control {
             control::check_account(&req.headers, &self.iam.account())?;
         }
-        self.call(endpoint.handler, req, on_bucket, query_bucket)
-            .await
+        let context = base_context(&identity, &req.headers, client, &self.iam.account());
+        self.call(
+            endpoint.handler,
+            req,
+            (&identity, &context),
+            on_bucket,
+            query_bucket,
+        )
+        .await
     }
 
     /// Calls an endpoint the caller may call, with what deciding it read: a tags call's
@@ -820,6 +843,7 @@ impl Routes {
         &self,
         handler: Handler,
         req: S3Request<Body>,
+        (identity, context): (&Identity, &Context),
         on_bucket: Option<(String, control::TagCall)>,
         query_bucket: Option<String>,
     ) -> S3Result<S3Response<Body>> {
@@ -888,6 +912,15 @@ impl Routes {
             Handler::AttachPolicy => minio_iam::associate(&self.iam, req, true).await,
             Handler::DetachPolicy => minio_iam::associate(&self.iam, req, false).await,
             Handler::PolicyEntities => minio_iam::policy_entities(&self.iam, &req).await,
+            Handler::AccountInfo => {
+                minio_iam::account_info(
+                    (&self.iam, &self.store, &self.rules),
+                    identity,
+                    context,
+                    &req,
+                )
+                .await
+            }
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -1134,6 +1167,7 @@ mod tests {
                         format!("`{action}`, or anyone on their own key unless denied")
                     }
                     (Some(action), _) => format!("`{action}`"),
+                    (None, false) if e.own_key => "anyone who signs, about themselves".to_owned(),
                     (None, true) => "root user".to_owned(),
                     (None, false) => "the action each call names".to_owned(),
                 };
@@ -1176,6 +1210,7 @@ mod tests {
             assert!(std::ptr::eq(found, e), "{e:?} is shadowed");
             match e.needs {
                 Needs::PerCall => assert_eq!(e.api, Api::Query),
+                Needs::Signed => assert_eq!(e.handler, Handler::AccountInfo),
                 Needs::Root => assert_ne!(e.api, Api::Query),
                 Needs::Action(action, resource) => {
                     assert!(action.contains(':') && !resource.is_empty(), "{e:?}");
