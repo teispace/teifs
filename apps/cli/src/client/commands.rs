@@ -63,22 +63,18 @@ pub async fn run(command: Command) -> Result<(), Error> {
             versions,
             bypass,
         } => {
-            if bypass && version_id.is_none() && !versions {
-                return Err(Error::usage(
-                    "--bypass removes locked versions: use it with --version-id or --versions",
-                ));
-            }
-            for target in &targets {
-                let target = remote(target, "rm")?;
-                match (&version_id, versions) {
-                    (Some(id), _) => super::versions::rm_version(target, id, bypass).await?,
-                    (None, true) => {
-                        super::versions::rm_versions(target, recursive, force, bypass).await?;
-                    }
-                    (None, false) => rm(target, recursive, force).await?,
-                }
-            }
-            Ok(())
+            let targets = targets
+                .iter()
+                .map(|target| remote(target, "rm"))
+                .collect::<Result<Vec<_>, _>>()?;
+            rm_all(
+                targets,
+                (recursive, force),
+                version_id.as_deref(),
+                versions,
+                bypass,
+            )
+            .await
         }
         Command::Cat {
             targets,
@@ -115,6 +111,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
             put,
             max_size,
         } => presign(remote(&target, "presign")?, expires, put, max_size).await,
+        Command::Migrate(args) => super::migrate::migrate(args, &aliases).await,
         Command::Mirror {
             source,
             destination,
@@ -129,6 +126,29 @@ pub async fn run(command: Command) -> Result<(), Error> {
             super::copy::mirror(source, destination, remove, dry_run, transfer).await
         }
     }
+}
+
+/// `teifs rm`: objects, one version of each, or every version.
+async fn rm_all(
+    targets: Vec<Remote>,
+    (recursive, force): (bool, bool),
+    version_id: Option<&str>,
+    versions: bool,
+    bypass: bool,
+) -> Result<(), Error> {
+    if bypass && version_id.is_none() && !versions {
+        return Err(Error::usage(
+            "--bypass removes locked versions: use it with --version-id or --versions",
+        ));
+    }
+    for target in targets {
+        match (version_id, versions) {
+            (Some(id), _) => super::versions::rm_version(target, id, bypass).await?,
+            (None, true) => super::versions::rm_versions(target, recursive, force, bypass).await?,
+            (None, false) => rm(target, recursive, force).await?,
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------

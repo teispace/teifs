@@ -99,6 +99,7 @@ teifs mb home/photos
 teifs cp -r ~/Pictures home/photos/2026/     # parallel parts; an interrupted copy resumes
 teifs ls home/photos/2026
 teifs mirror ~/Documents home/docs --remove  # copy what changed, delete what's gone
+teifs migrate minio home                     # every bucket, with every version and setting
 teifs cp home/photos/2026/cat.jpg .
 teifs presign home/photos/2026/cat.jpg --expires 1d
 teifs presign home/inbox/upload.jpg --put --max-size 10MiB   # an upload link that takes 10 MiB at most
@@ -215,6 +216,7 @@ requests live. See
 | `teifs mb\|rb ALIAS/BUCKET` | Make or remove a bucket (`mb --layout folder`, `mb --with-lock` for Object Lock, `rb --force`) |
 | `teifs cp\|mv SOURCE… DEST [-r]` | Copy or move between local files and S3, or within S3 (`--parallel 8`, `--part-size 8MiB`); `cp -` for standard input or output; `cp --version-id ID` copies an older version; `--enc-s3 PREFIX`, `--enc-kms PREFIX=KEY`, `--enc-dsse PREFIX=KEY` and `--enc-c PREFIX=FILE` (or `TEIFS_ENC_C`) encrypt by key prefix |
 | `teifs mirror SOURCE DEST [--remove] [--dry-run]` | Copy what's new or changed, one way (with `cp`'s `--enc-*` options) |
+| `teifs migrate SOURCE DEST [--latest] [--dry-run] [--size-only] [--no-configs]` | Move buckets from any S3 service (MinIO, AWS, RustFS…) to another: every version and delete marker in order, objects' headers, metadata, tags, retention and legal holds with the same ETags, and the buckets' settings; running it again carries on, and copies only what's new |
 | `teifs rm ALIAS/BUCKET/KEY… [-r [--force]]` | Delete objects (`-r` asks first, unless `--force` or `-y`); `--version-id ID` removes one version for good, `--versions` all of a key's (asks first); `--bypass` removes governance-locked versions |
 | `teifs cat\|stat ALIAS/BUCKET/KEY [--version-id ID] [--enc-c PREFIX=FILE]` | Print an object, or show its details with its retention and legal hold (a bucket's too, with its versioning, Object Lock and default encryption) |
 | `teifs version enable\|suspend\|info ALIAS/BUCKET` | Turn a bucket's versioning on, suspend it, or show it |

@@ -26,7 +26,7 @@ use std::{
 use aws_sdk_s3::{
     Client,
     operation::head_object::HeadObjectOutput,
-    primitives::{ByteStream, Length},
+    primitives::{ByteStream, DateTime, Length},
     types::{
         ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart, MetadataDirective,
     },
@@ -41,6 +41,7 @@ use tokio::{
 
 use super::{
     Error, Kind, TransferArgs,
+    attributes::{Attributes, with_attributes},
     sse::{Sse, copy_source_key, customer_key, encrypted},
 };
 use crate::ui::Progress;
@@ -163,6 +164,11 @@ impl Transfers {
         }
     }
 
+    /// Counts `bytes` as moved.
+    pub(super) fn moved(&self, bytes: u64) {
+        self.progress.add(bytes);
+    }
+
     /// Takes the progress bar away, once everything is done.
     pub fn finish(&self) {
         self.progress.finish();
@@ -173,7 +179,7 @@ impl Transfers {
         self.parallel
     }
 
-    async fn permit(&self) -> OwnedSemaphorePermit {
+    pub(super) async fn permit(&self) -> OwnedSemaphorePermit {
         Arc::clone(&self.permits)
             .acquire_owned()
             .await
@@ -210,9 +216,12 @@ impl Transfers {
         let (upload_id, done) = if let Some(found) = self.resumable(path, &parts, to).await {
             found
         } else {
-            let content_type = content_type.map(str::to_owned);
+            let attributes = Attributes {
+                content_type: content_type.map(str::to_owned),
+                ..Attributes::default()
+            };
             let id = self
-                .start_upload(to, content_type, None, Some(part_checksum(to)))
+                .start_upload(to, &attributes, Some(part_checksum(to)))
                 .await
                 .map_err(|e| e.within(what()))?;
             (id, BTreeMap::new())
@@ -299,7 +308,7 @@ impl Transfers {
             return Ok(first_len);
         }
         let upload_id = self
-            .start_upload(to, None, None, Some(ChecksumAlgorithm::Crc32))
+            .start_upload(to, &Attributes::default(), Some(ChecksumAlgorithm::Crc32))
             .await
             .map_err(|e| e.within(what()))?;
         let sent = self.send_stream(&mut input, first, &upload_id, to).await;
@@ -635,7 +644,8 @@ impl Transfers {
             self.progress.add(head.size);
             return Ok(());
         }
-        // The object's type and metadata go too: they need a HEAD.
+        // The object's headers and metadata go too, as with a copy at one endpoint: they
+        // need a HEAD.
         let fresh;
         let head = if head.output.is_none() {
             fresh = from.head().await?;
@@ -643,9 +653,11 @@ impl Transfers {
         } else {
             head
         };
-        let details = head.output.as_ref();
-        let content_type = details.and_then(|o| o.content_type().map(str::to_owned));
-        let metadata = details.and_then(|o| o.metadata().cloned());
+        let attributes = head
+            .output
+            .as_ref()
+            .map(|o| Attributes::of(o, &[], DateTime::from(SystemTime::now())).headers_only())
+            .unwrap_or_default();
         if !server_side && head.size <= self.part_size {
             let body = self.get_whole(from, head).await?;
             let _permit = self.permit().await;
@@ -654,10 +666,8 @@ impl Transfers {
                 .put_object()
                 .bucket(&to.bucket)
                 .key(&to.key)
-                .set_content_type(content_type)
-                .set_metadata(metadata)
                 .body(ByteStream::from(body));
-            encrypted!(request, to.sse())
+            encrypted!(with_attributes!(request, &attributes), to.sse())
                 .send()
                 .await
                 .map_err(|e| Error::s3(what(), &e))?;
@@ -665,7 +675,7 @@ impl Transfers {
             return Ok(());
         }
         let upload_id = self
-            .start_upload(to, content_type, metadata, None)
+            .start_upload(to, &attributes, None)
             .await
             .map_err(|e| e.within(what()))?;
         let result = self
@@ -767,8 +777,7 @@ impl Transfers {
     async fn start_upload(
         &self,
         to: &Object,
-        content_type: Option<String>,
-        metadata: Option<std::collections::HashMap<String, String>>,
+        attributes: &Attributes,
         checksum: Option<ChecksumAlgorithm>,
     ) -> Result<String, Error> {
         let _permit = self.permit().await;
@@ -777,10 +786,8 @@ impl Transfers {
             .create_multipart_upload()
             .bucket(&to.bucket)
             .key(&to.key)
-            .set_content_type(content_type)
-            .set_metadata(metadata)
             .set_checksum_algorithm(checksum);
-        let created = encrypted!(request, to.sse())
+        let created = encrypted!(with_attributes!(request, attributes), to.sse())
             .send()
             .await
             .map_err(|e| Error::s3("starting the upload", &e))?;
@@ -945,7 +952,7 @@ async fn hash_range<H: Send + 'static>(
     .map_err(std::io::Error::other)?
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut s, b| {
         let _ = write!(s, "{b:02x}");
@@ -955,7 +962,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `bucket/key` for `x-amz-copy-source`, with the key percent-encoded (keeping `/`),
 /// and `?versionId=` when it names a version.
-fn copy_source(from: &Object) -> String {
+pub(super) fn copy_source(from: &Object) -> String {
     let mut out = format!("{}/", from.bucket);
     percent_encode(&mut out, &from.key, b"-_.~/");
     if let Some(version) = &from.version_id {
@@ -967,7 +974,7 @@ fn copy_source(from: &Object) -> String {
 }
 
 /// Appends `text` percent-encoded, keeping letters, digits and the bytes in `keep`.
-fn percent_encode(out: &mut String, text: &str, keep: &[u8]) {
+pub(super) fn percent_encode(out: &mut String, text: &str, keep: &[u8]) {
     use std::fmt::Write;
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || keep.contains(&byte) {

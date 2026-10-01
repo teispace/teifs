@@ -177,6 +177,30 @@ async fn copies_between_objects_by_the_server_or_through_the_client() {
     }
     let stat = cli.ok(&["stat", "t/two/page.html"]).await;
     assert!(stat.contains("text/html"), "{stat}");
+    // The other headers go too, as with a copy by the server.
+    let s3 = client(&server, SECRET_KEY);
+    s3.put_object()
+        .bucket("one")
+        .key("cached.txt")
+        .body(ByteStream::from_static(b"x"))
+        .cache_control("max-age=60")
+        .content_disposition("attachment")
+        .send()
+        .await
+        .unwrap();
+    cli.ok(&["cp", "t/one/cached.txt", "u/two/cached.txt"])
+        .await;
+    let head = s3
+        .head_object()
+        .bucket("two")
+        .key("cached.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        (head.cache_control(), head.content_disposition()),
+        (Some("max-age=60"), Some("attachment"))
+    );
     // Recursively between endpoints.
     cli.ok(&["cp", "-r", "t/one", "u/two/all/"]).await;
     let listing = cli.ok(&["ls", "t/two/all"]).await;

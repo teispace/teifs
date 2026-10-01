@@ -2,6 +2,7 @@
 //! `ALIAS/BUCKET/KEY` paths and local files (`ls`, `cp`, `mirror`, …).
 
 pub(crate) mod alias;
+mod attributes;
 mod commands;
 mod copy;
 mod encrypt;
@@ -10,6 +11,7 @@ mod ilm;
 mod listing;
 mod lock;
 mod logging;
+mod migrate;
 mod quota;
 mod sse;
 pub(crate) mod status;
@@ -207,6 +209,11 @@ pub enum Command {
         #[command(flatten)]
         enc: EncArgs,
     },
+    /// Move buckets from any S3 service to another (MinIO, AWS or RustFS to TeiFS, say):
+    /// every version and delete marker in order, each object's headers, metadata, tags,
+    /// retention and legal hold with the same ETag, and the buckets' settings. Only what
+    /// the destination lacks is copied, so running it again carries on where it stopped.
+    Migrate(migrate::MigrateArgs),
     /// Send a bucket's events (objects written, read, deleted…) to the server's targets:
     /// add, list or remove its notification rules.
     Event {

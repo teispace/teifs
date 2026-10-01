@@ -409,6 +409,58 @@ dropped, with a warning, as other refused deliveries are. Setting and reading qu
 take `MinIO`'s actions, `admin:SetBucketQuota` and `admin:GetBucketQuota`, on the bucket
 (see [ADMIN_API.md](ADMIN_API.md)); admin exports and imports carry them.
 
+## Migrating from MinIO or another S3 service
+
+`teifs migrate SOURCE DEST` moves buckets from any S3 service to another, through the S3
+API with the keys of two aliases: from MinIO, AWS, RustFS or another TeiFS into TeiFS,
+say. `SOURCE` is an alias (every bucket, each keeping its name) or
+`ALIAS/BUCKET[/PREFIX]`; `DEST` is an alias or `ALIAS/BUCKET[/PREFIX]`.
+
+```sh
+teifs alias set minio https://minio.example.com:9000 --access-key admin
+teifs alias set home http://127.0.0.1:9000 --drive ~/Drive
+teifs migrate minio home --dry-run     # what would be copied
+teifs migrate minio home               # every bucket
+teifs migrate minio/photos home/pictures --latest   # one bucket, current objects only
+```
+
+What's carried:
+
+- **Buckets.** A missing destination bucket is made, with Object Lock when the source
+  has it. Its settings are copied where the destination has none of its own:
+  versioning, Object Lock's default retention, the policy (the source bucket's ARN made
+  the destination's), lifecycle rules, CORS, tags, default encryption, the website,
+  object ownership and the public access block. A setting the destination already has
+  is kept, and said. Notifications, access logging and replication name things on the
+  source (its queues, buckets and roles), so they're listed for you to set up again.
+  `--no-configs` copies none of them.
+- **Versions.** When the source bucket has versioning, every version and delete marker
+  goes, oldest first, so the destination's history is the source's. With `--latest`,
+  only the current objects go.
+- **Objects.** Each keeps its `Content-Type`, `Cache-Control`, `Content-Disposition`,
+  `Content-Encoding`, `Content-Language`, `Expires`, website redirect, user metadata,
+  tags, retention (when it hasn't ended) and legal hold. An object uploaded in parts is
+  copied in parts of the same sizes, so its ETag is the same, and each copy's ETag is
+  checked against the source's before it counts. Copies within one service are done by
+  the service; otherwise the bytes pass through `teifs`, several objects and parts at
+  once (`--parallel`, `--part-size`), without being held in memory whole.
+
+What isn't: an object's `Last-Modified` and version id (S3 sets both when it's written,
+so lifecycle rules count a migrated object's age from the migration), ACL grants (they
+name accounts of the source) and additional checksums (the destination computes its
+own).
+
+Only what the destination lacks is copied: the source and destination are listed side
+by side, a page at a time, so a migration that stopped (or failed for some objects)
+carries on when it's run again, and a later run copies only what's new. A key whose
+versions at the destination aren't the source's first ones is a conflict: it's
+reported, left alone, and the command exits with code 1. Objects are told apart by
+size and ETag; `--size-only` uses size alone, for services whose ETags aren't MD5s (as
+for objects encrypted with KMS keys on AWS). Users and their policies aren't part of
+`migrate`: between TeiFS servers `teifs admin iam export` and `import` move them; from
+another service, make them with `teifs admin user` or `aws iam` (TeiFS doesn't read
+`mc admin cluster iam export`'s files yet).
+
 ## Bucket notifications
 
 A bucket's rules send events (an object written, read, tagged, deleted, expired…) to

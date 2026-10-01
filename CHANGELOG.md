@@ -203,6 +203,16 @@ behaviour; the on-disk format is always upgraded automatically.
   fast, the drive serving and taking writes, the clocks, the certificate's expiry,
   version, disks, jobs, scrubs), with exit code 1 when one fails. `teifs-client` asks
   the health checks too (`Client::health`).
+- `teifs migrate SOURCE DEST`: buckets moved from any S3 service (MinIO, AWS,
+  RustFS, TeiFS) to another, with every version and delete marker in order, each
+  object's headers, metadata, tags, retention and legal hold, the same ETags (objects
+  uploaded in parts are copied in parts of the same sizes), and the buckets' settings.
+  The two sides are compared key by key, so running it again carries on where it
+  stopped and copies only what's new; `--latest`, `--dry-run`, `--size-only`,
+  `--no-configs`.
+- `teifs cp` and `teifs mirror` between endpoints keep every header a copy by the
+  server keeps (`Cache-Control`, `Content-Disposition`, `Content-Encoding`,
+  `Content-Language`, `Expires`, website redirect), not only the type and metadata.
 - `teifs doctor [DIR]`: a drive on this machine checked with the settings
   `teifs serve` would use (its options, environment and the drive's settings file):
   its format, whether a server has it, its databases' integrity, how its file system

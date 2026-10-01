@@ -68,7 +68,9 @@ crates/client   teifs-client   A typed client for the admin API (reqwest, Signat
 apps/cli        teifs          The `teifs` command: parses arguments, calls the crates,
                                prints results. `src/client/` is its S3 client (aliases,
                                cp/mirror with parallel, resumable transfers) on the AWS
-                               SDK, for TeiFS or any S3 service. `src/ui.rs` does all its
+                               SDK, for TeiFS or any S3 service; `client/migrate/` is
+                               `teifs migrate` (listings compared key by key, exact
+                               copies that keep ETags, buckets' settings). `src/ui.rs` does all its
                                output: styles, tables, progress bars, prompts, `--json`.
                                `src/init.rs` is `teifs init`; `src/admin/` is
                                `teifs admin`, on `teifs-client`, and its `users.rs`
