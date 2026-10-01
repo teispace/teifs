@@ -24,7 +24,7 @@ pub struct VerifyArgs {
 /// One pass over the drive, telling of each version that isn't intact.
 pub async fn verify(args: VerifyArgs) -> Result<(), error::Error> {
     let store = open(&args.keyring.dir)?;
-    if let Some((kms, _)) = open_kms(&args.keyring, Some(&store), false)? {
+    if let Some((kms, _)) = open_kms(&args.keyring, Some(&store), false).await? {
         store.attach_kms(kms).map_err(|e| e.to_string())?;
     }
     if let Some(bucket) = &args.bucket {

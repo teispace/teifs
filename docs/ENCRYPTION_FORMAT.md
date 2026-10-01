@@ -62,6 +62,23 @@ sends the ciphertext and the same associated data to `/decrypt`. TeiFS checks a 
 before using it, because the engine's `encrypt` would otherwise create a missing key.
 A key sealed by one provider is never handed to another.
 
+### Sealing with KES
+
+When the KMS is KES, KES seals the data key TeiFS generated: `PUT /v1/key/encrypt/<key>`
+with the data key as `plaintext` and the canonical context as `context` (both base64).
+Stored: `provider` = `kes`, the key name, version 1 (KES shows no versions), and KES's
+ciphertext as `sealed`. Unsealing sends both to `/v1/key/decrypt/<key>`; KES refuses
+(`400`) a ciphertext with another context.
+
+### Sealing with AWS KMS
+
+When the KMS is AWS KMS, `Encrypt` seals the data key under the key's alias (or the key id
+or ARN given), with the context's pairs as the encryption context (none for an empty
+context). Stored: `provider` = `aws-kms`, the key name as given, the key's version (one
+more than its completed rotations), and the `CiphertextBlob` as `sealed`. Unsealing calls
+`Decrypt` with the blob and the same encryption context and no key id: the blob names its
+key and material, so it opens after the alias moves or the key rotates.
+
 ### SSE-C
 
 The customer's 256-bit key is checked with `HMAC-SHA256(key = check salt, message =

@@ -63,6 +63,61 @@ pub trait Kms: Send + Sync + std::fmt::Debug {
     async fn rotate_key(&self, name: &str) -> Result<KeyInfo>;
 }
 
+/// A KMS whose default key goes by another name: where TeiFS would use [`DEFAULT_KEY`]
+/// (SSE-S3, SSE-KMS without a key, the drive's own secrets) it uses that key, such as
+/// one a KES server or AWS account already has. Keys sealed before keep opening.
+#[derive(Debug)]
+pub struct DefaultKeyNamed {
+    inner: std::sync::Arc<dyn Kms>,
+    name: String,
+}
+
+impl DefaultKeyNamed {
+    /// `inner`, with `name` as its default key.
+    #[must_use]
+    pub fn new(inner: std::sync::Arc<dyn Kms>, name: String) -> Self {
+        Self { inner, name }
+    }
+
+    /// The key `key` means: the renamed default for none or [`DEFAULT_KEY`].
+    fn key<'a>(&'a self, key: Option<&'a str>) -> &'a str {
+        match key {
+            None | Some(DEFAULT_KEY) => &self.name,
+            Some(key) => key,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Kms for DefaultKeyNamed {
+    async fn seal(
+        &self,
+        key: Option<&str>,
+        context: &Context,
+        data_key: &DataKey,
+    ) -> Result<SealedKey> {
+        self.inner
+            .seal(Some(self.key(key)), context, data_key)
+            .await
+    }
+
+    async fn unseal(&self, sealed: &SealedKey, context: &Context) -> Result<DataKey> {
+        self.inner.unseal(sealed, context).await
+    }
+
+    async fn keys(&self) -> Result<Vec<KeyInfo>> {
+        self.inner.keys().await
+    }
+
+    async fn create_key(&self, name: &str) -> Result<KeyInfo> {
+        self.inner.create_key(self.key(Some(name))).await
+    }
+
+    async fn rotate_key(&self, name: &str) -> Result<KeyInfo> {
+        self.inner.rotate_key(self.key(Some(name))).await
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct KeyringFile {
@@ -223,7 +278,7 @@ fn info(name: &str, version: &KeyVersion) -> KeyInfo {
 }
 
 /// Key names: 1 to 64 letters, digits, `-`, `_` and `.`.
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
     let ok = (1..=64).contains(&name.len())
         && name
             .bytes()
@@ -396,6 +451,41 @@ mod tests {
             kms.rotate_key("missing").await,
             Err(CryptoError::NoSuchKey(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn the_default_key_can_go_by_another_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(LocalKms::open(dir.path().join("keyring.json")).unwrap());
+        let (key, before) = local.generate(None, &ctx()).await.unwrap();
+        let kms = DefaultKeyNamed::new(local, "minio-default".to_owned());
+        // Making or rotating the default makes or rotates the renamed key.
+        assert_eq!(
+            kms.create_key(DEFAULT_KEY).await.unwrap().name,
+            "minio-default"
+        );
+        assert_eq!(kms.rotate_key(DEFAULT_KEY).await.unwrap().version, 2);
+        for asked in [None, Some(DEFAULT_KEY)] {
+            let (_, sealed) = kms.generate(asked, &ctx()).await.unwrap();
+            assert_eq!(
+                (sealed.kms_key.as_str(), sealed.kms_version),
+                ("minio-default", 2)
+            );
+        }
+        // Other keys are themselves, and keys sealed under the old default still open.
+        kms.create_key("photos").await.unwrap();
+        assert_eq!(kms.rotate_key("photos").await.unwrap().name, "photos");
+        let (_, photos) = kms.generate(Some("photos"), &ctx()).await.unwrap();
+        assert_eq!(photos.kms_key, "photos");
+        assert_eq!(kms.unseal(&before, &ctx()).await.unwrap(), key);
+        let names: Vec<_> = kms
+            .keys()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|k| k.name)
+            .collect();
+        assert_eq!(names, ["minio-default", "photos", DEFAULT_KEY]);
     }
 
     #[test]

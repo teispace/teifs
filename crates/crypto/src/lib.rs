@@ -9,27 +9,33 @@
 //!
 //! All primitives come from aws-lc-rs.
 
+mod aws_kms;
 mod context;
 mod customer;
 mod error;
+mod kes;
 mod key;
 mod kms;
 mod package;
 mod private;
 mod seal;
+mod tls;
 mod transit;
 
+pub use aws_kms::{AWS_KMS, AwsKms};
 pub use context::Context;
 pub use customer::CustomerKey;
 pub use error::CryptoError;
+pub use kes::{KES, KesAuth, KesKms};
 pub use key::DataKey;
-pub use kms::{DEFAULT_KEY, KeyInfo, Kms, LocalKms};
+pub use kms::{DEFAULT_KEY, DefaultKeyNamed, KeyInfo, Kms, LocalKms};
 pub use package::{
     PACKAGE_SIZE, PartCipher, PartEncryptor, PartId, TAG_LEN, ciphertext_len, decrypt_part,
     packages_for, plaintext_len,
 };
 pub use private::{create_private, replace_private};
 pub use seal::{SealedKey, seal, unseal};
+pub use tls::tls_config;
 pub use transit::{TRANSIT, TransitKms};
 
 /// A crypto result.

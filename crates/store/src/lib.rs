@@ -75,7 +75,8 @@ pub use sse::Encryption;
 pub use staged::Staged;
 pub use stages::{Stage, StageTimes};
 pub use teifs_crypto::{
-    CryptoError, CustomerKey, Kms, LocalKms, TransitKms, create_private, replace_private,
+    AwsKms, CryptoError, CustomerKey, DEFAULT_KEY, DefaultKeyNamed, KesAuth, KesKms, Kms, LocalKms,
+    TransitKms, create_private, replace_private,
 };
 pub use teifs_meta::{Layout, Part, Upload, Usage, Versioning};
 pub use teifs_types::admin::Snapshot;

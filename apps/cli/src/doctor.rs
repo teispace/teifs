@@ -1,7 +1,7 @@
 //! `teifs doctor`: what would stop `teifs serve`, or make it serve badly, with the same
 //! settings: the drive (its format, its databases, whether it's in use, whether it can be
 //! written, whether it's on this machine), its disk's room, how its file system treats names, the root keys, the
-//! keyring, the TLS certificates and the listen address. Each problem says what to do.
+//! keyring (or the external KMS, which is asked), the TLS certificates and the listen address. Each problem says what to do.
 //! Nothing is changed: an older drive isn't upgraded, and checks that would get in a
 //! running server's way are skipped while it runs. Exit code 1 when a check fails.
 
@@ -9,10 +9,11 @@ use std::{
     io,
     net::{SocketAddr, TcpListener},
     path::Path,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
-use teifs_server::{Tls, credentials, default_keyring};
+use teifs_server::{ExternalKms, Tls, credentials, default_keyring};
+use teifs_store::DEFAULT_KEY;
 use teifs_store::{Database, Diagnosis, Disk, FORMAT, SYSTEM_DIR};
 
 use crate::{
@@ -21,14 +22,27 @@ use crate::{
     config, error, tls_source,
 };
 
+/// How long an external KMS may take to answer.
+const KMS_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// `teifs doctor`.
-pub(crate) fn doctor(args: &ServeArgs) -> Result<(), error::Error> {
-    let checks = checks(args, |name| std::env::var(name).ok());
+pub(crate) async fn doctor(args: &ServeArgs) -> Result<(), error::Error> {
+    let keyring = args.kms_keyring.as_deref();
+    let kms = match args.kms.external(keyring) {
+        Some(external) => Some(external_kms(&external, args.kms.default_key(keyring)).await),
+        None => None,
+    };
+    let checks = checks(args, kms, |name| std::env::var(name).ok());
     checks::finish(&checks, ("drive", &args.dir.display().to_string()))
 }
 
-/// Every check, in order, with `env` for the environment.
-fn checks(args: &ServeArgs, env: impl Fn(&str) -> Option<String>) -> Vec<Check> {
+/// Every check, in order, with `env` for the environment; `kms` is the external KMS's,
+/// if there's one instead of a keyring.
+fn checks(
+    args: &ServeArgs,
+    kms: Option<Check>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<Check> {
     let mut checks = Vec::new();
     let dir = &args.dir;
     let diagnosis = if dir.is_dir() {
@@ -69,7 +83,7 @@ fn checks(args: &ServeArgs, env: impl Fn(&str) -> Option<String>) -> Vec<Check> 
         .as_ref()
         .and_then(|d| d.format.as_ref().ok())
         .map(|format| format.drive.clone());
-    checks.push(keyring(args, drive_id.as_deref()));
+    checks.push(kms.unwrap_or_else(|| keyring(args, drive_id.as_deref())));
     checks.extend(certificates(args));
     checks.push(listen(args.listen, in_use));
     checks
@@ -229,15 +243,53 @@ fn credentials_check(args: &ServeArgs, env: &impl Fn(&str) -> Option<String>) ->
     }
 }
 
+/// An external KMS: whether it answers, takes TeiFS's credentials, and has the key
+/// TeiFS uses by default (SSE-S3 and the drive's own secrets need it).
+async fn external_kms(external: &ExternalKms, default_key: Option<String>) -> Check {
+    let words = external.describe();
+    let listed = tokio::time::timeout(KMS_TIMEOUT, async {
+        let (kms, _) = teifs_server::open_external(external)
+            .await
+            .map_err(|e| e.to_string())?;
+        kms.keys().await.map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("it didn't answer in time".to_owned()));
+    let keys = match listed {
+        Ok(keys) => keys,
+        Err(err) => return Check::new("KMS", State::Failed, format!("{words}: {err}")),
+    };
+    let default = default_key.unwrap_or_else(|| DEFAULT_KEY.to_owned());
+    let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+    default_key_check(&words, &names, &default)
+}
+
+/// Whether a KMS with keys `names` has the key TeiFS uses by default.
+fn default_key_check(words: &str, names: &[&str], default: &str) -> Check {
+    if names.contains(&default) {
+        Check::new(
+            "KMS",
+            State::Ok,
+            format!(
+                "{words}: {} key{}, {default} among them",
+                names.len(),
+                crate::plural(u64::try_from(names.len()).unwrap_or(u64::MAX))
+            ),
+        )
+    } else {
+        Check::new(
+            "KMS",
+            State::Failed,
+            format!(
+                "{words} has no key {default}, which SSE-S3 and the drive's own secrets use: \
+                 `teifs key create {default}` with the same KMS settings makes it"
+            ),
+        )
+    }
+}
+
 /// The keyring that seals the drive's encryption keys.
 fn keyring(args: &ServeArgs, drive: Option<&str>) -> Check {
-    if let Some(address) = &args.kms_transit {
-        return Check::new(
-            "Keyring",
-            State::Ok,
-            format!("the transit engine at {address} (not asked here)"),
-        );
-    }
     let path = match (&args.kms_keyring, drive) {
         (Some(path), _) => path.clone(),
         (None, Some(drive)) => match default_keyring(drive) {
@@ -353,5 +405,27 @@ fn listen(address: SocketAddr, in_use: bool) -> Check {
             State::Failed,
             format!("can't listen on {address} ({err}): pick another --listen"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kms_without_the_default_key_fails() {
+        let check = default_key_check("KES at x", &["photos", "teifs-default"], "teifs-default");
+        assert_eq!(check.state, State::Ok);
+        assert_eq!(check.detail, "KES at x: 2 keys, teifs-default among them");
+        let check = default_key_check("KES at x", &["photos"], "teifs-default");
+        assert_eq!(check.state, State::Failed);
+        assert!(
+            check.detail.contains("has no key teifs-default"),
+            "{}",
+            check.detail
+        );
+        // A renamed default key is looked for by its own name.
+        let check = default_key_check("KES at x", &["teifs-default"], "main");
+        assert_eq!(check.state, State::Failed);
     }
 }

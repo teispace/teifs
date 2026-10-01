@@ -19,6 +19,7 @@ mod doctor;
 mod error;
 mod health;
 mod init;
+mod kms;
 mod notify;
 mod repair;
 mod sts;
@@ -31,7 +32,7 @@ use teifs_server::{
     Acks, Amqp, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability,
     Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl, KeyRules,
     KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres, ProxyHeader, Redis,
-    SaslMechanism, Server, ServerKey, Sns, Sqs, TargetConfig, TargetKind, TlsSource, Transit,
+    SaslMechanism, Server, ServerKey, Sns, Sqs, TargetConfig, TargetKind, TlsSource,
     TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
@@ -214,16 +215,8 @@ pub(crate) struct ServeArgs {
     /// off the drive and back it up: encrypted objects can't be read without it.
     #[arg(long, env = "TEIFS_KMS_KEYRING")]
     kms_keyring: Option<PathBuf>,
-    /// Use a Vault or OpenBao transit engine as the KMS (e.g. `https://vault:8200`);
-    /// its token comes from `VAULT_TOKEN` or `BAO_TOKEN`.
-    #[arg(long, env = "TEIFS_KMS_TRANSIT", conflicts_with = "kms_keyring")]
-    kms_transit: Option<String>,
-    /// Where the transit engine is mounted.
-    #[arg(long, default_value = "transit", env = "TEIFS_KMS_TRANSIT_MOUNT")]
-    kms_transit_mount: String,
-    /// The transit engine's namespace (Vault Enterprise, OpenBao).
-    #[arg(long, env = "TEIFS_KMS_TRANSIT_NAMESPACE")]
-    kms_transit_namespace: Option<String>,
+    #[command(flatten)]
+    kms: kms::KmsArgs,
     /// Allow SSE-C (customer-provided keys) on buckets that don't set it themselves;
     /// AWS blocks it by default since April 2026.
     #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
@@ -552,16 +545,8 @@ struct KeyringArgs {
     /// The drive whose default keyring to use.
     #[arg(long, default_value = ".", env = "TEIFS_DIR")]
     dir: PathBuf,
-    /// A Vault or OpenBao transit engine instead of a keyring (token from `VAULT_TOKEN`
-    /// or `BAO_TOKEN`).
-    #[arg(long, env = "TEIFS_KMS_TRANSIT", conflicts_with = "kms_keyring")]
-    kms_transit: Option<String>,
-    /// Where the transit engine is mounted.
-    #[arg(long, default_value = "transit", env = "TEIFS_KMS_TRANSIT_MOUNT")]
-    kms_transit_mount: String,
-    /// The transit engine's namespace.
-    #[arg(long, env = "TEIFS_KMS_TRANSIT_NAMESPACE")]
-    kms_transit_namespace: Option<String>,
+    #[command(flatten)]
+    kms: kms::KmsArgs,
 }
 
 #[derive(Subcommand)]
@@ -658,8 +643,12 @@ fn main() -> ExitCode {
             // error; server errors are still logged by s3s and by TeiFS. The AWS SDK
             // warns that it can't check a multipart object's composite checksum on
             // download; it checks every other kind, and there's nothing to do about it.
+            // AWS KMS's configuration warns when there's no instance metadata to ask
+            // for a region or credentials, as off EC2; TeiFS says what's missing itself.
             tracing_subscriber::EnvFilter::try_from_env("TEIFS_LOG").unwrap_or_else(|_| {
-                "info,s3s::ops=off,aws_sdk_s3::http_response_checksum=error".into()
+                "info,s3s::ops=off,aws_sdk_s3::http_response_checksum=error,\
+                 aws_config::imds=error"
+                    .into()
             }),
         )
         .with_writer(std::io::stderr)
@@ -730,7 +719,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
         Command::Init(args) => init::init(&args),
         Command::Health(args) => health::health(&args).await,
         Command::Status { alias } => client::status::status(&alias).await,
-        Command::Doctor(args) => doctor::doctor(&args),
+        Command::Doctor(args) => doctor::doctor(&args).await,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut script = Vec::new();
@@ -738,7 +727,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
             ui::raw(&String::from_utf8_lossy(&script));
             Ok(())
         }
-        Command::Serve(args) => Ok(serve(args).await?),
+        Command::Serve(args) => Ok(Box::pin(serve(args)).await?),
         Command::Config {
             action: ConfigAction::Show(args),
         } => Ok(config::show(&args, sources)?),
@@ -1593,12 +1582,9 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         website_domains: args.website_domains,
         credentials,
         default_layout: args.default_layout.into(),
+        kms_external: args.kms.external(args.kms_keyring.as_deref()),
+        kms_default_key: args.kms.default_key(args.kms_keyring.as_deref()),
         kms_keyring: args.kms_keyring,
-        kms_transit: args.kms_transit.map(|address| Transit {
-            address,
-            mount: args.kms_transit_mount,
-            namespace: args.kms_transit_namespace,
-        }),
         allow_sse_c: args.allow_sse_c,
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
@@ -1679,10 +1665,8 @@ fn announce(
         Some(keys) => keys.secret.describe(),
         None => format!("in {}", credentials::path(server.root()).display()),
     };
-    let (keyring, created) = match server.kms() {
-        KmsLocation::Keyring { path, created } => (path.display().to_string(), *created),
-        KmsLocation::Transit(address) => (format!("the transit engine at {address}"), false),
-    };
+    let keyring = server.kms().describe();
+    let created = matches!(server.kms(), KmsLocation::Keyring { created: true, .. });
     let durability_name = match durability {
         Durability::Strict => "strict",
         Durability::Relaxed => "relaxed",
@@ -1716,7 +1700,14 @@ fn announce(
             ("Endpoint", endpoint.clone()),
             ("Access key", server.access_key().to_owned()),
             ("Secret key", secret),
-            ("Keyring", keyring.clone()),
+            (
+                if matches!(server.kms(), KmsLocation::Keyring { .. }) {
+                    "Keyring"
+                } else {
+                    "KMS"
+                },
+                keyring.clone(),
+            ),
             ("Durability", durability_name.to_owned()),
         ],
         &[
@@ -1777,26 +1768,20 @@ type PlacedKms = (std::sync::Arc<dyn teifs_store::Kms>, String);
 
 /// The KMS `keyring` names and where it is. Without `create`, a local keyring that
 /// doesn't exist yet is `None` rather than made.
-fn open_kms(
+async fn open_kms(
     keyring: &KeyringArgs,
     drive: Option<&Store>,
     create: bool,
 ) -> Result<Option<PlacedKms>, error::Error> {
-    use teifs_store::{LocalKms, TransitKms};
-    if let Some(address) = &keyring.kms_transit {
-        let token = std::env::var("VAULT_TOKEN")
-            .or_else(|_| std::env::var("BAO_TOKEN"))
-            .map_err(|_| "set VAULT_TOKEN (or BAO_TOKEN) to use a transit engine".to_owned())?;
-        let kms = TransitKms::new(
-            address,
-            &keyring.kms_transit_mount,
-            token,
-            keyring.kms_transit_namespace.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+    let given = keyring.kms_keyring.as_deref();
+    let default_key = keyring.kms.default_key(given);
+    if let Some(external) = keyring.kms.external(given) {
+        let (kms, location) = teifs_server::open_external(&external)
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(Some((
-            std::sync::Arc::new(kms),
-            format!("the transit engine at {address}"),
+            teifs_server::with_default_key(kms, default_key),
+            location.describe(),
         )));
     }
     let path = if let Some(path) = &keyring.kms_keyring {
@@ -1811,9 +1796,12 @@ fn open_kms(
     if !create && !path.exists() {
         return Ok(None);
     }
-    let kms = LocalKms::open(&path)
+    let kms = teifs_store::LocalKms::open(&path)
         .map_err(|e| format!("can't open the keyring at {}: {e}", path.display()))?;
-    Ok(Some((std::sync::Arc::new(kms), path.display().to_string())))
+    Ok(Some((
+        teifs_server::with_default_key(std::sync::Arc::new(kms), default_key),
+        path.display().to_string(),
+    )))
 }
 
 async fn key(action: KeyAction) -> Result<(), error::Error> {
@@ -1821,7 +1809,9 @@ async fn key(action: KeyAction) -> Result<(), error::Error> {
     | KeyAction::Create { keyring, .. }
     | KeyAction::Rotate { keyring, .. }
     | KeyAction::Rewrap { keyring, .. }) = &action;
-    let (kms, place) = open_kms(keyring, None, true)?.expect("a keyring is made when missing");
+    let (kms, place) = open_kms(keyring, None, true)
+        .await?
+        .expect("a keyring is made when missing");
     match action {
         KeyAction::List { .. } => {
             let mut table = ui::Table::new(&["NAME", ">VERSION", "CREATED"]);

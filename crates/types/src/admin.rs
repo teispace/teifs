@@ -457,6 +457,9 @@ pub struct ServerConfig {
     pub key_names: String,
     /// Where the KMS keys are.
     pub kms: KmsConfig,
+    /// The key used where TeiFS would use `teifs-default`, if it's renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_default_key: Option<String>,
     /// Where the root user's key comes from: `drive` (generated, in the drive's
     /// `.teifs/credentials.json`) or `given` (the environment, flags or a file).
     pub root_credentials: String,
@@ -523,6 +526,18 @@ pub enum KmsConfig {
     Transit {
         /// Its address.
         address: String,
+    },
+    /// KES servers.
+    Kes {
+        /// Their URLs.
+        endpoints: Vec<String>,
+        /// The server's identity there (the SHA-256 of its certificate's public key).
+        identity: String,
+    },
+    /// AWS KMS.
+    AwsKms {
+        /// The region.
+        region: String,
     },
 }
 
@@ -641,6 +656,21 @@ mod tests {
         assert_eq!(
             kms,
             serde_json::json!({"kind": "transit", "address": "https://vault:8200"})
+        );
+        let kes = KmsConfig::Kes {
+            endpoints: vec!["https://kes:7373".into()],
+            identity: "ea98".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&kes).unwrap(),
+            serde_json::json!({"kind": "kes", "endpoints": ["https://kes:7373"], "identity": "ea98"})
+        );
+        let aws = KmsConfig::AwsKms {
+            region: "eu-west-1".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&aws).unwrap(),
+            serde_json::json!({"kind": "awsKms", "region": "eu-west-1"})
         );
     }
 }

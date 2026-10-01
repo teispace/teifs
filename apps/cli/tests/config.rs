@@ -103,6 +103,67 @@ fn relative_paths_are_relative_to_the_settings_file() {
 }
 
 #[test]
+fn external_kms_settings_go_in_the_file_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let quoted = |path: &Path| toml::Value::String(path.to_str().unwrap().to_owned());
+    let file = settings(
+        dir.path(),
+        "kms-kes = [\"https://kes1:7373\", \"https://kes2:7373\"]\n\
+         kms-kes-ca = \"certs/ca.pem\"\n\
+         kms-default-key = \"minio-default\"\n",
+    );
+    let (ok, out) = show(&["--config", &file], &[("TEIFS_KMS_KES_API_KEY", SECRET)]);
+    assert!(ok, "{out}");
+    assert_eq!(
+        line(&out, "kms-kes"),
+        r#"kms-kes = ["https://kes1:7373", "https://kes2:7373"]  # file"#
+    );
+    assert_eq!(
+        line(&out, "kms-kes-ca"),
+        format!(
+            "kms-kes-ca = {}  # file",
+            quoted(&dir.path().join("certs/ca.pem"))
+        )
+    );
+    assert_eq!(
+        line(&out, "kms-default-key"),
+        r#"kms-default-key = "minio-default"  # file"#
+    );
+}
+
+#[test]
+fn one_external_kms_at_a_time() {
+    for (args, expected) in [
+        (
+            &["--kms-kes", "https://kes:7373", "--kms-aws"][..],
+            "cannot be used with",
+        ),
+        (
+            &[
+                "--kms-transit",
+                "https://vault:8200",
+                "--kms-kes",
+                "https://kes:7373",
+            ],
+            "cannot be used with",
+        ),
+        (
+            &["--kms-aws", "--kms-keyring", "k.json"],
+            "cannot be used with",
+        ),
+        (&["--kms-aws-region", "eu-west-1"], "--kms-aws"),
+        (
+            &["--kms-kes", "https://kes:7373", "--kms-kes-cert", "c.pem"],
+            "--kms-kes-key",
+        ),
+    ] {
+        let (ok, out) = show(args, &[]);
+        assert!(!ok, "{args:?} was accepted:\n{out}");
+        assert!(out.contains(expected), "{args:?}: {out}");
+    }
+}
+
+#[test]
 fn without_a_file_the_defaults_show() {
     let (ok, out) = show(&[], &[]);
     assert!(ok, "{out}");

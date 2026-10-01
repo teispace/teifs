@@ -219,7 +219,7 @@ requests live. See
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |
-| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--website-domain D] [--default-layout object\|folder] [--kms-keyring PATH] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
+| `teifs serve [DIR] [--listen ADDR] [--certs-dir DIR \| --tls-cert FILE --tls-key FILE] [--trusted-proxy CIDR]… [--proxy-header x-forwarded-for\|forwarded\|x-real-ip] [--domain D] [--website-domain D] [--default-layout object\|folder] [--kms-keyring PATH \| --kms-transit URL \| --kms-kes URL \| --kms-aws] [--kms-default-key NAME] [--allow-sse-c] [--allow-sigv2] [--legacy-bucket-defaults] [--public-metrics] [--audit-log FILE\|-] [--audit-webhook URL] [--upload-expiry 7d\|never] [--scrub-every 30d\|never] [--snapshots 3] [--durability strict\|relaxed\|none] [--key-names portable\|host] [--header-timeout 30s] [--body-timeout 60s] [--max-connections 4096] [--config FILE]` | Serve a drive over S3 (default `127.0.0.1:9000`) |
 | `teifs config show [--config FILE] [serve's flags]` | Print the effective `serve` settings and where each comes from |
 | `teifs credentials [DIR]` | Show the access key and where the secret is |
 | `teifs bucket list\|create [--layout object\|folder]\|remove [--dir DIR]` | Manage buckets without a server |
@@ -306,9 +306,11 @@ they're set, so after a rotation set them again (`teifs alias set local URL --dr
 
 **Encryption at rest** in object buckets: SSE-S3 by default (as AWS), SSE-KMS with named
 keys, DSSE-KMS (two layers: a named key's and the drive's), and SSE-C with your own keys. The keys live in a keyring outside the drive
-(`teifs key list|create|rotate`), or in a Vault or OpenBao transit engine
-(`--kms-transit URL`, token from `VAULT_TOKEN`). **Back the keyring up**: encrypted
-objects can't be read without it.
+(`teifs key list|create|rotate`), or in an external KMS: a Vault or OpenBao transit engine
+(`--kms-transit URL`, token from `VAULT_TOKEN`), KES (`--kms-kes URL`, API key from
+`TEIFS_KMS_KES_API_KEY`; MinIO's `MINIO_KMS_KES_*` variables work too) or AWS KMS
+(`--kms-aws`, credentials as AWS's tools find them). **Back the keyring up**: encrypted
+objects can't be read without it. See [Operations](docs/OPERATIONS.md#encryption-keys).
 
 **Bucket notifications**, as S3's and MinIO's: `teifs serve --notify-webhook
 orders=https://hooks.example/s3` (or `--notify-elasticsearch`, `--notify-redis`, `--notify-nsq`, `--notify-nats`, `--notify-mqtt`, `--notify-kafka`, `--notify-amqp`, `--notify-postgresql`, `--notify-mysql`, `--notify-sqs`, `--notify-sns`, `--notify-lambda`, `--notify-eventbridge`) gives the server a target, and a bucket's rules

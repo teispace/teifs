@@ -32,7 +32,8 @@ crates/meta     teifs-meta     SQLite: the object index (index.db) and the syste
                                database (system.db). All SQL lives here.
 crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): data keys,
                                sealing, 64 KiB authenticated packages, SSE-C keys, the
-                               KMS trait and the local keyring. aws-lc-rs only.
+                               KMS trait, the local keyring and the external KMS
+                               backends (transit, KES, AWS KMS).
 crates/policy   teifs-policy   The IAM policy language: parsing, conditions, policy
                                variables, the allow/deny decision, and which S3
                                actions each S3 operation needs. Pure: no I/O.
@@ -441,8 +442,10 @@ the object is encrypted (the row's `crypt` column and the data file's footer).
 unseals the key and returns an `ObjectBody` that decrypts only the packages a range
 needs. Copies of encrypted objects are decrypted and encrypted again under the copy's own
 key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's default
-(`settings.rs`) and AWS's rules onto this. The server attaches a `LocalKms` keyring kept
-outside the drive.
+(`settings.rs`) and AWS's rules onto this. The server attaches a KMS
+(`crates/server/src/kms.rs`): a `LocalKms` keyring kept outside the drive, or a
+`TransitKms`, `KesKms` or `AwsKms`, wrapped in `DefaultKeyNamed` when
+`--kms-default-key` renames the default key.
 
 ## How a write works
 

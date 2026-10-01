@@ -402,10 +402,7 @@ async fn config(client: &Client) -> Result<(), Error> {
         .await
         .map_err(|e| Error::admin("can't get the server's configuration", &e))?;
     let yes_no = |b: bool| if b { "yes" } else { "no" }.to_owned();
-    let kms = match &config.kms {
-        teifs_client::KmsConfig::Keyring { path } => format!("keyring {path}"),
-        teifs_client::KmsConfig::Transit { address } => format!("transit engine {address}"),
-    };
+    let kms = kms_words(&config);
     ui::details(
         &[
             ("Listen", config.listen.clone()),
@@ -493,6 +490,23 @@ async fn config(client: &Client) -> Result<(), Error> {
         || record("serverConfig", &config),
     );
     Ok(())
+}
+
+/// Where the server's KMS keys are, in words.
+fn kms_words(config: &teifs_client::ServerConfig) -> String {
+    let kms = match &config.kms {
+        teifs_client::KmsConfig::Keyring { path } => format!("keyring {path}"),
+        teifs_client::KmsConfig::Transit { address } => format!("transit engine {address}"),
+        teifs_client::KmsConfig::Kes {
+            endpoints,
+            identity,
+        } => format!("KES {} (identity {identity})", endpoints.join(", ")),
+        teifs_client::KmsConfig::AwsKms { region } => format!("AWS KMS in {region}"),
+    };
+    match &config.kms_default_key {
+        Some(key) => format!("{kms}, default key {key}"),
+        None => kms,
+    }
 }
 
 fn summary(export: &IamExport) -> String {

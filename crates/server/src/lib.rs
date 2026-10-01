@@ -4,6 +4,7 @@
 
 mod audit;
 pub mod credentials;
+mod kms;
 mod serve;
 mod signals;
 pub mod tls;
@@ -20,14 +21,16 @@ use teifs_iam::{Iam, RootKey};
 use teifs_s3::Options;
 use teifs_types::admin::{KmsConfig, NotifyTarget, ServerConfig};
 
-use teifs_store::{
-    BucketEncryption, Layout, LocalKms, Store, StoreError, StoreOptions, TransitKms,
-};
+use teifs_store::{BucketEncryption, Layout, Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
 pub use audit::AuditTarget;
 pub use credentials::Credentials;
+pub use kms::{
+    AwsKmsConfig, ExternalKms, Kes, KmsLocation, Transit, default_keyring, open_external, open_kms,
+    with_default_key,
+};
 pub use serve::{DRAIN, Limits, serve};
 use teifs_notify::Notifier;
 pub use teifs_notify::{
@@ -59,12 +62,14 @@ pub struct Config {
     /// The layout of buckets created without choosing one.
     pub default_layout: Layout,
     /// The KMS keyring; `None` for the default, `<config dir>/teifs/keys/<drive id>.json`,
-    /// kept off the drive so a copy of the drive alone can't be decrypted. Unused with a
-    /// transit engine.
+    /// kept off the drive so a copy of the drive alone can't be decrypted. Unused with an
+    /// external KMS.
     pub kms_keyring: Option<PathBuf>,
-    /// A Vault or OpenBao transit engine to use as the KMS instead of a keyring. Its
-    /// token comes from `VAULT_TOKEN` (or `BAO_TOKEN`).
-    pub kms_transit: Option<Transit>,
+    /// A KMS to use instead of a keyring: a transit engine, KES or AWS KMS.
+    pub kms_external: Option<ExternalKms>,
+    /// The key to use where TeiFS would use its default key, `teifs-default` (SSE-S3,
+    /// SSE-KMS without a key, the drive's own secrets); `None` keeps that name.
+    pub kms_default_key: Option<String>,
     /// Allow SSE-C on buckets that don't set it themselves (AWS blocks it by default
     /// since April 2026).
     pub allow_sse_c: bool,
@@ -102,31 +107,6 @@ pub struct Config {
     pub access_log_interval: Option<std::time::Duration>,
     /// Serve HTTPS with these certificates; `None` serves plain HTTP.
     pub tls: Option<TlsSource>,
-}
-
-/// A Vault or OpenBao transit engine.
-#[derive(Debug, Clone)]
-pub struct Transit {
-    /// Its address, such as `https://vault.example:8200`.
-    pub address: String,
-    /// Where the engine is mounted (usually `transit`).
-    pub mount: String,
-    /// A Vault Enterprise or OpenBao namespace.
-    pub namespace: Option<String>,
-}
-
-/// Where a server's KMS keys are.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KmsLocation {
-    /// A keyring file; `created` when this start made it (a new key: back it up).
-    Keyring {
-        /// The file.
-        path: PathBuf,
-        /// Whether this start created it.
-        created: bool,
-    },
-    /// A transit engine.
-    Transit(String),
 }
 
 /// Why the server couldn't start.
@@ -182,11 +162,16 @@ pub enum ServerError {
     /// A transit engine was asked for without a token.
     #[error("set VAULT_TOKEN (or BAO_TOKEN) to use the transit engine at {0}")]
     NoTransitToken(String),
-    /// The transit engine client couldn't be set up.
-    #[error("can't use the transit engine at {address}: {source}")]
-    Transit {
-        /// The engine.
-        address: String,
+    /// KES was asked for without a way to sign in.
+    #[error(
+        "set TEIFS_KMS_KES_API_KEY, or give --kms-kes-cert and --kms-kes-key, to use KES at {0}"
+    )]
+    NoKesIdentity(String),
+    /// An external KMS couldn't be set up.
+    #[error("can't use {kms}: {source}")]
+    Kms {
+        /// Which, in words.
+        kms: String,
         /// Why.
         source: teifs_store::CryptoError,
     },
@@ -244,7 +229,7 @@ fn start_audit(targets: &[AuditTarget]) -> Result<Audit, ServerError> {
 }
 
 /// Opens (or creates) the drive, with its KMS.
-fn open_drive(
+async fn open_drive(
     config: &Config,
 ) -> Result<(Store, Arc<dyn teifs_store::Kms>, KmsLocation), ServerError> {
     std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
@@ -270,10 +255,12 @@ fn open_drive(
         source,
     })?;
     let (kms, location) = open_kms(
-        config.kms_transit.clone(),
+        config.kms_external.as_ref(),
         config.kms_keyring.clone(),
         &store.format().drive,
-    )?;
+        config.kms_default_key.clone(),
+    )
+    .await?;
     store
         .attach_kms(kms.clone())
         .map_err(|source| ServerError::Open {
@@ -281,42 +268,6 @@ fn open_drive(
             source,
         })?;
     Ok((store, kms, location))
-}
-
-/// The KMS: a transit engine when one is given, else the keyring (the drive's default one
-/// unless `keyring` names another).
-fn open_kms(
-    transit: Option<Transit>,
-    keyring: Option<PathBuf>,
-    drive: &str,
-) -> Result<(Arc<dyn teifs_store::Kms>, KmsLocation), ServerError> {
-    if let Some(transit) = transit {
-        let token = std::env::var("VAULT_TOKEN")
-            .or_else(|_| std::env::var("BAO_TOKEN"))
-            .map_err(|_| ServerError::NoTransitToken(transit.address.clone()))?;
-        let kms = TransitKms::new(&transit.address, &transit.mount, token, transit.namespace)
-            .map_err(|source| ServerError::Transit {
-                address: transit.address.clone(),
-                source,
-            })?;
-        return Ok((Arc::new(kms), KmsLocation::Transit(transit.address)));
-    }
-    let path = match keyring {
-        Some(path) => path,
-        None => default_keyring(drive)?,
-    };
-    let created = !path.exists();
-    let kms = LocalKms::open(&path).map_err(|source| ServerError::Keyring {
-        path: path.clone(),
-        source,
-    })?;
-    Ok((Arc::new(kms), KmsLocation::Keyring { path, created }))
-}
-
-/// Where a drive's keyring goes by default: the user's config folder, not the drive.
-pub fn default_keyring(drive: &str) -> Result<PathBuf, ServerError> {
-    let dir = dirs::config_dir().ok_or(ServerError::NoKeyringHome)?;
-    Ok(dir.join("teifs").join("keys").join(format!("{drive}.json")))
 }
 
 /// How the server was started, as the admin API reports it (no secrets).
@@ -348,7 +299,18 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
             KmsLocation::Transit(address) => KmsConfig::Transit {
                 address: address.clone(),
             },
+            KmsLocation::Kes {
+                endpoints,
+                identity,
+            } => KmsConfig::Kes {
+                endpoints: endpoints.clone(),
+                identity: identity.clone(),
+            },
+            KmsLocation::AwsKms(region) => KmsConfig::AwsKms {
+                region: region.clone(),
+            },
         },
+        kms_default_key: config.kms_default_key.clone(),
         root_credentials: if config.credentials.is_some() {
             "given"
         } else {
@@ -413,7 +375,7 @@ impl Server {
             .transpose()
             .map_err(ServerError::Tls)?
             .map(Arc::new);
-        let (store, kms, location) = open_drive(&config)?;
+        let (store, kms, location) = open_drive(&config).await?;
         let (listener, listen) = listen(config.listen).await?;
         let admin_config = admin_config(&config, &location, listen);
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =

@@ -163,6 +163,51 @@ folder that isn't a drive yet stays one, and while a server runs the drive, the 
 address isn't tried. `--json` prints one `{"type":"check","name","state","detail","drive"}`
 record per check.
 
+## Encryption keys
+
+Objects are encrypted with a key of their own, which a KMS key seals (see
+[ENCRYPTION_FORMAT.md](ENCRYPTION_FORMAT.md)). The KMS keys live in one of:
+
+| KMS | Settings | Secrets (environment only) | Rotation |
+|---|---|---|---|
+| A keyring file (default) | `--kms-keyring PATH`, default `<config dir>/teifs/keys/<drive id>.json` | none: the file itself (back it up) | `teifs key rotate` adds a version |
+| A Vault or OpenBao transit engine | `--kms-transit URL`, `--kms-transit-mount`, `--kms-transit-namespace` | `VAULT_TOKEN` or `BAO_TOKEN` | the engine's versions |
+| KES, one or more servers | `--kms-kes URL[,URL…]`, `--kms-kes-ca FILE`; `--kms-kes-cert FILE --kms-kes-key FILE` instead of an API key | `TEIFS_KMS_KES_API_KEY` (`kes:v1:…`) | none over KES's API: make a new key, set it as the buckets' (`teifs encrypt set`) and move objects to it (`teifs encrypt update`) |
+| AWS KMS | `--kms-aws`, `--kms-aws-region`, `--kms-aws-endpoint` (a VPC endpoint, an emulator) | AWS's usual places: `AWS_ACCESS_KEY_ID`…, shared config and SSO profiles (`AWS_PROFILE`), container and instance roles, web identity | `teifs key rotate` rotates the key material on demand (AWS allows 25); automatic rotation counts too |
+
+Each setting is also an environment variable (`TEIFS_KMS_KES`, `TEIFS_KMS_AWS_REGION`, …)
+and a settings file key (`kms-kes = ["https://kes1:7373", "https://kes2:7373"]`). The
+key commands take the same settings: `teifs key list|create|rotate|rewrap --kms-kes …`.
+
+TeiFS seals SSE-S3 objects, SSE-KMS objects that name no key, and the drive's own
+secrets (IAM) with the key `teifs-default`: create it in a transit engine, KES or AWS KMS
+before serving (`teifs key create teifs-default --kms-aws`), or use a key that's already
+there with `--kms-default-key NAME`. Keys sealed under the old name keep opening.
+
+**KES.** TeiFS proves who it is with a client certificate: the one KES's API key stands
+for (as KES's own clients make it), or the certificate and key files given. KES knows it
+by its *identity*, which `teifs serve`, `teifs key create` and `teifs admin config` show:
+allow it in KES's policy
+`/v1/key/create/*`, `/v1/key/describe/*`, `/v1/key/list/*`, `/v1/key/encrypt/*` and
+`/v1/key/decrypt/*`. With several servers, each call goes to the one that last answered,
+and on to the next when one can't be reached. MinIO's variables work as they are when no
+TeiFS KMS setting is given: `MINIO_KMS_KES_ENDPOINT` (a comma-separated list),
+`MINIO_KMS_KES_API_KEY`, `MINIO_KMS_KES_CERT_FILE`, `MINIO_KMS_KES_KEY_FILE`,
+`MINIO_KMS_KES_CAPATH` and `MINIO_KMS_KES_KEY_NAME` (the default key's name).
+
+**AWS KMS.** A name is an alias: `photos` is `alias/photos`; key ids, key ARNs and
+`alias/…` names are used as they are. `teifs key create` makes a symmetric key with that
+alias (tagged `teifs-key`), `teifs key list` lists the account's aliases (not AWS's own
+`alias/aws/…`). The object's ids are the encryption context, so CloudTrail shows which
+object each `Decrypt` was for. A key's version is one more than its completed rotations,
+counted at most hourly; `teifs key rewrap` seals data keys again under the newest
+material. The identity needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey` and
+`kms:ListKeyRotations` on the keys, and for the key commands `kms:CreateKey`,
+`kms:CreateAlias`, `kms:TagResource`, `kms:ListAliases` and `kms:RotateKeyOnDemand`.
+
+`teifs doctor` asks an external KMS: whether it answers, takes TeiFS's credentials, and
+has the default key (with the command that makes it when it hasn't).
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which
@@ -263,7 +308,7 @@ holds is left out unless the scrape asks, as a drive can have many buckets:
 `teifs admin info` shows the totals.
 
 Request histograms' buckets double from 1 ms to about a minute; the store's from 100 µs
-to about 52 s. A slow `sync` is the disk, a slow `key` the KMS (a transit engine's
+to about 52 s. A slow `sync` is the disk, a slow `key` the KMS (an external KMS's
 network), a slow `lock` many writes waiting their turn. Some queries to start with:
 
 ```promql

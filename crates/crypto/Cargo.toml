@@ -19,10 +19,18 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
+aws-config.workspace = true
+aws-sdk-kms.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+time = { workspace = true, features = ["parsing"] }
+x509-parser.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true

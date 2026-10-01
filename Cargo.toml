@@ -87,6 +87,8 @@ aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-v
 aws-sigv4 = { version = "1", default-features = false, features = ["http1"] }
 aws-credential-types = "1"
 aws-sdk-s3control = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1.122", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "sso"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"

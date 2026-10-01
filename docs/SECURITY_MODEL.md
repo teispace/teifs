@@ -256,7 +256,7 @@ of the settings; `teifs config show` names its source and never prints it (teste
 
 ### 6. Secrets never reach logs
 Types holding secrets leave them out of `Debug` output (credentials, access keys,
-sessions, KMS and transit keys, IAM state), and secrets are wiped from memory when
+sessions, KMS keys, transit tokens and KES API keys, IAM state), and secrets are wiped from memory when
 dropped (`Zeroizing`). The S3 layer logs every response at `DEBUG`, so answers that carry
 secrets (IAM and STS answers with access keys or session tokens, the admin API's IAM
 exports) are sent as bodies that log only their size. A test runs a full cycle at
@@ -403,8 +403,11 @@ Objects in object buckets are encrypted by default (SSE-S3), as specified in
 key and bound to the object's drive, bucket and object ids; 64 KiB authenticated
 packages that can't be reordered, cut short or moved. The KMS keyring lives outside the
 drive (`<config dir>/teifs/keys/<drive id>.json`, mode `0600`), so a copy of the drive
-alone reveals nothing; or the keys stay in a Vault or OpenBao transit engine, whose token
-comes only from the environment. SSE-C keys are never stored (only a salted HMAC to recognize
+alone reveals nothing; or the keys stay in an external KMS (a Vault or OpenBao transit
+engine, KES, AWS KMS) whose credentials come only from the environment (or AWS's own
+credential sources, or a client certificate file for KES), never a flag or the settings
+file. Each sealed key is bound to its object's context there too (the transit engine's
+associated data, KES's context, AWS's encryption context). SSE-C keys are never stored (only a salted HMAC to recognize
 them), are blocked on buckets by default, and are refused on plain HTTP (except on a
 server listening only on loopback, or with `--sse-c-over-http`) for every request that
 carries one, reads and copy sources included: one check in front of every operation

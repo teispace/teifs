@@ -282,3 +282,55 @@ fn keys_and_folders_are_checked() {
     assert_eq!(code, 1);
     assert_eq!(check(&checks, "Root keys").0, "failed");
 }
+
+#[test]
+fn an_external_kms_is_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let f = folder.to_str().unwrap();
+    // A KES server that isn't there.
+    let gone = std::net::TcpListener::bind(FREE).unwrap();
+    let endpoint = format!("https://{}", gone.local_addr().unwrap());
+    drop(gone);
+    // kes-go's published example key: not a secret.
+    let api_key = (
+        "TEIFS_KMS_KES_API_KEY",
+        "kes:v1:AGaV6VXHasF0FnaB60WdCOeTZ8eTIDikL4zlN16c8NAs",
+    );
+    let (code, checks) = doctor(
+        home.path(),
+        &[f, "--listen", FREE, "--kms-kes", &endpoint],
+        &[api_key],
+    );
+    assert_eq!(code, 1);
+    let (state, detail) = check(&checks, "KMS");
+    assert_eq!(state, "failed");
+    assert!(
+        detail.starts_with(&format!("KES at {endpoint}: can't reach KES")),
+        "{detail}"
+    );
+    // Without a way to sign in, it says how to give one.
+    let (_, checks) = doctor(
+        home.path(),
+        &[f, "--listen", FREE, "--kms-kes", &endpoint],
+        &[],
+    );
+    let (state, detail) = check(&checks, "KMS");
+    assert_eq!(state, "failed");
+    assert!(detail.contains("set TEIFS_KMS_KES_API_KEY"), "{detail}");
+    // MinIO's variables name it too.
+    let (_, checks) = doctor(
+        home.path(),
+        &[f, "--listen", FREE],
+        &[
+            ("MINIO_KMS_KES_ENDPOINT", &endpoint),
+            ("MINIO_KMS_KES_API_KEY", api_key.1),
+        ],
+    );
+    let (_, detail) = check(&checks, "KMS");
+    assert!(
+        detail.starts_with(&format!("KES at {endpoint}: can't reach KES")),
+        "{detail}"
+    );
+}

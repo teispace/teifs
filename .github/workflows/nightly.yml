@@ -139,9 +139,10 @@ jobs:
           docker build --build-arg TARGETARCH=amd64 -f docker/Dockerfile -t teifs:test ctx
       - run: packaging/helm/test-kind.sh
 
-  transit-kms:
-    # Encryption with a real OpenBao transit engine as the KMS.
-    name: Transit KMS (OpenBao)
+  external-kms:
+    # Encryption with real external KMSes: an OpenBao transit engine, KES, and Moto for
+    # AWS KMS (LocalStack needs an account since March 2026).
+    name: External KMS (OpenBao, KES, AWS KMS)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -152,13 +153,22 @@ jobs:
           BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
         ports:
           - 8200:8200
+      moto:
+        image: motoserver/moto:latest
+        ports:
+          - 5000:5000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --locked -p teifs-server --test transit -- --nocapture
+      - run: tests/kms/start-kes.sh
+      - run: cargo test --locked -p teifs-server --test external_kms -- --nocapture
         env:
           TEIFS_TEST_TRANSIT_ADDR: http://127.0.0.1:8200
           VAULT_TOKEN: dev-only-token
+          TEIFS_TEST_AWS_KMS_ENDPOINT: http://127.0.0.1:5000
+          AWS_ACCESS_KEY_ID: dummy-test-key
+          AWS_SECRET_ACCESS_KEY: dummy-test-secret
+          AWS_REGION: us-east-1
 
   kafka:
     # Notifications to a real Kafka broker: plain, SASL PLAIN and SCRAM, gzip; the records

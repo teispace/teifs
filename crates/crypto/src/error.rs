@@ -20,7 +20,7 @@ pub enum CryptoError {
     /// The KMS's keyring couldn't be read or written.
     #[error("the KMS keyring: {0}")]
     Keyring(String),
-    /// The KMS failed.
-    #[error("the KMS failed: {0}")]
+    /// The KMS failed or refused; the message names the KMS.
+    #[error("{0}")]
     Kms(String),
 }

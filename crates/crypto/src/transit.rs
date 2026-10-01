@@ -235,11 +235,7 @@ impl Kms for TransitKms {
                 .decode(plain.plaintext)
                 .map_err(|_| CryptoError::Authentication)?,
         );
-        let key: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| CryptoError::Authentication)?;
-        Ok(DataKey::from_bytes(key))
+        DataKey::from_slice(&bytes)
     }
 
     async fn keys(&self) -> Result<Vec<KeyInfo>> {

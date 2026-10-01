@@ -37,6 +37,14 @@ impl DataKey {
         Self(bytes)
     }
 
+    /// The key a KMS returned unsealed: exactly 32 bytes, else the seal was wrong.
+    pub(crate) fn from_slice(bytes: &[u8]) -> crate::Result<Self> {
+        let key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| crate::CryptoError::Authentication)?;
+        Ok(Self(key))
+    }
+
     pub(crate) fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
