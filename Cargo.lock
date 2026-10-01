@@ -4248,6 +4248,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "teifs-crypto",
  "teifs-types",
  "thiserror 2.0.21",
  "time",

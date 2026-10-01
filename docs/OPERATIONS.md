@@ -318,6 +318,31 @@ removed it goes too. The IAM API refuses to delete a user that still has service
 accounts. They're kept in IAM exports (`teifs admin iam export`), with their secrets
 when the export includes secrets.
 
+## Settings with `mc admin config`
+
+The sign-in settings below can also be set on a running server, as `mc admin config`
+sets MinIO's, and are kept on its drive (`.teifs/config.kv`, readable only by its
+owner):
+
+```sh
+teifs admin config set ALIAS identity_ldap server_addr=ldap.example.com:636 \
+  'lookup_bind_dn=cn=teifs,ou=services,dc=example,dc=com' lookup_bind_password=…
+teifs admin config get ALIAS identity_ldap     # never the secrets
+teifs admin config keys ALIAS identity_ldap    # what it takes (--env: as variables)
+teifs admin service restart ALIAS              # takes effect when it starts again
+```
+
+`identity_openid[:NAME]`, `identity_ldap` and `identity_plugin` are kept; another
+sub-system is refused. Each value stands for MinIO's variable
+(`MINIO_IDENTITY_LDAP_SERVER_ADDR`…) and counts only when nothing else sets it: flags,
+`TEIFS_*` variables, the settings file and MinIO's variables all come first. A change
+`teifs serve` wouldn't start with is refused, and nothing is kept. `reset` puts keys
+(or a whole target) back to their defaults; `history` lists the changes (by target,
+never their values), `restore ALIAS ID` sets one again and `clear-history ALIAS ID|all`
+forgets them; `export ALIAS -o FILE` writes everything, secrets included, to a file
+only you can read, and `import ALIAS FILE` replaces everything with one. Each needs
+`admin:ConfigUpdate`.
+
 ## LDAP sign-in
 
 Users of an LDAP directory (Active Directory, OpenLDAP, FreeIPA…) can get temporary

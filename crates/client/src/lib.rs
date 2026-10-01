@@ -37,8 +37,10 @@ pub use zeroize::Zeroizing;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
     ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE,
-    MINIO_GET_BUCKET_QUOTA, MINIO_KMS_CREATE_KEY, MINIO_KMS_KEY_STATUS, MINIO_KMS_LIST_KEYS,
-    MINIO_KMS_STATUS, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA,
+    MINIO_CLEAR_CONFIG_HISTORY_KV, MINIO_CONFIG, MINIO_DEL_CONFIG_KV, MINIO_GET_BUCKET_QUOTA,
+    MINIO_GET_CONFIG_KV, MINIO_HELP_CONFIG_KV, MINIO_KMS_CREATE_KEY, MINIO_KMS_KEY_STATUS,
+    MINIO_KMS_LIST_KEYS, MINIO_KMS_STATUS, MINIO_LIST_CONFIG_HISTORY_KV,
+    MINIO_RESTORE_CONFIG_HISTORY_KV, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA, MINIO_SET_CONFIG_KV,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
@@ -48,6 +50,7 @@ pub use teifs_types::admin::{
     ServerConfig, ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
+pub use teifs_types::config_kv::{Help as ConfigHelp, HelpKey as ConfigHelpKey};
 pub use teifs_types::notify::{EventRecord, ListenFilter, event_key_decoded};
 
 /// The region requests are signed for when none is given (TeiFS accepts any).
@@ -566,6 +569,137 @@ impl Client {
         .await
     }
 
+    /// A sub-system's settings (`SUBSYS[:TARGET]`; every one when empty) as `MinIO`'s
+    /// configuration lines, without secrets (`admin:ConfigUpdate`).
+    pub async fn config_kv(&self, key: &str) -> Result<String, ClientError> {
+        let query = pair_query("key", key);
+        let text = self
+            .encrypted_call(Method::GET, MINIO_GET_CONFIG_KV, Some(&query), None)
+            .await?;
+        Ok(text.to_string())
+    }
+
+    /// Sets configuration lines (`SUBSYS[:TARGET] KEY=VALUE…`); they take effect when the
+    /// server starts again (`admin:ConfigUpdate`).
+    pub async fn set_config_kv(&self, lines: &str) -> Result<(), ClientError> {
+        self.encrypted_call(Method::PUT, MINIO_SET_CONFIG_KV, None, Some(lines))
+            .await
+            .map(drop)
+    }
+
+    /// Resets targets or keys (`SUBSYS[:TARGET] [KEY…]`) to their defaults
+    /// (`admin:ConfigUpdate`).
+    pub async fn reset_config_kv(&self, lines: &str) -> Result<(), ClientError> {
+        self.encrypted_call(Method::DELETE, MINIO_DEL_CONFIG_KV, None, Some(lines))
+            .await
+            .map(drop)
+    }
+
+    /// Help for a sub-system (every one when empty) or one of its keys; with `env`, keys
+    /// are named by their variables.
+    pub async fn config_help(
+        &self,
+        subsystem: &str,
+        key: &str,
+        env: bool,
+    ) -> Result<ConfigHelp, ClientError> {
+        // A serializer isn't `Send`: it's gone before the call waits.
+        let query = {
+            let mut query = form_urlencoded::Serializer::new(String::new());
+            query
+                .append_pair("subSys", subsystem)
+                .append_pair("key", key);
+            if env {
+                query.append_pair("env", "");
+            }
+            query.finish()
+        };
+        self.call(Method::GET, MINIO_HELP_CONFIG_KV, Some(&query), Vec::new())
+            .await
+    }
+
+    /// The newest `count` changes to the configuration (all of them for `0`), oldest
+    /// first.
+    pub async fn config_history(&self, count: usize) -> Result<Vec<ConfigChange>, ClientError> {
+        let query = format!("count={count}");
+        let text = self
+            .encrypted_call(
+                Method::GET,
+                MINIO_LIST_CONFIG_HISTORY_KV,
+                Some(&query),
+                None,
+            )
+            .await?;
+        serde_json::from_str(&text).map_err(|e| ClientError::Answer(e.to_string()))
+    }
+
+    /// Sets a change's lines again, and forgets it.
+    pub async fn restore_config(&self, id: &str) -> Result<(), ClientError> {
+        let query = pair_query("restoreId", id);
+        self.encrypted_call(
+            Method::PUT,
+            MINIO_RESTORE_CONFIG_HISTORY_KV,
+            Some(&query),
+            None,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Forgets a change (`all` for every one).
+    pub async fn clear_config_history(&self, id: &str) -> Result<(), ClientError> {
+        let query = pair_query("restoreId", id);
+        self.encrypted_call(
+            Method::DELETE,
+            MINIO_CLEAR_CONFIG_HISTORY_KV,
+            Some(&query),
+            None,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// The whole configuration, secrets included (`admin:ConfigUpdate`).
+    pub async fn export_config(&self) -> Result<Zeroizing<String>, ClientError> {
+        self.encrypted_call(Method::GET, MINIO_CONFIG, None, None)
+            .await
+    }
+
+    /// Replaces the whole configuration with `lines` (`admin:ConfigUpdate`).
+    pub async fn import_config(&self, lines: &str) -> Result<(), ClientError> {
+        self.encrypted_call(Method::PUT, MINIO_CONFIG, None, Some(lines))
+            .await
+            .map(drop)
+    }
+
+    /// A call whose body and answer are encrypted with the secret key, as madmin's are:
+    /// the answer's text (empty when there's none).
+    async fn encrypted_call(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Zeroizing<String>, ClientError> {
+        let body = body.map_or_else(Vec::new, |text| {
+            teifs_crypto::madmin::encrypt(self.secret.as_str(), text.as_bytes())
+        });
+        let response = self.send(method, path, query, body).await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            return Err(api_error(status, &bytes));
+        }
+        if bytes.is_empty() {
+            return Ok(Zeroizing::new(String::new()));
+        }
+        let plain = teifs_crypto::madmin::decrypt(self.secret.as_str(), &bytes)
+            .map_err(|_| ClientError::Answer("the answer isn't encrypted for this key".into()))?;
+        std::str::from_utf8(&plain)
+            .map(|text| Zeroizing::new(text.to_owned()))
+            .map_err(|e| ClientError::Answer(e.to_string()))
+    }
+
     /// A live trace of the requests the server answers from now on, those `filter`
     /// shows (`teifs:ServerTrace`): read it with [`Trace::next`].
     pub async fn trace(&self, filter: &TraceFilter) -> Result<Trace, ClientError> {
@@ -854,9 +988,28 @@ pub struct Health {
 
 /// `?key-id=NAME`.
 fn key_query(name: &str) -> String {
+    pair_query("key-id", name)
+}
+
+/// `?NAME=VALUE`.
+fn pair_query(name: &str, value: &str) -> String {
     form_urlencoded::Serializer::new(String::new())
-        .append_pair("key-id", name)
+        .append_pair(name, value)
         .finish()
+}
+
+/// A change to a server's configuration, as [`Client::config_history`] lists it
+/// (`madmin.ConfigHistoryEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChange {
+    /// What puts it back ([`Client::restore_config`]).
+    pub restore_id: String,
+    /// When it was made, as RFC 3339.
+    pub create_time: String,
+    /// The lines it set.
+    #[serde(default)]
+    pub data: String,
 }
 
 /// A server's KMS, as [`Client::kms_status`] answers it (`madmin.KMSStatus`).

@@ -339,6 +339,11 @@ the environment or from a file of its own (`--secret-key-file`), never from a
 command-line flag or the settings file, so it doesn't show in process lists or in copies
 of the settings; `teifs config show` names its source and never prints it (tested in
 `apps/cli/tests/config.rs`). Secrets shorter than 8 characters are refused.
+Sign-in settings set through `mc admin config` (an LDAP bind password, an OpenID client
+secret, an identity plugin's token) are kept in `.teifs/config.kv` and its history, each
+mode `0600` in owner-only folders; they're answered only encrypted with the caller's
+secret key, never by `get`, and only to callers with `admin:ConfigUpdate`
+(`crates/server/tests/config_kv.rs`).
 
 ### 6. Secrets never reach logs
 Types holding secrets leave them out of `Debug` output (credentials, access keys,

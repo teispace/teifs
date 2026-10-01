@@ -12,6 +12,7 @@
 mod body;
 mod cache;
 pub mod checksum;
+mod config_kv;
 mod diagnose;
 mod error;
 mod filesystem;
@@ -49,6 +50,7 @@ use std::{
 use teifs_meta::{BucketRecord, Index, System};
 
 pub use body::{BodyReader, ObjectBody};
+pub use config_kv::{ConfigChange, ConfigFiles};
 pub use diagnose::{Database, Diagnosis, diagnose};
 pub use error::{Result, StoreError};
 pub use filesystem::remote_file_system;

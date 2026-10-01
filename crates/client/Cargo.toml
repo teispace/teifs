@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 teifs-types.workspace = true
+teifs-crypto.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true

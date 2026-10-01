@@ -1,5 +1,6 @@
 // The AWS SDK for Go v2 against TeiFS: what applications do with it; and madmin-go, the
-// library `mc` calls MinIO's admin API with, for bucket quotas, users, groups and policies.
+// library `mc` calls MinIO's admin API with, for bucket quotas, users, groups, policies,
+// the KMS and settings.
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -141,6 +143,7 @@ func main() {
 	serverInfo(ctx, adm, *bucket)
 	service(ctx, adm)
 	kms(ctx, adm)
+	configKV(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -337,4 +340,38 @@ func kms(ctx context.Context, adm *madmin.AdminClient) {
 	must(err)
 	check(keyStatus.KeyID == name && keyStatus.EncryptionErr == "" && keyStatus.DecryptionErr == "",
 		fmt.Sprintf("the new key's status: %+v", keyStatus))
+}
+
+func configKV(ctx context.Context, adm *madmin.AdminClient) {
+	step("settings set, read, reset, put back, exported and imported, as mc admin config calls them")
+	line := `identity_ldap server_addr=ldap.example.com:636 lookup_bind_dn="cn=admin, dc=example" lookup_bind_password=go-client-pw`
+	restart, err := adm.SetConfigKV(ctx, line)
+	must(err)
+	check(restart, "a restart is needed")
+	got, err := adm.GetConfigKV(ctx, "identity_ldap")
+	must(err)
+	text := string(got)
+	check(strings.Contains(text, "server_addr=ldap.example.com:636") && !strings.Contains(text, "go-client-pw"),
+		"the settings without their secret: "+text)
+	help, err := adm.HelpConfigKV(ctx, "identity_ldap", "", false)
+	must(err)
+	check(help.SubSys == "identity_ldap" && len(help.KeysHelp) > 0, fmt.Sprintf("the help: %+v", help))
+	history, err := adm.ListConfigHistoryKV(ctx, 10)
+	must(err)
+	check(len(history) > 0 && history[len(history)-1].Data == line, fmt.Sprintf("the history: %+v", history))
+	_, err = adm.DelConfigKV(ctx, "identity_ldap")
+	must(err)
+	got, err = adm.GetConfigKV(ctx, "identity_ldap")
+	must(err)
+	check(!strings.Contains(string(got), "ldap.example.com"), "reset: "+string(got))
+	must(adm.RestoreConfigHistoryKV(ctx, history[len(history)-1].RestoreID))
+	exported, err := adm.GetConfig(ctx)
+	must(err)
+	check(strings.Contains(string(exported), "lookup_bind_password=go-client-pw"), "the export has the secret")
+	// madmin sends no empty configuration: one with only a comment sets nothing.
+	must(adm.SetConfig(ctx, strings.NewReader("# nothing set\n")))
+	must(adm.ClearConfigHistoryKV(ctx, "all"))
+	got, err = adm.GetConfigKV(ctx, "identity_ldap")
+	must(err)
+	check(!strings.Contains(string(got), "ldap.example.com"), "imported nothing: "+string(got))
 }

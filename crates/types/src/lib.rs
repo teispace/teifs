@@ -5,6 +5,7 @@ mod acl;
 pub mod admin;
 pub mod audit;
 pub mod caps;
+pub mod config_kv;
 pub mod configs;
 pub mod logging;
 mod names;

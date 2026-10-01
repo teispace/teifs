@@ -385,7 +385,13 @@ for a restart once its runtime has shut down (`apps/cli/src/restart.rs`). `MinIO
 KMS API (`/minio/kms/v1/`, served as `Api::Minio` too) and its admin API's KMS calls
 (`minio_kms.rs`) work on `Store::kms`, which the store wraps in `teifs_crypto::Measured`
 to count calls for the metrics; `Needs::OnKmsKey` decides an action on no key and then
-on `arn:minio:kms:::KEY`, which a policy statement matches only when it names KMS keys. Quotas are
+on `arn:minio:kms:::KEY`, which a policy statement matches only when it names KMS keys.
+`MinIO`'s configuration calls (`minio_config.rs`) keep `teifs_types::config_kv::ConfigKv`
+(MinIO's text form, parsed and checked against the sub-systems TeiFS reads) in the drive's
+`teifs_store::ConfigFiles`, one change at a time, after the `ConfigCheck` the server was
+given: `teifs serve` passes one that builds its sign-in settings from the change
+(`apps/cli/src/config_kv.rs`), the same way it builds them at start, where the stored
+values are `MinIO` variables under every other source. Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and

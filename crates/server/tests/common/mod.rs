@@ -68,6 +68,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         client_certificates: None,
         identity_plugin: None,
         openid: Vec::new(),
+        config_check: teifs_server::ConfigCheck::default(),
     }
 }
 

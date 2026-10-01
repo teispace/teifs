@@ -54,15 +54,8 @@ const MINIO: &str = "MINIO_IDENTITY_OPENID_";
 const DISCOVERY: &str = "/.well-known/openid-configuration";
 
 impl OpenIdArgs {
-    /// The providers these settings (or MinIO's variables) name.
-    pub(crate) fn providers(&self) -> Result<Vec<ConfiguredOidcProvider>, Error> {
-        let env = std::env::vars()
-            .filter(|(name, value)| name.starts_with(MINIO) && !value.trim().is_empty())
-            .collect();
-        self.providers_with(&env)
-    }
-
-    fn providers_with(
+    /// The providers these settings (or MinIO's variables, `env`) name.
+    pub(crate) fn providers_with(
         &self,
         env: &BTreeMap<String, String>,
     ) -> Result<Vec<ConfiguredOidcProvider>, Error> {

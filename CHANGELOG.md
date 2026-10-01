@@ -351,6 +351,13 @@ behaviour; the on-disk format is always upgraded automatically.
   `admin:KMSKeyStatus` and `admin:KMSCreateKey` for the admin API's), and policies may
   name keys, as MinIO's do: `"Resource": "arn:minio:kms:::app-*"` limits creating,
   listing and checking keys to those.
+- MinIO's configuration calls (`mc admin config get|set|reset|history|restore|export|
+  import`), and `teifs admin config get|set|reset|keys|history|restore|clear-history|
+  export|import` for the same, for the sign-in settings: `identity_openid`,
+  `identity_ldap` and `identity_plugin`. They're kept on the drive (owner-only, with a
+  history of changes to put back) and take effect when the server starts again, under
+  every other setting. A change the server wouldn't start with is refused. Each needs
+  `admin:ConfigUpdate`.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

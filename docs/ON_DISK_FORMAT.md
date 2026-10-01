@@ -23,6 +23,8 @@ it against a drive written by each released format.
 │   ├── tmp/                  bytes being written (emptied at every start)
 │   ├── uploads/<id>/<part>   parts of multipart uploads in progress
 │   ├── credentials.json      generated credentials, readable only by the owner
+│   ├── config.kv             optional MinIO settings (`mc admin config set`), owner-only
+│   ├── config-history/<id>.kv  optional: each change to them, owner-only
 │   └── settings.toml         optional `teifs serve` settings (`teifs init`); never secrets
 ├── <bucket>/                 each folder is a folder bucket
 │   └── <key path>            each object is a plain file at its key's path
@@ -166,6 +168,23 @@ What can't be rebuilt from the files.
 | `iam_*` | IAM's users, access keys and MinIO service accounts (secrets sealed by the drive's KMS; a service account's parent, status, policy, name, description, expiry and creation time), groups, roles (trust policy, longest session, boundary), OpenID Connect providers (URL, audiences, thumbprints), SAML providers (metadata, private keys sealed under the IAM key), policies and their versions, attachments and tags |
 
 A bucket folder without a row is a folder bucket with default settings.
+
+### `config.kv` and `config-history/`
+
+The settings `mc admin config set` and `teifs admin config set` keep, in MinIO's text
+form: one line per target, `SUBSYS[:TARGET] KEY=VALUE …`, values with spaces in double
+quotes, every key of the target listed (`enable=off` for a target that's off). Only
+`identity_openid`, `identity_ldap` and `identity_plugin` are kept. Each value stands for
+MinIO's variable (`MINIO_IDENTITY_LDAP_SERVER_ADDR`, `MINIO_IDENTITY_OPENID_CLIENT_ID_<TARGET>`),
+read at start when nothing else sets it. It may hold passwords and tokens, so it's mode
+`0600`, replaced atomically.
+
+`config-history/` (mode `0700`) keeps each change set or imported as its own file
+(`0600`), named by a version 7 UUID, which says when it was made and is what
+`mc admin config restore` names. A change is the lines as they were sent. Restoring one
+removes it, as MinIO does.
+
+Neither file is in snapshots: a restore leaves them as they are.
 
 ### Durability
 

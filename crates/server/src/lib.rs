@@ -126,6 +126,27 @@ pub struct Config {
     /// OpenID Connect providers to make, or bring in line with these settings, when it
     /// starts (MinIO's `identity_openid`); none by default.
     pub openid: Vec<ConfiguredOidcProvider>,
+    /// How a change `mc admin config` makes to the drive's `.teifs/config.kv` is checked
+    /// before it's kept.
+    pub config_check: ConfigCheck,
+}
+
+/// Checks a change to the drive's key-value configuration as the next start would read
+/// it, so a change it would refuse is refused now. The default takes any change the
+/// configuration's own rules allow.
+#[derive(Clone)]
+pub struct ConfigCheck(pub Arc<teifs_s3::CheckConfig>);
+
+impl Default for ConfigCheck {
+    fn default() -> Self {
+        Self(Arc::new(|_| Ok(())))
+    }
+}
+
+impl std::fmt::Debug for ConfigCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConfigCheck")
+    }
 }
 
 /// How clients sign in with certificates.
@@ -667,6 +688,10 @@ impl Server {
                 request_metrics,
                 access_log_interval: config.access_log_interval,
                 config: Some(admin_config),
+                config_settings: Some(teifs_s3::ConfigSettings {
+                    files: teifs_store::ConfigFiles::new(&config.dir),
+                    check: config.config_check.0,
+                }),
                 root_keys,
             },
         )

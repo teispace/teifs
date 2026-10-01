@@ -81,7 +81,7 @@ pub(crate) fn caller_key(req: &S3Request<Body>) -> Option<&str> {
 }
 
 /// The caller's secret key: the password of the bodies it sends and reads.
-fn caller_secret(req: &S3Request<Body>) -> S3Result<Zeroizing<String>> {
+pub(crate) fn caller_secret(req: &S3Request<Body>) -> S3Result<Zeroizing<String>> {
     req.credentials
         .as_ref()
         .map(|c| Zeroizing::new(c.secret_key.expose().to_owned()))
@@ -116,8 +116,16 @@ pub(crate) async fn encrypted(
     req: &S3Request<Body>,
     value: &impl Serialize,
 ) -> S3Result<S3Response<Body>> {
-    let secret = caller_secret(req)?;
     let plain = Zeroizing::new(serde_json::to_vec(value).map_err(S3Error::internal_error)?);
+    encrypted_bytes(req, plain).await
+}
+
+/// An answer of `plain`, encrypted with the caller's secret key.
+pub(crate) async fn encrypted_bytes(
+    req: &S3Request<Body>,
+    plain: Zeroizing<Vec<u8>>,
+) -> S3Result<S3Response<Body>> {
+    let secret = caller_secret(req)?;
     let data = tokio::task::spawn_blocking(move || teifs_crypto::madmin::encrypt(&secret, &plain))
         .await
         .map_err(S3Error::internal_error)?;

@@ -127,6 +127,15 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/minio/kms/v1/key/create` | Creates KMS key `?key-id=`: `mc admin kms key create` | `kms:CreateKey` |
 | `GET` | `/minio/kms/v1/key/list` | The KMS keys whose names start with `?pattern=` (`*` or nothing for all) that the caller may list, as `madmin.KMSKeyInfo`: `mc admin kms key list` | `kms:ListKeys` |
 | `GET` | `/minio/kms/v1/key/status` | Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus`: `mc admin kms key status` | `kms:KeyStatus` |
+| `GET` | `/minio/admin/v3/get-config-kv` | A sub-system's settings (`?key=subsys`, `subsys:` for its default target, `subsys:target` for one), without secrets, as key-value lines encrypted with the caller's secret key: `mc admin config get` | `admin:ConfigUpdate` |
+| `PUT` | `/minio/admin/v3/set-config-kv` | Sets the key-value lines of the encrypted body; they take effect when the server starts again: `mc admin config set` | `admin:ConfigUpdate` |
+| `DELETE` | `/minio/admin/v3/del-config-kv` | Resets the targets or keys the encrypted body names to their defaults: `mc admin config reset` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/help-config-kv` | Help for sub-system `?subSys=` (all of them when empty) or its key `?key=`, keys named by their variables with `?env`, as `madmin.Help` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/list-config-history-kv` | The newest `?count=` changes (0 for all), oldest first, as `madmin.ConfigHistoryEntry` encrypted with the caller's secret key: `mc admin config history` | `admin:ConfigUpdate` |
+| `DELETE` | `/minio/admin/v3/clear-config-history-kv` | Forgets change `?restoreId=` (`all` for every one) | `admin:ConfigUpdate` |
+| `PUT` | `/minio/admin/v3/restore-config-history-kv` | Sets change `?restoreId=`'s lines again, then forgets it: `mc admin config restore` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/config` | The whole configuration, secrets included, encrypted with the caller's secret key: `mc admin config export` | `admin:ConfigUpdate` |
+| `PUT` | `/minio/admin/v3/config` | Replaces the whole configuration with the encrypted body's: `mc admin config import` | `admin:ConfigUpdate` |
 
 <!-- end generated -->
 

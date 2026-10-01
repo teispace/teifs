@@ -4,6 +4,7 @@
 //! --endpoint-url …` speaks too).
 
 mod buckets;
+mod config;
 mod kms;
 mod ldap;
 mod oidc;
@@ -41,10 +42,15 @@ pub enum AdminAction {
         /// The server's alias.
         alias: String,
     },
-    /// Show how a TeiFS server was started (never its secrets).
+    /// Show how a TeiFS server was started (never its secrets), or get and set the
+    /// settings it keeps on its drive (as `mc admin config`).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Config {
         /// The server's alias.
-        alias: String,
+        #[arg(required = true)]
+        alias: Option<String>,
+        #[command(subcommand)]
+        action: Option<config::ConfigAction>,
     },
     /// Export or import the account's IAM: users, groups, policies and access keys.
     Iam {
@@ -174,7 +180,13 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
     let aliases = Aliases::load()?;
     match action {
         AdminAction::Info { alias } => info(&client(&aliases, &alias)?).await,
-        AdminAction::Config { alias } => config(&client(&aliases, &alias)?).await,
+        AdminAction::Config {
+            action: Some(action),
+            ..
+        } => config::run(&aliases, action).await,
+        AdminAction::Config { alias, .. } => {
+            config(&client(&aliases, alias.as_deref().unwrap_or_default())?).await
+        }
         AdminAction::Iam {
             action:
                 IamAction::Export {

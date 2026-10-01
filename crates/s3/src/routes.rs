@@ -32,7 +32,8 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_iam, minio_info, minio_kms, minio_service, minio_service_accounts,
+    iam_api, listen, minio_config, minio_iam, minio_info, minio_kms, minio_service,
+    minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -162,6 +163,7 @@ enum Handler {
     MinioInfo(minio_info::Kind),
     MinioService,
     MinioKms(minio_kms::Call),
+    MinioConfig(minio_config::Call),
 }
 
 impl Handler {
@@ -220,6 +222,7 @@ impl Handler {
             Self::MinioInfo(kind) => kind.name(),
             Self::MinioService => "Service",
             Self::MinioKms(call) => call.name(),
+            Self::MinioConfig(call) => call.name(),
         }
     }
 }
@@ -751,6 +754,78 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioKms(minio_kms::Call::KeyStatus),
         about: "Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus`: `mc admin kms key status`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/get-config-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Get),
+        about: "A sub-system's settings (`?key=subsys`, `subsys:` for its default target, `subsys:target` for one), without secrets, as key-value lines encrypted with the caller's secret key: `mc admin config get`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/set-config-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Set),
+        about: "Sets the key-value lines of the encrypted body; they take effect when the server starts again: `mc admin config set`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/del-config-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Delete),
+        about: "Resets the targets or keys the encrypted body names to their defaults: `mc admin config reset`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/help-config-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Help),
+        about: "Help for sub-system `?subSys=` (all of them when empty) or its key `?key=`, keys named by their variables with `?env`, as `madmin.Help`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/list-config-history-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::History),
+        about: "The newest `?count=` changes (0 for all), oldest first, as `madmin.ConfigHistoryEntry` encrypted with the caller's secret key: `mc admin config history`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/clear-config-history-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::ClearHistory),
+        about: "Forgets change `?restoreId=` (`all` for every one)",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/restore-config-history-kv",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::RestoreHistory),
+        about: "Sets change `?restoreId=`'s lines again, then forgets it: `mc admin config restore`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/config",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Export),
+        about: "The whole configuration, secrets included, encrypted with the caller's secret key: `mc admin config export`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/config",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioConfig(minio_config::Call::Import),
+        about: "Replaces the whole configuration with the encrypted body's: `mc admin config import`",
+    },
 ];
 
 /// Why a call decided on its query's bucket has one.
@@ -891,6 +966,8 @@ pub(crate) struct Routes {
     pub(crate) request_metrics: Arc<crate::request_metrics::RequestMetrics>,
     /// The server's freezes, and whether it was asked to stop.
     pub(crate) control: Arc<crate::minio_service::Control>,
+    /// Where `mc admin config` keeps what it sets, if the drive keeps it.
+    pub(crate) configs: Option<Arc<minio_config::Configs>>,
 }
 
 #[async_trait::async_trait]
@@ -1195,6 +1272,7 @@ impl Routes {
             Handler::MinioInfo(kind) => kind.call(self, &req).await,
             Handler::MinioService => minio_service::call(self, &req),
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
+            Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

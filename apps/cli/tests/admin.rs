@@ -549,6 +549,94 @@ async fn kms_keys_from_the_command_line() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn minio_settings_from_the_command_line() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let out = cli
+        .ok(&[
+            "admin",
+            "config",
+            "set",
+            "t",
+            "identity_ldap",
+            "server_addr=ldap.example.com:636",
+            "lookup_bind_dn=cn=admin, dc=example",
+            "lookup_bind_password=pw-1",
+        ])
+        .await;
+    assert!(out.contains("Changed identity_ldap at t"), "{out}");
+    let out = cli
+        .ok(&["admin", "config", "get", "t", "identity_ldap"])
+        .await;
+    assert!(
+        out.contains("server_addr=ldap.example.com:636")
+            && out.contains("lookup_bind_dn=\"cn=admin, dc=example\"")
+            && !out.contains("pw-1"),
+        "{out}"
+    );
+    // The show stays as it was.
+    let out = cli.ok(&["admin", "config", "t"]).await;
+    assert!(out.contains("given by environment"), "{out}");
+    let err = cli
+        .fails(&["admin", "config", "set", "t", "api", "requests_max=1"], 1)
+        .await;
+    assert!(err.contains("api"), "{err}");
+
+    let keys = records(
+        &cli.ok(&["--json", "admin", "config", "keys", "t", "identity_ldap"])
+            .await,
+    );
+    assert!(keys.iter().any(|k| k["key"] == "server_addr"), "{keys:?}");
+
+    let history = records(&cli.ok(&["--json", "admin", "config", "history", "t"]).await);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["targets"][0], "identity_ldap");
+    assert!(
+        !history[0].to_string().contains("pw-1"),
+        "secrets aren't listed"
+    );
+    let id = history[0]["id"].as_str().unwrap().to_owned();
+
+    cli.ok(&["admin", "config", "reset", "t", "identity_ldap"])
+        .await;
+    let out = cli
+        .ok(&["admin", "config", "get", "t", "identity_ldap"])
+        .await;
+    assert!(!out.contains("ldap.example.com"), "{out}");
+    cli.ok(&["admin", "config", "restore", "t", &id]).await;
+    let out = cli
+        .ok(&["admin", "config", "get", "t", "identity_ldap"])
+        .await;
+    assert!(out.contains("ldap.example.com"), "{out}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.txt");
+    let path = file.to_str().unwrap();
+    cli.ok(&["admin", "config", "export", "t", "-o", path])
+        .await;
+    let exported = fs::read_to_string(&file).unwrap();
+    assert!(exported.contains("lookup_bind_password=pw-1"), "{exported}");
+    cli.fails(&["admin", "config", "export", "t", "-o", path], 6)
+        .await;
+    fs::write(
+        &file,
+        "identity_plugin url=https://plugin.example.com role_policy=readonly\n",
+    )
+    .unwrap();
+    cli.ok(&["admin", "config", "import", "t", path]).await;
+    let out = cli.ok(&["admin", "config", "get", "t"]).await;
+    assert!(
+        out.contains("identity_plugin url=https://plugin.example.com")
+            && !out.contains("ldap.example.com"),
+        "{out}"
+    );
+    cli.ok(&["admin", "config", "clear-history", "t", "all"])
+        .await;
+    let out = cli.ok(&["admin", "config", "history", "t"]).await;
+    assert!(!out.contains("identity_"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn buckets_move_between_servers_through_a_file() {
     let (from, to) = (start().await, start().await);
     let cli = Client::new(&from);

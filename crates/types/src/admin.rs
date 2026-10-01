@@ -84,6 +84,34 @@ pub const MINIO_KMS_LIST_KEYS: &str = "/minio/kms/v1/key/list";
 /// (`kms:KeyStatus`).
 pub const MINIO_KMS_KEY_STATUS: &str = "/minio/kms/v1/key/status";
 
+/// `MinIO`'s admin API: `GET ?key=SUBSYS[:TARGET]` answers a sub-system's settings
+/// without secrets, encrypted (`admin:ConfigUpdate`), as `mc admin config get` reads them.
+pub const MINIO_GET_CONFIG_KV: &str = "/minio/admin/v3/get-config-kv";
+
+/// `MinIO`'s admin API: `PUT` sets the encrypted lines of the body
+/// (`admin:ConfigUpdate`), as `mc admin config set` does.
+pub const MINIO_SET_CONFIG_KV: &str = "/minio/admin/v3/set-config-kv";
+
+/// `MinIO`'s admin API: `DELETE` resets the encrypted targets or keys of the body
+/// (`admin:ConfigUpdate`), as `mc admin config reset` does.
+pub const MINIO_DEL_CONFIG_KV: &str = "/minio/admin/v3/del-config-kv";
+
+/// `MinIO`'s admin API: `GET ?subSys=&key=[&env]` answers help for the settings.
+pub const MINIO_HELP_CONFIG_KV: &str = "/minio/admin/v3/help-config-kv";
+
+/// `MinIO`'s admin API: `GET ?count=N` answers the newest changes, encrypted.
+pub const MINIO_LIST_CONFIG_HISTORY_KV: &str = "/minio/admin/v3/list-config-history-kv";
+
+/// `MinIO`'s admin API: `DELETE ?restoreId=ID|all` forgets changes.
+pub const MINIO_CLEAR_CONFIG_HISTORY_KV: &str = "/minio/admin/v3/clear-config-history-kv";
+
+/// `MinIO`'s admin API: `PUT ?restoreId=ID` sets a change again.
+pub const MINIO_RESTORE_CONFIG_HISTORY_KV: &str = "/minio/admin/v3/restore-config-history-kv";
+
+/// `MinIO`'s admin API: `GET` answers the whole configuration, secrets included, and `PUT`
+/// replaces it, both encrypted, as `mc admin config export` and `import` do.
+pub const MINIO_CONFIG: &str = "/minio/admin/v3/config";
+
 /// The format of a [`BucketsExport`]; a server refuses any other.
 pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
 

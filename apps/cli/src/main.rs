@@ -15,6 +15,7 @@ mod backup;
 mod checks;
 mod client;
 mod config;
+mod config_kv;
 mod doctor;
 mod error;
 mod health;
@@ -1619,9 +1620,7 @@ fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
 async fn serve(args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
-    let ldap = args.ldap.settings().map_err(|e| e.to_string())?;
-    let identity_plugin = args.identity_plugin.settings().map_err(|e| e.to_string())?;
-    let openid = args.openid.providers().map_err(|e| e.to_string())?;
+    let (identity, config_check) = config_kv::identity_and_check(&args)?;
     let client_certificates = client_certificates(
         (
             args.identity_tls,
@@ -1690,10 +1689,11 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             body_timeout: args.body_timeout,
             max_connections: args.max_connections,
         },
-        ldap,
-        identity_plugin,
+        ldap: identity.ldap,
+        identity_plugin: identity.plugin,
         client_certificates,
-        openid,
+        openid: identity.openid,
+        config_check,
     })
     .await
     .map_err(|e| e.to_string())?;

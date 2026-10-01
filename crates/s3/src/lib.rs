@@ -29,6 +29,7 @@ mod lines;
 mod listen;
 mod logging;
 mod metrics;
+mod minio_config;
 mod minio_iam;
 mod minio_info;
 mod minio_kms;
@@ -67,6 +68,7 @@ pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
+pub use minio_config::{CheckConfig, ConfigSettings};
 pub use minio_service::{Control, Stop};
 pub use proxy::{ProxyHeader, TrustedProxies};
 pub use routes::{Api, EndpointInfo, endpoints};
@@ -108,6 +110,9 @@ pub struct Options {
     /// How the server was started, as the admin API reports it; `None` when whoever
     /// embeds the service doesn't say.
     pub config: Option<teifs_types::admin::ServerConfig>,
+    /// Where `mc admin config` keeps what it sets and how a change is checked; `None`
+    /// answers that the server's settings aren't kept on its drive.
+    pub config_settings: Option<ConfigSettings>,
     /// Where the root key is kept, if the admin API may replace it (a key the drive
     /// generated); `None` answers that it's managed elsewhere.
     pub root_keys: Option<Arc<dyn RootKeyStore>>,
@@ -210,6 +215,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             access_log,
             request_metrics,
             control: Arc::clone(&control),
+            configs: options
+                .config_settings
+                .map(|settings| Arc::new(minio_config::Configs::new(settings))),
         });
     }
     let host = if options.domains.is_empty() {

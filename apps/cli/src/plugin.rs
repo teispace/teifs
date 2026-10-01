@@ -59,12 +59,8 @@ const AUTH_TOKEN: &str = "TEIFS_IDENTITY_PLUGIN_AUTH_TOKEN";
 const MINIO: &str = "MINIO_IDENTITY_PLUGIN_";
 
 impl PluginArgs {
-    /// The plugin these settings (or MinIO's variables) name, if any.
-    pub(crate) fn settings(&self) -> Result<Option<PluginSettings>, Error> {
-        self.settings_with(&|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
-    }
-
-    fn settings_with(
+    /// The plugin these settings (or MinIO's variables, which `env` reads) name, if any.
+    pub(crate) fn settings_with(
         &self,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Option<PluginSettings>, Error> {

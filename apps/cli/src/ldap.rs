@@ -111,12 +111,9 @@ const PASSWORD: &str = "TEIFS_LDAP_LOOKUP_BIND_PASSWORD";
 const MINIO: &str = "MINIO_IDENTITY_LDAP_";
 
 impl LdapArgs {
-    /// The directory these settings (or MinIO's variables) name, if any.
-    pub(crate) fn settings(&self) -> Result<Option<LdapSettings>, Error> {
-        self.settings_with(&|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
-    }
-
-    fn settings_with(
+    /// The directory these settings (or MinIO's variables, which `env` reads) name, if
+    /// any.
+    pub(crate) fn settings_with(
         &self,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Option<LdapSettings>, Error> {

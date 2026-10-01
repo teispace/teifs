@@ -273,9 +273,9 @@ async fn external_kms(external: &ExternalKms, default_key: Option<String>) -> Ch
 /// account signs in, and the base DNs exist.
 async fn ldap(args: &ServeArgs) -> Option<Check> {
     let failed = |detail: String| Some(Check::new("LDAP", State::Failed, detail));
-    let settings = match args.ldap.settings() {
-        Ok(settings) => settings?,
-        Err(err) => return failed(err.to_string()),
+    let settings = match crate::config_kv::identity(args) {
+        Ok(identity) => identity.ldap?,
+        Err(err) => return failed(err),
     };
     let words = format!("LDAP at {}", settings.server);
     let directory = match Directory::new(settings) {
@@ -298,9 +298,9 @@ async fn ldap(args: &ServeArgs) -> Option<Check> {
 async fn identity_plugin(args: &ServeArgs) -> Option<Check> {
     const NAME: &str = "Identity plugin";
     let failed = |detail: String| Some(Check::new(NAME, State::Failed, detail));
-    let settings = match args.identity_plugin.settings() {
-        Ok(settings) => settings?,
-        Err(err) => return failed(err.to_string()),
+    let settings = match crate::config_kv::identity(args) {
+        Ok(identity) => identity.plugin?,
+        Err(err) => return failed(err),
     };
     let plugin = match IdentityPlugin::new(settings, "") {
         Ok(plugin) => plugin,
