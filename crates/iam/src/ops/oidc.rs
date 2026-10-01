@@ -9,6 +9,7 @@ use teifs_meta::IamWrite;
 use super::{TagKeys, checked_tags, merged, removed};
 use crate::{
     Draft, Iam, IamError, Result, ids,
+    oidc::{POLICY_CLAIM_TAG, ROLE_POLICY_TAG, USERINFO_TAG},
     rules::{self, MAX_CLIENT_IDS, MAX_OIDC_PROVIDERS, MAX_THUMBPRINTS},
     state::{OidcProvider, State},
 };
@@ -53,6 +54,61 @@ pub struct NewOidcProvider<'a> {
     pub thumbprints: &'a [String],
     /// Its tags.
     pub tags: &'a [(String, String)],
+}
+
+/// An OpenID Connect provider the server's settings name, as MinIO's `identity_openid`
+/// configuration does: made, or brought in line with them, when the server starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfiguredOidcProvider {
+    /// Its URL: the issuer its tokens name.
+    pub url: String,
+    /// The client its tokens are for (an audience it keeps).
+    pub client_id: String,
+    /// MinIO's `role_policy`: the managed policies every token for the client gets when
+    /// it names the client's role. None makes its tokens name their policies instead.
+    pub role_policies: Vec<String>,
+    /// MinIO's `claim_name`: the claim that names the policies (`policy` if not given).
+    pub claim_name: Option<String>,
+    /// MinIO's `claim_userinfo`: its tokens' claims are completed from its userinfo
+    /// endpoint.
+    pub claim_userinfo: bool,
+}
+
+impl ConfiguredOidcProvider {
+    /// The tags that make it work as MinIO's would, each with its value, or `None` for
+    /// the ones it mustn't have.
+    fn tags(&self) -> Result<[(&'static str, Option<String>); 3]> {
+        let role_policy = self.role_policies.join(" ");
+        if !role_policy.is_empty() && self.claim_name.is_some() {
+            return Err(IamError::InvalidInput(format!(
+                "The OpenID Connect provider {} can't have both role policies and a policy \
+                 claim: tokens for a role get the role's policies.",
+                self.url
+            )));
+        }
+        let claim = role_policy
+            .is_empty()
+            .then(|| self.claim_name.clone().unwrap_or_default());
+        Ok([
+            (POLICY_CLAIM_TAG, claim),
+            (
+                ROLE_POLICY_TAG,
+                (!role_policy.is_empty()).then_some(role_policy),
+            ),
+            (USERINFO_TAG, self.claim_userinfo.then(|| "on".to_owned())),
+        ])
+    }
+}
+
+/// What starting the server did to a provider its settings name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ensured {
+    /// It was made.
+    Created,
+    /// It was brought in line with the settings.
+    Updated,
+    /// It was as they say.
+    Unchanged,
 }
 
 /// Checked client ids, each once, in the order given.
@@ -149,6 +205,80 @@ impl Draft<'_> {
     }
 
     /// Changes the provider with this ARN with `f`.
+    /// Makes `wanted`, or brings the provider of its URL in line with it: the client is
+    /// added (others stay) and the tags that decide how its tokens get policies are set.
+    /// Its thumbprints and other tags stay as they are.
+    fn ensure_oidc_provider(
+        &mut self,
+        wanted: &ConfiguredOidcProvider,
+    ) -> Result<(String, Ensured)> {
+        let tags = wanted.tags()?;
+        let name = rules::oidc_url(&wanted.url)?;
+        rules::client_id(&wanted.client_id)?;
+        let existing = self
+            .state
+            .oidc_providers
+            .values()
+            .find(|p| p.name().eq_ignore_ascii_case(name))
+            .cloned();
+        let Some(existing) = existing else {
+            let tags: Vec<(String, String)> = tags
+                .into_iter()
+                .filter_map(|(key, value)| Some((key.to_owned(), value?)))
+                .collect();
+            let created = self.create_oidc_provider(&NewOidcProvider {
+                url: &wanted.url,
+                client_ids: std::slice::from_ref(&wanted.client_id),
+                thumbprints: &[],
+                tags: &tags,
+            })?;
+            return Ok((created.arn, Ensured::Created));
+        };
+        let mut provider = Arc::unwrap_or_clone(existing);
+        let mut changed = false;
+        if !provider.client_ids.contains(&wanted.client_id) {
+            if provider.client_ids.len() >= MAX_CLIENT_IDS {
+                return Err(too_many_client_ids());
+            }
+            provider.client_ids.push(wanted.client_id.clone());
+            changed = true;
+        }
+        for (key, value) in tags {
+            let has = provider
+                .tags
+                .iter()
+                .find(|(k, _)| TagKeys::OidcProvider.same(k, key))
+                .map(|(_, v)| v);
+            if has == value.as_ref() {
+                continue;
+            }
+            changed = true;
+            let key = key.to_owned();
+            if let Some(value) = value {
+                let new = [(key.clone(), value.clone())];
+                provider.tags = merged(TagKeys::OidcProvider, &provider.tags, &new)?;
+                self.write(IamWrite::PutOidcProviderTag(
+                    provider.id.clone(),
+                    key,
+                    value,
+                ));
+            } else {
+                removed(
+                    TagKeys::OidcProvider,
+                    &mut provider.tags,
+                    std::slice::from_ref(&key),
+                );
+                self.write(IamWrite::DeleteOidcProviderTag(provider.id.clone(), key));
+            }
+        }
+        let arn = self.state.oidc_provider_arn(&provider);
+        if !changed {
+            return Ok((arn, Ensured::Unchanged));
+        }
+        self.save_oidc_provider(provider);
+        Ok((arn, Ensured::Updated))
+    }
+
     fn change_oidc_provider(
         &mut self,
         arn: &str,
@@ -166,6 +296,20 @@ impl Iam {
     /// Creates an OpenID Connect provider (`CreateOpenIDConnectProvider`).
     pub fn create_oidc_provider(&self, new: &NewOidcProvider<'_>) -> Result<OidcProviderInfo> {
         self.change(|d| d.create_oidc_provider(new))
+    }
+
+    /// Makes the providers the server's settings name, or brings them in line with them,
+    /// all at once: their ARNs, with what was done to each.
+    pub fn ensure_oidc_providers(
+        &self,
+        wanted: &[ConfiguredOidcProvider],
+    ) -> Result<Vec<(String, Ensured)>> {
+        self.change(|d| {
+            wanted
+                .iter()
+                .map(|wanted| d.ensure_oidc_provider(wanted))
+                .collect()
+        })
     }
 
     /// An OpenID Connect provider (`GetOpenIDConnectProvider`).

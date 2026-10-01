@@ -43,8 +43,8 @@ pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
     ExportedBucket, ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion,
     IamExport, IdentityPluginConfig, ImportReport, JobInfo, KmsConfig, LdapConfig,
-    LdapPolicyChanged, LdapPolicyMapping, LdapPolicyRequest, RootKeyRotated, ServerConfig,
-    ServerInfo, Snapshot, Tag,
+    LdapPolicyChanged, LdapPolicyMapping, LdapPolicyRequest, OpenIdConfig, RootKeyRotated,
+    ServerConfig, ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
 pub use teifs_types::notify::{EventRecord, ListenFilter, event_key_decoded};

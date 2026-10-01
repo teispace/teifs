@@ -22,7 +22,7 @@ use crate::{
 
 pub(crate) use ldap::LdapSignIn;
 pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
-pub use oidc::{NewOidcProvider, OidcProviderInfo};
+pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
 
 /// A user.

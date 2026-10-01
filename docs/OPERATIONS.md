@@ -302,6 +302,42 @@ Any client of MinIO's API works: the call is a `POST /` over the TLS connection 
 `Policy`) in the query or a form body, unsigned. `teifs doctor` reads the authorities
 and says when each expires; `teifs admin config` shows how many there are.
 
+## OpenID Connect sign-in
+
+Tokens of an OpenID Connect provider (a company's single sign-on, Keycloak, a CI job's)
+get temporary credentials from `AssumeRoleWithWebIdentity` once the account has the
+provider: add it with `teifs admin oidc add`, or name it in the server's settings, as
+MinIO's `identity_openid` configuration does, and the server makes it when it starts.
+
+```sh
+teifs serve /srv/drive \
+  --openid-config-url https://sso.example.com/realms/main/.well-known/openid-configuration \
+  --openid-client-id teifs --openid-role-policy readonly
+teifs admin config local          # shows the role ARN the client's tokens name
+```
+
+| Setting | What it is |
+|---|---|
+| `--openid-config-url URL` | The provider's discovery URL, or its issuer: what's before `/.well-known/openid-configuration` is the issuer its tokens must name |
+| `--openid-client-id ID` | The client its tokens are for (`aud` or `azp`); needed |
+| `--openid-role-policy NAMES` | The managed policies every token for the client gets when it names the client's role ARN, `arn:minio:iam:::role/<id>` (comma-separated or repeated) |
+| `--openid-claim-name CLAIM` | Without role policies, the claim that names a token's policies (`policy` by default) |
+| `--openid-claim-userinfo` | Complete tokens' claims from the provider's userinfo endpoint, with the access token a request gives (`WebIdentityAccessToken`) |
+
+When the server starts it makes the provider, or brings the one it has for that issuer
+in line: the client is added (others stay), and the tags that decide how its tokens get
+policies (`teifs:role-policy`, `teifs:policy-claim`, `teifs:claim-userinfo`) are set as
+the settings say. Its thumbprints and other tags stay as they are, and a provider
+removed from the settings stays until `teifs admin oidc rm`. Settings that can't be
+(both role policies and a claim name, a URL that isn't `https`) stop the server.
+
+MinIO's variables work when `--openid-config-url` isn't given, one provider for each
+suffix: `MINIO_IDENTITY_OPENID_CONFIG_URL`, `_CLIENT_ID`, `_ROLE_POLICY`, `_CLAIM_NAME`,
+`_CLAIM_USERINFO` and `_ENABLE`, or `MINIO_IDENTITY_OPENID_CONFIG_URL_KEYCLOAK` and so on
+for another. Their client secrets, scopes and redirect URLs are for MinIO's console and
+aren't needed. Roles with trust policies, as on AWS, need none of this: a role that
+trusts the provider is assumed with `teifs sts assume-web`.
+
 ## Identity plugin sign-in
 
 An identity plugin is your own web service that decides who an opaque token belongs to:

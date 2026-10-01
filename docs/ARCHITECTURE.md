@@ -175,6 +175,9 @@ tagged `teifs:claim-userinfo`, `Iam::prove` also checks the token and asks the u
 endpoint (`KeyCache::userinfo`, its URL kept from the discovery document with the keys)
 with the request's access token; the answer reaches `web_identity` as
 `Proved::UserInfo`, which adds the claims the token lacks (`WebIdentity::complete`).
+Providers the server's settings name (`ConfiguredOidcProvider`) are made or brought in
+line when it starts, all in one change (`Iam::ensure_oidc_providers`), as tags and
+client ids like any other.
 
 MinIO's `AssumeRoleWithLDAPIdentity` (`ldap/`, `ops/ldap.rs`, `api/sts/ldap.rs`) is the
 other self-proving request. `ldap/mod.rs` holds the settings and checks them offline

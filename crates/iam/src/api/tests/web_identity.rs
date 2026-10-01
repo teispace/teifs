@@ -1231,3 +1231,125 @@ async fn claims_come_from_the_userinfo_endpoint_as_minio_has_it() {
     );
     assert_eq!(provider.authorizations.lock().unwrap().len(), asked);
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn the_settings_providers_are_made_and_kept_in_line_as_minio_configures_them() {
+    use crate::{ConfiguredOidcProvider, Ensured};
+
+    let d = drive().await;
+    let tags = |arn: &str| {
+        let mut tags = d.iam.oidc_provider(arn).unwrap().tags;
+        tags.sort();
+        tags
+    };
+    let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    let claims = ConfiguredOidcProvider {
+        url: "https://idp.example.com".into(),
+        client_id: "app".into(),
+        ..ConfiguredOidcProvider::default()
+    };
+    let made = d
+        .iam
+        .ensure_oidc_providers(std::slice::from_ref(&claims))
+        .unwrap();
+    let [(arn, Ensured::Created)] = made.as_slice() else {
+        panic!("{made:?}")
+    };
+    assert_eq!(tags(arn), [pair(crate::oidc::POLICY_CLAIM_TAG, "")]);
+    assert_eq!(d.iam.oidc_provider(arn).unwrap().client_ids, ["app"]);
+    // As the settings say already: nothing is written.
+    assert_eq!(
+        d.iam
+            .ensure_oidc_providers(std::slice::from_ref(&claims))
+            .unwrap(),
+        [(arn.clone(), Ensured::Unchanged)]
+    );
+
+    // What people added stays; what decides the policies follows the settings.
+    d.iam.add_client_id(arn, "other").unwrap();
+    d.iam
+        .tag_oidc_provider(
+            arn,
+            &[pair("team", "a"), pair("Teifs:Policy-Claim", "groups")],
+        )
+        .unwrap();
+    let roles = ConfiguredOidcProvider {
+        client_id: "ci".into(),
+        role_policies: vec!["reader".into(), "writer".into()],
+        claim_userinfo: true,
+        ..claims.clone()
+    };
+    assert_eq!(
+        d.iam
+            .ensure_oidc_providers(std::slice::from_ref(&roles))
+            .unwrap(),
+        [(arn.clone(), Ensured::Updated)]
+    );
+    assert_eq!(
+        tags(arn),
+        [
+            pair("team", "a"),
+            pair(crate::oidc::USERINFO_TAG, "on"),
+            pair(crate::oidc::ROLE_POLICY_TAG, "reader writer"),
+        ]
+    );
+    assert_eq!(
+        d.iam.oidc_provider(arn).unwrap().client_ids,
+        ["app", "other", "ci"]
+    );
+    let saved = d.reopened().await.oidc_provider(arn).unwrap();
+    assert_eq!(saved, d.iam.oidc_provider(arn).unwrap());
+    assert_eq!(
+        d.iam.ensure_oidc_providers(&[roles]).unwrap(),
+        [(arn.clone(), Ensured::Unchanged)]
+    );
+    // A claim of its own name.
+    let named = ConfiguredOidcProvider {
+        claim_name: Some("groups".into()),
+        ..claims.clone()
+    };
+    d.iam.ensure_oidc_providers(&[named]).unwrap();
+    assert_eq!(
+        tags(arn),
+        [
+            pair("team", "a"),
+            pair(crate::oidc::POLICY_CLAIM_TAG, "groups"),
+        ]
+    );
+
+    // Settings that can't be are refused, and nothing of them is made.
+    let both = ConfiguredOidcProvider {
+        url: "https://two.example.com".into(),
+        role_policies: vec!["reader".into()],
+        claim_name: Some("policy".into()),
+        ..claims.clone()
+    };
+    let fresh = ConfiguredOidcProvider {
+        url: "https://three.example.com".into(),
+        ..claims.clone()
+    };
+    let err = d.iam.ensure_oidc_providers(&[fresh, both]).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("both role policies and a policy claim"),
+        "{err}"
+    );
+    let bad_url = ConfiguredOidcProvider {
+        url: "ftp://idp.example.com".into(),
+        ..claims
+    };
+    assert!(d.iam.ensure_oidc_providers(&[bad_url]).is_err());
+    // A provider with as many clients as it can have takes no more.
+    for i in 0..97 {
+        d.iam.add_client_id(arn, &format!("c{i}")).unwrap();
+    }
+    let full = ConfiguredOidcProvider {
+        url: "https://idp.example.com".into(),
+        client_id: "one-more".into(),
+        ..ConfiguredOidcProvider::default()
+    };
+    let err = d.iam.ensure_oidc_providers(&[full]).unwrap_err();
+    assert!(matches!(err, crate::IamError::LimitExceeded(_)), "{err}");
+    assert_eq!(d.iam.oidc_providers().unwrap().len(), 1);
+}

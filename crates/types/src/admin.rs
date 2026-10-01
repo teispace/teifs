@@ -580,6 +580,31 @@ pub struct ServerConfig {
     /// (`AssumeRoleWithCustomToken`); none when there's none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_plugin: Option<IdentityPluginConfig>,
+    /// The OpenID Connect providers its settings name, made or kept in line when it
+    /// starts (MinIO's `identity_openid`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openid: Vec<OpenIdConfig>,
+}
+
+/// An OpenID Connect provider a server's settings name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenIdConfig {
+    /// Its issuer URL.
+    pub url: String,
+    /// The client its tokens are for.
+    pub client_id: String,
+    /// The role ARN that client's tokens name, when they get role policies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_arn: Option<String>,
+    /// The managed policies they get then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_policies: Vec<String>,
+    /// Otherwise, the claim that names their policies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_claim: Option<String>,
+    /// Whether their claims are completed from its userinfo endpoint.
+    pub claim_userinfo: bool,
 }
 
 /// The identity plugin a server checks custom tokens with (never its auth token, nor

@@ -330,6 +330,12 @@ them and their groups (`teifs admin ldap policy attach`). See
 get temporary credentials with the policy its common name names (`teifs sts
 assume-cert`). See [Operations](docs/OPERATIONS.md#client-certificate-sign-in).
 
+**OpenID Connect providers in the settings**, as MinIO's `identity_openid`: `teifs serve
+--openid-config-url … --openid-client-id … [--openid-role-policy NAMES]` (MinIO's
+`MINIO_IDENTITY_OPENID_*` variables work too, one provider for each suffix) makes the
+provider when the server starts, so its tokens get temporary credentials. See
+[Operations](docs/OPERATIONS.md#openid-connect-sign-in).
+
 **Identity plugin sign-in**, as MinIO's: `teifs serve --identity-plugin-url …
 --identity-plugin-role-policy readonly` (MinIO's `MINIO_IDENTITY_PLUGIN_*` variables work
 too) lets your own service decide whom a token belongs to, and clients exchange it for

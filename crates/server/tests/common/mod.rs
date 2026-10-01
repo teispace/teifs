@@ -64,6 +64,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         ldap: None,
         client_certificates: None,
         identity_plugin: None,
+        openid: Vec::new(),
     }
 }
 

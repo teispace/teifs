@@ -134,7 +134,7 @@ fn actions_match_aws_service_reference() {
 }
 
 struct Drive {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     iam: Iam,
     account: String,
 }
@@ -152,14 +152,18 @@ async fn drive() -> Drive {
         .await
         .unwrap();
     let account = iam.account();
-    Drive {
-        _dir: dir,
-        iam,
-        account,
-    }
+    Drive { dir, iam, account }
 }
 
 impl Drive {
+    /// The drive's IAM as it opens again: what was saved.
+    async fn reopened(&self) -> Iam {
+        let kms = LocalKms::open(self.dir.path().join("keyring.json")).unwrap();
+        Iam::open(&self.dir.path().join("system.db"), "d", &kms, None)
+            .await
+            .unwrap()
+    }
+
     fn identity(&self, key: &str) -> Arc<Identity> {
         self.iam.credential(key).unwrap().identity
     }

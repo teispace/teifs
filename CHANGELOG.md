@@ -262,6 +262,11 @@ behaviour; the on-disk format is always upgraded automatically.
   MinIO, and MinIO's `AssumeRoleWithClientGrants` works too. With `--claim-userinfo`,
   a token's claims are completed from the provider's userinfo endpoint with the access
   token a request gives (`WebIdentityAccessToken`), as MinIO's `claim_userinfo`.
+- OpenID Connect providers in the server's settings, as MinIO's `identity_openid`:
+  `teifs serve --openid-config-url URL --openid-client-id ID [--openid-role-policy
+  NAMES | --openid-claim-name CLAIM] [--openid-claim-userinfo]` (or MinIO's
+  `MINIO_IDENTITY_OPENID_*` variables, one provider for each suffix) makes the provider
+  when the server starts, or brings it in line; `teifs admin config` shows them.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to

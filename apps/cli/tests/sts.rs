@@ -14,7 +14,7 @@ mod harness;
 
 use std::fs;
 
-use common::{Server, idp::Idp, start, user};
+use common::{Server, idp::Idp, start, start_with, user};
 use harness::{Client, records};
 use teifs_iam::{NewRole, Owner};
 
@@ -696,4 +696,39 @@ async fn roles_and_providers_in_one_step() {
     assert_eq!(providers[0]["url"], "0.idp.example.com");
     cli.fails(&["-y", "admin", "oidc", "rm", "t", &host], 5)
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settings_openid_providers_are_shown() {
+    let providers = vec![
+        teifs_server::ConfiguredOidcProvider {
+            url: "https://sso.example.com".into(),
+            client_id: "teifs".into(),
+            role_policies: vec!["readonly".into()],
+            claim_name: None,
+            claim_userinfo: true,
+        },
+        teifs_server::ConfiguredOidcProvider {
+            url: "https://idp.example.com".into(),
+            client_id: "app".into(),
+            claim_name: Some("groups".into()),
+            ..teifs_server::ConfiguredOidcProvider::default()
+        },
+    ];
+    let server = start_with(|config| config.openid.clone_from(&providers)).await;
+    let cli = Client::new(&server);
+    let role = teifs_iam::openid_role_arn("teifs");
+    let info = cli.ok(&["admin", "config", "t"]).await;
+    assert!(
+        info.contains(&format!(
+            "https://sso.example.com for teifs: {role} (readonly), userinfo; \
+             https://idp.example.com for app: policies in the groups claim"
+        )),
+        "{info}"
+    );
+    let json = records(&cli.ok(&["--json", "admin", "config", "t"]).await);
+    assert_eq!(json[0]["openid"][0]["roleArn"], role.as_str());
+    assert_eq!(json[0]["openid"][1]["policyClaim"], "groups");
+    let listed = cli.ok(&["admin", "oidc", "ls", "t"]).await;
+    assert!(listed.contains("sso.example.com"), "{listed}");
 }

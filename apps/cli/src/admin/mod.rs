@@ -451,6 +451,7 @@ async fn config(client: &Client) -> Result<(), Error> {
                 "Identity plugin",
                 plugin_words(config.identity_plugin.as_ref()),
             ),
+            ("OpenID providers", openid_words(&config.openid)),
             ("SSE-C allowed", yes_no(config.allow_sse_c)),
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),
@@ -515,6 +516,26 @@ fn plugin_words(plugin: Option<&teifs_client::IdentityPluginConfig>) -> String {
             )
         },
     )
+}
+
+/// The OpenID Connect providers the settings name, in words.
+fn openid_words(providers: &[teifs_client::OpenIdConfig]) -> String {
+    if providers.is_empty() {
+        return "none".to_owned();
+    }
+    providers
+        .iter()
+        .map(|p| {
+            let policies = match (&p.role_arn, &p.policy_claim) {
+                (Some(role), _) => format!("{role} ({})", p.role_policies.join(", ")),
+                (None, Some(claim)) => format!("policies in the {claim} claim"),
+                (None, None) => "no policies".to_owned(),
+            };
+            let userinfo = if p.claim_userinfo { ", userinfo" } else { "" };
+            format!("{} for {}: {policies}{userinfo}", p.url, p.client_id)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The LDAP directory users sign in with, in words.

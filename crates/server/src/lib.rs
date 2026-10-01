@@ -17,10 +17,11 @@ use std::{
 };
 
 use std::sync::Arc;
-use teifs_iam::{CertificateDer, Iam, RootKey, certificate::CertificateSignIn};
+use teifs_iam::{CertificateDer, Ensured, Iam, RootKey, certificate::CertificateSignIn};
 use teifs_s3::Options;
 use teifs_types::admin::{
-    CertificateConfig, IdentityPluginConfig, KmsConfig, LdapConfig, NotifyTarget, ServerConfig,
+    CertificateConfig, IdentityPluginConfig, KmsConfig, LdapConfig, NotifyTarget, OpenIdConfig,
+    ServerConfig,
 };
 
 use teifs_store::{BucketEncryption, Layout, Store, StoreError, StoreOptions};
@@ -35,7 +36,7 @@ pub use kms::{
 };
 pub use serve::{DRAIN, Limits, serve};
 pub use teifs_iam::{
-    Directory, LdapSettings, SrvRecord, Transport,
+    ConfiguredOidcProvider, Directory, LdapSettings, SrvRecord, Transport,
     plugin::{IdentityPlugin, PluginSettings},
 };
 use teifs_notify::Notifier;
@@ -122,6 +123,9 @@ pub struct Config {
     /// The identity plugin custom tokens are checked with (`AssumeRoleWithCustomToken`);
     /// none by default.
     pub identity_plugin: Option<PluginSettings>,
+    /// OpenID Connect providers to make, or bring in line with these settings, when it
+    /// starts (MinIO's `identity_openid`); none by default.
+    pub openid: Vec<ConfiguredOidcProvider>,
 }
 
 /// How clients sign in with certificates.
@@ -183,6 +187,9 @@ pub enum ServerError {
     /// Client certificates can't sign in as asked.
     #[error("client certificates can't sign in: {0}")]
     ClientCertificates(String),
+    /// The OpenID Connect providers' settings are wrong.
+    #[error("the OpenID Connect providers' settings are wrong: {0}")]
+    OpenId(teifs_iam::IamError),
     /// The identity plugin's settings are wrong.
     #[error("the identity plugin's settings are wrong: {0}")]
     IdentityPlugin(String),
@@ -402,6 +409,7 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
         }),
         certificates: None,
         identity_plugin: None,
+        openid: Vec::new(),
     }
 }
 
@@ -413,6 +421,7 @@ struct SignIns {
     /// How the admin API shows the certificates' sign-in.
     shown_certificates: Option<CertificateConfig>,
     plugin: Option<IdentityPlugin>,
+    openid: Vec<ConfiguredOidcProvider>,
 }
 
 impl SignIns {
@@ -437,6 +446,7 @@ impl SignIns {
             certificates,
             shown_certificates,
             plugin,
+            openid: config.openid.clone(),
         })
     }
 
@@ -448,6 +458,22 @@ impl SignIns {
             role_arn: plugin.role_arn().to_owned(),
             role_policies: plugin.role_policies().to_vec(),
         });
+        admin.openid = self
+            .openid
+            .iter()
+            .map(|p| {
+                let roles = !p.role_policies.is_empty();
+                OpenIdConfig {
+                    url: p.url.clone(),
+                    client_id: p.client_id.clone(),
+                    role_arn: roles.then(|| teifs_iam::openid_role_arn(&p.client_id)),
+                    role_policies: p.role_policies.clone(),
+                    policy_claim: (!roles)
+                        .then(|| p.claim_name.clone().unwrap_or_else(|| "policy".to_owned())),
+                    claim_userinfo: p.claim_userinfo,
+                }
+            })
+            .collect();
     }
 }
 
@@ -465,8 +491,19 @@ async fn open_iam(
         directory,
         certificates,
         plugin,
+        openid,
         ..
     } = sign_ins;
+    for (arn, done) in iam
+        .ensure_oidc_providers(&openid)
+        .map_err(ServerError::OpenId)?
+    {
+        match done {
+            Ensured::Created => tracing::info!(%arn, "made the OpenID Connect provider"),
+            Ensured::Updated => tracing::info!(%arn, "updated the OpenID Connect provider"),
+            Ensured::Unchanged => {}
+        }
+    }
     if let Some(certificates) = certificates {
         iam = iam.with_certificates(certificates);
     }

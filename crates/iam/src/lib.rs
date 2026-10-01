@@ -35,9 +35,9 @@ pub use api::{Call, Reply};
 pub use bearer::metrics_token;
 pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
-    AccessKeyInfo, AttachedPolicy, GroupInfo, LdapEntity, LdapPolicies, LdapPolicyChange,
-    NewAccessKey, NewOidcProvider, NewRole, OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo,
-    RoleInfo, UserInfo,
+    AccessKeyInfo, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo, LdapEntity,
+    LdapPolicies, LdapPolicyChange, NewAccessKey, NewOidcProvider, NewRole, OidcProviderInfo,
+    Owner, PolicyInfo, PolicyVersionInfo, RoleInfo, UserInfo,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
