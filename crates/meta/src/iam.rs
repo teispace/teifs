@@ -168,6 +168,23 @@ pub(crate) const STATUS_MIGRATION: &str = "
     ALTER TABLE iam_users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE iam_groups ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;";
 
+/// `MinIO`'s service accounts: migration 11. The parent is a user's unique id, or empty
+/// for the root user, who isn't a row; so there's no foreign key, and IAM removes a
+/// user's service accounts with it.
+pub(crate) const SERVICE_ACCOUNTS_MIGRATION: &str = "
+    CREATE TABLE iam_service_accounts (
+        id          TEXT    PRIMARY KEY,
+        parent      TEXT    NOT NULL,
+        secret      BLOB    NOT NULL,
+        active      INTEGER NOT NULL,
+        policy      TEXT,
+        name        TEXT    NOT NULL,
+        description TEXT    NOT NULL,
+        expires_ms  INTEGER,
+        created_ms  INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    CREATE INDEX iam_service_accounts_parent ON iam_service_accounts (parent);";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -384,6 +401,42 @@ impl std::fmt::Debug for AccessKeyRow {
     }
 }
 
+/// A service account (`MinIO`'s): a key that acts as its parent, narrowed by its policy.
+/// The secret is sealed by `teifs-iam`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ServiceAccountRow {
+    /// The access key id.
+    pub id: String,
+    /// The unique id of the user it acts for; empty for the root user.
+    pub parent: String,
+    /// The sealed secret key.
+    pub secret: Vec<u8>,
+    /// Whether requests signed with it are accepted.
+    pub active: bool,
+    /// The policy that narrows what the parent may do; `None` for all of it.
+    pub policy: Option<String>,
+    /// Its name (may be empty).
+    pub name: String,
+    /// Its description (may be empty).
+    pub description: String,
+    /// When it stops signing, in milliseconds since the Unix epoch; `None` for never.
+    pub expires_ms: Option<i64>,
+    /// When it was created.
+    pub created_ms: i64,
+}
+
+impl std::fmt::Debug for ServiceAccountRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccountRow")
+            .field("id", &self.id)
+            .field("parent", &self.parent)
+            .field("active", &self.active)
+            .field("name", &self.name)
+            .field("expires_ms", &self.expires_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything IAM keeps, as loaded at start.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IamRows {
@@ -423,6 +476,8 @@ pub struct IamRows {
     pub attached: Vec<(String, String)>,
     /// Access keys.
     pub keys: Vec<AccessKeyRow>,
+    /// Service accounts.
+    pub service_accounts: Vec<ServiceAccountRow>,
     /// Policies mapped to LDAP DNs.
     pub ldap_policies: Vec<LdapPolicyRow>,
     /// LDAP users with live sessions.
@@ -503,6 +558,10 @@ pub enum IamWrite {
     PutKey(AccessKeyRow),
     /// Deletes an access key.
     DeleteKey(String),
+    /// Adds or updates a service account.
+    PutServiceAccount(ServiceAccountRow),
+    /// Deletes a service account.
+    DeleteServiceAccount(String),
     /// Maps a managed policy to an LDAP DN: (DN, `user` or `group`, policy id).
     PutLdapPolicy(String, String, String),
     /// Removes a mapping: (DN, policy id).
@@ -630,6 +689,25 @@ impl System {
                     secret: r.get(2)?,
                     active: r.get(3)?,
                     created_ms: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+            service_accounts: all(
+                "SELECT id, parent, secret, active, policy, name, description, expires_ms,
+                        created_ms
+                 FROM iam_service_accounts ORDER BY id",
+            )?
+            .query_map([], |r| {
+                Ok(ServiceAccountRow {
+                    id: r.get(0)?,
+                    parent: r.get(1)?,
+                    secret: r.get(2)?,
+                    active: r.get(3)?,
+                    policy: r.get(4)?,
+                    name: r.get(5)?,
+                    description: r.get(6)?,
+                    expires_ms: r.get(7)?,
+                    created_ms: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -950,10 +1028,33 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::PutKey(k) => run(
             "INSERT INTO iam_access_keys (id, user_id, secret, active, created_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (id) DO UPDATE SET active = excluded.active",
+             ON CONFLICT (id) DO UPDATE SET active = excluded.active, secret = excluded.secret",
             params![k.id, k.user_id, k.secret, k.active, k.created_ms],
         ),
         IamWrite::DeleteKey(id) => run("DELETE FROM iam_access_keys WHERE id = ?1", params![id]),
+        IamWrite::PutServiceAccount(a) => run(
+            "INSERT INTO iam_service_accounts
+                 (id, parent, secret, active, policy, name, description, expires_ms, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (id) DO UPDATE SET secret = excluded.secret,
+                 active = excluded.active, policy = excluded.policy, name = excluded.name,
+                 description = excluded.description, expires_ms = excluded.expires_ms",
+            params![
+                a.id,
+                a.parent,
+                a.secret,
+                a.active,
+                a.policy,
+                a.name,
+                a.description,
+                a.expires_ms,
+                a.created_ms
+            ],
+        ),
+        IamWrite::DeleteServiceAccount(id) => run(
+            "DELETE FROM iam_service_accounts WHERE id = ?1",
+            params![id],
+        ),
         IamWrite::PutLdapPolicy(dn, entity, policy) => run(
             "INSERT INTO iam_ldap_policies (dn, entity, policy_id) VALUES (?1, ?2, ?3)
              ON CONFLICT (dn, policy_id) DO UPDATE SET entity = excluded.entity",

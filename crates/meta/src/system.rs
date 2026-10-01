@@ -42,6 +42,9 @@ const MIGRATIONS: &[&str] = &[
     // 10: MinIO's status of IAM users and groups (a disabled one's keys and policies
     //     don't count).
     crate::iam::STATUS_MIGRATION,
+    // 11: MinIO's service accounts: keys of a user (or the root user) narrowed by a
+    //     policy, with a name, a description and an expiry.
+    crate::iam::SERVICE_ACCOUNTS_MIGRATION,
 ];
 
 /// How a bucket stores its objects.
