@@ -42,8 +42,31 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// A server that's stopped when the test ends, even when it fails.
+struct Server(Child);
+
+impl std::ops::Deref for Server {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Server {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// `teifs --json serve` on a free port with `args`: the process and its endpoint.
-fn serve(home: &Path, args: &[&str]) -> (Child, String) {
+fn serve(home: &Path, args: &[&str]) -> (Server, String) {
     let mut child = teifs(home)
         .args([
             "--json",
@@ -64,7 +87,10 @@ fn serve(home: &Path, args: &[&str]) -> (Child, String) {
         .read_line(&mut line)
         .unwrap();
     let serving: serde_json::Value = serde_json::from_str(&line).unwrap();
-    (child, serving["endpoint"].as_str().unwrap().to_owned())
+    (
+        Server(child),
+        serving["endpoint"].as_str().unwrap().to_owned(),
+    )
 }
 
 fn args(v: &[String]) -> Vec<&str> {
