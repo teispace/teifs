@@ -15,7 +15,7 @@ The Linux packages (`.deb` and `.rpm` on every release) install:
 | The drive | `/var/lib/teifs/drive`, and its encryption keyring `/var/lib/teifs/keyring.json` (the folder is `0700`, the service's own) |
 
 Installing doesn't start it. `sudo systemctl enable --now teifs` does; on its first
-start it creates the drive, its keys (`sudo -u teifs teifs credentials
+start it creates the drive, its keys (`sudo teifs credentials
 /var/lib/teifs/drive` shows them) and the keyring. Back up both the drive and the
 keyring: objects can't be read without it. To choose the keys, set
 `TEIFS_ACCESS_KEY` and `TEIFS_SECRET_KEY` in `teifs.env` before the first start.

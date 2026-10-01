@@ -19,19 +19,23 @@ teifs health 127.0.0.1:9000
 test -f /var/lib/teifs/drive/.teifs/credentials.json
 test -f /var/lib/teifs/keyring.json
 # Its own keys make a bucket, and a reload keeps it serving.
-sudo -u teifs teifs alias set local http://127.0.0.1:9000 --drive /var/lib/teifs/drive >/dev/null
-sudo -u teifs teifs mb local/packaged
+XDG_CONFIG_HOME=$(mktemp -d)
+export XDG_CONFIG_HOME
+teifs alias set local http://127.0.0.1:9000 --drive /var/lib/teifs/drive >/dev/null
+teifs mb --layout folder local/packaged
 systemctl reload teifs
 systemctl is-active teifs
 
 # How exposed it is, as systemd scores it (0 best, 10 worst).
-score=$(systemd-analyze security teifs.service --no-pager | awk '/Overall exposure level/ {print $(NF-1)}')
+report=$(systemd-analyze security teifs.service --no-pager)
+score=$(grep -o 'Overall exposure level for teifs.service: [0-9.]*' <<< "$report" | awk '{print $NF}')
 echo "exposure: $score"
+[ -n "$score" ] || { echo "$report"; exit 1; }
 awk -v s="$score" 'BEGIN { exit !(s < 2.5) }'
 
 systemctl stop teifs
 dpkg -r teifs
-! systemctl cat teifs.service >/dev/null 2>&1
+if systemctl cat teifs.service >/dev/null 2>&1; then echo "the service is still there" >&2; exit 1; fi
 # The drive stays, and so do the settings (until a purge).
 test -d /var/lib/teifs/drive/packaged
 test -f /etc/teifs/teifs.toml

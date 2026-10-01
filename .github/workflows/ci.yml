@@ -120,4 +120,4 @@ jobs:
             teifs --version
             systemd-analyze verify /usr/lib/systemd/system/teifs.service
             dnf remove -y -q teifs
-            ! test -e /usr/bin/teifs'
+            if test -e /usr/bin/teifs; then exit 1; fi'
