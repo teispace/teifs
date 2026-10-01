@@ -4,6 +4,8 @@
 pub(crate) mod c14n;
 pub(crate) mod dsig;
 pub(crate) mod encryption;
+#[cfg(any(test, feature = "fake-saml"))]
+pub mod fake;
 pub(crate) mod metadata;
 pub(crate) mod private_key;
 pub(crate) mod response;

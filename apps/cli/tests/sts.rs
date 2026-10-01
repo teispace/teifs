@@ -328,6 +328,84 @@ async fn ci_tokens_become_credentials() {
         .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn saml_responses_become_credentials() {
+    let server = start().await;
+    let account = server.iam.account();
+    let idp = SamlIdp::new("https://idp.example.com/saml");
+    let provider = server
+        .iam
+        .create_saml_provider(&teifs_iam::NewSamlProvider {
+            name: "Okta",
+            metadata: &idp.metadata,
+            ..teifs_iam::NewSamlProvider::default()
+        })
+        .unwrap()
+        .arn;
+    role(
+        &server,
+        "sso",
+        &format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"Federated":"{provider}"}},"Action":"sts:AssumeRoleWithSAML"}}]}}"#
+        ),
+    );
+    let role_arn = format!("arn:aws:iam::{account}:role/sso");
+    let cli = Client::new(&server);
+    let file = cli.path("response");
+    let file = file.to_str().unwrap();
+    let assume = |output: &'static [&'static str]| {
+        let mut args = vec![
+            "sts",
+            "assume-saml",
+            server.endpoint.as_str(),
+            "--role-arn",
+            role_arn.as_str(),
+            "--principal-arn",
+            provider.as_str(),
+            "--assertion-file",
+            file,
+        ];
+        args.extend(output);
+        args
+    };
+    // The SAMLResponse a browser posts.
+    let response = idp.response("alice@example.com", &role_arn, &provider, "alice");
+    fs::write(file, &response).unwrap();
+    cli.ok(&assume(&["--save-alias", "sso"])).await;
+    let me = records(&cli.ok(&["--json", "sts", "whoami", "sso"]).await);
+    assert_eq!(
+        me[0]["arn"],
+        format!("arn:aws:sts::{account}:assumed-role/sso/alice")
+    );
+    cli.ok(&["mb", "sso/shared"]).await;
+    // Or the XML it holds.
+    let xml = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(&response)
+            .unwrap()
+    };
+    fs::write(file, xml).unwrap();
+    let process = cli.ok(&assume(&["-o", "-"])).await;
+    assert!(process.contains("\"SessionToken\""), "{process}");
+
+    // A response for another role isn't taken.
+    let other = idp.response(
+        "alice@example.com",
+        "arn:aws:iam::1:role/x",
+        &provider,
+        "alice",
+    );
+    fs::write(file, other).unwrap();
+    let err = cli.fails(&assume(&["-o", "-"]), 4).await;
+    assert!(err.contains("AccessDenied"), "{err}");
+    fs::write(file, "not a response").unwrap();
+    let err = cli.fails(&assume(&["-o", "-"]), 1).await;
+    assert!(err.contains("InvalidIdentityToken"), "{err}");
+    fs::remove_file(file).unwrap();
+    cli.fails(&assume(&["-o", "-"]), 5).await;
+}
+
 fn now_ms() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()

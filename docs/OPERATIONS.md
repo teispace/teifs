@@ -373,6 +373,16 @@ admin saml ls` shows), which `--encryption required` insists on:
  "Condition": {"StringEquals": {"saml:aud": "https://signin.aws.amazon.com/saml"}}}
 ```
 
+From the command line, `teifs sts assume-saml` takes the response (the `SAMLResponse`
+form field the provider has the browser post, base64, or its XML) from a file or
+standard input and saves the role's credentials as an alias or writes them for `aws`:
+
+```sh
+teifs sts assume-saml https://s3.example.com --role-arn arn:aws:iam::ACCOUNT:role/staff \
+  --principal-arn arn:aws:iam::ACCOUNT:saml-provider/Okta --assertion-file response.txt \
+  --save-alias staff
+```
+
 ## Identity plugin sign-in
 
 An identity plugin is your own web service that decides who an opaque token belongs to:

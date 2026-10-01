@@ -18,6 +18,9 @@ mod ops;
 pub mod plugin;
 mod rules;
 mod saml;
+/// SAML responses as identity providers sign them, for other crates' tests.
+#[cfg(any(test, feature = "fake-saml"))]
+pub use saml::fake as saml_fake;
 mod sessions;
 mod snapshot;
 mod state;

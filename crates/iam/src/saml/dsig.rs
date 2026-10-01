@@ -322,6 +322,84 @@ pub(crate) fn verify(element: &Element, keys: &[PublicKey]) -> Result<bool, BadS
     }
 }
 
+/// `document` with the empty `DigestValue` and `SignatureValue` of the signature in the
+/// element whose ID is `id` filled in, as an identity provider signs: `signer` signs the
+/// canonical `SignedInfo`. For tests: it trusts what it's given.
+#[cfg(any(test, feature = "fake-saml"))]
+#[allow(
+    clippy::unwrap_used,
+    reason = "a test double: a bad template fails the test"
+)]
+pub(crate) fn sign(document: &str, id: &str, signer: impl Fn(&[u8]) -> Vec<u8>) -> String {
+    let element_of = |root: &Element| -> Element {
+        root.descendants()
+            .into_iter()
+            .find(|e| e.attr("ID") == Some(id))
+            .unwrap()
+            .clone()
+    };
+    // The first `empty` after the element whose ID is `id` starts, replaced by `full`.
+    let fill = |document: &str, empty: &str, full: &str| {
+        let start = document.find(&format!("ID=\"{id}\"")).unwrap();
+        let at = start + document[start..].find(empty).unwrap();
+        format!("{}{full}{}", &document[..at], &document[at + empty.len()..])
+    };
+    let root = super::xml::parse(document).unwrap();
+    let element = element_of(&root);
+    let signature = element.one(DS, "Signature").unwrap().unwrap();
+    let reference = one(one(signature, DS, "SignedInfo").unwrap(), DS, "Reference").unwrap();
+    let transform = one(reference, DS, "Transforms")
+        .unwrap()
+        .all(DS, "Transform")
+        .nth(1);
+    let inclusive = transform
+        .and_then(|t| canonicalization(t).unwrap())
+        .map(|(_, p)| p)
+        .unwrap_or_default();
+    let hash =
+        Hash::digest(algorithm(one(reference, DS, "DigestMethod").unwrap()).unwrap()).unwrap();
+    let content = c14n::canonicalize(
+        &element,
+        &Options {
+            inclusive: &inclusive,
+            without: Some(signature),
+            ..Options::default()
+        },
+    );
+    let digest = STANDARD.encode(digest::digest(hash.algorithm(), &content));
+    let digested = fill(
+        document,
+        "<ds:DigestValue/>",
+        &format!("<ds:DigestValue>{digest}</ds:DigestValue>"),
+    );
+    let root = super::xml::parse(&digested).unwrap();
+    let element = element_of(&root);
+    let signed_info = one(
+        element.one(DS, "Signature").unwrap().unwrap(),
+        DS,
+        "SignedInfo",
+    )
+    .unwrap();
+    let (comments, inclusive) =
+        canonicalization(one(signed_info, DS, "CanonicalizationMethod").unwrap())
+            .unwrap()
+            .unwrap();
+    let canonical = c14n::canonicalize(
+        signed_info,
+        &Options {
+            comments,
+            inclusive: &inclusive,
+            without: None,
+        },
+    );
+    let value = STANDARD.encode(signer(&canonical));
+    fill(
+        &digested,
+        "<ds:SignatureValue/>",
+        &format!("<ds:SignatureValue>{value}</ds:SignatureValue>"),
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     #![allow(clippy::unwrap_used, reason = "tests fail on any error")]
@@ -338,77 +416,7 @@ pub(crate) mod tests {
     /// the element whose ID is `id` filled in: signed by `signer` with `method` (a JOSE
     /// algorithm name, `RS256` or `ES256`), as an identity provider signs.
     pub(crate) fn sign(document: &str, id: &str, signer: &Signer, method: &str) -> String {
-        let element_of = |root: &Element| -> Element {
-            root.descendants()
-                .into_iter()
-                .find(|e| e.attr("ID") == Some(id))
-                .unwrap()
-                .clone()
-        };
-        let root = xml::parse(document).unwrap();
-        let element = element_of(&root);
-        let signature = element.one(DS, "Signature").unwrap().unwrap();
-        let reference = one(one(signature, DS, "SignedInfo").unwrap(), DS, "Reference").unwrap();
-        let transform = one(reference, DS, "Transforms")
-            .unwrap()
-            .all(DS, "Transform")
-            .nth(1);
-        let inclusive = transform
-            .and_then(|t| canonicalization(t).unwrap())
-            .map(|(_, p)| p)
-            .unwrap_or_default();
-        let hash =
-            Hash::digest(algorithm(one(reference, DS, "DigestMethod").unwrap()).unwrap()).unwrap();
-        let content = c14n::canonicalize(
-            &element,
-            &Options {
-                inclusive: &inclusive,
-                without: Some(signature),
-                ..Options::default()
-            },
-        );
-        let digest = STANDARD.encode(digest::digest(hash.algorithm(), &content));
-        let digested = fill(
-            document,
-            id,
-            "<ds:DigestValue/>",
-            &format!("<ds:DigestValue>{digest}</ds:DigestValue>"),
-        );
-        let root = xml::parse(&digested).unwrap();
-        let element = element_of(&root);
-        let signed_info = one(
-            element.one(DS, "Signature").unwrap().unwrap(),
-            DS,
-            "SignedInfo",
-        )
-        .unwrap();
-        let (comments, inclusive) =
-            canonicalization(one(signed_info, DS, "CanonicalizationMethod").unwrap())
-                .unwrap()
-                .unwrap();
-        let canonical = c14n::canonicalize(
-            signed_info,
-            &Options {
-                comments,
-                inclusive: &inclusive,
-                without: None,
-            },
-        );
-        let value = STANDARD.encode(signer.sign(method, &canonical));
-        fill(
-            &digested,
-            id,
-            "<ds:SignatureValue/>",
-            &format!("<ds:SignatureValue>{value}</ds:SignatureValue>"),
-        )
-    }
-
-    /// `document` with the first `empty` after the element whose ID is `id` starts
-    /// replaced by `full`.
-    fn fill(document: &str, id: &str, empty: &str, full: &str) -> String {
-        let start = document.find(&format!("ID=\"{id}\"")).unwrap();
-        let at = start + document[start..].find(empty).unwrap();
-        format!("{}{full}{}", &document[..at], &document[at + empty.len()..])
+        super::sign(document, id, |canonical| signer.sign(method, canonical))
     }
 
     /// The key of a PEM certificate, as metadata would name it.

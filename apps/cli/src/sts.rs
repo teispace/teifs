@@ -1,7 +1,7 @@
 //! `teifs sts`: temporary credentials, over AWS's STS API as `aws sts` speaks it — who an
 //! alias signs as, a role's session (or, without a role, MinIO's session for the user's
-//! own permissions), a role's session for an OpenID Connect ID token (a CI job's), and
-//! a session for an LDAP user's name and password (MinIO's `AssumeRoleWithLDAPIdentity`),
+//! own permissions), a role's session for an OpenID Connect ID token (a CI job's) or a
+//! SAML identity provider's response, and a session for an LDAP user's name and password (MinIO's `AssumeRoleWithLDAPIdentity`),
 //! a client certificate (`AssumeRoleWithCertificate`) or a token an identity plugin
 //! vouches for (`AssumeRoleWithCustomToken`).
 //!
@@ -40,6 +40,9 @@ pub enum StsAction {
     /// role's session, or without a role the policies the token names, where the
     /// server allows it. Needs no keys.
     AssumeWeb(WebArgs),
+    /// Exchange the response of a SAML identity provider (Okta, Entra ID, AD FS) for a
+    /// role's session, as `aws sts assume-role-with-saml` does. Needs no keys.
+    AssumeSaml(SamlArgs),
     /// Sign in with an LDAP user's name and password for temporary credentials with
     /// the policies mapped to the user and its groups. Needs no keys.
     AssumeLdap(LdapArgs),
@@ -49,6 +52,28 @@ pub enum StsAction {
     /// Exchange a token the server's identity plugin vouches for for temporary
     /// credentials with the plugin role's policies. Needs no keys.
     AssumeCustom(CustomArgs),
+}
+
+/// `sts assume-saml`'s arguments.
+#[derive(Args)]
+pub struct SamlArgs {
+    /// The server, like `https://s3.example.com`, or an alias for it.
+    server: String,
+    /// The role's ARN, which the response's `Role` attribute must name.
+    #[arg(long, value_name = "ARN")]
+    role_arn: String,
+    /// The SAML provider's ARN, `arn:aws:iam::ACCOUNT:saml-provider/NAME`.
+    #[arg(long, value_name = "ARN")]
+    principal_arn: String,
+    /// The file with the response the provider gave the browser (its `SAMLResponse`,
+    /// base64, or the XML itself), or `-` for standard input.
+    #[arg(long, value_name = "FILE")]
+    assertion_file: PathBuf,
+    /// The region to sign for.
+    #[arg(long, default_value = alias::DEFAULT_REGION)]
+    region: String,
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 /// `sts assume-custom`'s arguments.
@@ -195,6 +220,7 @@ pub async fn run(action: StsAction) -> Result<(), Error> {
         }
         StsAction::Assume(args) => assume(args, &mut aliases).await,
         StsAction::AssumeWeb(args) => assume_web(args, &mut aliases).await,
+        StsAction::AssumeSaml(args) => assume_saml(args, &mut aliases).await,
         StsAction::AssumeLdap(args) => assume_ldap(args, &mut aliases).await,
         StsAction::AssumeCert(args) => assume_cert(args, &mut aliases).await,
         StsAction::AssumeCustom(args) => assume_custom(args, &mut aliases).await,
@@ -307,6 +333,53 @@ async fn assume_web(args: WebArgs, aliases: &mut Aliases) -> Result<(), Error> {
         .credentials
         .ok_or_else(|| Error::general("the server answered without credentials"))?;
     deliver(&server, &credentials, &args.session.output, aliases)
+}
+
+async fn assume_saml(args: SamlArgs, aliases: &mut Aliases) -> Result<(), Error> {
+    let server = unsigned_server(aliases, &args.server, args.region)?;
+    args.session.output.check(aliases)?;
+    let policy = args.session.policy()?;
+    let assertion = saml_assertion(&args.assertion_file)?;
+    let answer = client(&server, false)
+        .assume_role_with_saml()
+        .role_arn(&args.role_arn)
+        .principal_arn(&args.principal_arn)
+        .saml_assertion(assertion.as_str())
+        .set_policy(policy)
+        .set_duration_seconds(args.session.seconds()?)
+        .send()
+        .await
+        .map_err(|e| Error::s3("the server didn't take the SAML response", &e))?;
+    let credentials = answer
+        .credentials
+        .ok_or_else(|| Error::general("the server answered without credentials"))?;
+    deliver(&server, &credentials, &args.session.output, aliases)
+}
+
+/// The SAML response in `path` (`-`: standard input), base64 as `SAMLAssertion` takes
+/// it: as it is, or encoded if it's the XML.
+fn saml_assertion(path: &std::path::Path) -> Result<Zeroizing<String>, Error> {
+    let text = Zeroizing::new(if path == std::path::Path::new("-") {
+        std::io::read_to_string(std::io::stdin())
+            .map_err(|e| Error::general(format!("can't read the SAML response: {e}")))?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| {
+            Error::new(
+                Kind::NotFound,
+                format!("can't read the SAML response file {}: {e}", path.display()),
+            )
+        })?
+    });
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Error::usage("the SAML response is empty"));
+    }
+    Ok(Zeroizing::new(if text.starts_with('<') {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(text)
+    } else {
+        text.to_owned()
+    }))
 }
 
 async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error> {

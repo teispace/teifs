@@ -419,6 +419,7 @@ pub(crate) mod tests {
         saml::{
             dsig::tests::sign,
             encryption::tests::{MGF1P_AES256_CBC, OAEP256_AES128_GCM, Scheme, encrypt},
+            fake::SIGNATURE,
             metadata::tests::document,
             private_key::{pkcs8, tests::new_pem},
         },
@@ -503,16 +504,6 @@ pub(crate) mod tests {
             .format(&Rfc3339)
             .unwrap()
     }
-
-    const SIGNATURE: &str = "<ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">\
-        <ds:SignedInfo><ds:CanonicalizationMethod \
-        Algorithm=\"http://www.w3.org/2001/10/xml-exc-c14n#\"/><ds:SignatureMethod \
-        Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256\"/>\
-        <ds:Reference URI=\"#ID\"><ds:Transforms><ds:Transform \
-        Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/><ds:Transform \
-        Algorithm=\"http://www.w3.org/2001/10/xml-exc-c14n#\"/></ds:Transforms>\
-        <ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/>\
-        <ds:DigestValue/></ds:Reference></ds:SignedInfo><ds:SignatureValue/></ds:Signature>";
 
     fn attributes_xml(attributes: &[(String, Vec<String>)]) -> String {
         use std::fmt::Write as _;

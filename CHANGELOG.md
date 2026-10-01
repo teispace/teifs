@@ -290,6 +290,9 @@ behaviour; the on-disk format is always upgraded automatically.
   canonicalization and verifier, which refuse signature wrapping, document type
   declarations and entities. The audit log doesn't record a `SAMLAssertion` sent in the
   query.
+- `teifs sts assume-saml SERVER --role-arn ARN --principal-arn ARN --assertion-file FILE`
+  exchanges a SAML response (base64, or its XML; `-` reads standard input) for a role's
+  credentials, saved as an alias or written for `aws`.
 - Encrypted SAML assertions, as AWS takes them: an `EncryptedAssertion` whose key is
   encrypted with RSA-OAEP for one of the provider's private keys (the newest tried
   first) and whose assertion is encrypted with AES-128/256-CBC or AES-128/256-GCM is

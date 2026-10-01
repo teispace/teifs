@@ -1,5 +1,5 @@
-//! A SAML identity provider for tests: its metadata, and private keys that decrypt the
-//! assertions encrypted for a TeiFS server.
+//! A SAML identity provider for tests: its metadata, the responses it signs, and private
+//! keys that decrypt the assertions encrypted for a TeiFS server.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{CertificateParams, KeyPair, PKCS_RSA_SHA256, RsaKeySize};
@@ -38,6 +38,27 @@ impl SamlIdp {
             metadata,
             key,
         }
+    }
+
+    /// A response saying `subject` signed in, to assume the role `role_arn` with the
+    /// provider `provider_arn` as `session_name`: base64, as `AssumeRoleWithSAML` takes it.
+    #[allow(dead_code, reason = "not every test binary signs responses")]
+    pub fn response(
+        &self,
+        subject: &str,
+        role_arn: &str,
+        provider_arn: &str,
+        session_name: &str,
+    ) -> String {
+        teifs_iam::saml_fake::response(
+            &teifs_iam::saml_fake::Response {
+                issuer: &self.entity_id,
+                subject,
+                roles: &[&format!("{role_arn},{provider_arn}")],
+                session_name,
+            },
+            &self.key.serialize_der(),
+        )
     }
 }
 

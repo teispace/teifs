@@ -56,7 +56,7 @@ time.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 rcgen.workspace = true
-teifs-iam = { workspace = true, features = ["fake-ldap", "fake-plugin"] }
+teifs-iam = { workspace = true, features = ["fake-ldap", "fake-plugin", "fake-saml"] }
 
 [lints]
 workspace = true
