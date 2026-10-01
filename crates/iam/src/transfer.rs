@@ -16,16 +16,12 @@ use teifs_types::admin::{
 use crate::{
     ACCOUNT, Draft, Iam, IamError, LdapEntity, NewOidcProvider, NewRole, NewSamlProvider, Owner,
     Result, SamlProviderUpdate, ldap,
-    rules::MAX_KEYS_PER_USER,
+    rules::{self, MAX_KEYS_PER_USER},
     state::{Key, State},
 };
 
 /// What a built-in policy's ARN starts with, as an export names it.
 const BUILTIN_ARN: &str = "arn:aws:iam::aws:policy/";
-
-/// The shortest secret key an import takes: 192 bits of base64, less than any TeiFS or
-/// AWS key has, so a weak secret can't be brought in.
-const MIN_SECRET: usize = 32;
 
 fn tags(tags: &[(String, String)]) -> Vec<Tag> {
     tags.iter()
@@ -149,6 +145,7 @@ fn export(state: &State, secrets: bool, key: &DataKey) -> IamExport {
             path: g.path.clone(),
             inline: inline(&g.inline),
             attached: policy_names(state, g.attached.iter()),
+            disabled: g.disabled,
         })
         .collect();
     groups.sort_by_cached_key(|g| g.name.to_ascii_lowercase());
@@ -177,6 +174,7 @@ fn export(state: &State, secrets: bool, key: &DataKey) -> IamExport {
                         secret: secrets.then(|| k.secret.as_str().to_owned()),
                     })
                     .collect(),
+                disabled: u.disabled,
             }
         })
         .collect();
@@ -312,6 +310,11 @@ impl Iam {
             let arn = |name: &str| exported_arn(&arns, name);
             for group in &export.groups {
                 d.create_group(&group.name, Some(&group.path))?;
+                if group.disabled {
+                    let mut made = Arc::unwrap_or_clone(d.group(&group.name)?);
+                    made.disabled = true;
+                    d.save_group(made);
+                }
                 for (name, document) in &group.inline {
                     d.put_inline(Owner::Group(&group.name), name, document)?;
                 }
@@ -331,32 +334,7 @@ impl Iam {
                 access_keys: 0,
                 keys_without_secrets: Vec::new(),
             };
-            for user in &export.users {
-                let boundary = user.boundary.as_deref().map(arn).transpose()?;
-                d.create_user(
-                    &user.name,
-                    Some(&user.path),
-                    &pairs(&user.tags),
-                    boundary.as_deref(),
-                )?;
-                for group in &user.groups {
-                    d.add_user_to_group(group, &user.name)?;
-                }
-                for (name, document) in &user.inline {
-                    d.put_inline(Owner::User(&user.name), name, document)?;
-                }
-                for policy in &user.attached {
-                    d.attach(Owner::User(&user.name), &arn(policy)?)?;
-                }
-                for key in &user.access_keys {
-                    if let Some(secret) = &key.secret {
-                        d.import_key(&user.name, key, secret)?;
-                        report.access_keys += 1;
-                    } else {
-                        report.keys_without_secrets.push(key.id.clone());
-                    }
-                }
-            }
+            import_users(d, &export.users, &arn, &mut report)?;
             // Before the roles, whose trust policies may name them.
             for provider in &export.oidc_providers {
                 d.create_oidc_provider(&NewOidcProvider {
@@ -372,6 +350,48 @@ impl Iam {
             Ok(report)
         })
     }
+}
+
+/// Creates the users with their keys, memberships and policies, counting the keys in
+/// `report`.
+fn import_users(
+    d: &mut Draft<'_>,
+    users: &[ExportedUser],
+    arn: &impl Fn(&str) -> Result<String>,
+    report: &mut ImportReport,
+) -> Result<()> {
+    for user in users {
+        let boundary = user.boundary.as_deref().map(arn).transpose()?;
+        d.create_user(
+            &user.name,
+            Some(&user.path),
+            &pairs(&user.tags),
+            boundary.as_deref(),
+        )?;
+        if user.disabled {
+            let mut made = Arc::unwrap_or_clone(d.user(&user.name)?);
+            made.disabled = true;
+            d.save_user(made);
+        }
+        for group in &user.groups {
+            d.add_user_to_group(group, &user.name)?;
+        }
+        for (name, document) in &user.inline {
+            d.put_inline(Owner::User(&user.name), name, document)?;
+        }
+        for policy in &user.attached {
+            d.attach(Owner::User(&user.name), &arn(policy)?)?;
+        }
+        for key in &user.access_keys {
+            if let Some(secret) = &key.secret {
+                d.import_key(&user.name, key, secret)?;
+                report.access_keys += 1;
+            } else {
+                report.keys_without_secrets.push(key.id.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Creates the roles once the users exist. A trust policy may name another role, so
@@ -455,20 +475,9 @@ impl Draft<'_> {
     /// Adds an exported access key, with its id and secret, to a user.
     fn import_key(&mut self, user: &str, key: &ExportedKey, secret: &str) -> Result<()> {
         let id = &key.id;
-        let id_ok = (16..=128).contains(&id.len())
-            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-        if !id_ok {
-            return Err(IamError::InvalidInput(format!(
-                "The access key id {id:?} isn't 16 to 128 letters, digits or underscores."
-            )));
-        }
-        let secret_ok = (MIN_SECRET..=128).contains(&secret.len())
-            && secret.bytes().all(|b| b.is_ascii_graphic());
-        if !secret_ok {
-            return Err(IamError::InvalidInput(format!(
-                "The secret of access key {id} isn't {MIN_SECRET} to 128 printable characters."
-            )));
-        }
+        rules::access_key_id(id).map_err(IamError::InvalidInput)?;
+        rules::secret_key(secret)
+            .map_err(|e| IamError::InvalidInput(format!("Access key {id}: {e}")))?;
         if !(0..=self.now).contains(&key.created_ms) {
             return Err(IamError::InvalidInput(format!(
                 "The access key {id} was created at an impossible time."

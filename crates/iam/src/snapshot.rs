@@ -450,10 +450,12 @@ impl Snapshot {
             entity: None,
             session: None,
         });
+        // A disabled user's keys and sessions don't sign.
         let users: HashMap<Box<str>, Arc<Identity>> = state
             .users
-            .keys()
-            .map(|id| (id.as_str().into(), Arc::new(identity(state, id))))
+            .values()
+            .filter(|u| !u.disabled)
+            .map(|u| (u.id.as_str().into(), Arc::new(identity(state, &u.id))))
             .collect();
         let mut keys = HashMap::with_capacity(state.keys.len() + 1);
         if let Some(root) = root {
@@ -820,7 +822,7 @@ fn boundary_of(state: &State, id: Option<&str>) -> Option<Arc<Policy>> {
 fn identity(state: &State, user_id: &str) -> Identity {
     let user = &state.users[user_id];
     let mut policies = policies_of(state, &user.inline, &user.attached);
-    for group in state.groups_of(&user.id) {
+    for group in state.groups_of(&user.id).filter(|g| !g.disabled) {
         policies.extend(policies_of(state, &group.inline, &group.attached));
     }
     Identity {

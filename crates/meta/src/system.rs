@@ -39,6 +39,9 @@ const MIGRATIONS: &[&str] = &[
     crate::iam::LDAP_MIGRATION,
     // 9: IAM SAML providers, their private keys and tags.
     crate::iam::SAML_MIGRATION,
+    // 10: MinIO's status of IAM users and groups (a disabled one's keys and policies
+    //     don't count).
+    crate::iam::STATUS_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

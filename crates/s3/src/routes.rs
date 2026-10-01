@@ -17,6 +17,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, route::S3Route};
 use teifs_iam::{Iam, Identity};
+use teifs_policy::Decision;
 use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
@@ -31,7 +32,7 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen,
+    iam_api, listen, minio_iam,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -64,6 +65,12 @@ pub(crate) enum Needs {
     /// This action on the bucket the query names (`?bucket=NAME`), decided with the
     /// caller's policies (as `MinIO` decides its admin actions).
     OnQueryBucket(&'static str),
+    /// This action, decided with the caller's policies; or, on the caller's own access
+    /// key (`?accessKey=` names the key that signed), anything but an explicit deny (as
+    /// `MinIO` lets a user read itself and change its own secret).
+    OrOwnKey(&'static str),
+    /// Anything but an explicit deny of this action: a call on the caller's own key.
+    NotDenied(&'static str),
     /// The Query APIs name an action in each call's body, and IAM decides it.
     PerCall,
     /// Only the account's root user, whatever policies say.
@@ -113,6 +120,23 @@ enum Handler {
     Trace,
     SetBucketQuota,
     GetBucketQuota,
+    AddUser,
+    ChangeMyPassword,
+    RemoveUser,
+    ListUsers,
+    UserInfo,
+    SetUserStatus,
+    UpdateGroupMembers,
+    GetGroup,
+    ListGroups,
+    SetGroupStatus,
+    AddCannedPolicy,
+    InfoCannedPolicy,
+    ListCannedPolicies,
+    RemoveCannedPolicy,
+    AttachPolicy,
+    DetachPolicy,
+    PolicyEntities,
 }
 
 impl Handler {
@@ -142,6 +166,23 @@ impl Handler {
             Self::Trace => "ServerTrace",
             Self::SetBucketQuota => "SetBucketQuota",
             Self::GetBucketQuota => "GetBucketQuota",
+            Self::AddUser => "AddUser",
+            Self::ChangeMyPassword => "ChangeMyPassword",
+            Self::RemoveUser => "RemoveUser",
+            Self::ListUsers => "ListUsers",
+            Self::UserInfo => "GetUserInfo",
+            Self::SetUserStatus => "SetUserStatus",
+            Self::UpdateGroupMembers => "UpdateGroupMembers",
+            Self::GetGroup => "GetGroup",
+            Self::ListGroups => "ListGroups",
+            Self::SetGroupStatus => "SetGroupStatus",
+            Self::AddCannedPolicy => "AddCannedPolicy",
+            Self::InfoCannedPolicy => "InfoCannedPolicy",
+            Self::ListCannedPolicies => "ListCannedPolicies",
+            Self::RemoveCannedPolicy => "RemoveCannedPolicy",
+            Self::AttachPolicy => "AttachPolicy",
+            Self::DetachPolicy => "DetachPolicy",
+            Self::PolicyEntities => "ListPolicyMappingEntities",
         }
     }
 }
@@ -353,6 +394,142 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::GetBucketQuota,
         about: "`?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/add-user",
+        needs: Needs::OrOwnKey("admin:CreateUser"),
+        handler: Handler::AddUser,
+        about: "Makes user `?accessKey=` (an IAM user of that name, signing with a key of that id) or changes its secret and status; the body is an encrypted `AddOrUpdateUserReq`: `mc admin user add`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/change-my-password",
+        needs: Needs::NotDenied("admin:ChangeMyPassword"),
+        handler: Handler::ChangeMyPassword,
+        about: "A new secret (an encrypted `AddOrUpdateUserReq`) for the access key that signs the request",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/remove-user",
+        needs: Needs::Action("admin:DeleteUser", ANY),
+        handler: Handler::RemoveUser,
+        about: "Deletes user `?accessKey=` with its keys, policies and memberships: `mc admin user rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/list-users",
+        needs: Needs::Action("admin:ListUsers", ANY),
+        handler: Handler::ListUsers,
+        about: "Every user's `UserInfo` by name, encrypted: `mc admin user ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/user-info",
+        needs: Needs::OrOwnKey("admin:GetUser"),
+        handler: Handler::UserInfo,
+        about: "User `?accessKey=`'s `UserInfo` (status, policies, groups): `mc admin user info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/set-user-status",
+        needs: Needs::Action("admin:EnableUser", ANY),
+        handler: Handler::SetUserStatus,
+        about: "Enables or disables user `?accessKey=` (`&status=enabled|disabled`); a disabled user's keys and sessions don't sign: `mc admin user enable` and `disable`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/update-group-members",
+        needs: Needs::Action("admin:AddUserToGroup", ANY),
+        handler: Handler::UpdateGroupMembers,
+        about: "Adds members to a group (made if needed) or removes them, or the group when it's empty (`GroupAddRemove`): `mc admin group add` and `rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/group",
+        needs: Needs::Action("admin:GetGroup", ANY),
+        handler: Handler::GetGroup,
+        about: "Group `?group=`'s `GroupDesc`: `mc admin group info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/groups",
+        needs: Needs::Action("admin:ListGroups", ANY),
+        handler: Handler::ListGroups,
+        about: "Every group's name: `mc admin group ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/set-group-status",
+        needs: Needs::Action("admin:EnableGroup", ANY),
+        handler: Handler::SetGroupStatus,
+        about: "Enables or disables group `?group=` (`&status=`); a disabled group's policies don't count: `mc admin group enable` and `disable`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/add-canned-policy",
+        needs: Needs::Action("admin:CreatePolicy", ANY),
+        handler: Handler::AddCannedPolicy,
+        about: "Makes policy `?name=` from the body's document or gives it a new version; a built-in name with `&overrideBuiltin=true`, and `&resetBuiltin=true` removes the override: `mc admin policy create`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/info-canned-policy",
+        needs: Needs::Action("admin:GetPolicy", ANY),
+        handler: Handler::InfoCannedPolicy,
+        about: "Policy `?name=`'s document, or with `&v=2` its `PolicyInfo`: `mc admin policy info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/list-canned-policies",
+        needs: Needs::Action("admin:ListUserPolicies", ANY),
+        handler: Handler::ListCannedPolicies,
+        about: "Every policy's document by name, built-in ones included: `mc admin policy ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/remove-canned-policy",
+        needs: Needs::Action("admin:DeletePolicy", ANY),
+        handler: Handler::RemoveCannedPolicy,
+        about: "Deletes policy `?name=`, which nothing may use: `mc admin policy rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/idp/builtin/policy/attach",
+        needs: Needs::Action("admin:UpdatePolicyAssociation", ANY),
+        handler: Handler::AttachPolicy,
+        about: "Attaches policies to a user or group (an encrypted `PolicyAssociationReq`), answering what changed, encrypted: `mc admin policy attach`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/idp/builtin/policy/detach",
+        needs: Needs::Action("admin:UpdatePolicyAssociation", ANY),
+        handler: Handler::DetachPolicy,
+        about: "Detaches policies from a user or group, as `attach`: `mc admin policy detach`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp/builtin/policy-entities",
+        needs: Needs::Action("admin:ListUserPolicies", ANY),
+        handler: Handler::PolicyEntities,
+        about: "Who has which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc admin policy entities`",
+    },
 ];
 
 /// `MinIO`'s admin API, as its clients reach it.
@@ -382,6 +559,9 @@ pub struct EndpointInfo {
     pub action: Option<&'static str>,
     /// Whether only the root user may call it.
     pub root_only: bool,
+    /// Whether a caller may call it on its own access key without the action, unless a
+    /// policy denies it.
+    pub own_key: bool,
     /// Its API.
     pub api: Api,
     /// What it does, in a line.
@@ -399,12 +579,15 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         },
         path: e.path,
         action: match e.needs {
-            Needs::Action(action, _) | Needs::OnBucket(action) | Needs::OnQueryBucket(action) => {
-                Some(action)
-            }
+            Needs::Action(action, _)
+            | Needs::OnBucket(action)
+            | Needs::OnQueryBucket(action)
+            | Needs::OrOwnKey(action)
+            | Needs::NotDenied(action) => Some(action),
             Needs::PerCall | Needs::Root => None,
         },
         root_only: e.needs == Needs::Root,
+        own_key: matches!(e.needs, Needs::OrOwnKey(_) | Needs::NotDenied(_)),
         api: e.api,
         about: e.about,
     })
@@ -611,6 +794,13 @@ impl Routes {
                 query_bucket = Some(bucket);
                 allowed
             }
+            Needs::OrOwnKey(action) => {
+                let decision = identity.decide(&context(), action, ANY, None);
+                decision.is_allowed() || (decision != Decision::ExplicitDeny && on_own_key(&req))
+            }
+            Needs::NotDenied(action) => {
+                identity.decide(&context(), action, ANY, None) != Decision::ExplicitDeny
+            }
             Needs::Root => identity.is_root(),
             Needs::PerCall => false,
         };
@@ -681,6 +871,23 @@ impl Routes {
                 let bucket = query_bucket.expect("decided on the query's bucket");
                 quota::get(&self.store, &bucket).await
             }
+            Handler::AddUser => minio_iam::add_user(&self.iam, req).await,
+            Handler::ChangeMyPassword => minio_iam::change_my_password(&self.iam, req).await,
+            Handler::RemoveUser => minio_iam::remove_user(&self.iam, &req),
+            Handler::ListUsers => minio_iam::list_users(&self.iam, &req).await,
+            Handler::UserInfo => minio_iam::user_info(&self.iam, &req),
+            Handler::SetUserStatus => minio_iam::set_user_status(&self.iam, &req),
+            Handler::UpdateGroupMembers => minio_iam::update_group_members(&self.iam, req).await,
+            Handler::GetGroup => minio_iam::group(&self.iam, &req),
+            Handler::ListGroups => Ok(minio_iam::groups(&self.iam)),
+            Handler::SetGroupStatus => minio_iam::set_group_status(&self.iam, &req),
+            Handler::AddCannedPolicy => minio_iam::add_canned_policy(&self.iam, req).await,
+            Handler::InfoCannedPolicy => minio_iam::info_canned_policy(&self.iam, &req),
+            Handler::ListCannedPolicies => minio_iam::list_canned_policies(&self.iam),
+            Handler::RemoveCannedPolicy => minio_iam::remove_canned_policy(&self.iam, &req),
+            Handler::AttachPolicy => minio_iam::associate(&self.iam, req, true).await,
+            Handler::DetachPolicy => minio_iam::associate(&self.iam, req, false).await,
+            Handler::PolicyEntities => minio_iam::policy_entities(&self.iam, &req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -747,6 +954,15 @@ impl Routes {
         let token = crate::access::security_token(&req.headers, &req.uri);
         crate::access::identify(&self.iam, &credentials.access_key, token.as_deref())
     }
+}
+
+/// Whether a `MinIO` call is on the access key that signed it: `?accessKey=` names it.
+fn on_own_key(req: &S3Request<Body>) -> bool {
+    let Some(own) = minio_iam::caller_key(req) else {
+        return false;
+    };
+    form_urlencoded::parse(req.uri.query().unwrap_or_default().as_bytes())
+        .any(|(name, value)| name == "accessKey" && value == own)
 }
 
 fn denied() -> S3Error {
@@ -914,6 +1130,9 @@ mod tests {
             );
             for e in endpoints().filter(|e| e.api == api) {
                 let who = match (e.action, e.root_only) {
+                    (Some(action), _) if e.own_key => {
+                        format!("`{action}`, or anyone on their own key unless denied")
+                    }
                     (Some(action), _) => format!("`{action}`"),
                     (None, true) => "root user".to_owned(),
                     (None, false) => "the action each call names".to_owned(),
@@ -960,18 +1179,27 @@ mod tests {
                 Needs::Root => assert_ne!(e.api, Api::Query),
                 Needs::Action(action, resource) => {
                     assert!(action.contains(':') && !resource.is_empty(), "{e:?}");
-                    let service = if e.api == Api::Admin { "teifs:" } else { "s3:" };
+                    let service = match e.api {
+                        Api::Admin => "teifs:",
+                        Api::Minio => "admin:",
+                        Api::Query | Api::Control => "s3:",
+                    };
                     assert!(action.starts_with(service), "{e:?}");
                 }
                 Needs::OnBucket(action) => {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
                     assert!(matches!(e.handler, Handler::Tags(_)), "{e:?}");
                 }
-                Needs::OnQueryBucket(action) => {
+                Needs::OnQueryBucket(action)
+                | Needs::OrOwnKey(action)
+                | Needs::NotDenied(action) => {
                     assert!(e.api == Api::Minio && action.starts_with("admin:"), "{e:?}");
-                    let v4 = e.path.replace(MINIO_ADMIN, MINIO_ADMIN_V4);
-                    assert!(std::ptr::eq(endpoint(e.api, &method, &v4).unwrap(), e));
                 }
+            }
+            if e.api == Api::Minio {
+                assert!(e.path.starts_with(MINIO_ADMIN), "{e:?}");
+                let v4 = e.path.replace(MINIO_ADMIN, MINIO_ADMIN_V4);
+                assert!(std::ptr::eq(endpoint(e.api, &method, &v4).unwrap(), e));
             }
         }
         assert!(endpoint(Api::Control, &Method::PATCH, control::PUBLIC_ACCESS_BLOCK).is_none());

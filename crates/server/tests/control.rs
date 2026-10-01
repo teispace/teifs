@@ -267,7 +267,9 @@ async fn every_endpoint_refuses_anonymous_callers_and_users_without_permission()
         )
         .await;
         // IAM's Query API names its action in the body (s3 isn't its signing service).
-        if endpoint.action.is_some() || endpoint.root_only {
+        // A call on one's own key needs no permission (`change-my-password`): it fails on
+        // what it's sent instead.
+        if (endpoint.action.is_some() && !endpoint.own_key) || endpoint.root_only {
             assert_eq!(status, 403, "{endpoint:?}: {answer}");
             assert!(answer.contains("AccessDenied"), "{endpoint:?}: {answer}");
         } else {

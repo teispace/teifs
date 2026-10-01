@@ -232,6 +232,30 @@ They can't be changed or deleted. Where a policy is given by name (LDAP mappings
 certificates' common names, OpenID Connect claims and roles, the identity plugin), a
 policy of the account's own with that name comes first.
 
+## Users with `mc admin`
+
+MinIO's admin client manages TeiFS's users, groups and policies as it manages MinIO's:
+
+```sh
+mc alias set teifs https://s3.example.com ACCESS_KEY SECRET_KEY
+mc admin user add teifs alice alice-secret-key
+mc admin policy attach teifs readwrite --user alice
+mc admin group add teifs devs alice
+mc admin policy create teifs photos-reader photos-reader.json
+mc admin policy attach teifs photos-reader --group devs
+mc admin user disable teifs alice     # alice's keys stop signing until enabled
+mc admin policy entities teifs --user alice
+```
+
+A user made this way is an IAM user named as its access key, which signs with a key of
+that id, so the IAM API and `teifs iam` see it too (and `mc admin user add` of an IAM
+user's name gives it that key). A canned policy is a managed policy by name; a built-in
+one is replaced only when the client asks to override it (madmin's `overrideBuiltin`),
+as on MinIO. Each
+call needs MinIO's admin action (`admin:CreateUser`, `admin:UpdatePolicyAssociation`…),
+which `consoleAdmin` and `iamAdmin` grant; a user may always read itself and change its
+own secret (`mc admin user svcacct` and access keys come next).
+
 ## LDAP sign-in
 
 Users of an LDAP directory (Active Directory, OpenLDAP, FreeIPA…) can get temporary

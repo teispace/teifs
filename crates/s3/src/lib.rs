@@ -29,6 +29,7 @@ mod lines;
 mod listen;
 mod logging;
 mod metrics;
+mod minio_iam;
 mod notification;
 mod object_lock;
 mod observe;

@@ -1,5 +1,5 @@
 // The AWS SDK for Go v2 against TeiFS: what applications do with it; and madmin-go, the
-// library `mc` calls MinIO's admin API with, for bucket quotas.
+// library `mc` calls MinIO's admin API with, for bucket quotas, users, groups and policies.
 package main
 
 import (
@@ -137,10 +137,92 @@ func main() {
 	must(err)
 	check(quota.Size == 0 && quota.Quota == 0, fmt.Sprintf("the quota cleared: %+v", quota))
 
+	minioIAM(ctx, adm)
+
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
 	must(err)
 	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: bucket})
 	must(err)
 	fmt.Println("ok")
+}
+
+// lists says whether a client signing with this key may list buckets.
+func lists(ctx context.Context, accessKey, secret string) bool {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithCredentialsProvider(
+		aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secret}, nil
+		})))
+	must(err)
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(os.Getenv("ENDPOINT"))
+		o.UsePathStyle = true
+	})
+	_, err = client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	return err == nil
+}
+
+// minioIAM is mc admin user, group and policy: secrets in bodies encrypted with the
+// caller's secret key, as madmin-go encrypts and decrypts them.
+func minioIAM(ctx context.Context, adm *madmin.AdminClient) {
+	step("a user, a group and policies through MinIO's admin API, as mc admin does")
+	must(adm.AddUser(ctx, "go-user", "go-user-secret"))
+	info, err := adm.GetUserInfo(ctx, "go-user")
+	must(err)
+	check(info.Status == madmin.AccountEnabled, fmt.Sprintf("the user's info: %+v", info))
+	check(!lists(ctx, "go-user", "go-user-secret"), "a user without policies lists buckets")
+
+	attached, err := adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{
+		Policies: []string{"readwrite"}, User: "go-user",
+	})
+	must(err)
+	check(len(attached.PoliciesAttached) == 1, fmt.Sprintf("attached: %+v", attached))
+	check(lists(ctx, "go-user", "go-user-secret"), "readwrite lets the user list buckets")
+	users, err := adm.ListUsers(ctx)
+	must(err)
+	check(users["go-user"].PolicyName == "readwrite", fmt.Sprintf("the users: %+v", users))
+	entities, err := adm.GetPolicyEntities(ctx, madmin.PolicyEntitiesQuery{Users: []string{"go-user"}})
+	must(err)
+	check(len(entities.UserMappings) == 1 && entities.UserMappings[0].Policies[0] == "readwrite",
+		fmt.Sprintf("the policy entities: %+v", entities))
+
+	must(adm.SetUserStatus(ctx, "go-user", madmin.AccountDisabled))
+	check(!lists(ctx, "go-user", "go-user-secret"), "a disabled user's key signs")
+	must(adm.SetUserStatus(ctx, "go-user", madmin.AccountEnabled))
+	detached, err := adm.DetachPolicy(ctx, madmin.PolicyAssociationReq{
+		Policies: []string{"readwrite"}, User: "go-user",
+	})
+	must(err)
+	check(len(detached.PoliciesDetached) == 1, fmt.Sprintf("detached: %+v", detached))
+
+	lister := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}]}`)
+	must(adm.AddCannedPolicy(ctx, "go-lister", lister))
+	policy, err := adm.InfoCannedPolicyV2(ctx, "go-lister")
+	must(err)
+	check(policy.PolicyName == "go-lister", fmt.Sprintf("the policy: %+v", policy))
+	policies, err := adm.ListCannedPolicies(ctx)
+	must(err)
+	_, ok := policies["consoleAdmin"]
+	check(ok && policies["go-lister"] != nil, "the canned policies, built-in ones too")
+
+	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", Members: []string{"go-user"}}))
+	_, err = adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{Policies: []string{"go-lister"}, Group: "go-group"})
+	must(err)
+	check(lists(ctx, "go-user", "go-user-secret"), "the group's policy lets its member list buckets")
+	group, err := adm.GetGroupDescription(ctx, "go-group")
+	must(err)
+	check(group.Policy == "go-lister" && len(group.Members) == 1, fmt.Sprintf("the group: %+v", group))
+	groups, err := adm.ListGroups(ctx)
+	must(err)
+	check(len(groups) == 1 && groups[0] == "go-group", fmt.Sprintf("the groups: %v", groups))
+	must(adm.SetGroupStatus(ctx, "go-group", madmin.GroupDisabled))
+	check(!lists(ctx, "go-user", "go-user-secret"), "a disabled group's policy counts")
+
+	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", Members: []string{"go-user"}, IsRemove: true}))
+	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", IsRemove: true}))
+	must(adm.RemoveCannedPolicy(ctx, "go-lister"))
+	must(adm.RemoveUser(ctx, "go-user"))
+	_, err = adm.GetUserInfo(ctx, "go-user")
+	var gone madmin.ErrorResponse
+	check(errors.As(err, &gone) && gone.Code == "XMinioAdminNoSuchUser", fmt.Sprintf("a removed user: %v", err))
 }

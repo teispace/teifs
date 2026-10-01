@@ -353,7 +353,15 @@ an unknown key) get S3's XML errors, everything after the admin API's JSON;
 quotas, `quota.rs`) are `Api::Minio` routes at `MinIO`'s exact paths
 (`/minio/admin/v3/…`, and `v4` taken as `v3`), matched only path-style, so a bucket named
 `minio` keeps its keys; they're decided with `MinIO`'s `admin:*` actions on the bucket
-their query names (`Needs::OnQueryBucket`) and answer `MinIO`'s JSON errors. Quotas are
+their query names (`Needs::OnQueryBucket`) and answer `MinIO`'s JSON errors. Users,
+groups and canned policies (`minio_iam.rs`) are decided with `MinIO`'s admin actions
+(`Needs::Action`, or `Needs::OrOwnKey` and `Needs::NotDenied` for a call on the caller's
+own key) and served by `Iam`'s `minio_*` methods (`ops/minio.rs`), which map them onto
+IAM: a user is the IAM user named as its access key, a canned policy the managed policy
+a name names. Secrets in bodies are encrypted with the caller's secret key as madmin
+does it (`teifs_crypto::madmin`, Argon2id run one at a time off the async workers).
+Users and groups have a `disabled` flag: the snapshot leaves out a disabled user (its
+keys and sessions find no one) and a disabled group's policies. Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and

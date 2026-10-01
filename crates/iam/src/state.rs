@@ -74,6 +74,8 @@ pub(crate) struct User {
     pub(crate) tags: Vec<(String, String)>,
     pub(crate) inline: BTreeMap<String, Document>,
     pub(crate) attached: BTreeSet<String>,
+    /// `MinIO`'s disabled status: its keys and sessions don't sign.
+    pub(crate) disabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,8 @@ pub(crate) struct Group {
     pub(crate) members: BTreeSet<String>,
     pub(crate) inline: BTreeMap<String, Document>,
     pub(crate) attached: BTreeSet<String>,
+    /// `MinIO`'s disabled status: its policies don't count for its members.
+    pub(crate) disabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +382,7 @@ impl State {
                     tags: Vec::new(),
                     inline: BTreeMap::new(),
                     attached: BTreeSet::new(),
+                    disabled: u.disabled,
                 };
                 (u.id, user)
             })
@@ -394,6 +399,7 @@ impl State {
                     members: BTreeSet::new(),
                     inline: BTreeMap::new(),
                     attached: BTreeSet::new(),
+                    disabled: g.disabled,
                 };
                 (g.id, group)
             })

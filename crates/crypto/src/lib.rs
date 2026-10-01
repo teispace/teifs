@@ -16,6 +16,7 @@ mod error;
 mod kes;
 mod key;
 mod kms;
+pub mod madmin;
 mod package;
 mod private;
 mod seal;

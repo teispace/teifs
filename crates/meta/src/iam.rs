@@ -163,6 +163,11 @@ pub(crate) const LDAP_MIGRATION: &str = "
         gone       INTEGER NOT NULL
     ) WITHOUT ROWID;";
 
+/// Users and groups that are disabled, as `MinIO` has them.
+pub(crate) const STATUS_MIGRATION: &str = "
+    ALTER TABLE iam_users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE iam_groups ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -176,6 +181,8 @@ pub struct UserRow {
     pub created_ms: i64,
     /// The id of the managed policy that is its permissions boundary.
     pub boundary: Option<String>,
+    /// Whether it's disabled (`MinIO`'s user status): its keys don't sign.
+    pub disabled: bool,
 }
 
 /// A role.
@@ -302,6 +309,8 @@ pub struct GroupRow {
     pub path: String,
     /// When it was created, in milliseconds since the Unix epoch.
     pub created_ms: i64,
+    /// Whether it's disabled (`MinIO`'s group status): its policies don't count.
+    pub disabled: bool,
 }
 
 /// A customer-managed policy (its documents are [`PolicyVersionRow`]s).
@@ -514,28 +523,32 @@ impl System {
             meta: all("SELECT key, value FROM iam_meta ORDER BY key")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?,
-            users: all("SELECT id, name, path, created_ms, boundary FROM iam_users ORDER BY id")?
-                .query_map([], |r| {
-                    Ok(UserRow {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        path: r.get(2)?,
-                        created_ms: r.get(3)?,
-                        boundary: r.get(4)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?,
+            users: all(
+                "SELECT id, name, path, created_ms, boundary, disabled FROM iam_users ORDER BY id",
+            )?
+            .query_map([], |r| {
+                Ok(UserRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    path: r.get(2)?,
+                    created_ms: r.get(3)?,
+                    boundary: r.get(4)?,
+                    disabled: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
             user_tags: tag_rows(
                 conn,
                 "SELECT user_id, key, value FROM iam_user_tags ORDER BY user_id, key",
             )?,
-            groups: all("SELECT id, name, path, created_ms FROM iam_groups ORDER BY id")?
+            groups: all("SELECT id, name, path, created_ms, disabled FROM iam_groups ORDER BY id")?
                 .query_map([], |r| {
                     Ok(GroupRow {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         path: r.get(2)?,
                         created_ms: r.get(3)?,
+                        disabled: r.get(4)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?,
@@ -761,10 +774,11 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
             params![key, value],
         ),
         IamWrite::PutUser(u) => run(
-            "INSERT INTO iam_users (id, name, path, created_ms, boundary) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO iam_users (id, name, path, created_ms, boundary, disabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (id) DO UPDATE SET name = excluded.name, path = excluded.path,
-               boundary = excluded.boundary",
-            params![u.id, u.name, u.path, u.created_ms, u.boundary],
+               boundary = excluded.boundary, disabled = excluded.disabled",
+            params![u.id, u.name, u.path, u.created_ms, u.boundary, u.disabled],
         ),
         IamWrite::DeleteUser(id) => run("DELETE FROM iam_users WHERE id = ?1", params![id]),
         IamWrite::PutUserTag(user, key, value) => run(
@@ -777,9 +791,10 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
             params![user, key],
         ),
         IamWrite::PutGroup(g) => run(
-            "INSERT INTO iam_groups (id, name, path, created_ms) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (id) DO UPDATE SET name = excluded.name, path = excluded.path",
-            params![g.id, g.name, g.path, g.created_ms],
+            "INSERT INTO iam_groups (id, name, path, created_ms, disabled) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name, path = excluded.path,
+               disabled = excluded.disabled",
+            params![g.id, g.name, g.path, g.created_ms, g.disabled],
         ),
         IamWrite::DeleteGroup(id) => run("DELETE FROM iam_groups WHERE id = ?1", params![id]),
         IamWrite::AddMember(group, user) => run(
@@ -981,6 +996,7 @@ mod tests {
             path: "/".into(),
             created_ms: 1,
             boundary: None,
+            disabled: false,
         }
     }
 
@@ -1020,6 +1036,7 @@ mod tests {
             IamWrite::PutPolicyTag("P1".into(), "team".into(), "b".into()),
             IamWrite::PutUser(UserRow {
                 boundary: Some("P1".into()),
+                disabled: true,
                 ..user("U1", "alice")
             }),
             IamWrite::PutUserTag("U1".into(), "team".into(), "a".into()),
@@ -1028,6 +1045,7 @@ mod tests {
                 name: "eng".into(),
                 path: "/x/".into(),
                 created_ms: 2,
+                disabled: true,
             }),
             IamWrite::AddMember("G1".into(), "U1".into()),
             IamWrite::AddMember("G1".into(), "U1".into()),
@@ -1371,6 +1389,7 @@ mod tests {
                 name: "g".into(),
                 path: "/".into(),
                 created_ms: 1,
+                disabled: false,
             }),
             IamWrite::PutUser(user("U2", "ALICE")),
         ]);

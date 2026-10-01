@@ -306,6 +306,23 @@ behaviour; the on-disk format is always upgraded automatically.
   MinIO policy name (an LDAP mapping, a certificate's common name, a token's `policy`
   claim, an identity plugin's or OpenID role's policies) names the account's own policy
   of that name, else the built-in one. IAM exports name them by ARN.
+- Users, groups and policies through MinIO's admin API, as `mc admin user`, `group` and
+  `policy` (and madmin-go) manage them: `add-user`, `remove-user`, `list-users`,
+  `user-info`, `set-user-status`, `change-my-password`, `update-group-members`, `group`,
+  `groups`, `set-group-status`, `add-canned-policy` (with `overrideBuiltin` and
+  `resetBuiltin`), `info-canned-policy`, `list-canned-policies`, `remove-canned-policy`,
+  and `idp/builtin/policy/attach`, `detach` and `policy-entities`, at `v3` and `v4`. A
+  MinIO user is the IAM user named as its access key, signing with a key of that id;
+  a canned policy is a managed policy by name. Secrets travel encrypted with the
+  caller's secret key as madmin encrypts them (Argon2id with AES-256-GCM or
+  ChaCha20-Poly1305, or PBKDF2 in MinIO's FIPS builds), errors are MinIO's
+  (`XMinioAdminNoSuchUser`, `XMinioIAMPolicyInUse`…), and each call is decided with
+  MinIO's admin action (`admin:CreateUser`, `admin:UpdatePolicyAssociation`…); a user
+  may read itself and change its own secret unless a policy denies it.
+- Users and groups can be disabled, as on MinIO: a disabled user's keys and sessions
+  don't sign, and a disabled group's policies don't count for its members. IAM exports
+  and imports keep the status, and an import takes secrets of 8 characters or more, as
+  MinIO's users have.
 - `teifs sts assume-saml SERVER --role-arn ARN --principal-arn ARN --assertion-file FILE`
   exchanges a SAML response (base64, or its XML; `-` reads standard input) for a role's
   credentials, saved as an alias or written for `aws`.

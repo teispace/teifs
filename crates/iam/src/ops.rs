@@ -1,6 +1,7 @@
 //! IAM's operations, with AWS's rules and messages.
 
 mod ldap;
+mod minio;
 mod oidc;
 mod roles;
 mod saml;
@@ -23,6 +24,10 @@ use crate::{
 
 pub(crate) use ldap::LdapSignIn;
 pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
+pub use minio::{
+    GroupPolicies, MinioError, MinioGroup, MinioPolicy, MinioUser, MinioUserChange, PolicyEntities,
+    PolicyHolders, UserPolicies,
+};
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
 pub use saml::{NewSamlProvider, SamlProviderInfo, SamlProviderUpdate};
@@ -321,7 +326,7 @@ impl Draft<'_> {
         self.state.user_named(name).cloned()
     }
 
-    fn group(&self, name: &str) -> Result<Arc<Group>> {
+    pub(crate) fn group(&self, name: &str) -> Result<Arc<Group>> {
         self.state.group_named(name).cloned()
     }
 
@@ -341,23 +346,25 @@ impl Draft<'_> {
         Ok(policy)
     }
 
-    fn save_user(&mut self, user: User) {
+    pub(crate) fn save_user(&mut self, user: User) {
         self.write(IamWrite::PutUser(UserRow {
             id: user.id.clone(),
             name: user.name.clone(),
             path: user.path.clone(),
             created_ms: user.created_ms,
             boundary: user.boundary.clone(),
+            disabled: user.disabled,
         }));
         self.state.users.insert(user.id.clone(), Arc::new(user));
     }
 
-    fn save_group(&mut self, group: Group) {
+    pub(crate) fn save_group(&mut self, group: Group) {
         self.write(IamWrite::PutGroup(GroupRow {
             id: group.id.clone(),
             name: group.name.clone(),
             path: group.path.clone(),
             created_ms: group.created_ms,
+            disabled: group.disabled,
         }));
         self.state.groups.insert(group.id.clone(), Arc::new(group));
     }
@@ -444,6 +451,7 @@ impl Draft<'_> {
             tags: tags.clone(),
             inline: BTreeMap::new(),
             attached: std::collections::BTreeSet::new(),
+            disabled: false,
         };
         let id = user.id.clone();
         self.save_user(user);
@@ -476,6 +484,7 @@ impl Draft<'_> {
             members: std::collections::BTreeSet::new(),
             inline: BTreeMap::new(),
             attached: std::collections::BTreeSet::new(),
+            disabled: false,
         };
         let info = group_info(&self.state, &group);
         self.save_group(group);
@@ -498,6 +507,40 @@ impl Draft<'_> {
         group.members.insert(user.id.clone());
         self.write(IamWrite::AddMember(group.id.clone(), user.id.clone()));
         self.state.groups.insert(group.id.clone(), Arc::new(group));
+        Ok(())
+    }
+
+    /// [`Iam::remove_user_from_group`], as part of a change.
+    pub(crate) fn remove_user_from_group(&mut self, group: &str, user: &str) -> Result<()> {
+        let group = self.group(group)?;
+        let user = self.user(user)?;
+        if !group.members.contains(&user.id) {
+            return Err(IamError::NoSuchEntity(format!(
+                "User {} is not in group {}.",
+                user.name, group.name
+            )));
+        }
+        let mut group = Arc::unwrap_or_clone(group);
+        group.members.remove(&user.id);
+        self.write(IamWrite::RemoveMember(group.id.clone(), user.id.clone()));
+        self.state.groups.insert(group.id.clone(), Arc::new(group));
+        Ok(())
+    }
+
+    /// [`Iam::detach`], as part of a change.
+    pub(crate) fn detach(&mut self, owner: Owner<'_>, arn: &str) -> Result<()> {
+        let owner = self.owner(owner)?;
+        let policy = self.policy(arn)?;
+        let id = policy.row.id.clone();
+        if !owner.attached().contains(&id) {
+            return Err(IamError::NoSuchEntity(format!(
+                "Policy {arn} was not found."
+            )));
+        }
+        self.write(IamWrite::Detach(owner.id().to_owned(), id.clone()));
+        owner.update(self, |_, attached| {
+            attached.remove(&id);
+        });
         Ok(())
     }
 
@@ -1126,21 +1169,7 @@ impl Iam {
 
     /// Removes a user from a group (`RemoveUserFromGroup`).
     pub fn remove_user_from_group(&self, group: &str, user: &str) -> Result<()> {
-        self.change(|d| {
-            let group = d.group(group)?;
-            let user = d.user(user)?;
-            if !group.members.contains(&user.id) {
-                return Err(IamError::NoSuchEntity(format!(
-                    "User {} is not in group {}.",
-                    user.name, group.name
-                )));
-            }
-            let mut group = Arc::unwrap_or_clone(group);
-            group.members.remove(&user.id);
-            d.write(IamWrite::RemoveMember(group.id.clone(), user.id.clone()));
-            d.state.groups.insert(group.id.clone(), Arc::new(group));
-            Ok(())
-        })
+        self.change(|d| d.remove_user_from_group(group, user))
     }
 }
 
@@ -1347,21 +1376,7 @@ impl Iam {
 
     /// Detaches a managed policy (`DetachUserPolicy`, `DetachGroupPolicy`).
     pub fn detach(&self, owner: Owner<'_>, arn: &str) -> Result<()> {
-        self.change(|d| {
-            let owner = d.owner(owner)?;
-            let policy = d.policy(arn)?;
-            let id = policy.row.id.clone();
-            if !owner.attached().contains(&id) {
-                return Err(IamError::NoSuchEntity(format!(
-                    "Policy {arn} was not found."
-                )));
-            }
-            d.write(IamWrite::Detach(owner.id().to_owned(), id.clone()));
-            owner.update(d, |_, attached| {
-                attached.remove(&id);
-            });
-            Ok(())
-        })
+        self.change(|d| d.detach(owner, arn))
     }
 
     /// The managed policies attached to a user or group, by name

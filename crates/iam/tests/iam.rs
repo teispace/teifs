@@ -881,6 +881,7 @@ async fn a_change_the_database_refuses_changes_nothing() {
             path: "/".into(),
             created_ms: 0,
             boundary: None,
+            disabled: false,
         })])
         .unwrap();
     assert!(matches!(

@@ -40,10 +40,11 @@ pub use api::{Call, Reply};
 pub use bearer::metrics_token;
 pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
-    AccessKeyInfo, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo, LdapEntity,
-    LdapPolicies, LdapPolicyChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider,
-    OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo, RoleInfo, SamlProviderInfo,
-    SamlProviderUpdate, UserInfo,
+    AccessKeyInfo, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo, GroupPolicies,
+    LdapEntity, LdapPolicies, LdapPolicyChange, MinioError, MinioGroup, MinioPolicy, MinioUser,
+    MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider, OidcProviderInfo,
+    Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo, RoleInfo,
+    SamlProviderInfo, SamlProviderUpdate, UserInfo, UserPolicies,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
@@ -315,9 +316,17 @@ impl Iam {
         f(&self.inner().state)
     }
 
+    /// Looks at the state.
+    fn view<T>(&self, f: impl FnOnce(&State) -> T) -> T {
+        f(&self.inner().state)
+    }
+
     /// Makes a change: `f` changes a copy of the state and says what to write; only if
     /// the database takes all of it does the copy become the state.
-    fn change<T>(&self, f: impl FnOnce(&mut Draft<'_>) -> Result<T>) -> Result<T> {
+    fn change<T, E: From<IamError>>(
+        &self,
+        f: impl FnOnce(&mut Draft<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut inner = self.inner();
         let Inner {
             db,
@@ -334,7 +343,7 @@ impl Iam {
         };
         let out = f(&mut draft)?;
         if !draft.writes.is_empty() {
-            db.iam_apply(&draft.writes)?;
+            db.iam_apply(&draft.writes).map_err(IamError::from)?;
             *state = draft.state;
             self.publish(state, root.as_ref());
         }

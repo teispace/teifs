@@ -87,6 +87,23 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 |---|---|---|---|
 | `PUT` | `/minio/admin/v3/set-bucket-quota` | Sets `?bucket=NAME`'s hard quota in bytes (`{"size":N,"quotatype":"hard"}`, or `quota` for `size`), or clears it with none: `mc quota set` and `clear` | `admin:SetBucketQuota` |
 | `GET` | `/minio/admin/v3/get-bucket-quota` | `?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info` | `admin:GetBucketQuota` |
+| `PUT` | `/minio/admin/v3/add-user` | Makes user `?accessKey=` (an IAM user of that name, signing with a key of that id) or changes its secret and status; the body is an encrypted `AddOrUpdateUserReq`: `mc admin user add` | `admin:CreateUser`, or anyone on their own key unless denied |
+| `POST` | `/minio/admin/v3/change-my-password` | A new secret (an encrypted `AddOrUpdateUserReq`) for the access key that signs the request | `admin:ChangeMyPassword`, or anyone on their own key unless denied |
+| `DELETE` | `/minio/admin/v3/remove-user` | Deletes user `?accessKey=` with its keys, policies and memberships: `mc admin user rm` | `admin:DeleteUser` |
+| `GET` | `/minio/admin/v3/list-users` | Every user's `UserInfo` by name, encrypted: `mc admin user ls` | `admin:ListUsers` |
+| `GET` | `/minio/admin/v3/user-info` | User `?accessKey=`'s `UserInfo` (status, policies, groups): `mc admin user info` | `admin:GetUser`, or anyone on their own key unless denied |
+| `PUT` | `/minio/admin/v3/set-user-status` | Enables or disables user `?accessKey=` (`&status=enabled|disabled`); a disabled user's keys and sessions don't sign: `mc admin user enable` and `disable` | `admin:EnableUser` |
+| `PUT` | `/minio/admin/v3/update-group-members` | Adds members to a group (made if needed) or removes them, or the group when it's empty (`GroupAddRemove`): `mc admin group add` and `rm` | `admin:AddUserToGroup` |
+| `GET` | `/minio/admin/v3/group` | Group `?group=`'s `GroupDesc`: `mc admin group info` | `admin:GetGroup` |
+| `GET` | `/minio/admin/v3/groups` | Every group's name: `mc admin group ls` | `admin:ListGroups` |
+| `PUT` | `/minio/admin/v3/set-group-status` | Enables or disables group `?group=` (`&status=`); a disabled group's policies don't count: `mc admin group enable` and `disable` | `admin:EnableGroup` |
+| `PUT` | `/minio/admin/v3/add-canned-policy` | Makes policy `?name=` from the body's document or gives it a new version; a built-in name with `&overrideBuiltin=true`, and `&resetBuiltin=true` removes the override: `mc admin policy create` | `admin:CreatePolicy` |
+| `GET` | `/minio/admin/v3/info-canned-policy` | Policy `?name=`'s document, or with `&v=2` its `PolicyInfo`: `mc admin policy info` | `admin:GetPolicy` |
+| `GET` | `/minio/admin/v3/list-canned-policies` | Every policy's document by name, built-in ones included: `mc admin policy ls` | `admin:ListUserPolicies` |
+| `DELETE` | `/minio/admin/v3/remove-canned-policy` | Deletes policy `?name=`, which nothing may use: `mc admin policy rm` | `admin:DeletePolicy` |
+| `POST` | `/minio/admin/v3/idp/builtin/policy/attach` | Attaches policies to a user or group (an encrypted `PolicyAssociationReq`), answering what changed, encrypted: `mc admin policy attach` | `admin:UpdatePolicyAssociation` |
+| `POST` | `/minio/admin/v3/idp/builtin/policy/detach` | Detaches policies from a user or group, as `attach`: `mc admin policy detach` | `admin:UpdatePolicyAssociation` |
+| `GET` | `/minio/admin/v3/idp/builtin/policy-entities` | Who has which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc admin policy entities` | `admin:ListUserPolicies` |
 
 <!-- end generated -->
 

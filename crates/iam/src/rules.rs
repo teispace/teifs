@@ -55,6 +55,37 @@ pub(crate) const ROLE_SESSION: std::ops::RangeInclusive<u32> = 3600..=43_200;
 /// The longest document accepted at all, white space included.
 const DOCUMENT_LENGTH: usize = 131_072;
 
+/// An access key id given rather than made (`MinIO`'s users are named by theirs, and
+/// imports keep theirs): 3 to 128 of `[A-Za-z0-9_+.@-]` (`MinIO` takes 3 or more, without
+/// `=` or `,`), never shaped like a session's key.
+pub(crate) fn access_key_id(id: &str) -> std::result::Result<(), String> {
+    let ok = (3..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_+.@-".contains(&b));
+    if !ok {
+        return Err(format!(
+            "The access key {id:?} isn't 3 to 128 letters, digits or `_+.@-`."
+        ));
+    }
+    if crate::sessions::is_session_key(id) {
+        return Err(format!(
+            "The access key {id} is shaped like a temporary one: choose another."
+        ));
+    }
+    Ok(())
+}
+
+/// A secret key given rather than made: 8 to 128 printable characters, as `MinIO` takes
+/// (at least 8).
+pub(crate) fn secret_key(secret: &str) -> std::result::Result<(), String> {
+    if (8..=128).contains(&secret.len()) && secret.bytes().all(|b| b.is_ascii_graphic()) {
+        Ok(())
+    } else {
+        Err("A secret key is 8 to 128 printable characters.".into())
+    }
+}
+
 /// A user, group, policy or inline policy name: 1 to `max` of `[A-Za-z0-9_+=,.@-]`.
 pub(crate) fn name(what: &str, value: &str, max: usize) -> Result<()> {
     let ok = !value.is_empty()

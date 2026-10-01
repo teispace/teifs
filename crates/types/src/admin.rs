@@ -273,6 +273,9 @@ pub struct ExportedGroup {
     /// The names of the managed policies attached to it.
     #[serde(default)]
     pub attached: Vec<String>,
+    /// Whether it's disabled (`MinIO`'s group status).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 /// A user.
@@ -301,6 +304,9 @@ pub struct ExportedUser {
     /// Its access keys, oldest first.
     #[serde(default)]
     pub access_keys: Vec<ExportedKey>,
+    /// Whether it's disabled (`MinIO`'s user status).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 /// A role.

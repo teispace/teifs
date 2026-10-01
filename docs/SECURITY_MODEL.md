@@ -77,6 +77,17 @@ URL, checked when it's written.
 A bucket's quota is set and read only with `MinIO`'s admin actions
 (`admin:SetBucketQuota`, `admin:GetBucketQuota`) on that bucket, which `s3:*` doesn't
 grant, so a user who may write objects can't lift the quota that limits them.
+MinIO's user, group and policy calls are decided with its admin actions, which only a
+policy naming them grants (`s3:*` and `iam:*` don't). `add-user` sets a secret but never
+policies (its `policy` field is ignored), so `admin:CreateUser` alone can't grant
+anything; attaching needs `admin:UpdatePolicyAssociation`. A user may read itself and
+change its own secret (`user-info` and `add-user` on its own key, `change-my-password`)
+unless a policy explicitly denies it, and can't remove or disable itself; temporary
+credentials that may not manage IAM are refused, and the root key is never a user's.
+Secrets in these bodies are encrypted with the caller's secret key, as madmin encrypts
+them: any change to the stream, a reorder or a cut is refused, and a body that doesn't
+open is refused before anything changes. Argon2id's 64 MiB runs one at a time. A
+disabled user's keys and sessions don't sign, and a disabled group grants nothing.
 
 ACLs are disabled on every new bucket (Object Ownership `BucketOwnerEnforced`, as on
 AWS): a request with an ACL other than the bucket owner's full control is refused, and
@@ -114,7 +125,8 @@ MinIO's admin actions ignores its `Resource`, as on MinIO); it never
 returns secrets unless an endpoint says so and only the root user may call it: the IAM
 export with secrets (sent `Cache-Control: no-store`) and the import, which sets secrets
 and may change the account's id. An import goes through the same checks as the IAM API
-(names, documents, quotas; imported secrets must be at least 32 printable characters;
+(names, documents, quotas; imported secrets must be 8 to 128 printable characters, as
+MinIO's users' are;
 no key may take the root's id), only into an empty IAM, in one transaction. The root
 user can replace a root key the drive generated (`POST root-key`): the new key is saved
 to the owner-only credentials file first (written beside it and renamed over it), and
