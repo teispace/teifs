@@ -65,6 +65,7 @@ async fn sign_in(iam: &Iam, form: &[(&str, &str)]) -> Reply {
         context: &context,
         body: body.as_bytes(),
         request_id: "test",
+        certificates: &[],
     })
     .await
 }

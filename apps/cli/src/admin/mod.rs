@@ -443,6 +443,10 @@ async fn config(client: &Client) -> Result<(), Error> {
                 },
             ),
             ("LDAP", ldap_words(config.ldap.as_ref())),
+            (
+                "Client certificates",
+                certificate_words(config.certificates.as_ref()),
+            ),
             ("SSE-C allowed", yes_no(config.allow_sse_c)),
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),
@@ -514,6 +518,20 @@ fn ldap_words(ldap: Option<&teifs_client::LdapConfig>) -> String {
             )
         },
     )
+}
+
+/// How clients sign in with certificates, in words.
+fn certificate_words(certificates: Option<&teifs_client::CertificateConfig>) -> String {
+    match certificates {
+        None => "not taken".to_owned(),
+        Some(c) if c.skip_verify => "any issuer (not verified: for testing only)".to_owned(),
+        Some(c) => format!(
+            "issued by {} authorit{} in {}",
+            c.count,
+            if c.count == 1 { "y" } else { "ies" },
+            c.authorities
+        ),
+    }
 }
 
 /// Where the server's KMS keys are, in words.

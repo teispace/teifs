@@ -17,9 +17,9 @@ use std::{
 };
 
 use std::sync::Arc;
-use teifs_iam::{Iam, RootKey};
+use teifs_iam::{CertificateDer, Iam, RootKey, certificate::CertificateSignIn};
 use teifs_s3::Options;
-use teifs_types::admin::{KmsConfig, LdapConfig, NotifyTarget, ServerConfig};
+use teifs_types::admin::{CertificateConfig, KmsConfig, LdapConfig, NotifyTarget, ServerConfig};
 
 use teifs_store::{BucketEncryption, Layout, Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
@@ -41,7 +41,7 @@ pub use teifs_notify::{
 };
 pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
-pub use tls::{Tls, TlsError, TlsSource};
+pub use tls::{Tls, TlsError, TlsSource, read_authorities};
 
 /// How to serve a drive.
 #[derive(Debug, Clone)]
@@ -111,6 +111,19 @@ pub struct Config {
     /// The LDAP directory users sign in with (`AssumeRoleWithLDAPIdentity`); none by
     /// default.
     pub ldap: Option<LdapSettings>,
+    /// Sign in clients with certificates (`AssumeRoleWithCertificate`); needs `tls`.
+    /// None by default.
+    pub client_certificates: Option<ClientCertificates>,
+}
+
+/// How clients sign in with certificates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientCertificates {
+    /// The CA certificates (PEM: a file, or a folder of files) that must have issued
+    /// them; by default the certificates folder's `CAs`, as MinIO has it.
+    pub authorities: Option<PathBuf>,
+    /// Take any certificate, whoever issued it: for testing only.
+    pub skip_verify: bool,
 }
 
 /// How often the directory is asked about LDAP users with live sessions, whose sessions
@@ -159,6 +172,9 @@ pub enum ServerError {
     /// The LDAP settings are wrong.
     #[error("the LDAP settings are wrong: {0}")]
     Ldap(String),
+    /// Client certificates can't sign in as asked.
+    #[error("client certificates can't sign in: {0}")]
+    ClientCertificates(String),
     /// The audit log couldn't be opened.
     #[error("can't open the audit log {target}: {source}")]
     Audit {
@@ -373,19 +389,25 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
             group_bases: ldap.group_bases.clone(),
             group_filter: ldap.group_filter.clone(),
         }),
+        certificates: None,
     }
 }
 
-/// Opens the drive's IAM, signing users in with `directory` if there's one.
+/// Opens the drive's IAM, signing users in with `directory` and client certificates as
+/// `certificates` says, if they do.
 async fn open_iam(
     store: &Store,
     kms: &dyn teifs_store::Kms,
     root: RootKey,
     directory: Option<Directory>,
+    certificates: Option<CertificateSignIn>,
 ) -> Result<Iam, ServerError> {
-    let iam = Iam::open(&store.system_db(), &store.format().drive, kms, Some(root))
+    let mut iam = Iam::open(&store.system_db(), &store.format().drive, kms, Some(root))
         .await
         .map_err(ServerError::Iam)?;
+    if let Some(certificates) = certificates {
+        iam = iam.with_certificates(certificates);
+    }
     let Some(directory) = directory else {
         return Ok(iam);
     };
@@ -394,6 +416,70 @@ async fn open_iam(
         tracing::warn!(error = %err, "the LDAP directory can't be used yet");
     }
     Ok(iam.with_ldap(directory))
+}
+
+/// How client certificates sign in, if they do, and how the admin API shows it.
+fn client_certificates(
+    config: &Config,
+) -> Result<Option<(CertificateSignIn, CertificateConfig)>, ServerError> {
+    config
+        .client_certificates
+        .as_ref()
+        .map(|asked| {
+            asked
+                .sign_in(config.tls.as_ref())
+                .map(|(sign_in, shown, _)| (sign_in, shown))
+        })
+        .transpose()
+        .map_err(ServerError::ClientCertificates)
+}
+
+impl ClientCertificates {
+    /// How clients sign in with certificates when the server's own come from `tls`:
+    /// whom they're trusted from, how the admin API shows it, and the authorities'
+    /// certificates.
+    ///
+    /// # Errors
+    /// Why they can't: no HTTPS, no authority (unless verification is off), or
+    /// authorities that can't be read.
+    pub fn sign_in(
+        &self,
+        tls: Option<&TlsSource>,
+    ) -> Result<
+        (
+            CertificateSignIn,
+            CertificateConfig,
+            Vec<CertificateDer<'static>>,
+        ),
+        String,
+    > {
+        let Some(source) = tls else {
+            return Err("they come over HTTPS: give the server certificates too".into());
+        };
+        let path = self.authorities.clone().or_else(|| source.authorities());
+        let roots = match &path {
+            Some(path) if self.authorities.is_some() || path.exists() => {
+                read_authorities(path).map_err(|e| e.to_string())?
+            }
+            _ => Vec::new(),
+        };
+        if roots.is_empty() && !self.skip_verify {
+            return Err(match &path {
+                Some(path) => format!(
+                    "no authority issues them: put CA certificates in {}, or name them",
+                    path.display()
+                ),
+                None => "no authority issues them: name the CA certificates".into(),
+            });
+        }
+        let sign_in = CertificateSignIn::new(&roots, self.skip_verify)?;
+        let shown = CertificateConfig {
+            authorities: path.map(|p| p.display().to_string()).unwrap_or_default(),
+            count: roots.len(),
+            skip_verify: self.skip_verify,
+        };
+        Ok((sign_in, shown, roots))
+    }
 }
 
 /// Listens on `address`: the listener, and the address it got (its port, for port 0).
@@ -411,10 +497,11 @@ impl Server {
         let tls = config
             .tls
             .clone()
-            .map(Tls::load)
+            .map(|source| Tls::load_with(source, config.client_certificates.is_some()))
             .transpose()
             .map_err(ServerError::Tls)?
             .map(Arc::new);
+        let (certificates, shown_certificates) = client_certificates(&config)?.unzip();
         let directory = config
             .ldap
             .clone()
@@ -423,7 +510,8 @@ impl Server {
             .map_err(ServerError::Ldap)?;
         let (store, kms, location) = open_drive(&config).await?;
         let (listener, listen) = listen(config.listen).await?;
-        let admin_config = admin_config(&config, &location, listen);
+        let mut admin_config = admin_config(&config, &location, listen);
+        admin_config.certificates = shown_certificates;
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
             config.credentials.is_none().then(|| {
                 Arc::new(credentials::DriveKeys {
@@ -439,7 +527,7 @@ impl Server {
             access_key: credentials.access_key,
             secret: Zeroizing::new(credentials.secret_key),
         };
-        let iam = Arc::new(open_iam(&store, kms.as_ref(), root, directory).await?);
+        let iam = Arc::new(open_iam(&store, kms.as_ref(), root, directory, certificates).await?);
         let (audit, audit_writers) = start_audit(&config.audit)?;
         let notifier = Arc::new(
             Notifier::start(&store.events_db(), config.notify).map_err(ServerError::Notify)?,

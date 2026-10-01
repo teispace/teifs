@@ -4253,6 +4253,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "teifs-crypto",
@@ -4266,6 +4267,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+ "x509-parser",
  "zeroize",
 ]
 

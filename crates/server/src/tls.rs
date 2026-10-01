@@ -15,10 +15,14 @@ use std::{
 };
 
 use rustls::{
-    ServerConfig,
+    DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
     crypto::CryptoProvider,
-    pki_types::{CertificateDer, DnsName, PrivateKeyDer, pem::PemObject},
-    server::{ClientHello, ResolvesServerCert},
+    pki_types::{CertificateDer, DnsName, PrivateKeyDer, UnixTime, pem::PemObject},
+    server::{
+        ClientHello, ResolvesServerCert,
+        danger::{ClientCertVerified, ClientCertVerifier},
+    },
     sign::CertifiedKey,
 };
 
@@ -135,17 +139,27 @@ struct Stamps {
 impl Tls {
     /// Loads the certificates: every one must load, its key must match it.
     pub fn load(source: TlsSource) -> Result<Self, TlsError> {
+        Self::load_with(source, false)
+    }
+
+    /// [`Self::load`]; with `client_certificates`, clients are asked for a certificate
+    /// too (`AssumeRoleWithCertificate`), which they needn't send.
+    pub fn load_with(source: TlsSource, client_certificates: bool) -> Result<Self, TlsError> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let (certs, stamp) = read(&source, &provider)?;
         let certs = Arc::new(RwLock::new(Arc::new(certs)));
-        let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
             .map_err(|e| TlsError::Invalid {
                 path: PathBuf::new(),
                 message: e.to_string(),
-            })?
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(Resolver(Arc::clone(&certs))));
+            })?;
+        let builder = if client_certificates {
+            builder.with_client_cert_verifier(Arc::new(AnyClientCertificate(Arc::clone(&provider))))
+        } else {
+            builder.with_no_client_auth()
+        };
+        let mut config = builder.with_cert_resolver(Arc::new(Resolver(Arc::clone(&certs))));
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(Self {
             source,
@@ -194,6 +208,68 @@ impl Tls {
                 Err(err)
             }
         }
+    }
+}
+
+/// Asks clients for a certificate without requiring one, and takes any: who issued it is
+/// checked when it signs in (`AssumeRoleWithCertificate`), as MinIO does, so a client
+/// with an unrelated certificate still connects. The handshake still proves the client
+/// holds the certificate's key.
+#[derive(Debug)]
+struct AnyClientCertificate(Arc<CryptoProvider>);
+
+impl ClientCertVerifier for AnyClientCertificate {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -263,6 +339,62 @@ impl TlsSource {
             })
             .collect()
     }
+}
+
+impl TlsSource {
+    /// Where MinIO keeps the authorities client certificates are checked against: the
+    /// certificates folder's `CAs`. None for a certificate given as files.
+    #[must_use]
+    pub fn authorities(&self) -> Option<PathBuf> {
+        match self {
+            Self::Dir(dir) => Some(dir.join("CAs")),
+            Self::Files { .. } => None,
+        }
+    }
+}
+
+/// The PEM certificates in `path`: a file, or every file in a folder (not in its
+/// subfolders, nor those whose names start with `.`).
+pub fn read_authorities(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+    let unreadable = |path: &Path, source| TlsError::Read {
+        path: path.to_owned(),
+        source,
+    };
+    let files = if path.is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| unreadable(path, e))? {
+            let file = entry.map_err(|e| unreadable(path, e))?.path();
+            let hidden = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_none_or(|n| n.starts_with('.'));
+            if !hidden && file.is_file() {
+                files.push(file);
+            }
+        }
+        files.sort();
+        files
+    } else {
+        vec![path.to_owned()]
+    };
+    let mut found = Vec::new();
+    for file in files {
+        let pem = fs::read(&file).map_err(|e| unreadable(&file, e))?;
+        let certificates = CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TlsError::Invalid {
+                path: file.clone(),
+                message: format!("isn't a PEM certificate: {e}"),
+            })?;
+        if certificates.is_empty() {
+            return Err(TlsError::Invalid {
+                path: file,
+                message: "has no PEM certificate".into(),
+            });
+        }
+        found.extend(certificates);
+    }
+    Ok(found)
 }
 
 /// The certificate and key in `dir`, if it has both.
@@ -464,6 +596,60 @@ mod tests {
             .certificates()
             .unwrap_err();
         assert!(err.to_string().contains("has no PEM certificate"), "{err}");
+    }
+
+    #[test]
+    fn clients_are_asked_for_a_certificate_and_must_hold_its_key() {
+        let verifier =
+            AnyClientCertificate(Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+        assert!(verifier.offer_client_auth());
+        assert!(!verifier.client_auth_mandatory());
+        assert!(verifier.root_hint_subjects().is_empty());
+        assert!(!verifier.supported_verify_schemes().is_empty());
+        let pem = issue(&["client.test"]).0;
+        let cert = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
+        // Any issuer: it's checked when it signs in.
+        assert!(
+            verifier
+                .verify_client_cert(&cert, &[], UnixTime::now())
+                .is_ok()
+        );
+        let config = Tls::load_with(
+            TlsSource::Files {
+                cert: PathBuf::from("/nonexistent"),
+                key: PathBuf::from("/nonexistent"),
+            },
+            true,
+        );
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn authorities_come_from_a_file_or_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            TlsSource::Dir(dir.path().to_owned()).authorities(),
+            Some(dir.path().join("CAs"))
+        );
+        let files = TlsSource::Files {
+            cert: dir.path().join("c"),
+            key: dir.path().join("k"),
+        };
+        assert_eq!(files.authorities(), None);
+        let cas = dir.path().join("CAs");
+        fs::create_dir_all(cas.join("sub")).unwrap();
+        let (a, b) = (issue(&["a.test"]).0, issue(&["b.test"]).0);
+        fs::write(cas.join("a.crt"), format!("{a}{b}")).unwrap();
+        fs::write(cas.join("b.pem"), &b).unwrap();
+        fs::write(cas.join(".hidden"), "nonsense").unwrap();
+        fs::write(cas.join("sub/c.crt"), "nonsense").unwrap();
+        assert_eq!(read_authorities(&cas).unwrap().len(), 3);
+        assert_eq!(read_authorities(&cas.join("b.pem")).unwrap().len(), 1);
+        fs::write(cas.join("c.txt"), "nonsense").unwrap();
+        let err = read_authorities(&cas).unwrap_err().to_string();
+        assert!(err.contains("c.txt: has no PEM certificate"), "{err}");
+        let err = read_authorities(&dir.path().join("missing")).unwrap_err();
+        assert!(err.to_string().starts_with("can't read"), "{err}");
     }
 
     #[test]

@@ -81,6 +81,9 @@ pub enum SessionKind {
     /// MinIO's `AssumeRoleWithLDAPIdentity`: the managed policies mapped to the
     /// directory user and its groups, narrowed by the session policy if there is one.
     Ldap,
+    /// MinIO's `AssumeRoleWithCertificate`: the managed policy a client certificate's
+    /// common name names, narrowed by the session policy if there is one.
+    Certificate,
 }
 
 impl Session {
@@ -120,7 +123,11 @@ impl Session {
     pub const fn may_manage(&self) -> bool {
         matches!(
             self.kind,
-            SessionKind::Role { .. } | SessionKind::User | SessionKind::Web | SessionKind::Ldap
+            SessionKind::Role { .. }
+                | SessionKind::User
+                | SessionKind::Web
+                | SessionKind::Ldap
+                | SessionKind::Certificate
         )
     }
 }
@@ -632,6 +639,9 @@ impl Snapshot {
             } => {
                 self.ldap_identity(dn, username, *generation, session(SessionKind::Ldap, false))?
             }
+            Who::Certificate { cn, policy } => {
+                self.certificate_identity(cn, policy, session(SessionKind::Certificate, false))
+            }
             Who::Federated { user, name } => {
                 let (policies, boundary, tags) = match user {
                     Some(user) => {
@@ -653,10 +663,6 @@ impl Snapshot {
         })
     }
 
-    /// Whom MinIO's `AssumeRoleWithWebIdentity` without a role makes a session for:
-    /// the web identity `sub` of the provider with unique id `provider`, with the
-    /// managed policies (by unique id) its token named. A deleted provider takes its
-    /// sessions with it; a deleted policy only its own permissions.
     /// An LDAP user's session: the policies mapped to its DN and to its groups' as the
     /// directory last said, while it's of the user's current generation.
     fn ldap_identity(
@@ -693,6 +699,24 @@ impl Snapshot {
         })
     }
 
+    /// A client certificate's session: the managed policy (by unique id) its common name
+    /// named, while it exists.
+    fn certificate_identity(&self, cn: &str, policy: &str, base: Session) -> Identity {
+        Identity {
+            principal: Principal::federated(&self.account, cn),
+            root: false,
+            tags: Box::default(),
+            policies: self.managed.get(policy).cloned().into_iter().collect(),
+            boundary: None,
+            entity: None,
+            session: Some(base),
+        }
+    }
+
+    /// Whom MinIO's `AssumeRoleWithWebIdentity` without a role makes a session for:
+    /// the web identity `sub` of the provider with unique id `provider`, with the
+    /// managed policies (by unique id) its token named. A deleted provider takes its
+    /// sessions with it; a deleted policy only its own permissions.
     fn web_identity(
         &self,
         provider: &str,

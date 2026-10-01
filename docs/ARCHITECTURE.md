@@ -186,6 +186,16 @@ recorded user's groups and bumps the generation of one the directory lost, which
 its sessions. `ldap/fake.rs` (ldap3_proto, behind the `fake-ldap` feature) is a small
 LDAP server for tests.
 
+MinIO's `AssumeRoleWithCertificate` (`certificate.rs`, `api/sts/certificate.rs`) is the
+third. The server's TLS (`crates/server/src/tls.rs`) asks for a client certificate without
+requiring one and takes any (rustls still checks the handshake signature); `serve.rs`
+hands the chain to the S3 service, which puts it on each request as
+`ClientCertificates`, and `iam_api.rs` passes it in `Call::certificates`.
+`CertificateSignIn::check` (rustls-webpki, x509-parser) checks the chain against the
+authorities read at start, and the action issues `Who::Certificate { cn, policy }`, the
+policy by unique id. MinIO's clients send the parameters in the query with no body,
+which `iam_api.rs` takes as the form.
+
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
 derived from the id under the IAM key (HKDF, then HMAC), so a signature can be checked

@@ -29,7 +29,7 @@ use aws_sigv4::{
 use reqwest::{Method, Url, header::CONTENT_TYPE};
 use rustls::{
     ClientConfig, RootCertStore,
-    pki_types::{CertificateDer, pem::PemObject},
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
 use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
@@ -40,9 +40,9 @@ use teifs_types::admin::{
     MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
 };
 pub use teifs_types::admin::{
-    AdminError, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
-    ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion, IamExport,
-    ImportReport, JobInfo, KmsConfig, LdapConfig, LdapPolicyChanged, LdapPolicyMapping,
+    AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
+    ExportedBucket, ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion,
+    IamExport, ImportReport, JobInfo, KmsConfig, LdapConfig, LdapPolicyChanged, LdapPolicyMapping,
     LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
@@ -78,6 +78,15 @@ pub enum ClientError {
     /// A certificate authority to trust isn't PEM certificates.
     #[error("the CA certificate isn't usable: {0}")]
     Certificate(String),
+    /// The client certificate or its key isn't usable.
+    #[error("the client certificate isn't usable: {0}")]
+    ClientCertificate(String),
+}
+
+/// A client certificate and its key, presented when connecting over TLS.
+struct Identity {
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
 }
 
 impl ClientError {
@@ -101,6 +110,10 @@ pub struct Client {
     /// Temporary credentials' session token.
     session_token: Option<Zeroizing<String>>,
     region: String,
+    /// The certificate authorities trusted besides the system's.
+    roots: Vec<CertificateDer<'static>>,
+    /// The certificate presented, if one is.
+    identity: Option<Arc<Identity>>,
 }
 
 impl fmt::Debug for Client {
@@ -139,6 +152,8 @@ impl Client {
             secret,
             session_token: None,
             region: DEFAULT_REGION.to_owned(),
+            roots: Vec::new(),
+            identity: None,
         })
     }
 
@@ -152,24 +167,56 @@ impl Client {
         if certificates.is_empty() {
             return Err(ClientError::Certificate("no certificate in it".into()));
         }
+        self.roots = certificates;
+        self.rebuild_tls()?;
+        Ok(self)
+    }
+
+    /// Presents a client certificate when connecting: `cert` holds it (with the
+    /// intermediate CAs after it) and `key` its private key, PEM. For
+    /// [`Self::assume_role_with_certificate`].
+    pub fn with_client_certificate(mut self, cert: &[u8], key: &[u8]) -> Result<Self, ClientError> {
+        let invalid = |e: &dyn std::fmt::Display| ClientError::ClientCertificate(e.to_string());
+        let chain = CertificateDer::pem_slice_iter(cert)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| invalid(&e))?;
+        if chain.is_empty() {
+            return Err(ClientError::ClientCertificate(
+                "no certificate in it".into(),
+            ));
+        }
+        let key = PrivateKeyDer::from_pem_slice(key).map_err(|e| invalid(&e))?;
+        self.identity = Some(Arc::new(Identity { chain, key }));
+        self.rebuild_tls()?;
+        Ok(self)
+    }
+
+    /// Connects with the trusted authorities and the client certificate as they are now.
+    fn rebuild_tls(&mut self) -> Result<(), ClientError> {
+        let invalid = |e: &dyn std::fmt::Display| ClientError::Certificate(e.to_string());
         // Checked as the AWS SDKs' clients check it (webpki, the system's authorities as
         // rustls-native-certs finds them), so an alias's servers pass or fail alike.
         let mut roots = RootCertStore::empty();
         roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        for certificate in certificates {
-            roots.add(certificate).map_err(|e| invalid(&e))?;
+        for certificate in &self.roots {
+            roots.add(certificate.clone()).map_err(|e| invalid(&e))?;
         }
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let tls = ClientConfig::builder_with_provider(provider)
+        let builder = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|e| invalid(&e))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+            .with_root_certificates(roots);
+        let tls = match &self.identity {
+            Some(identity) => builder
+                .with_client_auth_cert(identity.chain.clone(), identity.key.clone_key())
+                .map_err(|e| ClientError::ClientCertificate(e.to_string()))?,
+            None => builder.with_no_client_auth(),
+        };
         self.http = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .build()
             .map_err(|e| invalid(&e))?;
-        Ok(self)
+        Ok(())
     }
 
     /// Signs with temporary credentials: the key is theirs, and this their session
@@ -321,28 +368,35 @@ impl Client {
             .body(body.as_bytes().to_vec())
             .send()
             .await?;
-        let status = response.status();
-        let bytes = response.bytes().await?;
-        if !status.is_success() {
-            return Err(api_error(status, &bytes));
+        temporary_credentials(response).await
+    }
+
+    /// Temporary credentials for whoever holds the client certificate this client
+    /// presents ([`Self::with_client_certificate`]), with the policy its subject common
+    /// name names, narrowed by the session `policy` if there's one, for `seconds` (an
+    /// hour by default; never past the certificate's expiry). Sent unsigned, with the
+    /// parameters in the query, as MinIO's clients send it (MinIO's
+    /// `AssumeRoleWithCertificate`).
+    pub async fn assume_role_with_certificate(
+        &self,
+        policy: Option<&str>,
+        seconds: Option<i32>,
+    ) -> Result<TemporaryCredentials, ClientError> {
+        let mut url = self.endpoint.clone();
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("Action", "AssumeRoleWithCertificate")
+                .append_pair("Version", "2011-06-15");
+            if let Some(policy) = policy {
+                query.append_pair("Policy", policy);
+            }
+            if let Some(seconds) = seconds {
+                query.append_pair("DurationSeconds", &seconds.to_string());
+            }
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let field = |name: &str| {
-            xml_element(&text, name)
-                .ok_or_else(|| ClientError::Answer(format!("the answer has no {name}")))
-        };
-        let expiration = field("Expiration")?;
-        Ok(TemporaryCredentials {
-            access_key: field("AccessKeyId")?,
-            secret_key: Zeroizing::new(field("SecretAccessKey")?),
-            session_token: Zeroizing::new(field("SessionToken")?),
-            expires: time::OffsetDateTime::parse(
-                &expiration,
-                &time::format_description::well_known::Rfc3339,
-            )
-            .map_err(|_| ClientError::Answer(format!("the expiration {expiration} isn't a date")))?
-            .into(),
-        })
+        let response = self.http.post(url).send().await?;
+        temporary_credentials(response).await
     }
 
     /// The drive's metadata snapshots, oldest first (`teifs:ListSnapshots`).
@@ -579,6 +633,34 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
         message: element("Message").unwrap_or_default(),
         request_id: element("RequestId"),
     }
+}
+
+/// The temporary credentials an STS answer gives, or its error.
+async fn temporary_credentials(
+    response: reqwest::Response,
+) -> Result<TemporaryCredentials, ClientError> {
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        return Err(api_error(status, &bytes));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let field = |name: &str| {
+        xml_element(&text, name)
+            .ok_or_else(|| ClientError::Answer(format!("the answer has no {name}")))
+    };
+    let expiration = field("Expiration")?;
+    Ok(TemporaryCredentials {
+        access_key: field("AccessKeyId")?,
+        secret_key: Zeroizing::new(field("SecretAccessKey")?),
+        session_token: Zeroizing::new(field("SessionToken")?),
+        expires: time::OffsetDateTime::parse(
+            &expiration,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_err(|_| ClientError::Answer(format!("the expiration {expiration} isn't a date")))?
+        .into(),
+    })
 }
 
 /// The text of the first `<name>` element in `text`, unescaped: enough for the flat

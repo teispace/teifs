@@ -54,7 +54,7 @@ use s3s::{
 use teifs_iam::Iam;
 use teifs_store::{Layout, Store};
 
-pub use access::Client;
+pub use access::{Client, ClientCertificates};
 pub use access_log::{DEFAULT_INTERVAL as DEFAULT_ACCESS_LOG_INTERVAL, Worker as AccessLogWorker};
 pub use admin::RootKeyStore;
 pub use audit::{AuditSink, REDACTED};

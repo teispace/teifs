@@ -10,6 +10,7 @@
 
 mod api;
 mod bearer;
+pub mod certificate;
 mod ids;
 pub mod ldap;
 mod oidc;
@@ -37,6 +38,7 @@ pub use ops::{
     NewAccessKey, NewOidcProvider, NewRole, OidcProviderInfo, Owner, PolicyInfo, PolicyVersionInfo,
     RoleInfo, UserInfo,
 };
+pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
 pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};
 
@@ -134,6 +136,8 @@ pub struct Iam {
     web_keys: oidc::KeyCache,
     /// The LDAP directory users sign in with, if there's one.
     ldap: Option<Arc<ldap::Directory>>,
+    /// Whom client certificates are trusted from, if they sign in at all.
+    certificates: Option<Arc<certificate::CertificateSignIn>>,
 }
 
 struct Inner {
@@ -201,6 +205,7 @@ impl Iam {
             snapshot: RwLock::new(Arc::new(snapshot)),
             web_keys: oidc::KeyCache::default(),
             ldap: None,
+            certificates: None,
         })
     }
 
@@ -209,6 +214,20 @@ impl Iam {
     pub fn with_ldap(mut self, directory: ldap::Directory) -> Self {
         self.ldap = Some(Arc::new(directory));
         self
+    }
+
+    /// Signs in whoever connects with a client certificate `sign_in` trusts
+    /// (`AssumeRoleWithCertificate`).
+    #[must_use]
+    pub fn with_certificates(mut self, sign_in: certificate::CertificateSignIn) -> Self {
+        self.certificates = Some(Arc::new(sign_in));
+        self
+    }
+
+    /// Whom client certificates are trusted from, if they sign in at all.
+    #[must_use]
+    pub fn certificate_sign_in(&self) -> Option<&Arc<certificate::CertificateSignIn>> {
+        self.certificates.as_ref()
     }
 
     /// The LDAP directory users sign in with, if there's one.

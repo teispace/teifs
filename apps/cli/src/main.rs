@@ -30,9 +30,9 @@ mod verify;
 
 use clap::{Parser, Subcommand};
 use teifs_server::{
-    Acks, Amqp, AuditTarget, AwsCredentials, Compression, Config, Credentials, Durability,
-    Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl, KeyRules,
-    KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres, ProxyHeader, Redis,
+    Acks, Amqp, AuditTarget, AwsCredentials, ClientCertificates, Compression, Config, Credentials,
+    Durability, Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl,
+    KeyRules, KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres, ProxyHeader, Redis,
     SaslMechanism, Server, ServerKey, Sns, Sqs, TargetConfig, TargetKind, TlsSource,
     TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
@@ -220,6 +220,19 @@ pub(crate) struct ServeArgs {
     kms: kms::KmsArgs,
     #[command(flatten)]
     ldap: ldap::LdapArgs,
+    /// Sign in clients that connect with a certificate (MinIO's
+    /// `AssumeRoleWithCertificate`): the session has the policy the certificate's subject
+    /// common name names. Needs HTTPS. MinIO's `MINIO_IDENTITY_TLS_ENABLE=on` works too.
+    #[arg(long, env = "TEIFS_IDENTITY_TLS")]
+    identity_tls: bool,
+    /// The CA certificates (PEM: a file, or a folder of them) that must have issued
+    /// client certificates (default: the certificates folder's `CAs`, as MinIO has it).
+    #[arg(long, env = "TEIFS_IDENTITY_TLS_CA", value_name = "PATH")]
+    identity_tls_ca: Option<PathBuf>,
+    /// Take any client certificate, whoever issued it: for testing only. MinIO's
+    /// `MINIO_IDENTITY_TLS_SKIP_VERIFY=on` works too.
+    #[arg(long, env = "TEIFS_IDENTITY_TLS_SKIP_VERIFY")]
+    identity_tls_skip_verify: bool,
     /// Allow SSE-C (customer-provided keys) on buckets that don't set it themselves;
     /// AWS blocks it by default since April 2026.
     #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
@@ -1555,6 +1568,26 @@ fn parse_network(text: &str) -> Result<String, String> {
     Ok(text.trim().to_owned())
 }
 
+/// How `serve` signs in clients with certificates, if it does: `--identity-tls`,
+/// `--identity-tls-ca` and `--identity-tls-skip-verify` as given; `env` reads MinIO's
+/// variables.
+fn client_certificates(
+    (enable, authorities, skip): (bool, Option<PathBuf>, bool),
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<ClientCertificates>, String> {
+    let on = |name: &str| env(name).is_some_and(|v| v.eq_ignore_ascii_case("on"));
+    if !(enable || on("MINIO_IDENTITY_TLS_ENABLE")) {
+        if authorities.is_some() || skip {
+            return Err("identity-tls-ca and identity-tls-skip-verify need --identity-tls".into());
+        }
+        return Ok(None);
+    }
+    Ok(Some(ClientCertificates {
+        authorities,
+        skip_verify: skip || on("MINIO_IDENTITY_TLS_SKIP_VERIFY"),
+    }))
+}
+
 /// Where `serve`'s certificates come from, if it serves HTTPS.
 fn tls_source(args: &ServeArgs) -> Result<Option<TlsSource>, String> {
     match (&args.tls_cert, &args.tls_key, &args.certs_dir) {
@@ -1572,6 +1605,14 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
     let ldap = args.ldap.settings().map_err(|e| e.to_string())?;
+    let client_certificates = client_certificates(
+        (
+            args.identity_tls,
+            args.identity_tls_ca.clone(),
+            args.identity_tls_skip_verify,
+        ),
+        |name| std::env::var(name).ok(),
+    )?;
     let credentials = match &keys {
         Some(keys) => Some(Credentials {
             access_key: keys.access.clone(),
@@ -1633,6 +1674,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             max_connections: args.max_connections,
         },
         ldap,
+        client_certificates,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -2000,6 +2042,38 @@ mod tests {
         };
         assert!(sent.token.is_none());
         assert!(audit_targets(None, None, env("t0ken")).is_empty());
+    }
+
+    #[test]
+    fn client_certificates_follow_the_flags_or_minio_s_variables() {
+        let none = |_: &str| None;
+        assert_eq!(client_certificates((false, None, false), none), Ok(None));
+        let err = client_certificates((false, Some("ca".into()), false), none).unwrap_err();
+        assert!(err.contains("need --identity-tls"), "{err}");
+        assert!(client_certificates((false, None, true), none).is_err());
+        assert_eq!(
+            client_certificates((true, Some("ca".into()), false), none),
+            Ok(Some(ClientCertificates {
+                authorities: Some("ca".into()),
+                skip_verify: false
+            }))
+        );
+        let minio = |name: &str| {
+            matches!(
+                name,
+                "MINIO_IDENTITY_TLS_ENABLE" | "MINIO_IDENTITY_TLS_SKIP_VERIFY"
+            )
+            .then(|| "On".to_owned())
+        };
+        assert_eq!(
+            client_certificates((false, None, false), minio),
+            Ok(Some(ClientCertificates {
+                authorities: None,
+                skip_verify: true
+            }))
+        );
+        let off = |_: &str| Some("off".to_owned());
+        assert_eq!(client_certificates((false, None, false), off), Ok(None));
     }
 
     /// A CA's PEM file, and a client certificate's and key's, in `dir`.

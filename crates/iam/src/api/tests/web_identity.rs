@@ -631,6 +631,7 @@ async fn unsigned_requests_fetch_the_providers_keys_first() {
         context: &context,
         body: body.as_bytes(),
         request_id: "req-1",
+        certificates: &[],
     };
     let answer = ok(d.iam.serve_self_proving(&call).await, &body);
     assert!(
@@ -874,6 +875,7 @@ async fn providers_are_reached_through_the_certificates_they_pin() {
             context: &context,
             body: body.as_bytes(),
             request_id: "req-1",
+            certificates: &[],
         };
         let reply = d.iam.serve_self_proving(&call).await;
         if reached {

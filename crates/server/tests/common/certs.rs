@@ -7,7 +7,10 @@ use aws_smithy_http_client::{
     Builder,
     tls::{self, TlsContext, TrustStore, rustls_provider::CryptoMode},
 };
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose,
+};
 use rustls::{
     ClientConfig, RootCertStore,
     pki_types::{CertificateDer, ServerName},
@@ -96,6 +99,24 @@ impl Authority {
         }
     }
 
+    /// A client certificate for `cn` (`AssumeRoleWithCertificate`), valid for 30 days.
+    #[allow(dead_code, reason = "not every test binary uses it")]
+    pub fn issue_client(&self, cn: &str) -> Issued {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        date_from_now(&mut params, 30);
+        let key = KeyPair::generate().unwrap();
+        let issuer = Issuer::from_params(&self.params, &self.key);
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        Issued {
+            cert: cert.pem(),
+            key: key.serialize_pem(),
+            der: cert.der().clone(),
+        }
+    }
+
     /// Issues a certificate for `names` into `dir` as `public.crt` and `private.key`.
     pub fn issue_into(&self, dir: &Path, names: &[&str]) -> Issued {
         fs::create_dir_all(dir).unwrap();
@@ -137,6 +158,24 @@ impl Authority {
 
     /// An S3 client for `server` that trusts this authority.
     pub fn client(&self, server: &super::Server) -> aws_sdk_s3::Client {
+        self.client_with(
+            server,
+            aws_sdk_s3::config::Credentials::new(
+                super::ACCESS_KEY,
+                super::SECRET_KEY,
+                None,
+                None,
+                "tests",
+            ),
+        )
+    }
+
+    /// [`Self::client`], signing with `credentials`.
+    pub fn client_with(
+        &self,
+        server: &super::Server,
+        credentials: aws_sdk_s3::config::Credentials,
+    ) -> aws_sdk_s3::Client {
         let http = Builder::new()
             .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
             .tls_context(
@@ -154,13 +193,7 @@ impl Authority {
             .behavior_version_latest()
             .region(aws_sdk_s3::config::Region::new("us-east-1"))
             .endpoint_url(&server.endpoint)
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                super::ACCESS_KEY,
-                super::SECRET_KEY,
-                None,
-                None,
-                "tests",
-            ))
+            .credentials_provider(credentials)
             .force_path_style(true)
             .http_client(http)
             .build();

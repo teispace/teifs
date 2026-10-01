@@ -16,6 +16,7 @@ mod sts;
 mod users;
 mod xml;
 
+use rustls::pki_types::CertificateDer;
 use teifs_policy::{Context, IamKey, TagKind};
 use zeroize::Zeroizing;
 
@@ -42,6 +43,9 @@ pub struct Call<'a> {
     pub body: &'a [u8],
     /// The id the answer gives the request.
     pub request_id: &'a str,
+    /// The certificates the client sent when it connected over TLS, if it sent any: what
+    /// `AssumeRoleWithCertificate` signs in with.
+    pub certificates: &'a [CertificateDer<'static>],
 }
 
 /// An answer: its HTTP status and XML body.
@@ -95,14 +99,15 @@ impl Iam {
     }
 
     /// Whether a form is an STS request that carries its own proof of who is asking (a
-    /// web identity token, or MinIO's LDAP user name and password): it's answered
+    /// web identity token, MinIO's LDAP user name and password, or the connection's
+    /// client certificate): it's answered
     /// whether it's signed or not, as on AWS, and whoever signed it has no part in it.
     #[must_use]
     pub fn proves_itself(body: &[u8]) -> bool {
         Params::parse(body).is_ok_and(|p| {
             matches!(
                 p.optional("Action"),
-                Some(sts::WEB_IDENTITY | sts::LDAP_IDENTITY)
+                Some(sts::WEB_IDENTITY | sts::LDAP_IDENTITY | sts::CERTIFICATE)
             )
         })
     }
@@ -151,6 +156,7 @@ impl Iam {
             p: params,
             account: self.account(),
             ldap: None,
+            certificates: call.certificates,
         };
         let request = sts::ldap_request(&run).ok()?;
         Some((
@@ -173,6 +179,7 @@ impl Iam {
             p: params,
             account: self.account(),
             ldap,
+            certificates: call.certificates,
         };
         (action.run)(&run).map(|result| (action.name, result))
     }
@@ -576,6 +583,8 @@ struct Run<'a> {
     /// What the directory said of an LDAP sign-in, which only
     /// [`Iam::serve_self_proving`] asks.
     ldap: Option<&'a Result<SignedIn, LdapError>>,
+    /// The client's certificates, from [`Call::certificates`].
+    certificates: &'a [CertificateDer<'static>],
 }
 
 impl Run<'_> {

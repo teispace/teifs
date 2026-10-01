@@ -55,11 +55,13 @@ a table, authorizes it and answers in AWS's XML.
    Every action that issues credentials takes `min_token_size(r)?` and issues with
    `Iam::issue_at_least`, so `MinimumSessionTokenSize` works everywhere.
    An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`,
-   MinIO's `AssumeRoleWithLDAPIdentity`) is answered unsigned: `Iam::proves_itself`
+   MinIO's `AssumeRoleWithLDAPIdentity` and `AssumeRoleWithCertificate`) is answered
+   unsigned: `Iam::proves_itself`
    picks it out in `crates/s3/src/iam_api.rs`, and `Iam::serve_self_proving` does the
    async part (fetching the provider's keys, signing in with the directory) before the
    sync handler runs as the anonymous identity; the directory's answer reaches the
-   handler as `Run.ldap`. Tests get a local identity provider from
+   handler as `Run.ldap`, and the connection's client certificates as `Run.certificates`
+   (from `Call::certificates`). Tests get a local identity provider from
    `oidc::keys::tests::publishing` (plain HTTP) or `publishing_with` and
    `oidc::tls::tests::Authority` (TLS, own CA), and a directory from
    `ldap::fake::FakeLdap` (feature `fake-ldap` outside the crate).

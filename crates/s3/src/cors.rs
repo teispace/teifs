@@ -204,6 +204,7 @@ pub struct Service {
     proxies: Arc<crate::TrustedProxies>,
     /// The connection's peer.
     client: crate::Client,
+    certificates: crate::ClientCertificates,
     watch: Arc<Watch>,
     /// The background jobs, until the server takes them to run.
     workers: Arc<std::sync::Mutex<Option<crate::Workers>>>,
@@ -241,6 +242,7 @@ impl Service {
             plain_http_is_secure,
             proxies: Arc::new(proxies),
             client: crate::Client::default(),
+            certificates: crate::ClientCertificates::default(),
         }
     }
 
@@ -277,6 +279,13 @@ impl Service {
             .take()
     }
 
+    /// The service for one connection whose client sent `certificates` over TLS.
+    #[must_use]
+    pub fn with_client_certificates(mut self, certificates: crate::ClientCertificates) -> Self {
+        self.certificates = certificates;
+        self
+    }
+
     /// The service for one connection: requests on it come from `client`.
     #[must_use]
     pub fn for_client(&self, client: crate::Client) -> Self {
@@ -299,6 +308,7 @@ impl Service {
         let client = self.proxies.client(self.client, req.headers());
         let mut req = req;
         req.extensions_mut().insert(client);
+        req.extensions_mut().insert(self.certificates.clone());
         req.extensions_mut().insert(Arc::clone(seen));
         let req = req.map(|body| {
             let body = Received::new(body, Arc::clone(seen));

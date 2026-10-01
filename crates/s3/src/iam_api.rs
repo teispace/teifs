@@ -12,14 +12,16 @@
 //! `AssumeRoleWithWebIdentity` is the exception, as on AWS: its web identity token says
 //! who is asking, so it's answered unsigned (the AWS CLI and SDKs send it so), and a
 //! signature on it counts for nothing. So is MinIO's `AssumeRoleWithLDAPIdentity`, whose
-//! user name and password say who is asking.
+//! user name and password say who is asking, and `AssumeRoleWithCertificate`, whose
+//! connection's client certificate does. MinIO's clients send these with the parameters
+//! in the query and no body (`POST /?Action=…`), which is taken as the form too.
 
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use s3s::{Body, S3Request, S3Response};
 use teifs_iam::{AuthError, Call, Iam, Identity, Reply};
 
 use crate::{
-    access::{Client, base_context, security_token},
+    access::{Client, ClientCertificates, base_context, security_token},
     routes::{INCOMPLETE, signed_body, unreadable},
 };
 
@@ -30,15 +32,32 @@ pub(crate) const MAX_FORM_BYTES: usize = 512 * 1024;
 pub(crate) const CONTENT_SHA256: &str = "x-amz-content-sha256";
 const FORM: &str = "application/x-www-form-urlencoded";
 
-/// Whether a request is a form posted to `/`: what the Query protocol sends.
+/// Whether a request is a form posted to `/`: what the Query protocol sends; or a post
+/// to `/` whose query names an action, as MinIO's clients send STS requests.
 pub(crate) fn is_form_post(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
     method == Method::POST
         && uri.path() == "/"
-        && headers
+        && (headers
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
             .is_some_and(|v| v.trim().eq_ignore_ascii_case(FORM))
+            || query_names_action(uri))
+}
+
+/// Whether `uri`'s query has an `Action` parameter.
+fn query_names_action(uri: &Uri) -> bool {
+    form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()).any(|(n, _)| n == "Action")
+}
+
+/// The form: the body, or the query when the body is empty and the query names an
+/// action.
+fn form(body: bytes::Bytes, uri: &Uri) -> bytes::Bytes {
+    if body.is_empty() && query_names_action(uri) {
+        bytes::Bytes::copy_from_slice(uri.query().unwrap_or_default().as_bytes())
+    } else {
+        body
+    }
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -110,7 +129,7 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
     let Some(access_key) = req.credentials.as_ref().map(|c| c.access_key.clone()) else {
         // Unsigned: only a request that carries its own proof of who's asking.
         let body = match req.input.store_all_limited(MAX_FORM_BYTES).await {
-            Ok(body) => body,
+            Ok(body) => form(body, &req.uri),
             Err(err) => {
                 let (status, code, message) = unreadable(err.as_ref(), INCOMPLETE);
                 return refuse(status, code, message);
@@ -126,7 +145,7 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
         return self_proving(iam, req, &body, request_id).await;
     };
     let body = match signed_body(req, MAX_FORM_BYTES).await {
-        Ok(body) => body,
+        Ok(body) => form(body, &req.uri),
         Err((status, code, message)) => return refuse(status, code, message),
     };
     // Whoever signed it has no part in a request that carries its own proof.
@@ -160,6 +179,7 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
         context: &context,
         body: &body,
         request_id,
+        certificates: &[],
     };
     match req.service.as_deref() {
         Some("iam") => iam.serve_iam(&call),
@@ -173,17 +193,23 @@ async fn answer(iam: &Iam, req: &mut S3Request<Body>, request_id: &str) -> Reply
 }
 
 /// Answers a request that carries its own proof of who's asking
-/// (`AssumeRoleWithWebIdentity`'s token, `AssumeRoleWithLDAPIdentity`'s password), as the
-/// anonymous caller it is.
+/// (`AssumeRoleWithWebIdentity`'s token, `AssumeRoleWithLDAPIdentity`'s password, the
+/// connection's client certificate), as the anonymous caller it is.
 async fn self_proving(iam: &Iam, req: &S3Request<Body>, body: &[u8], request_id: &str) -> Reply {
     let identity = Identity::anonymous();
     let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+    let certificates = req
+        .extensions
+        .get::<ClientCertificates>()
+        .cloned()
+        .unwrap_or_default();
     let context = base_context(&identity, &req.headers, client, &iam.account());
     iam.serve_self_proving(&Call {
         identity: &identity,
         context: &context,
         body,
         request_id,
+        certificates: &certificates.0,
     })
     .await
 }
@@ -222,6 +248,23 @@ mod tests {
             &headers("multipart/form-data; boundary=x")
         ));
         assert!(!is_form_post(&Method::POST, &root, &HeaderMap::new()));
+        // MinIO's clients: the parameters in the query, no body.
+        let query: Uri = "/?Action=AssumeRoleWithCertificate&Version=2011-06-15"
+            .parse()
+            .unwrap();
+        assert!(is_form_post(&Method::POST, &query, &HeaderMap::new()));
+        assert!(!is_form_post(&Method::GET, &query, &HeaderMap::new()));
+        let other: Uri = "/?uploads".parse().unwrap();
+        assert!(!is_form_post(&Method::POST, &other, &HeaderMap::new()));
+        assert_eq!(
+            form(bytes::Bytes::new(), &query).as_ref(),
+            b"Action=AssumeRoleWithCertificate&Version=2011-06-15"
+        );
+        assert_eq!(
+            form(bytes::Bytes::from_static(b"a=b"), &query).as_ref(),
+            b"a=b"
+        );
+        assert!(form(bytes::Bytes::new(), &other).is_empty());
     }
 
     #[test]

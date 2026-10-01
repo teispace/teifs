@@ -41,6 +41,27 @@ pub enum StsAction {
     /// Sign in with an LDAP user's name and password for temporary credentials with
     /// the policies mapped to the user and its groups. Needs no keys.
     AssumeLdap(LdapArgs),
+    /// Sign in with a client certificate for temporary credentials with the policy its
+    /// subject common name names, where the server takes certificates. Needs no keys.
+    AssumeCert(CertArgs),
+}
+
+/// `sts assume-cert`'s arguments.
+#[derive(Args)]
+pub struct CertArgs {
+    /// The server, like `https://s3.example.com`, or an alias for it.
+    server: String,
+    /// The client certificate (PEM, with any intermediate CAs after it).
+    #[arg(long, value_name = "FILE")]
+    cert: PathBuf,
+    /// Its private key (PEM).
+    #[arg(long, value_name = "FILE")]
+    key: PathBuf,
+    /// The region to sign for.
+    #[arg(long, default_value = alias::DEFAULT_REGION)]
+    region: String,
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 /// `sts assume-ldap`'s arguments.
@@ -151,6 +172,7 @@ pub async fn run(action: StsAction) -> Result<(), Error> {
         StsAction::Assume(args) => assume(args, &mut aliases).await,
         StsAction::AssumeWeb(args) => assume_web(args, &mut aliases).await,
         StsAction::AssumeLdap(args) => assume_ldap(args, &mut aliases).await,
+        StsAction::AssumeCert(args) => assume_cert(args, &mut aliases).await,
     }
 }
 
@@ -267,13 +289,8 @@ async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error>
     args.session.output.check(aliases)?;
     let policy = args.session.policy()?;
     let password = ldap_password(args.password_stdin)?;
-    let client = teifs_client::Client::new(&server.url, "", Zeroizing::new(String::new()))
-        .and_then(|client| match server.trust.pem() {
-            Some(pem) => client.with_root_certificates(pem),
-            None => Ok(client),
-        })
-        .map_err(|e| Error::admin("can't reach the server", &e))?;
-    let answer = client
+    let answer = unsigned_client(&server)
+        .map_err(|e| Error::admin("can't reach the server", &e))?
         .assume_role_with_ldap_identity(
             &args.username,
             &password,
@@ -282,6 +299,47 @@ async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error>
         )
         .await
         .map_err(|e| Error::admin(format_args!("can't sign {} in", args.username), &e))?;
+    deliver_temporary(&server, answer, &args.session.output, aliases)
+}
+
+async fn assume_cert(args: CertArgs, aliases: &mut Aliases) -> Result<(), Error> {
+    let server = unsigned_server(aliases, &args.server, args.region)?;
+    args.session.output.check(aliases)?;
+    let policy = args.session.policy()?;
+    let read = |path: &std::path::Path| {
+        std::fs::read(path).map_err(|e| {
+            Error::new(
+                Kind::NotFound,
+                format!("can't read {}: {e}", path.display()),
+            )
+        })
+    };
+    let (cert, key) = (read(&args.cert)?, Zeroizing::new(read(&args.key)?));
+    let answer = unsigned_client(&server)
+        .and_then(|client| client.with_client_certificate(&cert, &key))
+        .map_err(|e| Error::admin("can't use the certificate", &e))?
+        .assume_role_with_certificate(policy.as_deref(), args.session.seconds()?)
+        .await
+        .map_err(|e| Error::admin("can't sign in with the certificate", &e))?;
+    deliver_temporary(&server, answer, &args.session.output, aliases)
+}
+
+/// A client for an unsigned sign-in to `server`, trusting what its alias trusts.
+fn unsigned_client(server: &Alias) -> Result<teifs_client::Client, teifs_client::ClientError> {
+    let client = teifs_client::Client::new(&server.url, "", Zeroizing::new(String::new()))?;
+    match server.trust.pem() {
+        Some(pem) => client.with_root_certificates(pem),
+        None => Ok(client),
+    }
+}
+
+/// Saves or writes the temporary credentials a sign-in gave.
+fn deliver_temporary(
+    server: &Alias,
+    answer: teifs_client::TemporaryCredentials,
+    output: &Output,
+    aliases: &mut Aliases,
+) -> Result<(), Error> {
     let credentials = Credentials::builder()
         .access_key_id(answer.access_key)
         .secret_access_key(answer.secret_key.as_str())
@@ -289,7 +347,7 @@ async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error>
         .expiration(aws_sdk_sts::primitives::DateTime::from(answer.expires))
         .build()
         .map_err(|e| Error::general(e.to_string()))?;
-    deliver(&server, &credentials, &args.session.output, aliases)
+    deliver(server, &credentials, output, aliases)
 }
 
 /// The LDAP password: from standard input, `TEIFS_LDAP_PASSWORD`, or a hidden prompt.

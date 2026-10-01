@@ -352,3 +352,125 @@ async fn for_every_alias(cli: &mut harness::Client, endpoint: &str, ca_path: &st
     assert_ne!(answered.code, 0, "{}", answered.stderr);
     cli.ok(&["ls", "e"]).await;
 }
+
+/// A server on HTTPS that takes client certificates `ca` issues, with a `readonly`
+/// policy.
+async fn taking_certificates(ca: &Authority) -> (common::Server, tempfile::TempDir) {
+    let certs = tempfile::tempdir().unwrap();
+    ca.issue_into(certs.path(), &["127.0.0.1"]);
+    fs::create_dir(certs.path().join("CAs")).unwrap();
+    fs::write(certs.path().join("CAs/ca.crt"), &ca.pem).unwrap();
+    let source = teifs_server::TlsSource::Dir(certs.path().to_owned());
+    let server = start_with(|config| {
+        config.tls = Some(source);
+        config.client_certificates = Some(teifs_server::ClientCertificates::default());
+    })
+    .await;
+    server
+        .iam
+        .create_policy(
+            "readonly",
+            None,
+            None,
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}]}"#,
+            &[],
+        )
+        .unwrap();
+    (server, certs)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sts_assume_cert_signs_in_with_a_client_certificate() {
+    let ca = Authority::new();
+    let (server, _certs) = taking_certificates(&ca).await;
+    let mut cli = harness::Client::new(&server);
+    cli.env
+        .retain(|(name, _)| !name.starts_with("TEIFS_ALIAS_"));
+    let ca_file = cli.path("ca.pem");
+    fs::write(&ca_file, &ca.pem).unwrap();
+    cli.env
+        .push(("TEIFS_CA_CERT".to_owned(), ca_file.display().to_string()));
+    let root = [
+        "alias",
+        "set",
+        "t",
+        server.endpoint.as_str(),
+        "--access-key",
+        ACCESS_KEY,
+        "--secret-key-stdin",
+    ];
+    assert_eq!(cli.run_with(&root, SECRET_KEY).await.code, 0);
+    let write = |name: &str, issued: &common::certs::Issued| {
+        let (cert, key) = (
+            cli.path(&format!("{name}.crt")),
+            cli.path(&format!("{name}.key")),
+        );
+        fs::write(&cert, &issued.cert).unwrap();
+        fs::write(&key, &issued.key).unwrap();
+        (cert.display().to_string(), key.display().to_string())
+    };
+    let (cert, key) = write("readonly", &ca.issue_client("readonly"));
+    let (stranger_cert, stranger_key) =
+        write("stranger", &Authority::new().issue_client("readonly"));
+    let endpoint = server.endpoint.clone();
+    let assume = |cert: &str, key: &str, rest: &[&str]| {
+        let mut all = vec![
+            "sts",
+            "assume-cert",
+            endpoint.as_str(),
+            "--cert",
+            cert,
+            "--key",
+            key,
+        ];
+        all.extend_from_slice(rest);
+        all.into_iter().map(str::to_owned).collect::<Vec<_>>()
+    };
+
+    let out = cli
+        .ok(&args(&assume(
+            &cert,
+            &key,
+            &["-o", "-", "--duration", "15m"],
+        )))
+        .await;
+    let process: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(process["Version"], 1);
+    assert!(
+        process["SessionToken"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+
+    cli.ok(&args(&assume(&cert, &key, &["--save-alias", "c"])))
+        .await;
+    let me = records(&cli.ok(&["--json", "sts", "whoami", "c"]).await);
+    assert_eq!(
+        me[0]["arn"],
+        format!(
+            "arn:aws:sts::{}:federated-user/readonly",
+            server.iam.account()
+        )
+    );
+    cli.ok(&["ls", "c"]).await;
+
+    let err = cli
+        .fails(
+            &args(&assume(&stranger_cert, &stranger_key, &["-o", "-"])),
+            1,
+        )
+        .await;
+    assert!(err.contains("InvalidClientCertificate"), "{err}");
+    let missing = cli.path("missing.key").display().to_string();
+    let err = cli
+        .fails(&args(&assume(&cert, &missing, &["-o", "-"])), 5)
+        .await;
+    assert!(err.contains("can't read"), "{err}");
+    let err = cli
+        .fails(&args(&assume(&cert, &cert, &["-o", "-"])), 2)
+        .await;
+    assert!(err.contains("the client certificate isn't usable"), "{err}");
+
+    let config = cli.ok(&["admin", "config", "t"]).await;
+    assert!(config.contains("issued by 1 authority in"), "{config}");
+}

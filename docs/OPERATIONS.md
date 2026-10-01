@@ -268,6 +268,40 @@ Policies can use `${ldap:username}`, `${ldap:user}` (the DN) and `ldap:groups` i
 conditions. A policy mapped to a user or group can't be deleted until it's detached.
 The mappings move with the IAM export (`teifs admin iam export`).
 
+## Client certificate sign-in
+
+Clients that hold a certificate your own certificate authority issued can get temporary
+credentials with it, as with MinIO's `AssumeRoleWithCertificate`: the session has the
+managed policy the certificate's subject common name names (`CN=readonly` gets the
+`readonly` policy). It needs HTTPS.
+
+```sh
+mkdir -p /etc/teifs/certs/CAs
+cp clients-ca.crt /etc/teifs/certs/CAs/
+teifs serve /srv/drive --certs-dir /etc/teifs/certs --identity-tls
+teifs sts assume-cert https://s3.example.com --cert client.crt --key client.key --save-alias ci
+```
+
+| Setting | What it is |
+|---|---|
+| `--identity-tls` | Take client certificates. MinIO's `MINIO_IDENTITY_TLS_ENABLE=on` works too |
+| `--identity-tls-ca PATH` | The CA certificates (PEM: a file, or a folder of files) that must have issued them. By default the certificates folder's `CAs`, as MinIO has it; the system's authorities never count, since any public CA could otherwise issue `CN=consoleAdmin` |
+| `--identity-tls-skip-verify` | Take any certificate, whoever issued it: for testing only. MinIO's `MINIO_IDENTITY_TLS_SKIP_VERIFY=on` works too |
+
+The server asks every client for a certificate but needs none: browsers and S3 clients
+without one connect as before. A certificate must be issued by one of the authorities
+(the client may send intermediate CAs after it, at most ten), be valid now, say it's for
+client authentication (extended key usage `clientAuth`), and have a common name; TeiFS
+checks this when it signs in, after the TLS handshake proved the client holds its key.
+The session lasts an hour unless `DurationSeconds` asks for 15 minutes to 365 days, and
+never past the certificate's expiry; a `Policy` narrows it. Deleting the policy takes
+the sessions' permissions with it.
+
+Any client of MinIO's API works: the call is a `POST /` over the TLS connection with
+`Action=AssumeRoleWithCertificate&Version=2011-06-15` (and optionally `DurationSeconds`,
+`Policy`) in the query or a form body, unsigned. `teifs doctor` reads the authorities
+and says when each expires; `teifs admin config` shows how many there are.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

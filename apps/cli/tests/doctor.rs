@@ -385,3 +385,69 @@ fn the_ldap_directory_is_asked() {
     let (_, checks) = doctor(home.path(), &[f, "--listen", FREE], &[]);
     assert!(checks.iter().all(|c| c["name"] != "LDAP"));
 }
+
+#[test]
+fn client_certificate_authorities_are_checked() {
+    const NAME: &str = "Client certificates";
+    let home = tempfile::tempdir().unwrap();
+    let drive = home.path().join("drive");
+    std::fs::create_dir(&drive).unwrap();
+    let d = drive.to_str().unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let certs = home.path().join("certs");
+    std::fs::create_dir(&certs).unwrap();
+    let params = rcgen::CertificateParams::new(vec!["s3.test".to_owned()]).unwrap();
+    std::fs::write(
+        certs.join("public.crt"),
+        params.self_signed(&key).unwrap().pem(),
+    )
+    .unwrap();
+    std::fs::write(certs.join("private.key"), key.serialize_pem()).unwrap();
+    let c = certs.to_str().unwrap();
+    let run = |extra: &[&str], env: &[(&str, &str)]| {
+        let args: Vec<&str> = [d, "--listen", FREE, "--certs-dir", c]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .collect();
+        doctor(home.path(), &args, env)
+    };
+
+    // No authority in the certificates folder's CAs.
+    let (code, checks) = run(&["--identity-tls"], &[]);
+    assert_eq!(code, 1);
+    let (state, detail) = check(&checks, NAME);
+    assert_eq!(state, "failed");
+    assert!(detail.contains("put CA certificates in"), "{detail}");
+
+    // One, valid for years.
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let today = time::OffsetDateTime::now_utc();
+    ca.not_before = today - time::Duration::days(1);
+    ca.not_after = today + time::Duration::days(3650);
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    std::fs::create_dir(certs.join("CAs")).unwrap();
+    std::fs::write(
+        certs.join("CAs/ca.crt"),
+        ca.self_signed(&ca_key).unwrap().pem(),
+    )
+    .unwrap();
+    let (code, checks) = run(&["--identity-tls"], &[]);
+    assert_eq!(code, 0, "{checks:?}");
+    let (state, detail) = check(&checks, NAME);
+    assert_eq!(state, "ok");
+    assert!(detail.starts_with("an authority in "), "{detail}");
+
+    // MinIO's variables, with verification off: a warning.
+    let (_, checks) = run(
+        &[],
+        &[
+            ("MINIO_IDENTITY_TLS_ENABLE", "on"),
+            ("MINIO_IDENTITY_TLS_SKIP_VERIFY", "on"),
+        ],
+    );
+    assert_eq!(check(&checks, NAME).0, "warning");
+    // Not asked for: no check.
+    let (_, checks) = run(&[], &[]);
+    assert!(checks.iter().all(|c| c["name"] != NAME));
+}

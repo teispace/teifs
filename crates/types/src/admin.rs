@@ -572,6 +572,22 @@ pub struct ServerConfig {
     /// The LDAP directory users sign in with; none when there's none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ldap: Option<LdapConfig>,
+    /// How client certificates sign in (`AssumeRoleWithCertificate`); none when they
+    /// don't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificates: Option<CertificateConfig>,
+}
+
+/// How a server signs in clients with certificates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateConfig {
+    /// Where the authorities that issue them are.
+    pub authorities: String,
+    /// How many authorities that holds.
+    pub count: usize,
+    /// Whether any certificate is taken, whoever issued it (for testing only).
+    pub skip_verify: bool,
 }
 
 /// The LDAP directory a server signs users in with (never the lookup account's

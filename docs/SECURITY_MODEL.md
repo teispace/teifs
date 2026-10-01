@@ -51,7 +51,7 @@ field the form sends. Its fields are read before any decision, at most 64 KiB of
 and the upload is authorized on the key the form names, as a PutObject would be; a form
 that couldn't be read is refused, never decided as if it had no fields. Error messages
 that quote a request are XML-escaped.
-The one unsigned request besides `AssumeRoleWithWebIdentity` and `AssumeRoleWithLDAPIdentity` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
+The one unsigned request besides `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity` and `AssumeRoleWithCertificate` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
 ordinary key that needs a signature. `MinIO`'s health checks (`/minio/health/live`,
@@ -244,6 +244,17 @@ is deleted, and loses a policy that's deleted. Tests:
 `crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/api/tests/web_identity.rs`,
 `crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
 `crates/server/tests/admin.rs`.
+
+MinIO's `AssumeRoleWithCertificate` is answered unsigned as well: the TLS connection's
+client certificate decides who is asking. The server asks every client for a certificate
+but takes the connection without one; the handshake proves a client that sends one holds
+its private key (rustls checks the signature), and the certificate itself is checked when
+it signs in: issued by one of the configured authorities (only those: the system's never
+count, since any public CA could issue a certificate named after a policy), valid now,
+marked for client authentication, with at most ten intermediate CAs. A session lasts no
+longer than the certificate, and has only the managed policy its common name names; a
+policy that doesn't exist means no session. Verification can be turned off for tests
+only, which `teifs doctor` flags.
 
 MinIO's `AssumeRoleWithLDAPIdentity` is answered unsigned too, and only the directory
 decides who is asking. Both the name and the password are needed: an empty password is

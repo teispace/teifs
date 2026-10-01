@@ -122,6 +122,9 @@ pub(crate) enum Who {
         username: String,
         generation: u32,
     },
+    /// MinIO's `AssumeRoleWithCertificate`: a client certificate's subject common name,
+    /// and the managed policy (by unique id) it names.
+    Certificate { cn: String, policy: String },
 }
 
 impl Claims {

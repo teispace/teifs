@@ -152,9 +152,9 @@ impl Error {
                     Some(unreachable_hint(&chain)),
                 )
             }
-            ClientError::Endpoint(_) | ClientError::Certificate(_) => {
-                (Kind::Usage, err.to_string(), None)
-            }
+            ClientError::Endpoint(_)
+            | ClientError::Certificate(_)
+            | ClientError::ClientCertificate(_) => (Kind::Usage, err.to_string(), None),
             ClientError::Answer(_) => (
                 Kind::General,
                 err.to_string(),

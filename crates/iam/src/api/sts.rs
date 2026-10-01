@@ -6,6 +6,7 @@
 //! `AssumeRole` without an AWS role ARN is MinIO's: credentials with the calling user's
 //! own permissions, narrowed by a session policy, for up to a year.
 
+mod certificate;
 mod ldap;
 
 use std::ops::RangeInclusive;
@@ -38,6 +39,7 @@ const ASSUME_ROLE: &[&str] = &[
 /// The action that exchanges a web identity token for a role's session.
 pub(super) const WEB_IDENTITY: &str = "AssumeRoleWithWebIdentity";
 
+pub(super) use certificate::CERTIFICATE;
 pub(super) use ldap::{LDAP_IDENTITY, request as ldap_request};
 
 /// The condition keys `AssumeRoleWithWebIdentity` sets besides the provider's own
@@ -71,6 +73,12 @@ pub(super) const ACTIONS: &[Action] = &[
         run: ldap::assume_role_with_ldap_identity,
     },
     Action {
+        name: CERTIFICATE,
+        on: On::Any,
+        keys: &[],
+        run: certificate::assume_role_with_certificate,
+    },
+    Action {
         name: "GetSessionToken",
         on: On::Any,
         keys: &[],
@@ -99,16 +107,18 @@ pub(super) const ACTIONS: &[Action] = &[
 /// The STS actions a session made in some way may call, as on AWS: a role's any but
 /// `GetSessionToken` and `GetFederationToken`; `GetSessionToken`'s only `AssumeRole`
 /// and `GetCallerIdentity`; a federated user's only `GetCallerIdentity`. Anyone may
-/// call `AssumeRoleWithWebIdentity` and `AssumeRoleWithLDAPIdentity`, which prove who
-/// is asking themselves.
+/// call `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity` and
+/// `AssumeRoleWithCertificate`, which prove who is asking themselves.
 pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
-    if action == WEB_IDENTITY || action == LDAP_IDENTITY {
+    if matches!(action, WEB_IDENTITY | LDAP_IDENTITY | CERTIFICATE) {
         return true;
     }
     match kind {
-        SessionKind::Role { .. } | SessionKind::User | SessionKind::Web | SessionKind::Ldap => {
-            !matches!(action, "GetSessionToken" | "GetFederationToken")
-        }
+        SessionKind::Role { .. }
+        | SessionKind::User
+        | SessionKind::Web
+        | SessionKind::Ldap
+        | SessionKind::Certificate => !matches!(action, "GetSessionToken" | "GetFederationToken"),
         SessionKind::SessionToken => matches!(action, "AssumeRole" | "GetCallerIdentity"),
         SessionKind::Federated => action == "GetCallerIdentity",
     }
@@ -176,7 +186,12 @@ fn assume_role(r: &Run<'_>) -> Out {
     // A web identity's session is a role's for chaining, as on AWS.
     let chained = matches!(
         caller.map(Session::kind),
-        Some(SessionKind::Role { .. } | SessionKind::Web | SessionKind::Ldap)
+        Some(
+            SessionKind::Role { .. }
+                | SessionKind::Web
+                | SessionKind::Ldap
+                | SessionKind::Certificate
+        )
     );
     let Inherited {
         tags: inherited,

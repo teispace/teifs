@@ -55,6 +55,12 @@ pub struct Client {
     pub tls: Option<&'static str>,
 }
 
+/// The certificates a client sent when it connected over TLS, its own first: what
+/// `AssumeRoleWithCertificate` signs in with. None over plain HTTP, or when the client
+/// sent none.
+#[derive(Debug, Clone, Default)]
+pub struct ClientCertificates(pub Arc<[teifs_iam::CertificateDer<'static>]>);
+
 /// Looks up signing secrets in IAM.
 pub(crate) struct Auth(pub(crate) Arc<Iam>);
 

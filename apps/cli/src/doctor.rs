@@ -87,6 +87,7 @@ fn checks(
         .map(|format| format.drive.clone());
     checks.push(kms.unwrap_or_else(|| keyring(args, drive_id.as_deref())));
     checks.extend(certificates(args));
+    checks.extend(certificate_sign_in(args, &env));
     checks.push(listen(args.listen, in_use));
     checks
 }
@@ -399,6 +400,47 @@ fn certificates(args: &ServeArgs) -> Vec<Check> {
             })
             .collect(),
         Err(err) => vec![Check::new("Certificate", State::Failed, err.to_string())],
+    }
+}
+
+/// Signing in with client certificates, if `teifs serve` would: whom they're trusted
+/// from, and when each authority expires. `env` reads MinIO's variables.
+fn certificate_sign_in(args: &ServeArgs, env: impl Fn(&str) -> Option<String>) -> Vec<Check> {
+    const NAME: &str = "Client certificates";
+    let asked = match crate::client_certificates(
+        (
+            args.identity_tls,
+            args.identity_tls_ca.clone(),
+            args.identity_tls_skip_verify,
+        ),
+        env,
+    ) {
+        Ok(Some(asked)) => asked,
+        Ok(None) => return Vec::new(),
+        Err(err) => return vec![Check::new(NAME, State::Failed, err)],
+    };
+    // A mistake in the server's own certificates is the certificate check's.
+    let Ok(tls) = tls_source(args) else {
+        return Vec::new();
+    };
+    match asked.sign_in(tls.as_ref()) {
+        Err(err) => vec![Check::new(NAME, State::Failed, err)],
+        Ok((_, shown, _)) if shown.skip_verify => vec![Check::new(
+            NAME,
+            State::Warning,
+            "any issuer's are taken, unverified: for testing only",
+        )],
+        Ok((_, shown, roots)) => roots
+            .iter()
+            .map(|der| {
+                let (state, detail) = checks::expiry(checks::not_after(der), SystemTime::now());
+                Check::new(
+                    NAME,
+                    state,
+                    format!("an authority in {}: {detail}", shown.authorities),
+                )
+            })
+            .collect(),
     }
 }
 

@@ -92,6 +92,9 @@ pub(crate) async fn call_encoded(
     if let Some(client) = req.extensions().get::<crate::Client>() {
         again.extensions_mut().insert(*client);
     }
+    if let Some(certificates) = req.extensions().get::<crate::ClientCertificates>() {
+        again.extensions_mut().insert(certificates.clone());
+    }
     if let Some(seen) = req
         .extensions()
         .get::<std::sync::Arc<crate::observe::Seen>>()
