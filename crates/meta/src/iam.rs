@@ -1176,6 +1176,71 @@ mod tests {
     }
 
     #[test]
+    fn service_accounts_round_trip_and_keys_take_new_secrets() {
+        let (_dir, mut system) = open();
+        let account = ServiceAccountRow {
+            id: "SVC1".into(),
+            parent: String::new(),
+            secret: vec![1, 2, 3],
+            active: true,
+            policy: Some("{}".into()),
+            name: "backup".into(),
+            description: "nightly".into(),
+            expires_ms: Some(9),
+            created_ms: 4,
+        };
+        let key = AccessKeyRow {
+            id: "alice".into(),
+            user_id: "U1".into(),
+            secret: vec![1],
+            active: true,
+            created_ms: 5,
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutServiceAccount(account.clone()),
+                IamWrite::PutUser(user("U1", "alice")),
+                IamWrite::PutKey(key.clone()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(rows.service_accounts, [account.clone()]);
+        assert!(!format!("{:?}", rows.service_accounts[0]).contains("secret"));
+        // An update changes everything but the parent and the creation time.
+        let changed = ServiceAccountRow {
+            secret: vec![4],
+            active: false,
+            policy: None,
+            name: "b".into(),
+            description: String::new(),
+            expires_ms: None,
+            ..account.clone()
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutServiceAccount(ServiceAccountRow {
+                    parent: "U9".into(),
+                    created_ms: 8,
+                    ..changed.clone()
+                }),
+                IamWrite::PutKey(AccessKeyRow {
+                    secret: vec![2],
+                    active: false,
+                    ..key.clone()
+                }),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(rows.service_accounts, [changed]);
+        assert_eq!(rows.keys[0].secret, [2], "a key's new secret is kept");
+        assert!(!rows.keys[0].active);
+        system
+            .iam_apply(&[IamWrite::DeleteServiceAccount("SVC1".into())])
+            .unwrap();
+        assert!(system.iam_rows().unwrap().service_accounts.is_empty());
+    }
+
+    #[test]
     fn updates_keep_what_hangs_off_a_row() {
         let (_dir, mut system) = open();
         system

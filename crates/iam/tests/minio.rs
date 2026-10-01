@@ -169,6 +169,13 @@ async fn secrets_change_and_removing_a_user_takes_everything() {
         "mine12345"
     );
     assert_eq!(iam.access_key("minio-user").unwrap().created_ms, created);
+    // The new secret is the one kept.
+    drop(iam);
+    let iam = open(dir.path()).await;
+    assert_eq!(
+        iam.credential("minio-user").unwrap().secret.as_str(),
+        "mine12345"
+    );
     assert_eq!(
         code(iam.minio_change_secret("nobody", "mine12345")),
         "XMinioAdminInvalidAccessKey"
