@@ -245,30 +245,32 @@ fn serve_restarts_in_place_and_stops_when_the_admin_api_asks() {
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     let (user, password) = ("restarter", "not-a-real-secret-only-for-tests");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_teifs"))
-        .args([
-            "--json",
-            "serve",
-            "--listen",
-            "127.0.0.1:0",
-            "--kms-keyring",
-        ])
-        .args([home.path().join("keys.json"), home.path().join("drive")])
-        .env_clear()
-        .env("NOTIFY_SOCKET", &socket)
-        .env("MINIO_ROOT_USER", user)
-        .env("MINIO_ROOT_PASSWORD", password)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = Stopped(
+        Command::new(env!("CARGO_BIN_EXE_teifs"))
+            .args([
+                "--json",
+                "serve",
+                "--listen",
+                "127.0.0.1:0",
+                "--kms-keyring",
+            ])
+            .args([home.path().join("keys.json"), home.path().join("drive")])
+            .env_clear()
+            .env("NOTIFY_SOCKET", &socket)
+            .env("MINIO_ROOT_USER", user)
+            .env("MINIO_ROOT_PASSWORD", password)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let mut got = [0; 64];
     let mut heard = || {
         let n = systemd.recv(&mut got).unwrap();
         String::from_utf8_lossy(&got[..n]).into_owned()
     };
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut lines = BufReader::new(child.0.stdout.take().unwrap()).lines();
     let mut serving = || {
         let line = lines.next().unwrap().unwrap();
         let serving: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -305,5 +307,17 @@ fn serve_restarts_in_place_and_stops_when_the_admin_api_asks() {
     let stopped = admin(&endpoint, &["stop"]);
     assert!(stopped.status.success(), "{}", text(&stopped.stderr));
     assert_eq!(heard(), "STOPPING=1");
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
+}
+
+/// A server that is stopped when the test ends, even when it fails.
+#[cfg(unix)]
+struct Stopped(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
