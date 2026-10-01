@@ -445,7 +445,7 @@ async fn keys_are_created_and_listed_but_not_rotated() {
     );
     assert!(matches!(
         kms.create_key("photos").await,
-        Err(CryptoError::Kms(m)) if m == "a key named photos already exists"
+        Err(CryptoError::KeyExists(name)) if name == "photos"
     ));
     assert!(kms.create_key("not/a name").await.is_err());
     kms.create_key("audio").await.unwrap();

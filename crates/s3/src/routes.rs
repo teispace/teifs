@@ -32,7 +32,7 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_iam, minio_info, minio_service, minio_service_accounts,
+    iam_api, listen, minio_iam, minio_info, minio_kms, minio_service, minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -50,7 +50,8 @@ pub enum Api {
     /// can be a key, so virtual-hosted-style requests are never for it).
     Admin,
     /// `MinIO`'s admin API, for the calls TeiFS serves: `/minio/admin/v3/…` (or `v4`),
-    /// only at their exact paths, so a bucket named `minio` keeps its other keys.
+    /// and its KMS API, `/minio/kms/v1/…`, only at their exact paths, so a bucket named
+    /// `minio` keeps its other keys.
     Minio,
 }
 
@@ -77,6 +78,10 @@ pub(crate) enum Needs {
     /// The action of the service call `?action=` names (`MinIO`'s restart, stop,
     /// freeze and unfreeze), decided with the caller's policies.
     ServiceAction,
+    /// This KMS action, decided with the caller's policies on no key and then on the
+    /// key `?key-id=` names (`arn:minio:kms:::KEY`; for a key's status, the default key
+    /// by default), as `MinIO` decides them.
+    OnKmsKey(&'static str),
     /// Any caller who signs: the call answers about the caller alone.
     Signed,
     /// The Query APIs name an action in each call's body, and IAM decides it.
@@ -156,6 +161,7 @@ enum Handler {
     TemporaryAccountInfo,
     MinioInfo(minio_info::Kind),
     MinioService,
+    MinioKms(minio_kms::Call),
 }
 
 impl Handler {
@@ -213,6 +219,7 @@ impl Handler {
             Self::TemporaryAccountInfo => "TemporaryAccountInfo",
             Self::MinioInfo(kind) => kind.name(),
             Self::MinioService => "Service",
+            Self::MinioKms(call) => call.name(),
         }
     }
 }
@@ -664,6 +671,86 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioService,
         about: "Restarts or stops the server once it has answered, or freezes S3's requests until as many unfreezes have come, as `?action=` (`restart`, `stop`, `freeze`, `unfreeze`) asks; with `?dry-run=true` it only answers. Restarting needs `admin:ServiceRestart`, stopping `admin:ServiceStop`, freezing and unfreezing `admin:ServiceFreeze`: `mc admin service`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/kms/status",
+        needs: Needs::Action("admin:KMSKeyStatus", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::Status),
+        about: "The KMS as `madmin.KMSStatus`: its kind, default key, and whether each of its endpoints answers (older clients; newer ones call `/minio/kms/v1/status`)",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/kms/key/create",
+        needs: Needs::Action("admin:KMSCreateKey", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::CreateKey),
+        about: "Creates the KMS key `?key-id=` (older clients; newer ones call `/minio/kms/v1/key/create`)",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/kms/key/status",
+        needs: Needs::Action("admin:KMSKeyStatus", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::KeyStatus),
+        about: "Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus` (older clients; newer ones call `/minio/kms/v1/key/status`)",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/status",
+        needs: Needs::Action("kms:Status", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::Status),
+        about: "The KMS as `madmin.KMSStatus`: its kind, default key, and whether each of its endpoints answers: `mc admin kms status`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/metrics",
+        needs: Needs::Action("kms:Metrics", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::Metrics),
+        about: "The KMS's calls since the server started (sealing, unsealing, creating and rotating keys): how many succeeded, were refused and failed, and a cumulative latency histogram",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/apis",
+        needs: Needs::Action("kms:API", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::Apis),
+        about: "The KMS API's calls, as `madmin.KMSAPI`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/version",
+        needs: Needs::Action("kms:Version", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::Version),
+        about: "The server's version, as `madmin.KMSVersion`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/kms/v1/key/create",
+        needs: Needs::OnKmsKey("kms:CreateKey"),
+        handler: Handler::MinioKms(minio_kms::Call::CreateKey),
+        about: "Creates KMS key `?key-id=`: `mc admin kms key create`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/key/list",
+        needs: Needs::Action("kms:ListKeys", ANY),
+        handler: Handler::MinioKms(minio_kms::Call::ListKeys),
+        about: "The KMS keys whose names start with `?pattern=` (`*` or nothing for all) that the caller may list, as `madmin.KMSKeyInfo`: `mc admin kms key list`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/kms/v1/key/status",
+        needs: Needs::OnKmsKey("kms:KeyStatus"),
+        handler: Handler::MinioKms(minio_kms::Call::KeyStatus),
+        about: "Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus`: `mc admin kms key status`",
+    },
 ];
 
 /// Why a call decided on its query's bucket has one.
@@ -674,9 +761,12 @@ const MINIO_ADMIN: &str = "/minio/admin/v3/";
 /// The same, as newer clients reach it.
 const MINIO_ADMIN_V4: &str = "/minio/admin/v4/";
 
-/// A `MinIO` admin API path, spelled as its `v3` endpoint is.
+/// `MinIO`'s KMS API.
+pub(crate) const MINIO_KMS: &str = "/minio/kms/v1/";
+
+/// A path of `MinIO`'s admin API, spelled as its `v3` endpoint is, or of its KMS API.
 fn minio_admin_path(path: &str) -> Option<std::borrow::Cow<'_, str>> {
-    if path.starts_with(MINIO_ADMIN) {
+    if path.starts_with(MINIO_ADMIN) || path.starts_with(MINIO_KMS) {
         Some(std::borrow::Cow::Borrowed(path))
     } else {
         let rest = path.strip_prefix(MINIO_ADMIN_V4)?;
@@ -721,7 +811,8 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OnQueryBucket(action)
             | Needs::OrOwnKey(action)
             | Needs::NotDenied(action)
-            | Needs::OrOwnAccount(action) => Some(action),
+            | Needs::OrOwnAccount(action)
+            | Needs::OnKmsKey(action) => Some(action),
             Needs::PerCall | Needs::Root | Needs::Signed | Needs::ServiceAction => None,
         },
         root_only: e.needs == Needs::Root,
@@ -951,6 +1042,21 @@ impl Routes {
                 privileged = decision.is_allowed();
                 decision != Decision::ExplicitDeny
             }
+            Needs::OnKmsKey(action) => {
+                let default = (endpoint.handler == Handler::MinioKms(minio_kms::Call::KeyStatus))
+                    .then(|| minio_kms::default_key(self.config.as_deref()));
+                let key = minio_kms::named_key(&req, default.as_deref())?;
+                let context = context();
+                identity.decide(&context, action, ANY, None).is_allowed()
+                    && identity
+                        .decide(
+                            &context,
+                            action,
+                            &teifs_policy::minio::kms_key_arn(&key),
+                            None,
+                        )
+                        .is_allowed()
+            }
             Needs::ServiceAction => {
                 let action = minio_service::Action::asked(req.uri.query())?;
                 identity
@@ -1079,6 +1185,7 @@ impl Routes {
             Handler::TemporaryAccountInfo => minio_service_accounts::temporary_account_info(&req),
             Handler::MinioInfo(kind) => kind.call(self, &req).await,
             Handler::MinioService => minio_service::call(self, &req),
+            Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -1313,7 +1420,7 @@ mod tests {
             (Api::Admin, "The admin API"),
             (Api::Control, "S3 Control"),
             (Api::Query, "IAM and STS"),
-            (Api::Minio, "MinIO's admin API"),
+            (Api::Minio, "MinIO's admin and KMS APIs"),
         ] {
             let _ = write!(
                 out,
@@ -1375,6 +1482,7 @@ mod tests {
                     assert!(action.contains(':') && !resource.is_empty(), "{e:?}");
                     let service = match e.api {
                         Api::Admin => "teifs:",
+                        Api::Minio if e.path.starts_with(MINIO_KMS) => "kms:",
                         Api::Minio => "admin:",
                         Api::Query | Api::Control => "s3:",
                     };
@@ -1384,6 +1492,10 @@ mod tests {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
                     assert!(matches!(e.handler, Handler::Tags(_)), "{e:?}");
                 }
+                Needs::OnKmsKey(action) => {
+                    assert!(e.path.starts_with(MINIO_KMS) && action.starts_with("kms:"));
+                    assert!(matches!(e.handler, Handler::MinioKms(_)), "{e:?}");
+                }
                 Needs::OnQueryBucket(action)
                 | Needs::OrOwnKey(action)
                 | Needs::NotDenied(action)
@@ -1391,7 +1503,7 @@ mod tests {
                     assert!(e.api == Api::Minio && action.starts_with("admin:"), "{e:?}");
                 }
             }
-            if e.api == Api::Minio {
+            if e.api == Api::Minio && !e.path.starts_with(MINIO_KMS) {
                 assert!(e.path.starts_with(MINIO_ADMIN), "{e:?}");
                 let v4 = e.path.replace(MINIO_ADMIN, MINIO_ADMIN_V4);
                 assert!(std::ptr::eq(endpoint(e.api, &method, &v4).unwrap(), e));

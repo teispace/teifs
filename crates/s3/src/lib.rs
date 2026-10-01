@@ -31,6 +31,7 @@ mod logging;
 mod metrics;
 mod minio_iam;
 mod minio_info;
+mod minio_kms;
 mod minio_service;
 mod minio_service_accounts;
 mod notification;

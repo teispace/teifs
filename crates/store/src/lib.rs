@@ -270,7 +270,7 @@ struct Inner {
     system: Mutex<System>,
     format: DriveFormat,
     /// Seals and unseals the data keys of encrypted objects (set once, at or after open).
-    kms: std::sync::OnceLock<Arc<dyn Kms>>,
+    kms: std::sync::OnceLock<teifs_crypto::Measured>,
     /// Told what the lifecycle job removes (set once, after open), while whoever set it
     /// keeps it: a listener that holds the store doesn't keep the drive open for ever.
     expirations: std::sync::OnceLock<std::sync::Weak<dyn jobs::Expirations>>,
@@ -413,7 +413,7 @@ impl Store {
                 .unwrap_or_else(BucketEncryption::aws_default),
         };
         if let Some(kms) = options.kms {
-            let _ = inner.kms.set(kms);
+            let _ = inner.kms.set(teifs_crypto::Measured::new(kms));
         }
         inner.sweep_garbage(&inner.lock(), usize::MAX)?;
         // Retries come within minutes; a day of tokens is plenty.
@@ -460,7 +460,7 @@ impl Store {
     pub fn attach_kms(&self, kms: Arc<dyn Kms>) -> Result<()> {
         self.inner
             .kms
-            .set(kms)
+            .set(teifs_crypto::Measured::new(kms))
             .map_err(|_| StoreError::InvalidRequest("the store already has a KMS"))
     }
 
@@ -487,7 +487,13 @@ impl Store {
 
     /// The KMS the drive's keys are sealed with, once it has one.
     pub fn kms(&self) -> Option<&dyn Kms> {
-        self.inner.kms.get().map(AsRef::as_ref)
+        self.inner.kms.get().map(|kms| kms as &dyn Kms)
+    }
+
+    /// What the KMS's calls have come to since the store was opened, if it has one.
+    #[must_use]
+    pub fn kms_metrics(&self) -> Option<teifs_crypto::KmsMetrics> {
+        self.inner.kms.get().map(teifs_crypto::Measured::metrics)
     }
 
     async fn blocking<T: Send + 'static>(

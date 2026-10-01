@@ -70,6 +70,20 @@ pub const MINIO_GET_BUCKET_QUOTA: &str = "/minio/admin/v3/get-bucket-quota";
 /// restart, stop, hold S3's requests or let them go, as `mc admin service` does.
 pub const MINIO_SERVICE: &str = "/minio/admin/v3/service";
 
+/// `MinIO`'s KMS API: `GET` answers the KMS's kind, default key and endpoints
+/// (`kms:Status`), as `mc admin kms status` reads them.
+pub const MINIO_KMS_STATUS: &str = "/minio/kms/v1/status";
+
+/// `MinIO`'s KMS API: `POST ?key-id=NAME` creates a key (`kms:CreateKey`).
+pub const MINIO_KMS_CREATE_KEY: &str = "/minio/kms/v1/key/create";
+
+/// `MinIO`'s KMS API: `GET ?pattern=PREFIX` lists the keys (`kms:ListKeys`).
+pub const MINIO_KMS_LIST_KEYS: &str = "/minio/kms/v1/key/list";
+
+/// `MinIO`'s KMS API: `GET ?key-id=NAME` checks a key seals and unseals
+/// (`kms:KeyStatus`).
+pub const MINIO_KMS_KEY_STATUS: &str = "/minio/kms/v1/key/status";
+
 /// The format of a [`BucketsExport`]; a server refuses any other.
 pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
 

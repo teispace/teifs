@@ -10,6 +10,7 @@ mod policy;
 mod prometheus;
 mod roles;
 mod saml;
+mod kms;
 mod service;
 mod trace;
 mod users;
@@ -75,6 +76,11 @@ pub enum AdminAction {
     Service {
         #[command(subcommand)]
         action: service::ServiceAction,
+    },
+    /// A server's KMS and its keys (as `mc admin kms`).
+    Kms {
+        #[command(subcommand)]
+        action: kms::KmsAction,
     },
     /// Replace the root key a TeiFS server's drive generated.
     RootKey {
@@ -198,6 +204,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         AdminAction::Prometheus { action } => prometheus::run(&aliases, action),
         AdminAction::Trace(args) => trace::run(&aliases, args).await,
         AdminAction::Service { action } => service::run(&aliases, action).await,
+        AdminAction::Kms { action } => kms::run(&aliases, action).await,
         AdminAction::Snapshot {
             action: SnapshotAction::Ls { alias },
         } => snapshots(&client(&aliases, &alias)?).await,

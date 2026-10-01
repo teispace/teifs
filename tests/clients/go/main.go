@@ -140,6 +140,7 @@ func main() {
 	minioIAM(ctx, adm)
 	serverInfo(ctx, adm, *bucket)
 	service(ctx, adm)
+	kms(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -310,4 +311,30 @@ func service(ctx context.Context, adm *madmin.AdminClient) {
 		check(result.Action == action && !result.DryRun && len(result.Results) == 0,
 			fmt.Sprintf("a %s: %+v", action, result))
 	}
+}
+
+func kms(ctx context.Context, adm *madmin.AdminClient) {
+	step("KMS status, version, and a key created, listed and checked, as mc admin kms calls them")
+	status, err := adm.KMSStatus(ctx)
+	must(err)
+	check(status.DefaultKeyID != "" && len(status.Endpoints) > 0, fmt.Sprintf("the KMS status: %+v", status))
+	for endpoint, state := range status.Endpoints {
+		check(state == madmin.ItemOnline, fmt.Sprintf("KMS endpoint %s is %s", endpoint, state))
+	}
+	version, err := adm.KMSVersion(ctx)
+	must(err)
+	check(version.Version != "", "the KMS version")
+	name := fmt.Sprintf("go-client-%d", time.Now().UnixNano())
+	must(adm.CreateKey(ctx, name))
+	keys, err := adm.ListKeys(ctx, "go-client-")
+	must(err)
+	found := false
+	for _, key := range keys {
+		found = found || key.Name == name
+	}
+	check(found, fmt.Sprintf("the new key in %+v", keys))
+	keyStatus, err := adm.GetKeyStatus(ctx, name)
+	must(err)
+	check(keyStatus.KeyID == name && keyStatus.EncryptionErr == "" && keyStatus.DecryptionErr == "",
+		fmt.Sprintf("the new key's status: %+v", keyStatus))
 }

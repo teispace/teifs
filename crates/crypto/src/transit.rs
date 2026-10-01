@@ -260,9 +260,7 @@ impl Kms for TransitKms {
     async fn create_key(&self, name: &str) -> Result<KeyInfo> {
         match self.key_data(name).await {
             Ok(_) => {
-                return Err(CryptoError::Kms(format!(
-                    "a key named {name} already exists"
-                )));
+                return Err(CryptoError::KeyExists(name.to_owned()));
             }
             Err(CryptoError::NoSuchKey(_)) => {}
             Err(err) => return Err(err),

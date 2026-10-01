@@ -123,7 +123,8 @@ again first; s3s checks only the first, so a failed signature is checked once mo
 with the path encoded again, before anything runs. The admin API's actions
 are `teifs:*`, which only a policy naming them (or MinIO's `admin:` names of the same
 permissions) grants (`s3:*` doesn't, nor `*` on a bucket's resource: only a statement of
-MinIO's admin actions ignores its `Resource`, as on MinIO); it never
+MinIO's admin actions ignores its `Resource`, as on MinIO, and a statement of KMS
+actions that names keys, `arn:minio:kms:::KEY`, grants those keys alone); it never
 returns secrets unless an endpoint says so and only the root user may call it: the IAM
 export with secrets (sent `Cache-Control: no-store`) and the import, which sets secrets
 and may change the account's id. An import goes through the same checks as the IAM API

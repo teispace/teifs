@@ -237,9 +237,7 @@ impl Kms for LocalKms {
         check_name(name)?;
         self.with_keys(|keys| {
             if keys.contains_key(name) {
-                return Err(CryptoError::Kms(format!(
-                    "a key named {name} already exists"
-                )));
+                return Err(CryptoError::KeyExists(name.to_owned()));
             }
             keys.insert(name.to_owned(), vec![new_version(1)]);
             if let Err(err) = write(&self.path, keys, false) {
@@ -286,9 +284,7 @@ pub(crate) fn check_name(name: &str) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(CryptoError::Kms(
-            "a key name is 1 to 64 letters, digits, '-', '_' or '.'".to_owned(),
-        ))
+        Err(CryptoError::InvalidKeyName)
     }
 }
 

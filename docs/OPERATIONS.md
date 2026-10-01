@@ -209,6 +209,18 @@ secrets (IAM) with the key `teifs-default`: create it in a transit engine, KES o
 before serving (`teifs key create teifs-default --kms-aws`), or use a key that's already
 there with `--kms-default-key NAME`. Keys sealed under the old name keep opening.
 
+A running server's KMS is also reachable over the network, as `mc admin kms` reaches
+MinIO's: `teifs admin kms status ALIAS` shows its kind, default key and whether each
+endpoint answers; `teifs admin kms key create|list|status ALIAS [NAME]` creates a key,
+lists them, or checks that one (the default key by default) seals a new data key and
+unseals it again. They need `kms:Status`, `kms:CreateKey`, `kms:ListKeys` and
+`kms:KeyStatus`; as on MinIO, a policy can limit the last three to some keys:
+
+```json
+{"Effect": "Allow", "Action": ["kms:CreateKey", "kms:ListKeys", "kms:KeyStatus"],
+ "Resource": "arn:minio:kms:::app-*"}
+```
+
 **KES.** TeiFS proves who it is with a client certificate: the one KES's API key stands
 for (as KES's own clients make it), or the certificate and key files given. KES knows it
 by its *identity*, which `teifs serve`, `teifs key create` and `teifs admin config` show:

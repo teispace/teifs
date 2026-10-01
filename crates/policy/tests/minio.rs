@@ -103,6 +103,42 @@ fn minio_admin_policies_grant_teifs_admin_actions() {
 }
 
 #[test]
+fn kms_statements_that_name_keys_are_decided_on_the_key() {
+    let key = teifs_policy::minio::kms_key_arn;
+    let some = policy(
+        r#"{"Effect":"Allow","Action":["kms:CreateKey","kms:KeyStatus"],"Resource":["arn:minio:kms:::app-*"]}"#,
+    );
+    assert_eq!(decide(&some, "kms:CreateKey", &key("app-1")), Decision::Allow);
+    assert_eq!(
+        decide(&some, "kms:KeyStatus", &key("other")),
+        Decision::ImplicitDeny
+    );
+    // A call on no key (the first of MinIO's two checks) ignores them.
+    assert_eq!(decide(&some, "kms:CreateKey", "*"), Decision::Allow);
+    // Statements naming no key, or other resources, decide on the action alone.
+    for statement in [
+        r#"{"Effect":"Allow","Action":"kms:CreateKey"}"#,
+        r#"{"Effect":"Allow","Action":"kms:*","Resource":"arn:aws:s3:::*"}"#,
+        r#"{"Effect":"Allow","Action":"kms:*","Resource":"*"}"#,
+    ] {
+        assert_eq!(
+            decide(&policy(statement), "kms:CreateKey", &key("any")),
+            Decision::Allow,
+            "{statement}"
+        );
+    }
+    // A Deny of some keys denies those alone.
+    let but = policy(
+        r#"{"Effect":"Allow","Action":"kms:*"},{"Effect":"Deny","Action":"kms:KeyStatus","Resource":"arn:minio:kms:::secret*"}"#,
+    );
+    assert_eq!(
+        decide(&but, "kms:KeyStatus", &key("secret-1")),
+        Decision::ExplicitDeny
+    );
+    assert_eq!(decide(&but, "kms:KeyStatus", &key("public")), Decision::Allow);
+}
+
+#[test]
 fn resources_still_bound_what_isnt_minio_admin() {
     // A bucket's admin action matches its Resource.
     let quota = policy(

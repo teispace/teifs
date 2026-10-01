@@ -14,6 +14,12 @@ pub enum CryptoError {
     /// The KMS has no key by that name.
     #[error("the KMS has no key named {0}")]
     NoSuchKey(String),
+    /// A key by that name exists already.
+    #[error("a key named {0} already exists")]
+    KeyExists(String),
+    /// A key's name isn't one TeiFS takes.
+    #[error("a key name is 1 to 64 letters, digits, '-', '_' or '.'")]
+    InvalidKeyName,
     /// A sealed key's format version is unknown.
     #[error("unknown sealed key version {0}")]
     UnknownVersion(u8),

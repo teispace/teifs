@@ -17,6 +17,7 @@ mod kes;
 mod key;
 mod kms;
 pub mod madmin;
+mod measured;
 mod package;
 mod private;
 mod seal;
@@ -29,6 +30,7 @@ pub use customer::CustomerKey;
 pub use error::CryptoError;
 pub use kes::{KES, KesAuth, KesKms};
 pub use key::DataKey;
+pub use measured::{KmsMetrics, LATENCY_BUCKETS, Measured};
 pub use kms::{DEFAULT_KEY, DefaultKeyNamed, KeyInfo, Kms, LocalKms};
 pub use package::{
     PACKAGE_SIZE, PartCipher, PartEncryptor, PartId, TAG_LEN, ciphertext_len, decrypt_part,

@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, time::Duration};
 use http::header;
 use s3s::{Body, S3Request, S3Response, S3Result};
 use serde::Serialize;
-use teifs_types::admin::{KmsConfig, ServerConfig};
+use teifs_types::admin::ServerConfig;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{admin::json, drive::REGION, minio_iam::query, routes::Routes};
@@ -312,12 +312,7 @@ async fn kms_status(routes: &Routes, config: Option<&ServerConfig>) -> Vec<Servi
     let (Some(kms), Some(config)) = (routes.store.kms(), config) else {
         return Vec::new();
     };
-    let endpoints = match &config.kms {
-        KmsConfig::Keyring { .. } => vec!["local".to_owned()],
-        KmsConfig::Transit { address } => vec![address.clone()],
-        KmsConfig::Kes { endpoints, .. } => endpoints.clone(),
-        KmsConfig::AwsKms { region } => vec![format!("kms.{region}.amazonaws.com")],
-    };
+    let (_, endpoints) = crate::minio_kms::kind(Some(config));
     let status = match tokio::time::timeout(CHECK, kms.keys()).await {
         Ok(Ok(_)) => ONLINE,
         Ok(Err(err)) => {

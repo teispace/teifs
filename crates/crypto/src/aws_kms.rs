@@ -328,9 +328,7 @@ impl Kms for AwsKms {
         check_name(name)?;
         match self.describe(name).await {
             Ok(_) => {
-                return Err(CryptoError::Kms(format!(
-                    "a key named {name} already exists"
-                )));
+                return Err(CryptoError::KeyExists(name.to_owned()));
             }
             Err(CryptoError::NoSuchKey(_)) => {}
             Err(err) => return Err(err),
@@ -371,7 +369,7 @@ impl Kms for AwsKms {
                 .await;
             return Err(match err.code() {
                 Some("AlreadyExistsException") => {
-                    CryptoError::Kms(format!("a key named {name} already exists"))
+                    CryptoError::KeyExists(name.to_owned())
                 }
                 _ => failure(&err, name),
             });

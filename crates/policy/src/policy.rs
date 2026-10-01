@@ -486,9 +486,14 @@ impl Statement {
 
     /// Action, resource and conditions (not the principal).
     fn applies(&self, request: &Request<'_>) -> bool {
-        let Some(resource_ignored) = self.actions.take(request.action) else {
+        let Some(mut resource_ignored) = self.actions.take(request.action) else {
             return false;
         };
+        // As on `MinIO`, a KMS statement that names keys is decided on the key a call
+        // names; one that names none, or a call on no key, ignores them.
+        if resource_ignored && request.resource.starts_with(minio::KMS_KEY_ARN_PREFIX) {
+            resource_ignored = !self.resources.names_kms_keys();
+        }
         (resource_ignored || self.resources.matches(request.resource, request.context))
             && self.conditions.iter().all(|c| c.holds(request.context))
     }
@@ -764,6 +769,13 @@ impl Resources {
             })
             .collect::<Result<_, Error>>()?;
         Ok(Self { negated, templates })
+    }
+
+    /// Whether any is a key of `MinIO`'s KMS (`arn:minio:kms:::KEY`).
+    fn names_kms_keys(&self) -> bool {
+        self.templates
+            .iter()
+            .any(|t| t.literal_prefix().0.starts_with("arn:minio:kms:"))
     }
 
     /// A resource with a variable the request has no value for matches nothing.

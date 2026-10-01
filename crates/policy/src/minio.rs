@@ -193,6 +193,15 @@ pub fn minio_names(action: &str) -> &'static [&'static str] {
         .map_or(&[], |i| SAME_AS[i].1)
 }
 
+/// How policies name a key of `MinIO`'s KMS: `arn:minio:kms:::KEY`, with wildcards.
+pub const KMS_KEY_ARN_PREFIX: &str = "arn:minio:kms:::";
+
+/// `arn:minio:kms:::KEY`, the resource a call on one key of the KMS is decided on.
+#[must_use]
+pub fn kms_key_arn(key: &str) -> String {
+    format!("{KMS_KEY_ARN_PREFIX}{key}")
+}
+
 /// Whether `service:` (`admin`, `kms`) is one of `MinIO`'s, whose statements need no
 /// `Resource`.
 pub(crate) fn resourceless_service(service: &str) -> bool {

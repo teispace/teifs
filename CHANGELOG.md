@@ -341,6 +341,16 @@ behaviour; the on-disk format is always upgraded automatically.
   API's, nor health checks) until as many unfreezes have come, or the server stops.
   Each needs MinIO's admin action (`admin:ServiceRestart`, `admin:ServiceStop`,
   `admin:ServiceFreeze`), and a dry run only checks it.
+- MinIO's KMS API (`mc admin kms`: `/minio/kms/v1/` `status`, `metrics`, `apis`,
+  `version`, `key/create`, `key/list`, `key/status`) and the KMS calls of its admin API
+  (`kms/status`, `kms/key/create`, `kms/key/status`), on the server's KMS, and
+  `teifs admin kms status|key create|key list|key status` for the same. A key's status
+  seals a new data key and unseals it again, and says which failed. The metrics count
+  the KMS's calls since the server started (succeeded, refused, failed) with a latency
+  histogram. Each needs MinIO's KMS action (`kms:Status`, `kms:CreateKey`…, or
+  `admin:KMSKeyStatus` and `admin:KMSCreateKey` for the admin API's), and policies may
+  name keys, as MinIO's do: `"Resource": "arn:minio:kms:::app-*"` limits creating,
+  listing and checking keys to those.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

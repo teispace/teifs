@@ -37,7 +37,8 @@ pub use zeroize::Zeroizing;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
     ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE,
-    MINIO_GET_BUCKET_QUOTA, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA,
+    MINIO_GET_BUCKET_QUOTA, MINIO_KMS_CREATE_KEY, MINIO_KMS_KEY_STATUS, MINIO_KMS_LIST_KEYS,
+    MINIO_KMS_STATUS, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
@@ -522,6 +523,49 @@ impl Client {
         Ok(())
     }
 
+    /// The server's KMS: its kind, default key, and whether each endpoint answers
+    /// (`MinIO`'s KMS API, `kms:Status`).
+    pub async fn kms_status(&self) -> Result<KmsStatus, ClientError> {
+        self.call(Method::GET, MINIO_KMS_STATUS, None, Vec::new())
+            .await
+    }
+
+    /// Creates a key in the server's KMS (`kms:CreateKey` on the key).
+    pub async fn create_kms_key(&self, name: &str) -> Result<(), ClientError> {
+        let query = key_query(name);
+        let response = self
+            .send(Method::POST, MINIO_KMS_CREATE_KEY, Some(&query), Vec::new())
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_error(status, &response.bytes().await?));
+        }
+        Ok(())
+    }
+
+    /// The keys of the server's KMS whose names start with `prefix` and the caller may
+    /// list (`kms:ListKeys`).
+    pub async fn kms_keys(&self, prefix: &str) -> Result<Vec<KmsKey>, ClientError> {
+        let query: String = form_urlencoded::Serializer::new(String::new())
+            .append_pair("pattern", prefix)
+            .finish();
+        self.call(Method::GET, MINIO_KMS_LIST_KEYS, Some(&query), Vec::new())
+            .await
+    }
+
+    /// Whether a key of the server's KMS (its default key for `None`) seals a new data
+    /// key and unseals it again (`kms:KeyStatus` on the key).
+    pub async fn kms_key_status(&self, name: Option<&str>) -> Result<KmsKeyStatus, ClientError> {
+        let query = name.map(key_query);
+        self.call(
+            Method::GET,
+            MINIO_KMS_KEY_STATUS,
+            query.as_deref(),
+            Vec::new(),
+        )
+        .await
+    }
+
     /// A live trace of the requests the server answers from now on, those `filter`
     /// shows (`teifs:ServerTrace`): read it with [`Trace::next`].
     pub async fn trace(&self, filter: &TraceFilter) -> Result<Trace, ClientError> {
@@ -806,6 +850,52 @@ pub struct Health {
     pub elapsed: Duration,
     /// The server's clock, from its `Date` header.
     pub date: Option<SystemTime>,
+}
+
+/// `?key-id=NAME`.
+fn key_query(name: &str) -> String {
+    form_urlencoded::Serializer::new(String::new())
+        .append_pair("key-id", name)
+        .finish()
+}
+
+/// A server's KMS, as [`Client::kms_status`] answers it (`madmin.KMSStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct KmsStatus {
+    /// Its kind: `TeiFS keyring`, `Vault transit`, `KES`, `AWS KMS` (`MinIO`'s own names
+    /// from a `MinIO` server).
+    pub name: String,
+    /// The key used when none is named.
+    #[serde(rename = "default-key-id")]
+    pub default_key: String,
+    /// Each endpoint, and whether it answers: `online` or `offline`.
+    #[serde(default)]
+    pub endpoints: std::collections::BTreeMap<String, String>,
+}
+
+/// A key of a server's KMS, as [`Client::kms_keys`] lists it (`madmin.KMSKeyInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct KmsKey {
+    /// Its name.
+    pub name: String,
+    /// When it was made, as RFC 3339 (empty when the KMS doesn't say).
+    #[serde(default, rename = "createdAt")]
+    pub created_at: String,
+}
+
+/// Whether a key seals and unseals, as [`Client::kms_key_status`] answers it
+/// (`madmin.KMSKeyStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct KmsKeyStatus {
+    /// The key.
+    #[serde(rename = "key-id")]
+    pub key: String,
+    /// Why sealing a new data key failed, if it did.
+    #[serde(default, rename = "encryption-error")]
+    pub encryption_error: Option<String>,
+    /// Why unsealing it again failed, if it did.
+    #[serde(default, rename = "decryption-error")]
+    pub decryption_error: Option<String>,
 }
 
 /// A bucket's quota, as `MinIO`'s admin API takes and answers it.

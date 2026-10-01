@@ -81,7 +81,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 |---|---|---|---|
 | `POST` | `/` | The IAM and STS Query APIs: each call names its action in the signed form | the action each call names |
 
-### MinIO's admin API
+### MinIO's admin and KMS APIs
 
 | Method | Path | What it does | Who may |
 |---|---|---|---|
@@ -117,6 +117,16 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/storageinfo` | The drive's disks and their room as `madmin.StorageInfo` | `admin:StorageInfo` |
 | `GET` | `/minio/admin/v3/datausageinfo` | What each bucket holds as `madmin.DataUsageInfo`, with the disks' room when `?capacity=true`: `mc admin info`, the console's dashboard | `admin:DataUsageInfo` |
 | `POST` | `/minio/admin/v3/service` | Restarts or stops the server once it has answered, or freezes S3's requests until as many unfreezes have come, as `?action=` (`restart`, `stop`, `freeze`, `unfreeze`) asks; with `?dry-run=true` it only answers. Restarting needs `admin:ServiceRestart`, stopping `admin:ServiceStop`, freezing and unfreezing `admin:ServiceFreeze`: `mc admin service` | the action each call names |
+| `POST` | `/minio/admin/v3/kms/status` | The KMS as `madmin.KMSStatus`: its kind, default key, and whether each of its endpoints answers (older clients; newer ones call `/minio/kms/v1/status`) | `admin:KMSKeyStatus` |
+| `POST` | `/minio/admin/v3/kms/key/create` | Creates the KMS key `?key-id=` (older clients; newer ones call `/minio/kms/v1/key/create`) | `admin:KMSCreateKey` |
+| `GET` | `/minio/admin/v3/kms/key/status` | Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus` (older clients; newer ones call `/minio/kms/v1/key/status`) | `admin:KMSKeyStatus` |
+| `GET` | `/minio/kms/v1/status` | The KMS as `madmin.KMSStatus`: its kind, default key, and whether each of its endpoints answers: `mc admin kms status` | `kms:Status` |
+| `GET` | `/minio/kms/v1/metrics` | The KMS's calls since the server started (sealing, unsealing, creating and rotating keys): how many succeeded, were refused and failed, and a cumulative latency histogram | `kms:Metrics` |
+| `GET` | `/minio/kms/v1/apis` | The KMS API's calls, as `madmin.KMSAPI` | `kms:API` |
+| `GET` | `/minio/kms/v1/version` | The server's version, as `madmin.KMSVersion` | `kms:Version` |
+| `POST` | `/minio/kms/v1/key/create` | Creates KMS key `?key-id=`: `mc admin kms key create` | `kms:CreateKey` |
+| `GET` | `/minio/kms/v1/key/list` | The KMS keys whose names start with `?pattern=` (`*` or nothing for all) that the caller may list, as `madmin.KMSKeyInfo`: `mc admin kms key list` | `kms:ListKeys` |
+| `GET` | `/minio/kms/v1/key/status` | Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus`: `mc admin kms key status` | `kms:KeyStatus` |
 
 <!-- end generated -->
 

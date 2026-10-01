@@ -391,7 +391,7 @@ impl Kms for KesKms {
             None,
             |name, message| {
                 if message.contains("already exists") {
-                    CryptoError::Kms(format!("a key named {name} already exists"))
+                    CryptoError::KeyExists(name.to_owned())
                 } else {
                     failed(name, message)
                 }

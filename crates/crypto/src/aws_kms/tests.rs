@@ -338,7 +338,7 @@ async fn keys_are_created_listed_and_rotated() {
     );
     assert!(matches!(
         kms.create_key("photos").await,
-        Err(CryptoError::Kms(m)) if m.contains("already exists")
+        Err(CryptoError::KeyExists(_))
     ));
     assert!(kms.create_key("not/a name").await.is_err());
     kms.create_key("videos").await.unwrap();
@@ -407,7 +407,7 @@ async fn a_lost_alias_race_deletes_the_new_key() {
     state.lock().unwrap().alias_race = true;
     assert!(matches!(
         kms.create_key("photos").await,
-        Err(CryptoError::Kms(m)) if m.contains("already exists")
+        Err(CryptoError::KeyExists(_))
     ));
     let state = state.lock().unwrap();
     assert_eq!(state.deleted, ["1234abcd-12ab-34cd-56ef-000000000000"]);

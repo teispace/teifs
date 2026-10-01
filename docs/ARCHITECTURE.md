@@ -344,7 +344,9 @@ bucket's key, so the route compares the `Host` header with the served domains, w
 s3s doesn't pass to it. Its actions are `teifs:*`, or `Needs::Root` for what only the
 root user may do. `teifs_policy::minio` lists MinIO's admin and KMS actions and the
 MinIO names each `teifs:` action answers to; a statement takes an action by any of its
-names, and ignores its `Resource` when a MinIO admin name without a resource matched. Bucket import (`bucket_export.rs`) applies each setting with the
+names, and ignores its `Resource` when a MinIO admin name without a resource matched
+(a KMS action on a key, `arn:minio:kms:::KEY`, is matched against a statement's KMS keys
+when it names some). Bucket import (`bucket_export.rs`) applies each setting with the
 checks S3's calls make (the same `from_dto` conversions, policy parsing and Block Public
 Access checks), and forgets the bucket's cached access rules after each change that
 feeds them. Requests s3s refuses before the route (a signature that doesn't match,
@@ -379,7 +381,11 @@ the drive in madmin's types from the store's disks and usage counters, asking th
 (`minio_service.rs`) go through a `Control` shared by the routes, `Access` (whose check
 waits while it's frozen, so only S3 operations are held) and `Server::run`, which stops
 when it's asked, thaws what's held and returns why; `teifs serve` re-executes itself
-for a restart once its runtime has shut down (`apps/cli/src/restart.rs`). Quotas are
+for a restart once its runtime has shut down (`apps/cli/src/restart.rs`). `MinIO`'s
+KMS API (`/minio/kms/v1/`, served as `Api::Minio` too) and its admin API's KMS calls
+(`minio_kms.rs`) work on `Store::kms`, which the store wraps in `teifs_crypto::Measured`
+to count calls for the metrics; `Needs::OnKmsKey` decides an action on no key and then
+on `arn:minio:kms:::KEY`, which a policy statement matches only when it names KMS keys. Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and
