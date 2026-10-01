@@ -12,6 +12,7 @@ mod lock;
 mod logging;
 mod quota;
 mod sse;
+pub(crate) mod status;
 mod target;
 mod transfer;
 pub(crate) mod trust;

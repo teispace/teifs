@@ -264,6 +264,15 @@ async fn aliases_trust_a_private_ca() {
         .await;
     assert_eq!(cli.ok(&["cat", "s/photos/a.txt"]).await, "over TLS");
     cli.ok(&["admin", "info", "s"]).await;
+    let checks = records(&cli.ok(&["--json", "status", "s"]).await);
+    let certificate = checks.iter().find(|c| c["name"] == "Certificate").unwrap();
+    assert_eq!(certificate["state"], "ok", "{certificate}");
+    assert!(
+        certificate["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("valid until ")
+    );
     cli.ok(&["sts", "whoami", "s"]).await;
     // A user's alias is for the same server, so it trusts the same CA.
     cli.ok(&[

@@ -16,7 +16,11 @@
 //! # }
 //! ```
 
-use std::{fmt, sync::Arc, time::SystemTime};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
 
 use aws_sigv4::{
     http_request::{PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign},
@@ -179,6 +183,25 @@ impl Client {
     pub fn with_region(mut self, region: &str) -> Self {
         region.clone_into(&mut self.region);
         self
+    }
+
+    /// Asks one of the server's health checks, unsigned, as a load balancer would.
+    pub async fn health(&self, check: HealthCheck) -> Result<Health, ClientError> {
+        let mut url = self.endpoint.clone();
+        url.set_path(check.path());
+        let started = Instant::now();
+        let response = self.http.get(url).send().await?;
+        let elapsed = started.elapsed();
+        let date = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|date| date.to_str().ok())
+            .and_then(|date| httpdate::parse_http_date(date).ok());
+        Ok(Health {
+            status: response.status().as_u16(),
+            elapsed,
+            date,
+        })
     }
 
     /// What the server is and how it's doing (`teifs:GetServerInfo`).
@@ -473,6 +496,40 @@ fn api_error(status: reqwest::StatusCode, body: &[u8]) -> ClientError {
 }
 
 /// A bucket's quota, as `MinIO`'s admin API takes and answers it.
+/// A server's health checks, as `MinIO`'s probes name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthCheck {
+    /// The server answers.
+    Live,
+    /// Its drive can serve.
+    Ready,
+    /// Its drive can take writes.
+    Write,
+}
+
+impl HealthCheck {
+    /// The check's path.
+    #[must_use]
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Live => "/minio/health/live",
+            Self::Ready => "/minio/health/ready",
+            Self::Write => "/minio/health/cluster",
+        }
+    }
+}
+
+/// A health check's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    /// Its HTTP status: `200` when healthy.
+    pub status: u16,
+    /// How long the server took to answer.
+    pub elapsed: Duration,
+    /// The server's clock, from its `Date` header.
+    pub date: Option<SystemTime>,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct BucketQuota {
     /// The limit as older clients send it.

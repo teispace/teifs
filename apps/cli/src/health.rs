@@ -111,6 +111,26 @@ async fn ask(target: &str, https: bool) -> std::io::Result<(u16, bool)> {
 }
 
 async fn ask_over_tls(target: &str) -> std::io::Result<u16> {
+    match ask_over(connect_tls(target).await?, target).await? {
+        Status::Code(code) => Ok(code),
+        Status::Https => Ok(400),
+    }
+}
+
+/// The certificate the server at `target` (`host:port`) presents, whoever signed it.
+pub(crate) async fn certificate(target: &str) -> std::io::Result<CertificateDer<'static>> {
+    let stream = connect_tls(target).await?;
+    stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .map(|leaf| leaf.clone().into_owned())
+        .ok_or_else(|| std::io::Error::other("the server sent no certificate"))
+}
+
+/// A TLS connection to `target` (`host:port`) that accepts any certificate.
+async fn connect_tls(target: &str) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let config = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()
@@ -125,13 +145,9 @@ async fn ask_over_tls(target: &str) -> std::io::Result<u16> {
         .trim_end_matches(']');
     let name = ServerName::try_from(host.to_owned()).map_err(std::io::Error::other)?;
     let tcp = TcpStream::connect(target).await?;
-    let stream = TlsConnector::from(Arc::new(config))
+    TlsConnector::from(Arc::new(config))
         .connect(name, tcp)
-        .await?;
-    match ask_over(stream, target).await? {
-        Status::Code(code) => Ok(code),
-        Status::Https => Ok(400),
-    }
+        .await
 }
 
 /// A health check's answer.

@@ -199,6 +199,10 @@ behaviour; the on-disk format is always upgraded automatically.
   rules, redirects of every request and of single objects, S3's HTML error pages,
   ranges, conditional requests and CORS. Access logs record these requests as
   `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- `teifs status [ALIAS]`: how a server is doing, as a list of checks (answers and how
+  fast, the drive serving and taking writes, the clocks, the certificate's expiry,
+  version, disks, jobs, scrubs), with exit code 1 when one fails. `teifs-client` asks
+  the health checks too (`Client::health`).
 - `teifs admin info` (and the admin API's server info) shows the disks the drive uses:
   its own and those of folder buckets linked from elsewhere, with their free space,
   size and the room kept free for deletes.

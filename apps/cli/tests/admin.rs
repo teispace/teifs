@@ -719,3 +719,65 @@ async fn trace_prints_requests_until_the_server_stops() {
     assert_eq!(traced[0]["api"]["name"], "GetObject");
     assert_eq!(traced[0]["error"], "NoSuchKey");
 }
+
+/// `teifs status`: each check, for people and programs, with exit code 1 when one fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_checks_a_server() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let out = cli.ok(&["status", "t"]).await;
+    for line in ["Server", "Clock", "Drive", "Writes", "Version", "Disk"] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(!out.contains("failed"), "{out}");
+    let checks = records(&cli.ok(&["--json", "status", "t"]).await);
+    let names: Vec<&str> = checks.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["Server", "Clock", "Drive", "Writes", "Version", "Disk"]
+    );
+    for check in &checks {
+        assert_eq!(check["type"], "check");
+        // How full this machine's disk is isn't the test's to choose.
+        let expected: &[&str] = if check["name"] == "Disk" {
+            &["ok", "warning"]
+        } else {
+            &["ok"]
+        };
+        assert!(
+            expected.contains(&check["state"].as_str().unwrap()),
+            "{check}"
+        );
+        assert_eq!(check["server"], server.endpoint);
+    }
+    // Keys that may not read the server's info: what can be checked without them.
+    user(&server, "nobody", None);
+    let key = server.iam.create_access_key("nobody").unwrap();
+    let address = server.endpoint.trim_start_matches("http://");
+    let mut other = Client::new(&server);
+    other.env.push((
+        "TEIFS_ALIAS_N".to_owned(),
+        format!("http://{}:{}@{address}", key.info.id, key.secret.as_str()),
+    ));
+    let checks = records(&other.ok(&["--json", "status", "n"]).await);
+    let last = checks.last().unwrap();
+    assert_eq!(
+        (&last["name"], &last["state"]),
+        (&"Server info".into(), &"warning".into())
+    );
+    // A server that doesn't answer: a failure.
+    let mut gone = Client::new(&server);
+    gone.env.push((
+        "TEIFS_ALIAS_G".to_owned(),
+        format!("http://{ACCESS_KEY}:{SECRET_KEY}@127.0.0.1:9"),
+    ));
+    let run = gone.run(&["--json", "status", "g"]).await;
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    let checks = records(&run.stdout);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        (&checks[0]["name"], &checks[0]["state"]),
+        (&"Server".into(), &"failed".into())
+    );
+    cli.fails(&["status", "nope"], 5).await;
+}

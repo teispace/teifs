@@ -117,6 +117,15 @@ enum Command {
     /// Check that a TeiFS server answers its health check (exit code 0 when it does);
     /// for container health checks and scripts.
     Health(health::HealthArgs),
+    /// Check how a server is doing: whether it answers and how fast, whether its drive
+    /// can serve and take writes, whether the clocks agree, when its certificate expires,
+    /// and (with keys that may read it) its version, disks, jobs and scrubs. Exit code 1
+    /// when a check fails.
+    Status {
+        /// The server's alias.
+        #[arg(default_value = "local")]
+        alias: String,
+    },
     /// Print the shell completion script for `shell`, for example
     /// `teifs completions zsh > ~/.zfunc/_teifs` or
     /// `teifs completions bash > ~/.local/share/bash-completion/completions/teifs`.
@@ -712,6 +721,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
     match command {
         Command::Init(args) => init::init(&args),
         Command::Health(args) => health::health(&args).await,
+        Command::Status { alias } => client::status::status(&alias).await,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut script = Vec::new();

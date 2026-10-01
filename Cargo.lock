@@ -3065,6 +3065,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -3074,6 +3075,7 @@ version = "0.1.0"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
+ "httpdate",
  "reqwest",
  "rustls",
  "rustls-native-certs",

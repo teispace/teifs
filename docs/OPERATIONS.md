@@ -40,6 +40,29 @@ node. In Kubernetes, point the liveness probe at `/minio/health/live` and the re
 probe at `/minio/health/ready`. Only unsigned requests are health checks: a signed
 request for one of those paths reaches a bucket named `minio`, as any request does.
 
+`teifs status ALIAS` checks a server from anywhere its alias reaches it, and exits with
+code 1 when a check fails:
+
+```text
+CHECK        STATE    DETAIL
+Server       ok       answers in 2 ms
+Clock        ok       agrees with this machine's
+Drive        ok       serves
+Writes       ok       taken
+Certificate  ok       valid until 2027-01-02
+Version      ok       TeiFS 0.1.0
+Disk         ok       /srv/drive: 412.3 GiB free of 931.5 GiB
+Scrub        ok       found no damage
+```
+
+The clock check fails when the two clocks are 15 minutes or more apart, since signed
+requests fail then, and warns from a minute. The certificate check (HTTPS only) warns 14
+days before it expires. Version, disks, jobs and scrubs come from the server's info, which
+needs `teifs:GetServerInfo`; without it they're skipped with a warning. A disk with no room
+left beyond what's kept free for deletes fails, and one with less than 5 % of its size
+left warns. `--json` prints one `{"type":"check","name","state","detail","server"}`
+record per check.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which
