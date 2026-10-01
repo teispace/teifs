@@ -478,12 +478,12 @@ impl Store {
         Ok(false)
     }
 
-    /// Whether any bucket has a request metrics configuration (reads every bucket's
-    /// configurations: for a start).
-    pub async fn any_bucket_metrics(&self) -> Result<bool> {
+    /// Whether any bucket's requests are counted, for request metrics or a storage class
+    /// analysis that exports (reads every bucket's configurations: for a start).
+    pub async fn any_bucket_counting_requests(&self) -> Result<bool> {
         for bucket in self.list_buckets().await? {
             match self.bucket_configurations(&bucket.name).await {
-                Ok(configurations) if !configurations.metrics.is_empty() => return Ok(true),
+                Ok(configurations) if configurations.counts_requests() => return Ok(true),
                 Ok(_) | Err(StoreError::NoSuchBucket) => {}
                 Err(err) => return Err(err),
             }

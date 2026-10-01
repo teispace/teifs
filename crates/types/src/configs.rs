@@ -37,6 +37,13 @@ pub struct Configurations {
 }
 
 impl Configurations {
+    /// Whether requests on the bucket are counted: for request metrics, or for a storage
+    /// class analysis that exports.
+    #[must_use]
+    pub fn counts_requests(&self) -> bool {
+        !self.metrics.is_empty() || self.analytics.values().any(|a| a.export.is_some())
+    }
+
     /// Whether it holds nothing (a bucket without any).
     #[must_use]
     pub fn is_empty(&self) -> bool {

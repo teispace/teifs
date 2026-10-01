@@ -27,11 +27,14 @@ use prometheus_client::{
     registry::{Registry, Unit},
 };
 use teifs_store::{Store, StoreError};
-use teifs_types::configs::MetricsConfig;
+use teifs_types::{ObjectInfo, configs::MetricsConfig};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::observe::{Answer, CLIENT_LEFT, Seen};
+use crate::{
+    analytics::{self, Activity, Counts},
+    observe::{Answer, CLIENT_LEFT, Seen},
+};
 
 /// How many requests may wait for the worker.
 const QUEUE: usize = 16 * 1024;
@@ -82,6 +85,7 @@ impl RequestMetrics {
             return;
         }
         let done = Done {
+            operation: seen.operation(),
             kind: kind(seen.method(), seen.operation(), !key.is_empty()),
             bucket,
             key,
@@ -100,6 +104,7 @@ impl RequestMetrics {
 /// An answered request, as its metrics need it.
 #[derive(Debug)]
 pub(crate) struct Done {
+    operation: &'static str,
     bucket: String,
     /// Empty for a request on the bucket.
     key: String,
@@ -309,7 +314,63 @@ impl Series {
 /// What each metric's help ends with.
 const REQUESTS_HELP: &str = ", by bucket and metrics configuration";
 
-/// Counts answered requests against their buckets' metrics configurations.
+/// Whether storage class analysis counts the request, as S3's does: a successful
+/// `GetObject` (`Some(false)`), or `PutObject` or `CopyObject` (`Some(true)`), and not
+/// multipart uploads.
+fn analysed(done: &Done) -> Option<bool> {
+    if done.key.is_empty() || !(200..300).contains(&done.status) {
+        return None;
+    }
+    match done.operation {
+        "GetObject" => Some(false),
+        "PutObject" | "CopyObject" => Some(true),
+        _ => None,
+    }
+}
+
+/// The object a request was on, read once when a filter or an analysis needs it.
+struct Object<'a> {
+    store: &'a Store,
+    done: &'a Done,
+    read: bool,
+    info: Option<ObjectInfo>,
+}
+
+impl Object<'_> {
+    /// The object as it is now; `None` when it's gone.
+    async fn get(&mut self) -> Option<&ObjectInfo> {
+        if !self.read {
+            self.read = true;
+            self.info = self
+                .store
+                .head(&self.done.bucket, &self.done.key)
+                .await
+                .ok();
+        }
+        self.info.as_ref()
+    }
+}
+
+/// Whether the request counts for the configuration: every request for one without a
+/// filter, else a request on an object its filter matches.
+async fn matches(config: &MetricsConfig, done: &Done, object: &mut Object<'_>) -> bool {
+    let Some(filter) = &config.filter else {
+        return true;
+    };
+    if done.key.is_empty() {
+        return false;
+    }
+    if !filter.needs_tags() {
+        return filter.matches(&done.key, &BTreeMap::new());
+    }
+    match object.get().await {
+        Some(info) => filter.matches(&done.key, &info.attrs.tags),
+        None => false,
+    }
+}
+
+/// Counts answered requests against their buckets' metrics configurations, and for
+/// their analytics configurations that export.
 #[derive(Debug)]
 pub(crate) struct Worker {
     done: mpsc::Receiver<Done>,
@@ -319,6 +380,8 @@ pub(crate) struct Worker {
     shown: HashSet<(String, String)>,
     /// How often the series of configurations that are gone are removed.
     prune: Duration,
+    /// Where requests are counted for storage class analysis.
+    activity: Arc<Activity>,
 }
 
 impl Worker {
@@ -326,6 +389,7 @@ impl Worker {
         done: mpsc::Receiver<Done>,
         metrics: Arc<RequestMetrics>,
         store: Store,
+        activity: Arc<Activity>,
     ) -> Self {
         Self {
             done,
@@ -333,6 +397,7 @@ impl Worker {
             store,
             shown: HashSet::new(),
             prune: PRUNE,
+            activity,
         }
     }
 
@@ -356,9 +421,14 @@ impl Worker {
         let Ok(configurations) = self.store.bucket_configurations(&done.bucket).await else {
             return;
         };
-        let mut tags = None;
+        let mut object = Object {
+            store: &self.store,
+            done,
+            read: false,
+            info: None,
+        };
         for (id, config) in &configurations.metrics {
-            if !self.matches(config, done, &mut tags).await {
+            if !matches(config, done, &mut object).await {
                 continue;
             }
             let labels = Labels {
@@ -368,27 +438,35 @@ impl Worker {
             self.metrics.series.count(&labels, done);
             self.shown.insert((labels.bucket, labels.filter_id));
         }
-    }
-
-    /// Whether the request counts for the configuration; reads the object's tags into
-    /// `tags` the first time a filter needs them.
-    async fn matches(
-        &self,
-        config: &MetricsConfig,
-        done: &Done,
-        tags: &mut Option<BTreeMap<String, String>>,
-    ) -> bool {
-        let Some(filter) = &config.filter else {
-            return true;
+        let Some(put) = analysed(done) else {
+            return;
         };
-        if done.key.is_empty() {
-            return false;
+        let now = crate::inventory::now_ms();
+        let day_ms = self.store.day_ms();
+        let exporting = configurations
+            .analytics
+            .iter()
+            .filter(|(_, c)| c.export.is_some());
+        for (id, config) in exporting {
+            let Some(info) = object.get().await else {
+                return;
+            };
+            if !analytics::matches(config, info) {
+                continue;
+            }
+            let age = (now - analytics::ms(info)).div_euclid(day_ms);
+            let counts = Counts {
+                requests: 1,
+                retrieved: if put { 0 } else { done.sent },
+                uploaded: if put { info.size } else { 0 },
+            };
+            self.activity.add(
+                now.div_euclid(day_ms),
+                (&done.bucket, id),
+                analytics::group(age, info.size),
+                counts,
+            );
         }
-        if filter.needs_tags() && tags.is_none() {
-            let found = self.store.head(&done.bucket, &done.key).await;
-            *tags = Some(found.map(|info| info.attrs.tags).unwrap_or_default());
-        }
-        filter.matches(&done.key, tags.as_ref().unwrap_or(&BTreeMap::new()))
     }
 
     /// Removes the series of configurations (or buckets) that are gone.
@@ -463,6 +541,11 @@ mod tests {
 
     fn done(key: &str, kind: Option<Kind>, status: u16) -> Done {
         Done {
+            operation: match kind {
+                Some(Kind::Get) => "GetObject",
+                Some(Kind::Put) => "PutObject",
+                _ => "Other",
+            },
             bucket: "bkt".to_owned(),
             key: key.to_owned(),
             kind,
@@ -491,7 +574,8 @@ mod tests {
         let mut registry = Registry::default();
         let series = Series::register(&mut registry);
         let (metrics, done) = RequestMetrics::new(false, series);
-        (dir, Worker::new(done, metrics, store), registry)
+        let activity = Arc::new(Activity::default());
+        (dir, Worker::new(done, metrics, store, activity), registry)
     }
 
     async fn configure(store: &Store, configs: &[(&str, Option<Filter>)]) {
@@ -648,9 +732,9 @@ mod tests {
     #[tokio::test]
     async fn the_series_of_configurations_that_are_gone_are_removed() {
         let (_dir, mut worker, registry) = setup().await;
-        assert!(!worker.store.any_bucket_metrics().await.unwrap());
+        assert!(!worker.store.any_bucket_counting_requests().await.unwrap());
         configure(&worker.store, &[("all", None), ("kept", None)]).await;
-        assert!(worker.store.any_bucket_metrics().await.unwrap());
+        assert!(worker.store.any_bucket_counting_requests().await.unwrap());
         worker.count(&done("k", Some(Kind::Get), 200)).await;
         configure(&worker.store, &[("kept", None)]).await;
         worker.prune().await;
@@ -696,5 +780,54 @@ mod tests {
         assert!(!shown(&registry), "the series went with its configuration");
         stop.cancel();
         running.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exported_analyses_count_successful_gets_and_puts_of_their_objects() {
+        let (_dir, mut worker, _registry) = setup().await;
+        let analysis = |prefix: &str, export: bool| teifs_types::configs::AnalyticsConfig {
+            filter: Some(Filter {
+                prefix: Some(prefix.to_owned()),
+                ..Filter::default()
+            }),
+            export: export.then(|| teifs_types::configs::AnalyticsExport {
+                bucket: "bkt".to_owned(),
+                account: None,
+                prefix: None,
+            }),
+        };
+        let configurations = teifs_types::configs::Configurations {
+            analytics: [
+                ("logs".to_owned(), analysis("logs/", true)),
+                ("quiet".to_owned(), analysis("logs/", false)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert!(configurations.counts_requests());
+        worker
+            .store
+            .set_bucket_configurations("bkt", configurations)
+            .await
+            .unwrap();
+        for done in [
+            done("logs/tagged", Some(Kind::Get), 200),
+            done("logs/plain", Some(Kind::Put), 200),
+            done("logs/plain", Some(Kind::Get), 404),
+            done("logs/plain", Some(Kind::Head), 200),
+            done("logs/gone", Some(Kind::Get), 200),
+            Done {
+                operation: "CopyObject",
+                ..done("logs/plain", Some(Kind::Put), 200)
+            },
+            done("other", Some(Kind::Get), 200),
+            done("", Some(Kind::List), 200),
+        ] {
+            worker.count(&done).await;
+        }
+        let day = crate::inventory::now_ms().div_euclid(worker.store.day_ms());
+        let all = worker.activity.of_for_test(day, "bkt", "logs");
+        assert_eq!((all.requests, all.retrieved, all.uploaded), (3, 10, 2));
+        assert_eq!(worker.activity.of_for_test(day, "bkt", "quiet").requests, 0);
     }
 }

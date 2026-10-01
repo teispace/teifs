@@ -2044,6 +2044,82 @@ async fn metrics_configurations_are_added_listed_and_removed() {
 }
 
 #[tokio::test]
+async fn analytics_configurations_are_added_listed_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    for bucket in ["t/app", "t/reports"] {
+        cli.ok(&["mb", bucket]).await;
+    }
+    let ls = async || records(&cli.ok(&["--json", "analytics", "ls", "t/app"]).await);
+    assert!(ls().await.is_empty());
+    let text = cli.ok(&["analytics", "add", "t/app", "all"]).await;
+    assert!(
+        text.contains("Analytics all of t/app: every object"),
+        "{text}"
+    );
+    let add = [
+        "analytics",
+        "add",
+        "t/app",
+        "docs",
+        "--prefix",
+        "docs/",
+        "--export",
+        "t/reports/an",
+    ];
+    let text = cli.ok(&add).await;
+    assert!(
+        text.contains("Analytics docs of t/app: objects docs/*, exported daily to reports/an"),
+        "{text}"
+    );
+    // Adding again replaces it, and lets S3 in once.
+    cli.ok(&add).await;
+    let listed = ls().await;
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        (&listed[1]["id"], &listed[1]["prefix"], &listed[1]["export"]),
+        (&"docs".into(), &"docs/".into(), &"reports/an".into())
+    );
+    let s3 = client(&server, SECRET_KEY);
+    let policy = s3
+        .get_bucket_policy()
+        .bucket("reports")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        policy
+            .policy()
+            .unwrap()
+            .matches("TeiFSAnalytics-app")
+            .count(),
+        1
+    );
+    let info = cli.ok(&["analytics", "info", "t/app", "docs"]).await;
+    assert!(info.contains("reports/an/app/docs.csv"), "{info}");
+    let text = cli.ok(&["analytics", "rm", "t/app", "docs"]).await;
+    assert!(text.contains("Analytics docs of t/app: removed"), "{text}");
+    assert_eq!(ls().await.len(), 1);
+    let err = cli.fails(&["analytics", "info", "t/app", "docs"], 5).await;
+    assert!(
+        err.contains("can't read the analytics docs of t/app"),
+        "{err}"
+    );
+    cli.fails(
+        &[
+            "analytics",
+            "add",
+            "t/app",
+            "x",
+            "--export",
+            "other/reports",
+        ],
+        2,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn websites_are_set_shown_and_removed() {
     let server = start().await;
     let cli = Client::new(&server);

@@ -142,7 +142,7 @@ pub(crate) async fn import(
         if store
             .bucket_configurations(&bucket.name)
             .await
-            .is_ok_and(|configurations| !configurations.metrics.is_empty())
+            .is_ok_and(|configurations| configurations.counts_requests())
         {
             request_metrics.turn_on();
         }

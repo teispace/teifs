@@ -5,6 +5,7 @@ mod access;
 mod access_log;
 mod acl;
 mod admin;
+mod analytics;
 mod audit;
 mod bucket_access;
 mod bucket_export;
@@ -114,8 +115,8 @@ pub struct Options {
     /// Whether some bucket logs its requests as the server starts (see
     /// [`Store::any_bucket_logging`]): requests are watched from the first.
     pub access_logging: bool,
-    /// Whether some bucket has a request metrics configuration as the server starts
-    /// (see [`Store::any_bucket_metrics`]): requests are watched from the first.
+    /// Whether some bucket's requests are counted as the server starts (see
+    /// [`Store::any_bucket_counting_requests`]): requests are watched from the first.
     pub request_metrics: bool,
     /// How often each bucket's access log records are delivered as a log object; `None`
     /// is every five minutes.

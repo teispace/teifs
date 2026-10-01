@@ -2,6 +2,7 @@
 //! `ALIAS/BUCKET/KEY` paths and local files (`ls`, `cp`, `mirror`, …).
 
 pub(crate) mod alias;
+mod analytics;
 mod attributes;
 mod commands;
 mod copy;
@@ -179,6 +180,13 @@ pub enum Command {
     Metrics {
         #[command(subcommand)]
         action: metrics::MetricsAction,
+    },
+    /// Analyse how a bucket's objects are read by age, as S3's storage class analysis
+    /// does, exporting each day's figures as CSV into another bucket (or itself): add,
+    /// list, show or remove its analytics configurations.
+    Analytics {
+        #[command(subcommand)]
+        action: analytics::AnalyticsAction,
     },
     /// Serve a bucket as a static website (its index and error documents and
     /// redirects, as S3's website hosting), or show or remove its configuration.

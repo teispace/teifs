@@ -453,14 +453,13 @@ impl Server {
                     path: config.dir.clone(),
                     source,
                 })?;
-        let request_metrics =
-            store
-                .any_bucket_metrics()
-                .await
-                .map_err(|source| ServerError::Open {
-                    path: config.dir.clone(),
-                    source,
-                })?;
+        let request_metrics = store
+            .any_bucket_counting_requests()
+            .await
+            .map_err(|source| ServerError::Open {
+                path: config.dir.clone(),
+                source,
+            })?;
         check_website_domains(&config.domains, &config.website_domains)?;
         let service = teifs_s3::service(
             store.clone(),

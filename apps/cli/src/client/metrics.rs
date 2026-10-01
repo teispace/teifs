@@ -56,7 +56,7 @@ pub enum MetricsAction {
 }
 
 /// A `KEY=VALUE` tag.
-fn tag(given: &str) -> Result<(String, String), String> {
+pub(super) fn tag(given: &str) -> Result<(String, String), String> {
     match given.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
         _ => Err(format!("{given} isn't a tag: give KEY=VALUE")),

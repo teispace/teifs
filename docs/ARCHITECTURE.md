@@ -376,13 +376,19 @@ The day or week each configuration last had its report is a store note (`Store::
 so restarts neither repeat nor skip one; stopping ends a report after its current page,
 never in the middle of a store call.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
-(`Store::any_bucket_metrics` at the start, or a put or an import), `Watch::done` queues
+or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
+start, or a put or an import), `Watch::done` queues
 each S3 request on a bucket (its method, which `Seen` keeps, operation, key, status,
 bytes and times) on a bounded queue without waiting. The request metrics worker, one of
 the `Workers`, matches it against the bucket's cached configurations (reading the
 object's tags only for a tag filter) and moves the Prometheus families registered with
 the server's `Metrics`, labeled by bucket and `filter_id`; every minute it removes the
-series of configurations that are gone.
+series of configurations that are gone. For analytics configurations that export, it
+counts successful `GetObject`, `PutObject` and `CopyObject` requests by the object's age
+group into `analytics::Activity`, shared with the analytics worker (`analytics.rs`),
+which keeps the counts as a store note every check and, once a day is over, lists each
+configuration's objects by age group and adds the day's rows to its CSV through
+`Drive::deliver`, the day each last exported being another note.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

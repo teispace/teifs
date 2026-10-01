@@ -10,6 +10,8 @@
 mod files;
 mod report;
 
+pub(crate) use self::report::iso;
+
 use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 use bytes::Bytes;
@@ -440,7 +442,7 @@ fn period(frequency: Frequency, ms: i64, day_ms: i64) -> i64 {
 }
 
 /// How often due reports are looked for: 96 times a day, at most every 15 minutes.
-fn check_every(day_ms: i64) -> Duration {
+pub(crate) fn check_every(day_ms: i64) -> Duration {
     Duration::from_millis(
         u64::try_from(day_ms / 96)
             .unwrap_or(0)
@@ -448,7 +450,7 @@ fn check_every(day_ms: i64) -> Duration {
     )
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| {

@@ -232,6 +232,11 @@ behaviour; the on-disk format is always upgraded automatically.
   and tags) as `teifs_request_metrics_…` Prometheus metrics labeled by bucket and
   `filter_id`, with CloudWatch's names: requests by kind, bytes up and down, 4xx and 5xx
   errors, and first-byte and total latency. `teifs metrics add|ls|info|rm` manages them.
+- Storage class analysis exports, as S3 writes them: an analytics configuration with an
+  export adds each day's figures (storage, uploads, retrievals and requests by object age
+  group, and `ALL`) to `PREFIX/BUCKET/ID.csv` in its destination, written by
+  `s3.amazonaws.com` into a bucket whose policy lets it in. `teifs analytics
+  add|ls|info|rm` manages them and lets S3 into the destination.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
   reload; it used to stop.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,

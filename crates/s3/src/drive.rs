@@ -2275,6 +2275,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutBucketAnalyticsConfigurationOutput>> {
         let input = req.input;
         let given = configs::analytics_from_dto(input.analytics_configuration)?;
+        let exports = given.1.export.is_some();
         configs::put(
             &self.store,
             (&input.bucket, &input.id),
@@ -2283,6 +2284,9 @@ impl S3 for Drive {
             |c| &mut c.analytics,
         )
         .await?;
+        if exports && let Some(metrics) = &self.request_metrics {
+            metrics.turn_on();
+        }
         Ok(S3Response::new(
             dto::PutBucketAnalyticsConfigurationOutput::default(),
         ))

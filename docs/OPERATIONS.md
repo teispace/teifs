@@ -453,8 +453,9 @@ rate(teifs_request_metrics_4xx_errors_total[5m]) / rate(teifs_request_metrics_al
 histogram_quantile(0.99, rate(teifs_request_metrics_first_byte_latency_seconds_bucket{bucket="app"}[5m]))
 ```
 
-Requests are watched from the moment a bucket has a configuration (from the start, when
-one has one as the server starts), and counted once their answer is done with, a few
+Requests are watched from the moment a bucket has a configuration, or an exporting
+[storage class analysis](#storage-class-analysis) (from the start, when one has one as
+the server starts), and counted once their answer is done with, a few
 milliseconds later. A client that leaves early is counted, but not as an error. Tags are
 the object's once the request is answered, so a deleted object's requests match no tag
 filter. Access point filters match nothing: TeiFS has no access points. A configuration's
@@ -503,6 +504,56 @@ in the server's log); a failure of the drive is tried again within 15 minutes. R
 are written like any other object: encrypted as `--encrypt` or the destination's default
 says (a folder bucket takes no encryption, so give such a destination none), counted in
 its usage, and announced by its notifications.
+
+## Storage class analysis
+
+A bucket's analytics configurations analyse how its objects are read by age, as S3's
+storage class analysis does; one that exports adds each day's figures to a CSV in a
+destination bucket, the same file S3 writes, for a spreadsheet or Quick.
+
+```sh
+teifs analytics add local/app docs --prefix docs/ --export local/reports/analytics
+teifs analytics add local/app red --tag team=red
+teifs analytics ls local/app
+teifs analytics info local/app docs
+teifs analytics rm local/app docs
+```
+
+`teifs analytics add --export` also adds a statement to the destination's bucket policy
+that lets S3 (`s3.amazonaws.com`) write there for this bucket, as the S3 console does;
+with `--no-policy`, grant it yourself. Like any other configuration it can be set through
+S3 (`PutBucketAnalyticsConfiguration`).
+
+The export is `PREFIX/BUCKET/ID.csv` in the destination. Each day (UTC) once it's over,
+13 rows are added: one for each age group of objects of 128 KiB or more (`000-014` days
+since they were written, `015-029`, … `365-729`, `730+`), then `ALL`, for every object
+the configuration matches. Rows are sorted by date within age group, `ALL` last, under
+S3's header:
+
+| Column | What |
+|---|---|
+| `Date` | When the row was made, `MM-DD-YYYY` |
+| `ConfigId` | The configuration's id |
+| `Filter` | Empty, as on S3 |
+| `StorageClass` | `STANDARD`: every object is |
+| `ObjectAge` | The age group, or `ALL` |
+| `ObjectCount` | Objects (`ALL` only) |
+| `DataUploaded_MB` | Bytes written that day by `PutObject` and `CopyObject`, not multipart uploads (`ALL` only) |
+| `Storage_MB` | Bytes stored at the end of the day |
+| `DataRetrieved_MB` | Bytes read by `GetObject` that day |
+| `GetRequestCount` | Successful `GetObject`, `PutObject` and `CopyObject` requests that day (S3's name; it counts both) |
+| `CumulativeAccessRatio` | Bytes retrieved over bytes stored, for the age group and every older one (`ALL`: every object); empty when nothing is stored |
+| `ObjectAgeForSIATransition`, `RecommendedObjectAgeForSIATransition` | Empty |
+
+A megabyte is 1,048,576 bytes; figures have up to six decimals. A configuration's first
+row is of its first whole day. Requests are counted as they're answered, by the object's
+tags and age then; the day's counts are kept with the drive every 15 minutes and when
+the server stops, so a crash loses at most 15 minutes of them. S3's transition recommendations come from a model of 30
+days of access it doesn't publish, so TeiFS leaves their columns empty; read the age
+groups' `CumulativeAccessRatio` instead: an age from which it stays low is where S3
+would move objects to `STANDARD_IA`. A destination that doesn't let the
+service in, or doesn't exist, gets nothing that day (with a warning in the server's log);
+a failure of the drive is tried again within 15 minutes.
 
 ## Static websites
 
