@@ -4,9 +4,11 @@
 //! - `docs`: only the documentation check.
 //! - `release VERSION`: prepares a release (version, changelog, lock file).
 //! - `release-notes VERSION`: prints a release's notes, checking they're in place.
+//! - `manifests VERSION SHA256SUMS OUT`: a release's Homebrew formula and winget manifests.
 
 #![allow(clippy::print_stdout, reason = "a task runner reports to the terminal")]
 
+mod manifests;
 mod release;
 
 use std::{
@@ -19,14 +21,21 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let task = args.next().unwrap_or_default();
     let version = args.next();
+    let rest: Vec<String> = args.collect();
     let root = root();
     let result = match (task.as_str(), version.as_deref()) {
+        ("manifests", Some(version)) if rest.len() == 2 => {
+            manifests::write(version, Path::new(&rest[0]), Path::new(&rest[1]))
+        }
+        _ if !rest.is_empty() => Err("too many arguments".into()),
         ("verify", None) => verify(&root),
         ("docs", None) => check_docs(&root).and_then(|()| check_planning_ids(&root)),
         ("release", Some(version)) => release::prepare(&root, version),
         ("release-notes", Some(version)) => release::notes(&root, version),
         _ => {
-            eprintln!("usage: cargo xtask <verify|docs|release VERSION|release-notes VERSION>");
+            eprintln!(
+                "usage: cargo xtask <verify|docs|release VERSION|release-notes VERSION|manifests VERSION SHA256SUMS OUT>"
+            );
             return ExitCode::from(2);
         }
     };

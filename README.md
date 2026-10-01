@@ -48,6 +48,8 @@ sudo systemctl enable --now teifs             # serves /var/lib/teifs/drive on 1
 ```
 
 See [Running as a service](docs/OPERATIONS.md#running-as-a-service) for its settings.
+The Docker image is `ghcr.io/teispace/teifs`, and the Helm chart for Kubernetes is in
+`packaging/helm/teifs` ([Kubernetes](docs/OPERATIONS.md#kubernetes)).
 
 ## Quick start
 

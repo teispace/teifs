@@ -1,0 +1,108 @@
+# TeiFS's chart. Every setting `teifs serve` takes can go in `config` (a flag's name
+# without `--`), or as a TEIFS_* variable in `env`.
+
+image:
+  repository: ghcr.io/teispace/teifs
+  # The chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# The root keys. Without existingSecret the chart makes a Secret with a random pair,
+# kept across upgrades: `kubectl get secret RELEASE-teifs -o jsonpath='{.data.secretKey}'`.
+auth:
+  # A Secret of yours, with the keys named below.
+  existingSecret: ""
+  accessKeyKey: accessKey
+  secretKeyKey: secretKey
+  # For the generated Secret; random when empty.
+  accessKey: ""
+
+# teifs.toml, as `teifs serve` reads it, e.g. {default-layout: folder, domain: [s3.example.com]}.
+config: {}
+
+# More environment variables, as a container's `env` list.
+env: []
+envFrom: []
+
+# HTTPS: a kubernetes.io/tls Secret (cert-manager makes one), served from the certs folder.
+tls:
+  existingSecret: ""
+
+persistence:
+  # The drive, at /data.
+  data:
+    size: 10Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    # A claim of yours instead of the StatefulSet's.
+    existingClaim: ""
+  # The encryption keyring, at /config: objects can't be read without it. Back it up.
+  config:
+    size: 64Mi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 9000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # hosts: [{host: s3.example.com, paths: [{path: /, pathType: Prefix}]}]
+  hosts: []
+  tls: []
+
+# Prometheus Operator: a ServiceMonitor scraping /.teifs/metrics with a bearer token
+# (`teifs admin prometheus generate`) kept in a Secret of yours.
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+    bearerTokenSecret:
+      name: ""
+      key: token
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+# Requests in flight finish before the pod stops.
+terminationGracePeriodSeconds: 300
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+startupProbe:
+  periodSeconds: 2
+  failureThreshold: 150
+livenessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3

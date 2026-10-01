@@ -1,0 +1,31 @@
+{{- with .Values.metrics.serviceMonitor }}
+{{- if .enabled }}
+{{- if not .bearerTokenSecret.name }}
+{{- fail "metrics.serviceMonitor.bearerTokenSecret.name: a Secret with the token `teifs admin prometheus generate` makes" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "teifs.fullname" $ }}
+  labels:
+    {{- include "teifs.labels" $ | nindent 4 }}
+    {{- with .labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "teifs.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: s3
+  endpoints:
+    - port: s3
+      path: /.teifs/metrics
+      scheme: {{ include "teifs.scheme" $ | lower }}
+      interval: {{ .interval }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ .bearerTokenSecret.name }}
+          key: {{ .bearerTokenSecret.key }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,17 @@
+TeiFS serves its drive in {{ include "teifs.fullname" . }}-0, at
+  {{ include "teifs.scheme" . | lower }}://{{ include "teifs.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Its root keys are in the Secret {{ include "teifs.secretName" . }}:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "teifs.secretName" . }} -o jsonpath='{.data.{{ .Values.auth.accessKeyKey }}}' | base64 -d
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "teifs.secretName" . }} -o jsonpath='{.data.{{ .Values.auth.secretKeyKey }}}' | base64 -d
+
+From this machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "teifs.fullname" . }} 9000:{{ .Values.service.port }}
+  teifs alias set k8s {{ include "teifs.scheme" . | lower }}://127.0.0.1:9000 --access-key KEY
+
+The encryption keyring is on the volume config-{{ include "teifs.fullname" . }}-0: back it
+up with the drive; objects can't be read without it.
+{{- if not .Values.auth.existingSecret }}
+The generated Secret is kept when the release is uninstalled, so a reinstall opens the
+same drive.
+{{- end }}

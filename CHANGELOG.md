@@ -219,6 +219,15 @@ behaviour; the on-disk format is always upgraded automatically.
   with settings in `/etc/teifs`. Removing the package keeps the drive.
 - `teifs serve` tells systemd when it's ready and when it's stopping (`Type=notify`,
   through `NOTIFY_SOCKET`).
+- A Helm chart (`packaging/helm/teifs`): a StatefulSet with volumes for the drive and the
+  keyring, root keys from a Secret (made and kept when none is given) passed as a file,
+  a non-root pod with a read-only root file system, MinIO's health probes, optional
+  `teifs.toml`, HTTPS from a TLS Secret, Ingress and a Prometheus ServiceMonitor, and a
+  `helm test`. Its version is TeiFS's.
+- Every release carries a Homebrew formula (`teifs.rb`, macOS and Linux, with
+  completions and a `brew services` service) and winget manifests, made from its
+  checksums. The Docker image goes to Docker Hub as well when the repository has its
+  keys.
 - `teifs doctor [DIR]`: a drive on this machine checked with the settings
   `teifs serve` would use (its options, environment and the drive's settings file):
   its format, whether a server has it, its databases' integrity, how its file system

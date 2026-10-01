@@ -1,0 +1,15 @@
+apiVersion: v2
+name: teifs
+description: TeiFS, an S3-compatible server for a drive, as a StatefulSet with its own volumes.
+type: application
+# The chart's version is TeiFS's (`cargo xtask release` sets both).
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/teispace/teifs
+sources:
+  - https://github.com/teispace/teifs
+keywords: [s3, object-storage, storage]
+maintainers:
+  - name: Teispace
+    email: info@teispace.com

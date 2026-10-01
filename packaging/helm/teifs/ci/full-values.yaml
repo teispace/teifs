@@ -1,0 +1,32 @@
+# Every optional part on, for `helm lint` and `helm template` in CI.
+auth:
+  existingSecret: teifs-keys
+config:
+  default-layout: folder
+  domain: [s3.example.com]
+env:
+  - name: TEIFS_LOG
+    value: debug
+tls:
+  existingSecret: teifs-tls
+persistence:
+  data:
+    existingClaim: teifs-drive
+  config:
+    storageClass: fast
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: s3.example.com
+      paths: [{path: /}]
+  tls:
+    - hosts: [s3.example.com]
+      secretName: teifs-tls
+metrics:
+  serviceMonitor:
+    enabled: true
+    bearerTokenSecret:
+      name: teifs-metrics
+resources:
+  requests: {cpu: 100m, memory: 128Mi}

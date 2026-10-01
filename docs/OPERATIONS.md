@@ -37,6 +37,34 @@ To listen on a port below 1024, add `AmbientCapabilities=CAP_NET_BIND_SERVICE` a
 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` the same way. Removing the package stops
 the service and keeps `/var/lib/teifs`; delete it yourself when it's no longer needed.
 
+## Kubernetes
+
+The Helm chart in `packaging/helm/teifs` runs TeiFS as a StatefulSet of one pod, with a
+volume for the drive (`/data`) and one for the encryption keyring (`/config`):
+
+```sh
+helm install teifs packaging/helm/teifs --set persistence.data.size=100Gi
+helm test teifs        # the server answers its health check through its Service
+```
+
+Without `auth.existingSecret` the chart makes the root keys (a Secret named after the
+release, kept across upgrades and after an uninstall, so a reinstall opens the same
+drive); the install's notes say how to read them. The secret key reaches the server as
+a file, never a variable. The pod runs as a non-root user with a read-only root file
+system and no capabilities; probes ask `/minio/health/live` and `/minio/health/ready`.
+
+| Value | What |
+|---|---|
+| `auth.existingSecret` | A Secret of yours with `accessKey` and `secretKey` (names set by `auth.accessKeyKey`, `auth.secretKeyKey`) |
+| `config` | `teifs.toml`, as `teifs serve` reads it: `{default-layout: folder, domain: [s3.example.com]}` |
+| `env`, `envFrom` | More `TEIFS_*` variables, such as a notification target's secret from a Secret |
+| `tls.existingSecret` | A `kubernetes.io/tls` Secret (cert-manager's): the server speaks HTTPS, and the probes too |
+| `persistence.data`, `persistence.config` | Each volume's `size`, `storageClass`, `accessModes`, or an `existingClaim` |
+| `ingress` | An Ingress to the Service, with its hosts and TLS |
+| `metrics.serviceMonitor` | A Prometheus Operator ServiceMonitor; `bearerTokenSecret` names the Secret holding the token `teifs admin prometheus generate` makes |
+
+Back up the keyring volume with the drive: objects can't be read without it.
+
 ## Request ids
 
 Every answer has an `x-amz-request-id` header: 16 hex digits, unique on the server, as

@@ -91,6 +91,10 @@ packaging/      —              The Linux packages: `linux/` has
                                the systemd service, its sysusers entry, settings,
                                scripts and `nfpm.yaml`; `build.sh` makes the .deb and
                                .rpm, and `test-deb.sh` installs one and checks it.
+                               `helm/teifs` is the Helm chart; `helm/check.sh` lints and
+                               renders it, `helm/test-kind.sh` installs it on kind.
+xtask           —              `cargo xtask`: verify, releases, and a release's Homebrew
+                               formula and winget manifests (`manifests.rs`).
 ```
 
 Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.

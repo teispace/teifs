@@ -1,0 +1,11 @@
+{{- if .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "teifs.fullname" . }}
+  labels:
+    {{- include "teifs.labels" . | nindent 4 }}
+data:
+  teifs.toml: |
+    {{- toToml .Values.config | nindent 4 }}
+{{- end }}

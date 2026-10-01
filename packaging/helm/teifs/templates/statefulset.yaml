@@ -1,0 +1,164 @@
+{{- $scheme := include "teifs.scheme" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "teifs.fullname" . }}
+  labels:
+    {{- include "teifs.labels" . | nindent 4 }}
+spec:
+  # One server for one drive.
+  replicas: 1
+  serviceName: {{ include "teifs.fullname" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "teifs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "teifs.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed config restarts the server with it.
+        checksum/config: {{ toToml .Values.config | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: teifs
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [serve]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: TEIFS_DIR
+              value: /data
+            - name: TEIFS_LISTEN
+              value: "0.0.0.0:9000"
+            - name: XDG_CONFIG_HOME
+              value: /config
+            - name: TEIFS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "teifs.secretName" . }}
+                  key: {{ .Values.auth.accessKeyKey }}
+            - name: TEIFS_SECRET_KEY_FILE
+              value: /run/secrets/teifs/secret-key
+            {{- if .Values.config }}
+            - name: TEIFS_CONFIG
+              value: /etc/teifs/teifs.toml
+            {{- end }}
+            {{- if .Values.tls.existingSecret }}
+            - name: TEIFS_CERTS_DIR
+              value: /etc/teifs/certs
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: s3
+              containerPort: 9000
+              protocol: TCP
+          startupProbe:
+            httpGet: {path: /minio/health/live, port: s3, scheme: {{ $scheme }}}
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: /minio/health/live, port: s3, scheme: {{ $scheme }}}
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: s3, scheme: {{ $scheme }}}
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+            - {name: tmp, mountPath: /tmp}
+            - {name: keys, mountPath: /run/secrets/teifs, readOnly: true}
+            {{- if .Values.config }}
+            - {name: settings, mountPath: /etc/teifs/teifs.toml, subPath: teifs.toml, readOnly: true}
+            {{- end }}
+            {{- if .Values.tls.existingSecret }}
+            - {name: certs, mountPath: /etc/teifs/certs, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: keys
+          secret:
+            secretName: {{ include "teifs.secretName" . }}
+            defaultMode: 0400
+            items:
+              - {key: {{ .Values.auth.secretKeyKey }}, path: secret-key}
+        {{- if .Values.config }}
+        - name: settings
+          configMap:
+            name: {{ include "teifs.fullname" . }}
+        {{- end }}
+        {{- if .Values.tls.existingSecret }}
+        - name: certs
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+            defaultMode: 0400
+            items:
+              - {key: tls.crt, path: public.crt}
+              - {key: tls.key, path: private.key}
+        {{- end }}
+        {{- range $name, $p := .Values.persistence }}
+        {{- if $p.existingClaim }}
+        - name: {{ $name }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+        {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    {{- range $name, $p := .Values.persistence }}
+    {{- if not $p.existingClaim }}
+    - metadata:
+        name: {{ $name }}
+        labels:
+          {{- include "teifs.selectorLabels" $ | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml $p.accessModes | nindent 10 }}
+        {{- with $p.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $p.size }}
+    {{- end }}
+    {{- end }}

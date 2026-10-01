@@ -10,6 +10,8 @@ use std::{
 };
 
 const UNRELEASED: &str = "## Unreleased";
+/// The Helm chart, whose version and appVersion are TeiFS's.
+const CHART: &str = "packaging/helm/teifs/Chart.yaml";
 
 /// `cargo xtask release VERSION`.
 pub fn prepare(root: &Path, version: &str) -> Result<(), String> {
@@ -17,6 +19,10 @@ pub fn prepare(root: &Path, version: &str) -> Result<(), String> {
     let manifest_path = root.join("Cargo.toml");
     let manifest = read(&manifest_path)?;
     write(&manifest_path, &set_version(&manifest, version)?)?;
+
+    let chart_path = root.join(CHART);
+    let chart = read(&chart_path)?;
+    write(&chart_path, &set_chart_version(&chart, version)?)?;
 
     let changelog_path = root.join("CHANGELOG.md");
     let changelog = read(&changelog_path)?;
@@ -43,6 +49,12 @@ pub fn notes(root: &Path, version: &str) -> Result<(), String> {
     if current != version {
         return Err(format!(
             "Cargo.toml says {current}, not {version}: run `cargo xtask release {version}`"
+        ));
+    }
+    let chart = read(&root.join(CHART))?;
+    if set_chart_version(&chart, version)? != chart {
+        return Err(format!(
+            "{CHART} isn't at {version}: run `cargo xtask release {version}`"
         ));
     }
     let changelog = read(&root.join("CHANGELOG.md"))?;
@@ -115,6 +127,28 @@ fn set_version(manifest: &str, version: &str) -> Result<String, String> {
         &manifest[..offset],
         &manifest[offset + line.len()..]
     ))
+}
+
+/// The chart's `version:` and `appVersion:` lines set to `version`.
+fn set_chart_version(chart: &str, version: &str) -> Result<String, String> {
+    let (mut found_version, mut found_app) = (false, false);
+    let lines = chart.split_inclusive('\n').map(|line| {
+        if line.starts_with("version:") {
+            found_version = true;
+            format!("version: {version}\n")
+        } else if line.starts_with("appVersion:") {
+            found_app = true;
+            format!("appVersion: \"{version}\"\n")
+        } else {
+            line.to_owned()
+        }
+    });
+    let set: String = lines.collect();
+    if found_version && found_app {
+        Ok(set)
+    } else {
+        Err(format!("{CHART} has no `version:` or `appVersion:` line"))
+    }
 }
 
 /// Puts the `Unreleased` notes under `## VERSION - DATE`, with a new, empty
@@ -202,6 +236,30 @@ mod tests {
         assert_eq!(workspace_version(&bumped).unwrap(), "0.2.0");
         assert!(bumped.contains("clap = { version = \"4.6\" }"));
         assert_eq!(bumped.len(), manifest.len());
+    }
+
+    #[test]
+    fn the_chart_follows_the_version() {
+        let chart = "apiVersion: v2\nname: teifs\n# The chart's version is TeiFS's.\nversion: 0.1.0\nappVersion: \"0.1.0\"\nkubeVersion: \">=1.25.0-0\"\n";
+        let set = set_chart_version(chart, "0.2.0").unwrap();
+        assert_eq!(
+            set,
+            "apiVersion: v2\nname: teifs\n# The chart's version is TeiFS's.\nversion: 0.2.0\nappVersion: \"0.2.0\"\nkubeVersion: \">=1.25.0-0\"\n"
+        );
+        assert_eq!(
+            set_chart_version(&set, "0.2.0").unwrap(),
+            set,
+            "already there"
+        );
+        assert!(set_chart_version("apiVersion: v2\nversion: 0.1.0\n", "0.2.0").is_err());
+        assert!(set_chart_version("appVersion: \"0.1.0\"\n", "0.2.0").is_err());
+        // The repository's own chart can be set.
+        let ours = include_str!("../../packaging/helm/teifs/Chart.yaml");
+        assert!(
+            set_chart_version(ours, "9.9.9")
+                .unwrap()
+                .contains("version: 9.9.9\n")
+        );
     }
 
     #[test]

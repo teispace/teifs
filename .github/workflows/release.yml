@@ -2,7 +2,8 @@ name: Release
 
 # A release starts from a tag: the maintainer runs `cargo xtask release X.Y.Z`, commits
 # `chore: release X.Y.Z`, and pushes the tag vX.Y.Z. This builds every platform, checks
-# each binary runs, writes SHA256SUMS.txt and build provenance, and creates a DRAFT
+# each binary runs, packages the Linux ones as .deb and .rpm, writes SHA256SUMS.txt,
+# build provenance, the Homebrew formula and winget manifests, and creates a DRAFT
 # release with the changelog's notes. Publishing it stays a person's decision; then
 # image.yml (run by hand with the tag) publishes the Docker image from its binaries.
 #
@@ -17,6 +18,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - xtask/src/release.rs
+      - xtask/src/manifests.rs
       - packaging/linux/**
   workflow_dispatch:
 
@@ -254,6 +256,15 @@ jobs:
           name: notes
       - name: Checksums
         run: (cd dist && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+      - name: The Homebrew formula and the winget manifests, from the checksums
+        run: |
+          set -euo pipefail
+          (cd src && cargo xtask manifests "$VERSION" ../dist/SHA256SUMS.txt ../manifests)
+          cp manifests/teifs.rb dist/
+          (cd manifests && zip -q -r "../dist/teifs-$VERSION-winget-manifests.zip" winget)
       - name: Build provenance
         if: github.ref_type == 'tag'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

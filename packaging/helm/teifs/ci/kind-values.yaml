@@ -1,0 +1,8 @@
+# The nightly's install on kind, with the image it builds from source.
+image:
+  repository: teifs
+  tag: test
+  pullPolicy: Never
+persistence:
+  data:
+    size: 1Gi

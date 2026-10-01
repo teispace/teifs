@@ -103,6 +103,42 @@ jobs:
             gh issue create --title "$TITLE" --body "The nightly client matrix failed: $RUN. Logs are attached to the run."
           fi
 
+  helm:
+    # The chart on a kind cluster, with an image built from source.
+    name: Helm chart on Kubernetes (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: kind and helm, pinned
+        env:
+          KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+          HELM_SHA256: 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "$KIND_SHA256  kind" | sha256sum --check --strict
+          install -m 0755 kind bin/kind
+          curl -fsSL -o helm.tar.gz https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "$HELM_SHA256  helm.tar.gz" | sha256sum --check --strict
+          tar -xzf helm.tar.gz -C bin --strip-components 1 linux-amd64/helm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: The image, from a static binary built here
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          CC_x86_64_unknown_linux_musl=musl-gcc \
+            cargo build --release --locked -p teifs --target x86_64-unknown-linux-musl
+          mkdir -p ctx/empty ctx/linux-amd64
+          cp target/x86_64-unknown-linux-musl/release/teifs ctx/linux-amd64/
+          docker build --build-arg TARGETARCH=amd64 -f docker/Dockerfile -t teifs:test ctx
+      - run: packaging/helm/test-kind.sh
+
   transit-kms:
     # Encryption with a real OpenBao transit engine as the KMS.
     name: Transit KMS (OpenBao)

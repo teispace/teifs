@@ -4,7 +4,9 @@ name: Image
 # built from that release's own static binaries after checking their checksums and
 # build provenance, so the image runs exactly what the release ships. Tags: 0.1.0, 0.1,
 # and latest when it's the latest release. Run it by hand (Actions ▸ Image ▸ Run
-# workflow, tag v0.1.0) once the release is published.
+# workflow, tag v0.1.0) once the release is published. With the repository secrets
+# DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a Docker Hub access token that may push), the
+# same image goes to docker.io/teispace/teifs too.
 #
 # Pull requests and pushes to main that change the image build it from source for
 # linux/amd64 and check it serves, is healthy and keeps its data, without pushing it.
@@ -32,6 +34,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  HUB_IMAGE: docker.io/teispace/teifs
 
 jobs:
   image:
@@ -46,6 +49,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
+      DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -101,7 +105,9 @@ jobs:
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.IMAGE }}
+          images: |
+            ${{ env.IMAGE }}
+            ${{ env.PUBLISH == 'true' && env.DOCKERHUB == 'true' && env.HUB_IMAGE || '' }}
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ steps.release.outputs.tag || 'v0.0.0' }}
@@ -174,6 +180,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.PUBLISH == 'true' && env.DOCKERHUB == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker Hub skipped
+        if: env.PUBLISH == 'true' && env.DOCKERHUB != 'true'
+        run: echo "::notice::No DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets; published to ghcr.io only."
+
       - name: Build and publish both platforms
         if: env.PUBLISH == 'true'
         id: push
@@ -194,5 +210,13 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Build provenance on Docker Hub
+        if: env.PUBLISH == 'true' && env.DOCKERHUB == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.HUB_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
