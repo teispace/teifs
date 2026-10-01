@@ -467,8 +467,10 @@ impl Service {
         let path = req.uri().path();
         let website = self.website(&req);
         if website.is_none() && self.virtual_bucket(&req).is_none() {
-            if health::is_health_check(req.method(), path) {
-                return Ok(health::response(req.method()));
+            if let Some(probe) = health::probe(req.method(), path, req.headers(), req.uri().query())
+            {
+                let query = req.uri().query();
+                return Ok(health::answer(probe, req.method(), query, &self.store).await);
             }
             if metrics::is_scrape(req.method(), path) {
                 let client = self.proxies.client(self.client, req.headers());

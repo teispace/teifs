@@ -66,6 +66,7 @@ pub use settings::{
     ObjectOwnership, PublicAccessBlock,
 };
 pub use snapshots::{Restored, restore};
+pub use space::Health;
 pub use sse::Encryption;
 pub use staged::Staged;
 pub use stages::{Stage, StageTimes};

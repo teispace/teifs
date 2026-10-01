@@ -41,6 +41,14 @@ impl Inner {
     /// Writes a snapshot, named for `at_ms`, into a folder of its own in `dir`.
     fn snapshot_into(&self, dir: &Path, at_ms: i64) -> Result<Snapshot> {
         let _one_at_a_time = self.snapshot_lock();
+        // A drive whose folder went away (an unmounted disk) has nothing to snapshot, and
+        // nothing is made where it was.
+        if !self.system_dir.join(INDEX_DB).is_file() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the drive's index is missing",
+            )));
+        }
         fs::create_dir_all(dir)?;
         let name = snapshot_name(at_ms);
         let partial = dir.join(format!(".{name}.partial"));
@@ -324,6 +332,23 @@ mod tests {
         ));
         // The newer object's bytes stay on the disk.
         assert_eq!(data_files(drive.path()), 2);
+    }
+
+    /// A drive whose folder went away (an unmounted disk) isn't snapshotted as empty,
+    /// and nothing is made where it was.
+    // Windows can't move a folder with open files in it.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_drive_that_went_away_is_never_snapshotted() {
+        let drive = tempfile::tempdir().unwrap();
+        let store = Store::open(drive.path()).unwrap();
+        let system = drive.path().join(crate::SYSTEM_DIR);
+        fs::rename(&system, drive.path().join("moved")).unwrap();
+        assert!(store.take_snapshot().await.is_err());
+        let backups = tempfile::tempdir().unwrap();
+        assert!(store.back_up_to(backups.path()).await.is_err());
+        assert!(!system.exists());
+        assert_eq!(fs::read_dir(backups.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

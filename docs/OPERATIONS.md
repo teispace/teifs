@@ -22,6 +22,24 @@ followed through the log with the id it got.
 drive: for load balancers, orchestrators and container health checks. `teifs health`
 asks it.
 
+`MinIO`'s health checks are answered too, as a single-drive `MinIO` answers them, so
+probes and load balancers set up for `MinIO` work unchanged. Each answers `GET` and
+`HEAD` without a signature and with an empty body:
+
+| Path | `200` when | Otherwise |
+|---|---|---|
+| `/minio/health/live` | the server answers | (it doesn't answer) |
+| `/minio/health/ready` | the drive can serve: its index is there | `503`, `MinIO-ServerStatus: offline` |
+| `/minio/health/cluster` | the drive can take writes: it can serve, and its disk has more room than the space kept free for deletes | `503` |
+| `/minio/health/cluster/read` | the drive can serve reads | `503` |
+
+The cluster checks send `MinIO-WriteQuorum: 1` (or `MinIO-ReadQuorum: 1`) and
+`MinIO-StorageClassDefaults: true`. With `?maintenance=true`, which asks whether the
+server can be taken down without losing the drive, they answer `412`: it's the only
+node. In Kubernetes, point the liveness probe at `/minio/health/live` and the readiness
+probe at `/minio/health/ready`. Only unsigned requests are health checks: a signed
+request for one of those paths reaches a bucket named `minio`, as any request does.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

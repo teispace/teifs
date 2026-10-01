@@ -54,7 +54,10 @@ that quote a request are XML-escaped.
 The one unsigned request besides `AssumeRoleWithWebIdentity` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
-ordinary key that needs a signature. Any other unsigned request is anonymous: it's
+ordinary key that needs a signature. `MinIO`'s health checks (`/minio/health/live`,
+`ready`, `cluster`, `cluster/read`) answer the same way, with a status and `MinIO`'s
+fixed headers only; as they can name a bucket called `minio`, only unsigned requests
+for them are health checks, and a signed request reaches the bucket. Any other unsigned request is anonymous: it's
 decided like any other, as `Principal: *`, so it gets only what a bucket policy grants
 everyone. A new bucket blocks public access (all four Block Public Access settings on,
 as on AWS), so a bucket becomes public only when its owner turns that off and writes a

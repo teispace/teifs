@@ -2,7 +2,7 @@
 
 use std::{path::Path, time::Duration};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::{MetaError, Result};
 
@@ -42,7 +42,7 @@ pub(crate) fn open(path: &Path, migrations: &[&str]) -> Result<Connection> {
 /// Writes a consistent copy of the database at `path` to `to` (which must not exist),
 /// including anything still in its write-ahead log.
 pub fn backup(path: &Path, to: &Path) -> Result<()> {
-    let conn = Connection::open(path)?;
+    let conn = existing(path)?;
     conn.execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
     Ok(())
 }
@@ -50,10 +50,19 @@ pub fn backup(path: &Path, to: &Path) -> Result<()> {
 /// Whether the database at `path` passes SQLite's quick check (a file SQLite can't
 /// read as a database doesn't).
 pub fn intact(path: &Path) -> Result<bool> {
-    let conn = Connection::open(path)?;
+    let conn = existing(path)?;
     Ok(conn
         .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
         .is_ok_and(|answer| answer == "ok"))
+}
+
+/// Opens the database at `path`, which must exist: a missing one is an error, never a
+/// new empty database (a backup of that would pass for a drive with nothing in it).
+fn existing(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    Ok(Connection::open_with_flags(path, flags)?)
 }
 
 #[cfg(test)]
@@ -113,5 +122,14 @@ mod tests {
         let copy = Connection::open(copy).unwrap();
         let x: String = copy.query_row("SELECT x FROM a", [], |r| r.get(0)).unwrap();
         assert_eq!(x, "kept");
+    }
+
+    #[test]
+    fn a_missing_database_is_never_made_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.db");
+        assert!(backup(&missing, &dir.path().join("copy.db")).is_err());
+        assert!(intact(&missing).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

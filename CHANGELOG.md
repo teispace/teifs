@@ -199,6 +199,12 @@ behaviour; the on-disk format is always upgraded automatically.
   rules, redirects of every request and of single objects, S3's HTML error pages,
   ranges, conditional requests and CORS. Access logs record these requests as
   `WEBSITE.GET.OBJECT`. A domain can't be both a `--domain` and a `--website-domain`.
+- `MinIO`'s health checks, as a single-drive `MinIO` answers them:
+  `/minio/health/live`, `/minio/health/ready`, `/minio/health/cluster` and
+  `/minio/health/cluster/read`, so probes set up for `MinIO` work unchanged.
+- Snapshots and backups of a drive whose metadata folder went away (an unmounted disk)
+  fail instead of saving an empty index that would pass for a drive with nothing in it,
+  and make nothing where the drive was.
 - As on AWS, a single upload (`PutObject`, a browser's `POST`, `UploadPart`) is at most
   5 GiB, refused with `EntityTooLarge` before its body when it says it's larger, and a
   copy (`CopyObject`, `UploadPartCopy`) reads at most 5 GiB of its source

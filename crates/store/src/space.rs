@@ -56,7 +56,35 @@ pub(crate) fn fits(dir: &Path, len: u64) -> Result<()> {
     }
 }
 
+/// Whether a drive can serve, as a health check asks: cheap, and never waiting for a
+/// lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    /// Its index is there: it can serve reads.
+    pub readable: bool,
+    /// It can serve reads, and its disk has more room than the reserve: it can take writes.
+    pub writable: bool,
+}
+
 impl Store {
+    /// Whether the drive can serve reads and take writes. A disk that went away (an
+    /// unmounted volume, a removed folder) can't serve either.
+    pub async fn health(&self) -> Health {
+        let inner = std::sync::Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let readable = inner.system_dir.join(crate::format::INDEX_DB).is_file();
+            Health {
+                readable,
+                writable: readable && fits(&inner.tmp, 0).is_ok(),
+            }
+        })
+        .await
+        .unwrap_or(Health {
+            readable: false,
+            writable: false,
+        })
+    }
+
     /// Checks a write before its bytes are read: that `key` (when the write names one)
     /// can be created in `bucket`, and that `len` more bytes (when known) leave the room
     /// kept free for deletes and metadata.
@@ -106,6 +134,45 @@ mod tests {
         assert!(!has_room(10 * GIB, total, 10 * GIB - 50 * MIB));
         assert!(!has_room(90 * MIB, total, 1));
         assert!(!has_room(10 * GIB, total, u64::MAX));
+    }
+
+    // Windows can't move a folder with open files in it.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_drive_whose_folder_went_away_is_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let healthy = Health {
+            readable: true,
+            writable: true,
+        };
+        assert_eq!(store.health().await, healthy);
+        // Where writes are staged is gone: reads are served, writes aren't.
+        let staging = dir.path().join("staging");
+        std::fs::rename(&store.inner.tmp, &staging).unwrap();
+        let read_only = Health {
+            readable: true,
+            writable: false,
+        };
+        assert_eq!(store.health().await, read_only);
+        std::fs::rename(&staging, &store.inner.tmp).unwrap();
+        // The index alone is gone.
+        let index = store.inner.system_dir.join(crate::format::INDEX_DB);
+        let moved_index = dir.path().join("index");
+        std::fs::rename(&index, &moved_index).unwrap();
+        let gone = Health {
+            readable: false,
+            writable: false,
+        };
+        assert_eq!(store.health().await, gone);
+        std::fs::rename(&moved_index, &index).unwrap();
+        assert_eq!(store.health().await, healthy);
+        std::fs::rename(&store.inner.system_dir, dir.path().join("moved")).unwrap();
+        let gone = Health {
+            readable: false,
+            writable: false,
+        };
+        assert_eq!(store.health().await, gone);
     }
 
     #[tokio::test]
