@@ -84,6 +84,45 @@ const OID_KEYS: &[(&str, &str)] = &[
     ("urn:oid:2.5.4.3", "saml:cn"),
 ];
 
+/// The trust policy keys AWS makes of Active Directory's and X.500's attributes, by
+/// the attribute's `Name`. Each takes one value, and one attribute: the first one there.
+const SINGLE_KEYS: &[(&str, &str)] = &[
+    (
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        "saml:name",
+    ),
+    (
+        "http://schemas.xmlsoap.org/claims/CommonName",
+        "saml:commonname",
+    ),
+    (
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
+        "saml:givenname",
+    ),
+    (
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
+        "saml:surname",
+    ),
+    (
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "saml:mail",
+    ),
+    (
+        "http://schemas.microsoft.com/ws/2008/06/identity/claims/primarygroupsid",
+        "saml:uid",
+    ),
+    ("2.5.4.3", "saml:commonname"),
+    ("2.5.4.4", "saml:surname"),
+    ("2.5.4.42", "saml:givenname"),
+    ("2.5.4.45", "saml:x500uniqueidentifier"),
+    ("0.9.2342.19200300.100.1.1", "saml:uid"),
+    ("0.9.2342.19200300.100.1.3", "saml:mail"),
+    ("0.9.2342.19200300.100.1.45", "saml:organizationstatus"),
+    // As AWS's documentation writes these two.
+    ("2.4.5.42", "saml:givenname"),
+    ("0.9.2342.19200300100.1.1", "saml:uid"),
+];
+
 fn refused(err: Refused) -> ApiError {
     match err {
         Refused::Invalid(message) => super::invalid_token(message),
@@ -274,9 +313,15 @@ fn trust_context(
         .with_claim("saml:sub_type", assertion.subject_type.as_str())
         .with_claim("saml:namequalifier", qualifier)
         .with_claim("saml:doc", format!("{}/{}", r.account, provider.name));
+    let mut single = std::collections::BTreeSet::new();
     for a in &assertion.attributes {
         if let Some((_, key)) = OID_KEYS.iter().find(|(oid, _)| *oid == a.name) {
             context = context.with_claim(key, a.values.clone());
+        } else if let Some((_, key)) = SINGLE_KEYS.iter().find(|(name, _)| *name == a.name)
+            && let Some(value) = a.values.first()
+            && single.insert(*key)
+        {
+            context = context.with_claim(key, value.as_str());
         }
     }
     context = with_request_tags(context, &asked.tags).with_sts(StsKey::RoleSessionName, asked.name);

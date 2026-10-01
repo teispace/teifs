@@ -281,7 +281,8 @@ behaviour; the on-disk format is always upgraded automatically.
   for AWS's sign-in endpoint and audience and within its times, gets the session of a
   role its `Role` attribute pairs with the provider, when the role's trust policy allows
   it with the `saml:` keys (`saml:aud`, `saml:iss`, `saml:sub`, `saml:sub_type`,
-  `saml:namequalifier`, `saml:doc`, the eduPerson attributes). `RoleSessionName`,
+  `saml:namequalifier`, `saml:doc`, the eduPerson, Active Directory and X.500
+  attributes). `RoleSessionName`,
   `SessionDuration`, `SourceIdentity`, `PrincipalTag:*` and `TransitiveTagKeys` work as
   on AWS, and the answer has `Subject`, `SubjectType`, `Issuer`, `Audience` and
   `NameQualifier`. The session's requests have `saml:sub`, `saml:sub_type` and

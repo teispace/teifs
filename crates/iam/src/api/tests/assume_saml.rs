@@ -213,6 +213,54 @@ async fn saml_users_assume_the_roles_their_trust_policies_allow() {
         "Not authorized to perform sts:AssumeRoleWithSAML",
     );
 
+    // Active Directory's and X.500's attributes, one value each.
+    for (name, mail) in [
+        ("directory", "alice@example.com"),
+        ("elsewhere", "a@example.org"),
+    ] {
+        setup(
+            &d,
+            &idp,
+            name,
+            &[],
+            &format!(
+                r#"{{"StringEquals":{{"saml:mail":"{mail}","saml:commonName":"Alice","saml:x500UniqueIdentifier":"u1"}}}}"#
+            ),
+        );
+    }
+    let directory = |role: &str| {
+        let mut saml = for_role(&d, role);
+        saml.attributes.extend([
+            (
+                "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress".to_owned(),
+                vec!["alice@example.com".to_owned(), "a@example.org".to_owned()],
+            ),
+            ("2.5.4.3".to_owned(), vec!["Alice".to_owned()]),
+            // Another attribute for the same key counts for nothing.
+            (
+                "http://schemas.xmlsoap.org/claims/CommonName".to_owned(),
+                vec!["Bob".to_owned()],
+            ),
+            ("2.5.4.45".to_owned(), vec!["u1".to_owned()]),
+        ]);
+        saml
+    };
+    ok(
+        d.saml(&assuming(
+            &d,
+            "directory",
+            &idp.response(&directory("directory")),
+            "",
+        )),
+        "directory",
+    );
+    refused(
+        &d,
+        &assuming(&d, "elsewhere", &idp.response(&directory("elsewhere")), ""),
+        "AccessDenied",
+        "Not authorized to perform sts:AssumeRoleWithSAML",
+    );
+
     // The Role attribute must pair the role with the provider.
     let other_role = Saml::default()
         .with(
