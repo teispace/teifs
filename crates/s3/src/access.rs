@@ -117,6 +117,8 @@ pub(crate) struct Access {
     store: Store,
     account: Arc<str>,
     anonymous: Arc<Identity>,
+    /// Holds S3's requests while the server is frozen.
+    control: Arc<crate::minio_service::Control>,
 }
 
 impl Access {
@@ -160,7 +162,12 @@ impl Access {
         Ok(())
     }
 
-    pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>, store: Store) -> Self {
+    pub(crate) fn new(
+        iam: Arc<Iam>,
+        rules: Arc<Rules>,
+        store: Store,
+        control: Arc<crate::minio_service::Control>,
+    ) -> Self {
         let account = iam.account().into();
         Self {
             iam,
@@ -168,6 +175,7 @@ impl Access {
             store,
             account,
             anonymous: Arc::new(Identity::anonymous()),
+            control,
         }
     }
 
@@ -525,6 +533,8 @@ fn seen_source(seen: &Seen, operation: &'static str, (bucket, key, version_id): 
 #[async_trait::async_trait]
 impl S3Access for Access {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
+        // A frozen server holds S3's requests until it's unfrozen, or their client goes.
+        self.control.thawed().await;
         let operation = crate::observe::intern(cx.s3_op().name());
         let seen = observed(cx, operation);
         let client = cx

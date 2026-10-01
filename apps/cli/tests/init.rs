@@ -231,3 +231,79 @@ fn serve_tells_systemd_when_it_is_ready_and_stopping() {
     assert_eq!(&got[..n], b"STOPPING=1");
     assert!(child.wait().unwrap().success());
 }
+
+/// `teifs admin service restart|stop`: the same process starts again as it was started
+/// (systemd hears it reloading, then ready), or exits.
+#[cfg(unix)]
+#[test]
+fn serve_restarts_in_place_and_stops_when_the_admin_api_asks() {
+    use std::{os::unix::net::UnixDatagram, time::Duration};
+    let home = tempfile::tempdir().unwrap();
+    let socket = home.path().join("notify");
+    let systemd = UnixDatagram::bind(&socket).unwrap();
+    systemd
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let (user, password) = ("restarter", "not-a-real-secret-only-for-tests");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teifs"))
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--kms-keyring",
+        ])
+        .args([home.path().join("keys.json"), home.path().join("drive")])
+        .env_clear()
+        .env("NOTIFY_SOCKET", &socket)
+        .env("MINIO_ROOT_USER", user)
+        .env("MINIO_ROOT_PASSWORD", password)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut got = [0; 64];
+    let mut heard = || {
+        let n = systemd.recv(&mut got).unwrap();
+        String::from_utf8_lossy(&got[..n]).into_owned()
+    };
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut serving = || {
+        let line = lines.next().unwrap().unwrap();
+        let serving: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(serving["type"], "serving", "{line}");
+        serving["endpoint"].as_str().unwrap().to_owned()
+    };
+    let admin = |endpoint: &str, args: &[&str]| {
+        let alias = endpoint.replace("http://", &format!("http://{user}:{password}@"));
+        Command::new(env!("CARGO_BIN_EXE_teifs"))
+            .args(["--yes", "admin", "service"])
+            .args(args)
+            .arg("s")
+            .env_clear()
+            .env("TEIFS_ALIAS_S", alias)
+            .env("TEIFS_CLIENT_CONFIG", home.path().join("aliases.toml"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert_eq!(heard(), "READY=1");
+    let endpoint = serving();
+    let dry = admin(&endpoint, &["restart", "--dry-run"]);
+    assert!(dry.status.success(), "{}", text(&dry.stderr));
+    let restarted = admin(&endpoint, &["restart"]);
+    assert!(restarted.status.success(), "{}", text(&restarted.stderr));
+    assert_eq!(heard(), "RELOADING=1");
+    assert_eq!(heard(), "READY=1", "the same process, started again");
+    let endpoint = serving();
+    assert!(
+        teifs(home.path(), &["-q", "health", &endpoint])
+            .status
+            .success()
+    );
+    let stopped = admin(&endpoint, &["stop"]);
+    assert!(stopped.status.success(), "{}", text(&stopped.stderr));
+    assert_eq!(heard(), "STOPPING=1");
+    assert!(child.wait().unwrap().success());
+}

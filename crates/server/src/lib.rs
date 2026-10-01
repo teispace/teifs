@@ -45,7 +45,7 @@ pub use teifs_notify::{
     KafkaSasl, Lambda, Mqtt, Mysql, Nats, Nsq, Postgres, Redis, SaslMechanism, ServerKey, Sns, Sqs,
     TargetConfig, TargetKind, UserKey, Webhook, tls_config,
 };
-pub use teifs_s3::{HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, TrustedProxies};
+pub use teifs_s3::{Control, HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, Stop, TrustedProxies};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource, read_authorities};
 
@@ -735,9 +735,18 @@ impl Server {
         self.created_credentials
     }
 
-    /// Serves requests, and runs the background jobs, until `shutdown` resolves; then
-    /// lets open requests finish for up to [`DRAIN`] and stops the jobs.
-    pub async fn run(self, shutdown: impl Future<Output = ()>) {
+    /// What the admin API asks of the server (`MinIO`'s service calls): to stop or
+    /// restart, and to hold S3's requests.
+    #[must_use]
+    pub fn control(&self) -> Arc<teifs_s3::Control> {
+        self.service.control()
+    }
+
+    /// Serves requests, and runs the background jobs, until `shutdown` resolves or the
+    /// admin API asks it to stop or restart; then lets open requests finish for up to
+    /// [`DRAIN`] and stops the jobs. Returns what the admin API asked, if that's why it
+    /// stopped: a restart is for whoever started it to do.
+    pub async fn run(self, shutdown: impl Future<Output = ()>) -> Option<teifs_s3::Stop> {
         // `SIGHUP` reloads what can be reloaded (the TLS certificates, the audit log), and
         // otherwise does nothing: it never stops the server, as it would by default.
         let _hangups = signals::Hangups::new();
@@ -763,11 +772,20 @@ impl Server {
                 let _ = stopped.await;
             }))
         });
-        // Live traces last until the server stops: they end when it starts to.
+        // Live traces last until the server stops: they end when it starts to, and
+        // frozen requests are let go.
         let stopping = self.service.stopping();
-        let shutdown = async move {
-            shutdown.await;
+        let control = self.service.control();
+        let asked = std::sync::OnceLock::new();
+        let shutdown = async {
+            tokio::select! {
+                () = shutdown => {}
+                stop = control.asked() => {
+                    let _ = asked.set(stop);
+                }
+            }
             stopping.cancel();
+            control.thaw();
         };
         serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
         if let Some(reloads) = reloads {
@@ -793,6 +811,7 @@ impl Server {
                 tracing::warn!("the audit log's last entries weren't all written");
             }
         }
+        asked.into_inner()
     }
 }
 

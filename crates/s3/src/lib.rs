@@ -31,6 +31,7 @@ mod logging;
 mod metrics;
 mod minio_iam;
 mod minio_info;
+mod minio_service;
 mod minio_service_accounts;
 mod notification;
 mod object_lock;
@@ -65,6 +66,7 @@ pub use cors::Service;
 pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
+pub use minio_service::{Control, Stop};
 pub use proxy::{ProxyHeader, TrustedProxies};
 pub use routes::{Api, EndpointInfo, endpoints};
 pub use workers::Workers;
@@ -174,6 +176,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         store.format().drive.clone(),
         (Arc::clone(&access_log), Arc::clone(&request_metrics)),
     );
+    let control = Arc::new(Control::default());
     let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
     config.enable_sig_v2 = options.allow_sig_v2;
@@ -191,6 +194,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             iam.clone(),
             rules.clone(),
             store.clone(),
+            Arc::clone(&control),
         ));
         builder.set_route(routes::Routes {
             iam,
@@ -204,6 +208,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             events,
             access_log,
             request_metrics,
+            control: Arc::clone(&control),
         });
     }
     let host = if options.domains.is_empty() {
@@ -222,5 +227,6 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         watch,
     )
     .with_workers(workers, expirations)
+    .with_control(control)
     .with_website_domains(&options.website_domains))
 }

@@ -1,5 +1,5 @@
 //! `teifs admin`: a TeiFS server's admin API through an alias — what the server is and
-//! how it was started, moving its IAM, replacing its root key, and users with their keys
+//! how it was started, restarting or stopping it, moving its IAM, replacing its root key, and users with their keys
 //! and policies, roles and OpenID Connect providers (over AWS's IAM API, which `aws iam
 //! --endpoint-url …` speaks too).
 
@@ -10,6 +10,7 @@ mod policy;
 mod prometheus;
 mod roles;
 mod saml;
+mod service;
 mod trace;
 mod users;
 
@@ -68,6 +69,12 @@ pub enum AdminAction {
     Prometheus {
         #[command(subcommand)]
         action: prometheus::PrometheusAction,
+    },
+    /// Restart or stop a server, or hold its S3 requests for a while (as `mc admin
+    /// service`).
+    Service {
+        #[command(subcommand)]
+        action: service::ServiceAction,
     },
     /// Replace the root key a TeiFS server's drive generated.
     RootKey {
@@ -190,6 +197,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         AdminAction::Bucket { action } => buckets::run(&aliases, action).await,
         AdminAction::Prometheus { action } => prometheus::run(&aliases, action),
         AdminAction::Trace(args) => trace::run(&aliases, args).await,
+        AdminAction::Service { action } => service::run(&aliases, action).await,
         AdminAction::Snapshot {
             action: SnapshotAction::Ls { alias },
         } => snapshots(&client(&aliases, &alias)?).await,

@@ -212,6 +212,8 @@ pub struct Service {
     expirations: Option<Arc<dyn teifs_store::Expirations>>,
     /// The domains buckets' websites are served on.
     websites: Arc<crate::website::Domains>,
+    /// The server's freezes, and whether it was asked to stop.
+    control: Arc<crate::Control>,
 }
 
 impl std::fmt::Debug for Service {
@@ -235,6 +237,7 @@ impl Service {
             workers: Arc::default(),
             expirations: None,
             websites: Arc::default(),
+            control: Arc::default(),
             s3,
             store,
             host: host.map(Arc::new),
@@ -260,6 +263,19 @@ impl Service {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(workers);
         self
+    }
+
+    /// The service sharing `control` with its calls.
+    #[must_use]
+    pub(crate) fn with_control(mut self, control: Arc<crate::Control>) -> Self {
+        self.control = control;
+        self
+    }
+
+    /// What the admin API asks of the server: to stop or restart, to hold S3's requests.
+    #[must_use]
+    pub fn control(&self) -> Arc<crate::Control> {
+        Arc::clone(&self.control)
     }
 
     /// The service with buckets' websites served on `domains` (`BUCKET.DOMAIN`).

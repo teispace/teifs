@@ -359,7 +359,7 @@ async fn ldap_status(routes: &Routes) -> Option<Service> {
 }
 
 /// The host the caller reached, as `madmin` names a server: `host:port`.
-fn endpoint(routes: &Routes, req: &S3Request<Body>) -> String {
+pub(crate) fn endpoint(routes: &Routes, req: &S3Request<Body>) -> String {
     req.headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())

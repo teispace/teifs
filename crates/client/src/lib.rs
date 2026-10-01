@@ -37,7 +37,7 @@ pub use zeroize::Zeroizing;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
     ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE,
-    MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA,
+    MINIO_GET_BUCKET_QUOTA, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
@@ -506,6 +506,22 @@ impl Client {
         Ok(())
     }
 
+    /// Asks the server to restart, stop, hold S3's requests or let them go (`MinIO`'s
+    /// admin API: `admin:ServiceRestart`, `admin:ServiceStop`, `admin:ServiceFreeze`).
+    /// It answers before it restarts or stops; with `dry_run` it only checks the caller
+    /// may.
+    pub async fn service(&self, action: ServiceAction, dry_run: bool) -> Result<(), ClientError> {
+        let query = format!("action={}&type=2&dry-run={dry_run}", action.name());
+        let response = self
+            .send(Method::POST, MINIO_SERVICE, Some(&query), Vec::new())
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_error(status, &response.bytes().await?));
+        }
+        Ok(())
+    }
+
     /// A live trace of the requests the server answers from now on, those `filter`
     /// shows (`teifs:ServerTrace`): read it with [`Trace::next`].
     pub async fn trace(&self, filter: &TraceFilter) -> Result<Trace, ClientError> {
@@ -630,6 +646,32 @@ impl Client {
             .headers()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect())
+    }
+}
+
+/// What [`Client::service`] asks of a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    /// Stop, then start again as it was started.
+    Restart,
+    /// Stop.
+    Stop,
+    /// Hold S3's requests until as many unfreezes have come.
+    Freeze,
+    /// Undo a freeze.
+    Unfreeze,
+}
+
+impl ServiceAction {
+    /// Its name in the call (`?action=`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Freeze => "freeze",
+            Self::Unfreeze => "unfreeze",
+        }
     }
 }
 

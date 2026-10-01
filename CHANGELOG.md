@@ -334,6 +334,13 @@ behaviour; the on-disk format is always upgraded automatically.
   with their room, what the drive and each bucket hold, and whether the KMS and the
   LDAP directory answer. Each needs MinIO's admin action (`admin:ServerInfo`,
   `admin:StorageInfo`, `admin:DataUsageInfo`).
+- MinIO's service calls (`mc admin service restart|stop|freeze|unfreeze`), and
+  `teifs admin service` for the same: a restart finishes what the server is answering,
+  then starts `teifs serve` again as it was started, in the same process on Unix (so
+  systemd sees it reload); a stop exits. A freeze holds S3's requests (not the admin
+  API's, nor health checks) until as many unfreezes have come, or the server stops.
+  Each needs MinIO's admin action (`admin:ServiceRestart`, `admin:ServiceStop`,
+  `admin:ServiceFreeze`), and a dry run only checks it.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

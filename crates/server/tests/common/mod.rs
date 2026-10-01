@@ -26,6 +26,8 @@ pub struct Server {
     /// The listener's TLS, when it serves HTTPS.
     pub tls: Option<std::sync::Arc<teifs_server::Tls>>,
     _stop: oneshot::Sender<()>,
+    /// The running server: what the admin API asked, once it has stopped.
+    pub running: tokio::task::JoinHandle<Option<teifs_server::Stop>>,
 }
 
 pub async fn start() -> Server {
@@ -81,7 +83,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     let iam = server.iam().clone();
     let tls = server.tls().cloned();
     let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(server.run(async {
+    let running = tokio::spawn(server.run(async {
         let _ = stopped.await;
     }));
     Server {
@@ -91,6 +93,7 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
         endpoint,
         tls,
         _stop: stop,
+        running,
     }
 }
 

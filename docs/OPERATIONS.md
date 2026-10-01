@@ -136,6 +136,20 @@ what it holds, and whether the KMS and the LDAP directory answer, each asked for
 mc admin info teifs
 ```
 
+`teifs admin service restart ALIAS` (or `mc admin service restart`) restarts a server:
+it finishes what it's answering, then starts again as it was started, with the binary
+now at its path (a package upgrade's). On Unix it's the same process, so systemd hears
+it reloading and then ready again; on Windows the new server is a child the old one
+waits for. `stop` makes it exit (only whatever started it can start it again, so it
+asks first). `freeze` holds S3's requests, not the admin API's or health checks, until
+as many `unfreeze`s have come or the server stops. They need `admin:ServiceRestart`,
+`admin:ServiceStop` and `admin:ServiceFreeze`; `--dry-run` only checks the alias may.
+
+```sh
+teifs admin service restart prod
+teifs admin service freeze prod && teifs admin service unfreeze prod
+```
+
 ### Doctor
 
 `teifs doctor [DIR]` looks at a drive on the machine it's on, with the settings

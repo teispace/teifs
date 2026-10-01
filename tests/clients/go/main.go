@@ -139,6 +139,7 @@ func main() {
 
 	minioIAM(ctx, adm)
 	serverInfo(ctx, adm, *bucket)
+	service(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -290,4 +291,23 @@ func serverInfo(ctx context.Context, adm *madmin.AdminClient, bucket string) {
 	_, has := usage.BucketsUsage[bucket]
 	check(has && usage.TotalCapacity > 0 && usage.TotalCapacity >= usage.TotalUsedCapacity,
 		fmt.Sprintf("the data usage: %+v", usage))
+}
+
+// The service calls a server answers before it acts: restart and stop only as dry runs
+// (the server is everyone's), and a freeze undone at once.
+func service(ctx context.Context, adm *madmin.AdminClient) {
+	step("service restart and stop (dry runs), freeze and unfreeze, as mc admin service calls them")
+	for _, action := range []madmin.ServiceAction{madmin.ServiceActionRestart, madmin.ServiceActionStop} {
+		result, err := adm.ServiceAction(ctx, madmin.ServiceActionOpts{Action: action, DryRun: true})
+		must(err)
+		check(result.Action == action && result.DryRun && len(result.Results) == 1 &&
+			result.Results[0].Host != "" && result.Results[0].Err == "",
+			fmt.Sprintf("a dry-run %s: %+v", action, result))
+	}
+	for _, action := range []madmin.ServiceAction{madmin.ServiceActionFreeze, madmin.ServiceActionUnfreeze} {
+		result, err := adm.ServiceAction(ctx, madmin.ServiceActionOpts{Action: action})
+		must(err)
+		check(result.Action == action && !result.DryRun && len(result.Results) == 0,
+			fmt.Sprintf("a %s: %+v", action, result))
+	}
 }

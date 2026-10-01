@@ -66,6 +66,10 @@ pub const MINIO_SET_BUCKET_QUOTA: &str = "/minio/admin/v3/set-bucket-quota";
 /// as `mc quota info` reads it.
 pub const MINIO_GET_BUCKET_QUOTA: &str = "/minio/admin/v3/get-bucket-quota";
 
+/// `MinIO`'s admin API: `POST ?action=restart|stop|freeze|unfreeze` asks the server to
+/// restart, stop, hold S3's requests or let them go, as `mc admin service` does.
+pub const MINIO_SERVICE: &str = "/minio/admin/v3/service";
+
 /// The format of a [`BucketsExport`]; a server refuses any other.
 pub const BUCKETS_EXPORT_FORMAT: u32 = 1;
 

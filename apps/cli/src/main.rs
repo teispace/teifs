@@ -25,6 +25,7 @@ mod notify;
 mod openid;
 mod plugin;
 mod repair;
+mod restart;
 mod sts;
 mod ui;
 mod units;
@@ -704,6 +705,11 @@ fn main() -> ExitCode {
             Err(err) => std::panic::resume_unwind(err.into_panic()),
         }
     });
+    if RESTART.load(std::sync::atomic::Ordering::Relaxed) {
+        // Its tasks hold the drive's lock and its files until they're gone.
+        runtime.shutdown_timeout(RESTART_WAIT);
+        return restart::again();
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -712,6 +718,9 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// How long a restart waits for what's still running to end.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The stack of the threads commands run on.
 const STACK_SIZE: usize = 8 * 1024 * 1024;
@@ -1697,15 +1706,36 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     let address = server.local_addr().map_err(|e| e.to_string())?;
     announce(&server, address, keys.as_ref(), args.durability.into());
     notify::notify("READY=1");
-    server
+    let asked = server
         .run(async {
             shutdown_signal().await;
             notify::notify("STOPPING=1");
         })
         .await;
-    ui::note("Stopped.");
+    stopped(asked);
     Ok(())
 }
+
+/// Says why `teifs serve` stopped, to people and to systemd; a restart is done once
+/// everything it opened is closed (see [`RESTART`]).
+fn stopped(asked: Option<teifs_server::Stop>) {
+    match asked {
+        Some(teifs_server::Stop::Restart) => {
+            notify::notify("RELOADING=1");
+            ui::note("Restarting…");
+            RESTART.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Some(teifs_server::Stop::Stop) => {
+            notify::notify("STOPPING=1");
+            ui::note("Stopped, as the admin API asked.");
+        }
+        None => ui::note("Stopped."),
+    }
+}
+
+/// Set when the admin API asked `teifs serve` to restart: once everything it opened is
+/// closed, it starts again as it was started.
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Says what `teifs serve` is serving and how to reach it: a block for people on
 /// standard error, or one `serving` record for `--json` (its endpoint is the one to use,

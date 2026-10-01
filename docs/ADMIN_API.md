@@ -116,6 +116,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/info` | The server as `madmin.InfoMessage`: one server with one pool of one set, its drives the disks the drive uses, what it holds, and whether its KMS and LDAP directory answer: `mc admin info` | `admin:ServerInfo` |
 | `GET` | `/minio/admin/v3/storageinfo` | The drive's disks and their room as `madmin.StorageInfo` | `admin:StorageInfo` |
 | `GET` | `/minio/admin/v3/datausageinfo` | What each bucket holds as `madmin.DataUsageInfo`, with the disks' room when `?capacity=true`: `mc admin info`, the console's dashboard | `admin:DataUsageInfo` |
+| `POST` | `/minio/admin/v3/service` | Restarts or stops the server once it has answered, or freezes S3's requests until as many unfreezes have come, as `?action=` (`restart`, `stop`, `freeze`, `unfreeze`) asks; with `?dry-run=true` it only answers. Restarting needs `admin:ServiceRestart`, stopping `admin:ServiceStop`, freezing and unfreezing `admin:ServiceFreeze`: `mc admin service` | the action each call names |
 
 <!-- end generated -->
 

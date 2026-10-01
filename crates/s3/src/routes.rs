@@ -32,7 +32,7 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_iam, minio_info, minio_service_accounts,
+    iam_api, listen, minio_iam, minio_info, minio_service, minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -74,6 +74,9 @@ pub(crate) enum Needs {
     /// Anything but an explicit deny of this action; the handler then lets a caller
     /// without it act only on its own service accounts (as `MinIO` decides them).
     OrOwnAccount(&'static str),
+    /// The action of the service call `?action=` names (`MinIO`'s restart, stop,
+    /// freeze and unfreeze), decided with the caller's policies.
+    ServiceAction,
     /// Any caller who signs: the call answers about the caller alone.
     Signed,
     /// The Query APIs name an action in each call's body, and IAM decides it.
@@ -152,6 +155,7 @@ enum Handler {
     InfoAccessKey,
     TemporaryAccountInfo,
     MinioInfo(minio_info::Kind),
+    MinioService,
 }
 
 impl Handler {
@@ -208,6 +212,7 @@ impl Handler {
             Self::InfoAccessKey => "InfoAccessKey",
             Self::TemporaryAccountInfo => "TemporaryAccountInfo",
             Self::MinioInfo(kind) => kind.name(),
+            Self::MinioService => "Service",
         }
     }
 }
@@ -651,7 +656,18 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioInfo(minio_info::Kind::DataUsage),
         about: "What each bucket holds as `madmin.DataUsageInfo`, with the disks' room when `?capacity=true`: `mc admin info`, the console's dashboard",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/service",
+        needs: Needs::ServiceAction,
+        handler: Handler::MinioService,
+        about: "Restarts or stops the server once it has answered, or freezes S3's requests until as many unfreezes have come, as `?action=` (`restart`, `stop`, `freeze`, `unfreeze`) asks; with `?dry-run=true` it only answers. Restarting needs `admin:ServiceRestart`, stopping `admin:ServiceStop`, freezing and unfreezing `admin:ServiceFreeze`: `mc admin service`",
+    },
 ];
+
+/// Why a call decided on its query's bucket has one.
+const ON: &str = "decided on the query's bucket";
 
 /// `MinIO`'s admin API, as its clients reach it.
 const MINIO_ADMIN: &str = "/minio/admin/v3/";
@@ -706,7 +722,7 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OrOwnKey(action)
             | Needs::NotDenied(action)
             | Needs::OrOwnAccount(action) => Some(action),
-            Needs::PerCall | Needs::Root | Needs::Signed => None,
+            Needs::PerCall | Needs::Root | Needs::Signed | Needs::ServiceAction => None,
         },
         root_only: e.needs == Needs::Root,
         own_key: matches!(
@@ -782,6 +798,8 @@ pub(crate) struct Routes {
     pub(crate) access_log: Arc<crate::access_log::AccessLog>,
     /// Where answered requests go for buckets' request metrics.
     pub(crate) request_metrics: Arc<crate::request_metrics::RequestMetrics>,
+    /// The server's freezes, and whether it was asked to stop.
+    pub(crate) control: Arc<crate::minio_service::Control>,
 }
 
 #[async_trait::async_trait]
@@ -933,6 +951,12 @@ impl Routes {
                 privileged = decision.is_allowed();
                 decision != Decision::ExplicitDeny
             }
+            Needs::ServiceAction => {
+                let action = minio_service::Action::asked(req.uri.query())?;
+                identity
+                    .decide(&context(), action.needs(), ANY, None)
+                    .is_allowed()
+            }
             Needs::Root => identity.is_root(),
             Needs::Signed => true,
             Needs::PerCall => false,
@@ -1004,14 +1028,8 @@ impl Routes {
                 .await
             }
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
-            Handler::SetBucketQuota => {
-                let bucket = query_bucket.expect("decided on the query's bucket");
-                quota::set(&self.store, &bucket, req).await
-            }
-            Handler::GetBucketQuota => {
-                let bucket = query_bucket.expect("decided on the query's bucket");
-                quota::get(&self.store, &bucket).await
-            }
+            Handler::SetBucketQuota => quota::set(&self.store, &query_bucket.expect(ON), req).await,
+            Handler::GetBucketQuota => quota::get(&self.store, &query_bucket.expect(ON)).await,
             Handler::AddUser => minio_iam::add_user(&self.iam, req).await,
             Handler::ChangeMyPassword => minio_iam::change_my_password(&self.iam, req).await,
             Handler::RemoveUser => minio_iam::remove_user(&self.iam, &req),
@@ -1060,6 +1078,7 @@ impl Routes {
             }
             Handler::TemporaryAccountInfo => minio_service_accounts::temporary_account_info(&req),
             Handler::MinioInfo(kind) => kind.call(self, &req).await,
+            Handler::MinioService => minio_service::call(self, &req),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -1350,6 +1369,7 @@ mod tests {
             match e.needs {
                 Needs::PerCall => assert_eq!(e.api, Api::Query),
                 Needs::Signed => assert_eq!(e.handler, Handler::AccountInfo),
+                Needs::ServiceAction => assert_eq!(e.handler, Handler::MinioService),
                 Needs::Root => assert_ne!(e.api, Api::Query),
                 Needs::Action(action, resource) => {
                     assert!(action.contains(':') && !resource.is_empty(), "{e:?}");

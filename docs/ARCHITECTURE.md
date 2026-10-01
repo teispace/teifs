@@ -375,7 +375,11 @@ the action; without it, the handler allows only the accounts of the user the cal
 acts as (`Iam::minio_parent`); a caller signing with session keys adds or deletes
 service accounts only with the action. `mc admin info`'s calls (`minio_info.rs`) describe
 the drive in madmin's types from the store's disks and usage counters, asking the KMS
-(`Store::kms`) and the LDAP directory with a timeout. Quotas are
+(`Store::kms`) and the LDAP directory with a timeout. `MinIO`'s service calls
+(`minio_service.rs`) go through a `Control` shared by the routes, `Access` (whose check
+waits while it's frozen, so only S3 operations are held) and `Server::run`, which stops
+when it's asked, thaws what's held and returns why; `teifs serve` re-executes itself
+for a restart once its runtime has shut down (`apps/cli/src/restart.rs`). Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and
