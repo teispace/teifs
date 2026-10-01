@@ -18,6 +18,7 @@ use teifs_types::{
     admin::{
         BUCKETS_EXPORT_FORMAT, BucketImportItem, BucketsExport, BucketsImportReport, ExportedBucket,
     },
+    configs::Configurations,
     logging::LoggingConfig,
     notify::NotificationConfig,
     website::WebsiteConfig,
@@ -27,7 +28,7 @@ use crate::{
     access_log::AccessLog,
     acl, admin,
     bucket_access::{Rules, parse_policy, public_policy_blocked},
-    cors,
+    configs, cors,
     errors::StoreResultExt,
     lifecycle, logging, object_lock, quota,
     routes::{s3_refusal, signed_body},
@@ -51,6 +52,7 @@ const SETTINGS: &[&str] = &[
     "notifications",
     "website",
     "quota",
+    "configurations",
     "logging",
 ];
 
@@ -328,6 +330,10 @@ impl Import<'_> {
             let result = self.quota(value).await;
             self.report("quota", result.map(|()| APPLIED));
         }
+        if let Some(value) = settings.get("configurations") {
+            let result = self.configurations(value).await;
+            self.report("configurations", result.map(|()| APPLIED));
+        }
     }
 
     async fn object_lock(&self, value: &Value) -> S3Result<()> {
@@ -488,6 +494,16 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Requester Pays and the reporting configurations, each checked as its Put checks it.
+    async fn configurations(&self, value: &Value) -> S3Result<()> {
+        let given: Configurations = parse("configurations", value)?;
+        let checked = configs::check_all(&given)?;
+        self.store
+            .set_bucket_configurations(self.bucket, checked)
+            .await
+            .s3()
+    }
+
     /// Checked as `MinIO`'s `SetBucketQuota` checks it.
     async fn quota(&self, value: &Value) -> S3Result<()> {
         let quota: u64 = parse("quota", value)?;
@@ -615,6 +631,7 @@ mod tests {
                 protocol: None,
             }),
             quota: Some(1),
+            configurations: Some(Configurations::default()),
         };
         let Value::Object(given) = serde_json::to_value(all).unwrap() else {
             unreachable!()

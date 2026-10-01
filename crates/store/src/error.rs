@@ -29,6 +29,9 @@ pub enum StoreError {
     /// A bucket with that name already exists.
     #[error("a bucket with that name already exists")]
     BucketExists,
+    /// A bucket already has as many configurations of a kind as S3 allows.
+    #[error("the bucket has 1,000 configurations of this kind already")]
+    TooManyConfigurations,
     /// The bucket still holds objects.
     #[error("the bucket isn't empty")]
     BucketNotEmpty,

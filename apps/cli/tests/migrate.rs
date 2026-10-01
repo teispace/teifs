@@ -16,8 +16,9 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{
         BucketVersioningStatus, CompletedMultipartUpload, CompletedPart, DefaultRetention,
-        ObjectLockConfiguration, ObjectLockEnabled, ObjectLockLegalHoldStatus,
-        ObjectLockRetentionMode, ObjectLockRule, Tag, Tagging, VersioningConfiguration,
+        MetricsConfiguration, MetricsFilter, ObjectLockConfiguration, ObjectLockEnabled,
+        ObjectLockLegalHoldStatus, ObjectLockRetentionMode, ObjectLockRule, Payer,
+        RequestPaymentConfiguration, Tag, Tagging, VersioningConfiguration,
     },
 };
 use common::{ACCESS_KEY, SECRET_KEY, Server, client, start};
@@ -247,6 +248,27 @@ async fn seed(from: &S3) -> (String, String, ObjectLockConfiguration) {
         .send()
         .await
         .unwrap();
+    from.put_bucket_request_payment()
+        .bucket("photos")
+        .request_payment_configuration(
+            RequestPaymentConfiguration::builder()
+                .payer(Payer::Requester)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    // More than a page of them.
+    for id in (0..=100).map(|n| format!("m{n:03}")) {
+        from.put_bucket_metrics_configuration()
+            .bucket("photos")
+            .id(&id)
+            .metrics_configuration(metrics(&id))
+            .send()
+            .await
+            .unwrap();
+    }
 
     from.create_bucket()
         .bucket("locked")
@@ -282,6 +304,33 @@ async fn seed(from: &S3) -> (String, String, ObjectLockConfiguration) {
         .await
         .unwrap();
     (even, uneven, lock)
+}
+
+fn metrics(id: &str) -> MetricsConfiguration {
+    MetricsConfiguration::builder()
+        .id(id)
+        .filter(MetricsFilter::Prefix(format!("{id}/")))
+        .build()
+        .unwrap()
+}
+
+/// Requester Pays and the metrics configurations `seed` set.
+async fn check_configurations(to: &S3) {
+    let payment = to
+        .get_bucket_request_payment()
+        .bucket("photos")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(payment.payer(), Some(&Payer::Requester));
+    let last = to
+        .get_bucket_metrics_configuration()
+        .bucket("photos")
+        .id("m100")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last.metrics_configuration(), Some(&metrics("m100")));
 }
 
 /// Checks that everything `seed` made is at the destination, the same.
@@ -356,6 +405,7 @@ async fn check_copied(
             .value(),
         "ops"
     );
+    check_configurations(to).await;
     let there = to
         .get_object_lock_configuration()
         .bucket("locked")

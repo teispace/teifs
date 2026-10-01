@@ -10,6 +10,7 @@ mod bucket_access;
 mod bucket_export;
 mod caps;
 mod checksums;
+mod configs;
 mod control;
 mod cors;
 mod crc_combine;

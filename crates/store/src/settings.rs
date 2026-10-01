@@ -5,7 +5,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 use teifs_meta::{BucketRecord, Layout, Versioning};
 use teifs_types::{
-    Acl, SseMode, logging::LoggingConfig, notify::NotificationConfig, website::WebsiteConfig,
+    Acl, SseMode,
+    configs::{Configurations, Kind, MAX_CONFIGURATIONS},
+    logging::LoggingConfig,
+    notify::NotificationConfig,
+    website::WebsiteConfig,
 };
 
 use crate::{
@@ -57,6 +61,10 @@ pub(crate) struct BucketConfig {
     /// The most bytes it may hold (`MinIO`'s hard quota).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quota: Option<u64>,
+    /// Requester Pays and its inventory, analytics, metrics and Intelligent-Tiering
+    /// configurations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    configurations: Option<Configurations>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
 }
@@ -108,6 +116,10 @@ pub struct BucketSettings {
     /// The most bytes it may hold (`MinIO`'s hard quota).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<u64>,
+    /// Requester Pays and its inventory, analytics, metrics and Intelligent-Tiering
+    /// configurations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configurations: Option<Configurations>,
 }
 
 /// How a bucket encrypts objects written without asking, and which encryption it
@@ -386,6 +398,7 @@ impl Store {
             logging: config.logging,
             website: config.website,
             quota: config.quota,
+            configurations: config.configurations,
         })
     }
 
@@ -519,6 +532,92 @@ impl Store {
     pub async fn set_bucket_quota(&self, bucket: &str, quota: Option<u64>) -> Result<()> {
         self.change_config(bucket, move |config| config.quota = quota)
             .await
+    }
+
+    /// A bucket's Requester Pays setting and its inventory, analytics, metrics and
+    /// Intelligent-Tiering configurations; from memory once read.
+    pub async fn bucket_configurations(&self, bucket: &str) -> Result<Arc<Configurations>> {
+        if let Some(found) = self.inner.configurations.cached(bucket) {
+            return Ok(found.unwrap_or_default());
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            let found = inner.configurations.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.configurations)
+            })?;
+            Ok(found.unwrap_or_default())
+        })
+        .await
+    }
+
+    /// Replaces all of a bucket's configurations (an import); empty removes them.
+    pub async fn set_bucket_configurations(
+        &self,
+        bucket: &str,
+        configurations: Configurations,
+    ) -> Result<()> {
+        self.change_config(bucket, move |config| {
+            config.configurations = (!configurations.is_empty()).then_some(configurations);
+        })
+        .await
+    }
+
+    /// Sets whether a bucket's requesters pay.
+    pub async fn set_requester_pays(&self, bucket: &str, requester_pays: bool) -> Result<()> {
+        self.change_configurations(bucket, move |configurations| {
+            configurations.requester_pays = requester_pays;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Adds or replaces one of a bucket's configurations: `put` changes the set of that
+    /// kind. A new one beyond [`MAX_CONFIGURATIONS`] of its kind is refused
+    /// ([`StoreError::TooManyConfigurations`]).
+    pub async fn put_configuration(
+        &self,
+        bucket: &str,
+        kind: Kind,
+        id: &str,
+        put: impl FnOnce(&mut Configurations) + Send + 'static,
+    ) -> Result<()> {
+        let id = id.to_owned();
+        self.change_configurations(bucket, move |configurations| {
+            let (count, exists) = configurations.count(kind, &id);
+            if !exists && count >= MAX_CONFIGURATIONS {
+                return Err(StoreError::TooManyConfigurations);
+            }
+            put(configurations);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes one of a bucket's configurations; `false` when it had none by that id.
+    pub async fn delete_configuration(&self, bucket: &str, kind: Kind, id: &str) -> Result<bool> {
+        let id = id.to_owned();
+        let (sender, removed) = std::sync::mpsc::channel();
+        self.change_configurations(bucket, move |configurations| {
+            let _ = sender.send(configurations.remove(kind, &id));
+            Ok(())
+        })
+        .await?;
+        Ok(removed.try_recv().unwrap_or(false))
+    }
+
+    async fn change_configurations(
+        &self,
+        bucket: &str,
+        change: impl FnOnce(&mut Configurations) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        self.try_change_config(bucket, move |config| {
+            let mut configurations = config.configurations.take().unwrap_or_default();
+            let result = change(&mut configurations);
+            config.configurations = (!configurations.is_empty()).then_some(configurations);
+            result
+        })
+        .await
     }
 
     /// What decides who may reach a bucket: its policy, Block Public Access settings,
@@ -776,6 +875,7 @@ impl Inner {
         self.logging.clear();
         self.websites.clear();
         self.quotas.clear();
+        self.configurations.clear();
     }
 
     /// Changes a bucket's settings. A folder bucket made outside TeiFS gets its record.

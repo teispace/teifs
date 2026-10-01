@@ -96,7 +96,7 @@ pub(crate) fn to_dto(config: Option<&LoggingConfig>) -> dto::GetBucketLoggingOut
 }
 
 /// What `PutBucketLogging` checks of `source`'s new configuration, as S3 does: the
-/// target exists, has no default retention, takes target grants only while its ACLs are
+/// target exists, isn't a Requester Pays bucket, has no default retention, takes target grants only while its ACLs are
 /// enabled, and (when IAM decides requests, in `account`) lets the logging service in,
 /// by its policy or an ACL grant to the log delivery group.
 pub(crate) async fn check(
@@ -116,6 +116,16 @@ pub(crate) async fn check(
             ));
         }
         Err(err) => return Err(from_store(err)),
+    }
+    if store
+        .bucket_configurations(target)
+        .await
+        .map_err(from_store)?
+        .requester_pays
+    {
+        return Err(invalid_target(
+            "The target bucket for logging can't be a Requester Pays bucket",
+        ));
     }
     let lock = store.bucket_object_lock(target).await.map_err(from_store)?;
     if lock.is_some_and(|lock| lock.default_retention.is_some()) {

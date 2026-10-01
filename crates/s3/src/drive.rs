@@ -18,7 +18,7 @@ use teifs_store::{
     Match, NewBucket, OWNER_ID, ObjectAttrs, ObjectInfo, ObjectOwnership, Precondition, SseInfo,
     SseMode, Staged, Store, Upload, Versioning, VersionsQuery,
 };
-use teifs_types::logging::LoggingConfig;
+use teifs_types::{configs::Kind, logging::LoggingConfig};
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -28,7 +28,7 @@ use crate::{
     bucket_access::{self, Rules},
     caps::{self, Caps},
     checksums::{self, Sums, checksum_of, set_checksums},
-    cors, encode,
+    configs, cors, encode,
     errors::{StoreResultExt, from_body},
     events::{Events, Happened},
     lifecycle, logging, notification,
@@ -2188,6 +2188,315 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::PutBucketWebsiteOutput::default()))
+    }
+
+    async fn put_bucket_inventory_configuration(
+        &self,
+        req: S3Request<dto::PutBucketInventoryConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketInventoryConfigurationOutput>> {
+        let input = req.input;
+        let given = configs::inventory_from_dto(input.inventory_configuration)?;
+        configs::put(
+            &self.store,
+            (&input.bucket, &input.id),
+            Kind::Inventory,
+            given,
+            |c| &mut c.inventory,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::PutBucketInventoryConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_inventory_configuration(
+        &self,
+        req: S3Request<dto::GetBucketInventoryConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketInventoryConfigurationOutput>> {
+        let input = req.input;
+        let config =
+            configs::get(&self.store, &input.bucket, &input.id, |c| &mut c.inventory).await?;
+        Ok(S3Response::new(
+            dto::GetBucketInventoryConfigurationOutput {
+                inventory_configuration: Some(configs::inventory_to_dto(&input.id, &config)),
+            },
+        ))
+    }
+
+    async fn delete_bucket_inventory_configuration(
+        &self,
+        req: S3Request<dto::DeleteBucketInventoryConfigurationInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketInventoryConfigurationOutput>> {
+        let input = req.input;
+        configs::delete(&self.store, &input.bucket, Kind::Inventory, &input.id).await?;
+        Ok(S3Response::new(
+            dto::DeleteBucketInventoryConfigurationOutput::default(),
+        ))
+    }
+
+    async fn list_bucket_inventory_configurations(
+        &self,
+        req: S3Request<dto::ListBucketInventoryConfigurationsInput>,
+    ) -> S3Result<S3Response<dto::ListBucketInventoryConfigurationsOutput>> {
+        let input = req.input;
+        let token = input.continuation_token;
+        let (found, truncated, next) = configs::list(
+            &self.store,
+            &input.bucket,
+            token.as_deref(),
+            |c| &mut c.inventory,
+            configs::inventory_to_dto,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::ListBucketInventoryConfigurationsOutput {
+                continuation_token: token,
+                inventory_configuration_list: Some(found),
+                is_truncated: Some(truncated),
+                next_continuation_token: next,
+            },
+        ))
+    }
+
+    async fn put_bucket_analytics_configuration(
+        &self,
+        req: S3Request<dto::PutBucketAnalyticsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketAnalyticsConfigurationOutput>> {
+        let input = req.input;
+        let given = configs::analytics_from_dto(input.analytics_configuration)?;
+        configs::put(
+            &self.store,
+            (&input.bucket, &input.id),
+            Kind::Analytics,
+            given,
+            |c| &mut c.analytics,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::PutBucketAnalyticsConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_analytics_configuration(
+        &self,
+        req: S3Request<dto::GetBucketAnalyticsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketAnalyticsConfigurationOutput>> {
+        let input = req.input;
+        let config =
+            configs::get(&self.store, &input.bucket, &input.id, |c| &mut c.analytics).await?;
+        Ok(S3Response::new(
+            dto::GetBucketAnalyticsConfigurationOutput {
+                analytics_configuration: Some(configs::analytics_to_dto(&input.id, &config)),
+            },
+        ))
+    }
+
+    async fn delete_bucket_analytics_configuration(
+        &self,
+        req: S3Request<dto::DeleteBucketAnalyticsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketAnalyticsConfigurationOutput>> {
+        let input = req.input;
+        configs::delete(&self.store, &input.bucket, Kind::Analytics, &input.id).await?;
+        Ok(S3Response::new(
+            dto::DeleteBucketAnalyticsConfigurationOutput::default(),
+        ))
+    }
+
+    async fn list_bucket_analytics_configurations(
+        &self,
+        req: S3Request<dto::ListBucketAnalyticsConfigurationsInput>,
+    ) -> S3Result<S3Response<dto::ListBucketAnalyticsConfigurationsOutput>> {
+        let input = req.input;
+        let token = input.continuation_token;
+        let (found, truncated, next) = configs::list(
+            &self.store,
+            &input.bucket,
+            token.as_deref(),
+            |c| &mut c.analytics,
+            configs::analytics_to_dto,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::ListBucketAnalyticsConfigurationsOutput {
+                continuation_token: token,
+                analytics_configuration_list: Some(found),
+                is_truncated: Some(truncated),
+                next_continuation_token: next,
+            },
+        ))
+    }
+
+    async fn put_bucket_metrics_configuration(
+        &self,
+        req: S3Request<dto::PutBucketMetricsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketMetricsConfigurationOutput>> {
+        let input = req.input;
+        let given = configs::metrics_from_dto(input.metrics_configuration)?;
+        configs::put(
+            &self.store,
+            (&input.bucket, &input.id),
+            Kind::Metrics,
+            given,
+            |c| &mut c.metrics,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::PutBucketMetricsConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_metrics_configuration(
+        &self,
+        req: S3Request<dto::GetBucketMetricsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketMetricsConfigurationOutput>> {
+        let input = req.input;
+        let config =
+            configs::get(&self.store, &input.bucket, &input.id, |c| &mut c.metrics).await?;
+        Ok(S3Response::new(dto::GetBucketMetricsConfigurationOutput {
+            metrics_configuration: Some(configs::metrics_to_dto(&input.id, &config)),
+        }))
+    }
+
+    async fn delete_bucket_metrics_configuration(
+        &self,
+        req: S3Request<dto::DeleteBucketMetricsConfigurationInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketMetricsConfigurationOutput>> {
+        let input = req.input;
+        configs::delete(&self.store, &input.bucket, Kind::Metrics, &input.id).await?;
+        Ok(S3Response::new(
+            dto::DeleteBucketMetricsConfigurationOutput::default(),
+        ))
+    }
+
+    async fn list_bucket_metrics_configurations(
+        &self,
+        req: S3Request<dto::ListBucketMetricsConfigurationsInput>,
+    ) -> S3Result<S3Response<dto::ListBucketMetricsConfigurationsOutput>> {
+        let input = req.input;
+        let token = input.continuation_token;
+        let (found, truncated, next) = configs::list(
+            &self.store,
+            &input.bucket,
+            token.as_deref(),
+            |c| &mut c.metrics,
+            configs::metrics_to_dto,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::ListBucketMetricsConfigurationsOutput {
+                continuation_token: token,
+                metrics_configuration_list: Some(found),
+                is_truncated: Some(truncated),
+                next_continuation_token: next,
+            },
+        ))
+    }
+
+    async fn put_bucket_intelligent_tiering_configuration(
+        &self,
+        req: S3Request<dto::PutBucketIntelligentTieringConfigurationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketIntelligentTieringConfigurationOutput>> {
+        let input = req.input;
+        let given = configs::tiering_from_dto(input.intelligent_tiering_configuration)?;
+        configs::put(
+            &self.store,
+            (&input.bucket, &input.id),
+            Kind::IntelligentTiering,
+            given,
+            |c| &mut c.intelligent_tiering,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::PutBucketIntelligentTieringConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_intelligent_tiering_configuration(
+        &self,
+        req: S3Request<dto::GetBucketIntelligentTieringConfigurationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketIntelligentTieringConfigurationOutput>> {
+        let input = req.input;
+        let config = configs::get(&self.store, &input.bucket, &input.id, |c| {
+            &mut c.intelligent_tiering
+        })
+        .await?;
+        Ok(S3Response::new(
+            dto::GetBucketIntelligentTieringConfigurationOutput {
+                intelligent_tiering_configuration: Some(configs::tiering_to_dto(
+                    &input.id, &config,
+                )),
+            },
+        ))
+    }
+
+    async fn delete_bucket_intelligent_tiering_configuration(
+        &self,
+        req: S3Request<dto::DeleteBucketIntelligentTieringConfigurationInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketIntelligentTieringConfigurationOutput>> {
+        let input = req.input;
+        configs::delete(
+            &self.store,
+            &input.bucket,
+            Kind::IntelligentTiering,
+            &input.id,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::DeleteBucketIntelligentTieringConfigurationOutput::default(),
+        ))
+    }
+
+    async fn list_bucket_intelligent_tiering_configurations(
+        &self,
+        req: S3Request<dto::ListBucketIntelligentTieringConfigurationsInput>,
+    ) -> S3Result<S3Response<dto::ListBucketIntelligentTieringConfigurationsOutput>> {
+        let input = req.input;
+        let token = input.continuation_token;
+        let (found, truncated, next) = configs::list(
+            &self.store,
+            &input.bucket,
+            token.as_deref(),
+            |c| &mut c.intelligent_tiering,
+            configs::tiering_to_dto,
+        )
+        .await?;
+        Ok(S3Response::new(
+            dto::ListBucketIntelligentTieringConfigurationsOutput {
+                continuation_token: token,
+                intelligent_tiering_configuration_list: Some(found),
+                is_truncated: Some(truncated),
+                next_continuation_token: next,
+            },
+        ))
+    }
+
+    async fn get_bucket_request_payment(
+        &self,
+        req: S3Request<dto::GetBucketRequestPaymentInput>,
+    ) -> S3Result<S3Response<dto::GetBucketRequestPaymentOutput>> {
+        let configurations = self
+            .store
+            .bucket_configurations(&req.input.bucket)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::GetBucketRequestPaymentOutput {
+            payer: Some(configs::payer(configurations.requester_pays)),
+        }))
+    }
+
+    async fn put_bucket_request_payment(
+        &self,
+        req: S3Request<dto::PutBucketRequestPaymentInput>,
+    ) -> S3Result<S3Response<dto::PutBucketRequestPaymentOutput>> {
+        let input = req.input;
+        let requester_pays = configs::requester_pays(&input.request_payment_configuration)?;
+        self.store
+            .set_requester_pays(&input.bucket, requester_pays)
+            .await
+            .s3()?;
+        Ok(S3Response::new(
+            dto::PutBucketRequestPaymentOutput::default(),
+        ))
     }
 
     /// Removes the bucket's website configuration; one that has none answers the same.

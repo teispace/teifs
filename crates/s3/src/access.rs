@@ -132,6 +132,28 @@ impl Access {
         Ok((rules, source_rules))
     }
 
+    /// Refuses an anonymous request to a Requester Pays bucket (or copying from one),
+    /// whatever its policy says. A bucket that doesn't exist is left for the operation
+    /// to report.
+    async fn refuse_anonymous(
+        &self,
+        bucket: Option<&str>,
+        source: Option<&Source>,
+    ) -> S3Result<()> {
+        let source = source.map(|(bucket, _, _)| bucket.as_str());
+        for bucket in bucket.into_iter().chain(source) {
+            let pays = self
+                .store
+                .bucket_configurations(bucket)
+                .await
+                .is_ok_and(|configurations| configurations.requester_pays);
+            if pays {
+                return Err(denied());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(iam: Arc<Iam>, rules: Arc<Rules>, store: Store) -> Self {
         let account = iam.account().into();
         Self {
@@ -539,15 +561,14 @@ impl S3Access for Access {
             S3Path::Bucket { bucket } | S3Path::Object { bucket, .. } => Some(bucket.to_string()),
             S3Path::Root => None,
         };
-        // Whoever asks, a bucket owned by another account than the one named is refused.
-        if bucket_name.is_some() && operation != "CreateBucket" {
-            check_owner(field(cx, form.as_ref(), EXPECTED_OWNER), &self.account)?;
-        }
-        if source.is_some() {
-            check_owner(
-                field(cx, form.as_ref(), EXPECTED_SOURCE_OWNER),
-                &self.account,
-            )?;
+        let named = (
+            bucket_name.is_some() && operation != "CreateBucket",
+            source.is_some(),
+        );
+        check_owners(cx, form.as_ref(), named, &self.account)?;
+        if !signed {
+            self.refuse_anonymous(bucket_name.as_deref(), source.as_ref())
+                .await?;
         }
         let (rules, source_rules) = self
             .rules_of(bucket_name.as_deref(), source.as_ref())
@@ -968,6 +989,23 @@ const EXPECTED_SOURCE_OWNER: &str = "x-amz-source-expected-bucket-owner";
 
 /// Checks an expected bucket owner, if the request names one, as S3 does: it must be an
 /// account id (12 digits), and the bucket's (every bucket on a drive is its account's).
+/// Whoever asks, a bucket (`named.0`) or copy source (`named.1`) owned by another account
+/// than the one the request names is refused.
+fn check_owners(
+    cx: &S3AccessContext<'_>,
+    form: Option<&Form>,
+    named: (bool, bool),
+    account: &str,
+) -> S3Result<()> {
+    if named.0 {
+        check_owner(field(cx, form, EXPECTED_OWNER), account)?;
+    }
+    if named.1 {
+        check_owner(field(cx, form, EXPECTED_SOURCE_OWNER), account)?;
+    }
+    Ok(())
+}
+
 fn check_owner(expected: Option<&str>, account: &str) -> S3Result<()> {
     match expected {
         None => Ok(()),

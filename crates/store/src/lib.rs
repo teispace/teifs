@@ -79,12 +79,12 @@ pub use teifs_crypto::{
 };
 pub use teifs_meta::{Layout, Part, Upload, Usage, Versioning};
 pub use teifs_types::admin::Snapshot;
-use teifs_types::check_folder_bucket;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,
     SseInfo, SseMode, UploadChecksum,
 };
 pub use teifs_types::{MAX_KEY_LEN, NameError, ObjectAttrs, ObjectInfo, ObjectKey, check_bucket};
+use teifs_types::{check_folder_bucket, configs::Configurations};
 pub use usage::BucketUsage;
 pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 
@@ -290,6 +290,8 @@ struct Inner {
     websites: cache::SettingCache<teifs_types::website::WebsiteConfig>,
     /// Buckets' quotas, read once.
     quotas: cache::SettingCache<u64>,
+    /// Buckets' Requester Pays and reporting configurations, read once.
+    configurations: cache::SettingCache<Configurations>,
     /// How long a lifecycle "day" is, in milliseconds (shorter only in tests).
     day_ms: i64,
     /// How long each stage of reads and writes takes.
@@ -400,6 +402,7 @@ impl Store {
             logging: cache::SettingCache::default(),
             websites: cache::SettingCache::default(),
             quotas: cache::SettingCache::default(),
+            configurations: cache::SettingCache::default(),
             stages: stages::new(),
             day_ms: options.lifecycle_day.map_or(lifecycle::DAY_MS, |day| {
                 i64::try_from(day.as_millis()).unwrap_or(i64::MAX).max(1)

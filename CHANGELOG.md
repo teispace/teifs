@@ -213,6 +213,12 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs cp` and `teifs mirror` between endpoints keep every header a copy by the
   server keeps (`Cache-Control`, `Content-Disposition`, `Content-Encoding`,
   `Content-Language`, `Expires`, website redirect), not only the type and metadata.
+- Requester Pays (`Put/GetBucketRequestPayment`): a Requester Pays bucket refuses
+  anonymous requests, whatever its policy allows, and can't receive access logs.
+- Inventory, analytics, metrics and Intelligent-Tiering configurations
+  (`Put/Get/Delete/ListBucket…Configuration`), kept and answered as given with S3's
+  checks, 1,000 of a kind per bucket and lists of 100 with continuation tokens. Bucket
+  exports and `teifs migrate` carry them, and Requester Pays.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,
   installing `teifs`, its shell completions, a `teifs` system user and a hardened
   systemd service (`systemctl enable --now teifs`) that serves `/var/lib/teifs/drive`

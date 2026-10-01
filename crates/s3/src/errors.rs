@@ -61,6 +61,15 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         } => delete_marker(version_id.as_deref(), modified, named),
         StoreError::BucketExists => s3_error!(BucketAlreadyOwnedByYou),
         StoreError::BucketNotEmpty => s3_error!(BucketNotEmpty),
+        StoreError::TooManyConfigurations => {
+            let mut err = S3Error::with_message(
+                S3ErrorCode::Custom("TooManyConfigurations".into()),
+                "You are attempting to create a new configuration but have already reached the \
+                 1,000-configuration limit.",
+            );
+            err.set_status_code(http::StatusCode::BAD_REQUEST);
+            err
+        }
         StoreError::InvalidName(NameError::InvalidBucketName(why)) => {
             s3_error!(InvalidBucketName, "{why}")
         }

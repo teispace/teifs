@@ -10,9 +10,11 @@ use aws_sdk_s3::{
     config::http::HttpResponse,
     error::{ProvideErrorMetadata, SdkError},
     types::{
-        BucketLifecycleConfiguration, BucketLocationConstraint, BucketVersioningStatus,
-        CorsConfiguration, CreateBucketConfiguration, ObjectLockEnabled, Tagging,
-        VersioningConfiguration, WebsiteConfiguration,
+        AnalyticsConfiguration, BucketLifecycleConfiguration, BucketLocationConstraint,
+        BucketVersioningStatus, CorsConfiguration, CreateBucketConfiguration,
+        IntelligentTieringConfiguration, InventoryConfiguration, MetricsConfiguration,
+        ObjectLockEnabled, Payer, RequestPaymentConfiguration, Tagging, VersioningConfiguration,
+        WebsiteConfiguration,
     },
 };
 use futures::future::BoxFuture;
@@ -308,6 +310,11 @@ async fn settings(pair: &Pair, dry_run: bool, unmade: bool) {
     copy_setting(pair, (dry_run, unmade), &WEBSITE, |c| c).await;
     copy_setting(pair, (dry_run, unmade), &OWNERSHIP, |c| c).await;
     copy_setting(pair, (dry_run, unmade), &PUBLIC_ACCESS, |c| c).await;
+    copy_setting(pair, (dry_run, unmade), &REQUEST_PAYMENT, |c| c).await;
+    copy_setting(pair, (dry_run, unmade), &INVENTORY, |c| c).await;
+    copy_setting(pair, (dry_run, unmade), &ANALYTICS, |c| c).await;
+    copy_setting(pair, (dry_run, unmade), &METRICS, |c| c).await;
+    copy_setting(pair, (dry_run, unmade), &TIERING, |c| c).await;
     not_copied(pair).await;
 }
 
@@ -507,6 +514,143 @@ const ENCRYPTION: Setting<aws_sdk_s3::types::ServerSideEncryptionConfiguration> 
         })
     },
 };
+
+/// Whether a service doesn't have a setting at all (`MinIO` has no inventory, say).
+fn unsupported<E: ProvideErrorMetadata, R>(err: &SdkError<E, R>) -> bool {
+    err.code() == Some("NotImplemented")
+}
+
+/// Requester Pays, when it's on (the bucket owner paying is every bucket's default).
+const REQUEST_PAYMENT: Setting<Payer> = Setting {
+    what: "Requester Pays",
+    read: |client, bucket| {
+        Box::pin(async move {
+            let got = client
+                .get_bucket_request_payment()
+                .bucket(&bucket)
+                .send()
+                .await;
+            match got {
+                Ok(found) => Ok(found.payer().filter(|p| **p == Payer::Requester).cloned()),
+                Err(err) if unsupported(&err) => Ok(None),
+                Err(err) => Err(Error::s3(
+                    format!("can't read the Requester Pays setting of {bucket}"),
+                    &err,
+                )),
+            }
+        })
+    },
+    write: |client, bucket, payer| {
+        Box::pin(async move {
+            let config = RequestPaymentConfiguration::builder()
+                .payer(payer)
+                .build()
+                .map_err(|e| Error::general(format!("can't set Requester Pays: {e}")))?;
+            client
+                .put_bucket_request_payment()
+                .bucket(bucket)
+                .request_payment_configuration(config)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|e| Error::s3("can't set Requester Pays", &e))
+        })
+    },
+};
+
+/// A kind of configuration named by an id, all of a bucket's (every page), copied one
+/// by one.
+macro_rules! configurations {
+    ($name:ident, $what:literal, $config:ty, $list:ident, $listed:ident, $put:ident, $set:ident) => {
+        const $name: Setting<Vec<$config>> = Setting {
+            what: $what,
+            read: |client, bucket| {
+                Box::pin(async move {
+                    let mut all = Vec::new();
+                    let mut token = None;
+                    loop {
+                        let got = client
+                            .$list()
+                            .bucket(&bucket)
+                            .set_continuation_token(token.take())
+                            .send()
+                            .await;
+                        let page = match got {
+                            Ok(page) => page,
+                            Err(err) if unsupported(&err) || absent(&err) => return Ok(None),
+                            Err(err) => {
+                                return Err(Error::s3(
+                                    format!("can't read the {} of {bucket}", $what),
+                                    &err,
+                                ));
+                            }
+                        };
+                        all.extend_from_slice(page.$listed());
+                        match page.next_continuation_token() {
+                            Some(next) if page.is_truncated() == Some(true) => {
+                                token = Some(next.to_owned());
+                            }
+                            _ => break,
+                        }
+                    }
+                    Ok((!all.is_empty()).then_some(all))
+                })
+            },
+            write: |client, bucket, configurations| {
+                Box::pin(async move {
+                    for configuration in configurations {
+                        client
+                            .$put()
+                            .bucket(&bucket)
+                            .id(configuration.id())
+                            .$set(configuration.clone())
+                            .send()
+                            .await
+                            .map_err(|e| Error::s3(concat!("can't set the ", $what), &e))?;
+                    }
+                    Ok(())
+                })
+            },
+        };
+    };
+}
+
+configurations!(
+    INVENTORY,
+    "inventory configurations",
+    InventoryConfiguration,
+    list_bucket_inventory_configurations,
+    inventory_configuration_list,
+    put_bucket_inventory_configuration,
+    inventory_configuration
+);
+configurations!(
+    ANALYTICS,
+    "analytics configurations",
+    AnalyticsConfiguration,
+    list_bucket_analytics_configurations,
+    analytics_configuration_list,
+    put_bucket_analytics_configuration,
+    analytics_configuration
+);
+configurations!(
+    METRICS,
+    "metrics configurations",
+    MetricsConfiguration,
+    list_bucket_metrics_configurations,
+    metrics_configuration_list,
+    put_bucket_metrics_configuration,
+    metrics_configuration
+);
+configurations!(
+    TIERING,
+    "Intelligent-Tiering configurations",
+    IntelligentTieringConfiguration,
+    list_bucket_intelligent_tiering_configurations,
+    intelligent_tiering_configuration_list,
+    put_bucket_intelligent_tiering_configuration,
+    intelligent_tiering_configuration
+);
 
 const WEBSITE: Setting<WebsiteConfiguration> = Setting {
     what: "website",

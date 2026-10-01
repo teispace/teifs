@@ -492,7 +492,8 @@ What's carried:
   has it. Its settings are copied where the destination has none of its own:
   versioning, Object Lock's default retention, the policy (the source bucket's ARN made
   the destination's), lifecycle rules, CORS, tags, default encryption, the website,
-  object ownership and the public access block. A setting the destination already has
+  object ownership, the public access block, Requester Pays and the inventory, analytics,
+  metrics and Intelligent-Tiering configurations. A setting the destination already has
   is kept, and said. Notifications, access logging and replication name things on the
   source (its queues, buckets and roles), so they're listed for you to set up again.
   `--no-configs` copies none of them.
