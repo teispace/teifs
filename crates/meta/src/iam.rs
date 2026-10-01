@@ -1204,7 +1204,7 @@ mod tests {
             ])
             .unwrap();
         let rows = system.iam_rows().unwrap();
-        assert_eq!(rows.service_accounts, [account.clone()]);
+        assert_eq!(rows.service_accounts, std::slice::from_ref(&account));
         assert!(!format!("{:?}", rows.service_accounts[0]).contains("secret"));
         // An update changes everything but the parent and the creation time.
         let changed = ServiceAccountRow {
