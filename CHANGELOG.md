@@ -319,6 +319,16 @@ behaviour; the on-disk format is always upgraded automatically.
   (`XMinioAdminNoSuchUser`, `XMinioIAMPolicyInUse`…), and each call is decided with
   MinIO's admin action (`admin:CreateUser`, `admin:UpdatePolicyAssociation`…); a user
   may read itself and change its own secret unless a policy denies it.
+- MinIO's service accounts (`mc admin user svcacct`, `mc admin accesskey`):
+  `add-service-account`, `update-service-account`, `info-service-account`,
+  `list-service-accounts`, `delete-service-account`, `list-access-keys-bulk`,
+  `info-access-key` and `temporary-account-info`. A service account acts as its user (or
+  the root user), narrowed by a policy of its own when it has one, until it expires
+  (15 minutes to 365 days away, or never). It may be disabled, renamed or given a new
+  secret, and it goes when its user does. A caller manages its own unless a policy
+  denies it; another user's need MinIO's admin actions. Service accounts get no
+  temporary credentials from STS, and IAM exports and imports carry them. Unlike MinIO,
+  an update that leaves out the policy keeps it rather than dropping it.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

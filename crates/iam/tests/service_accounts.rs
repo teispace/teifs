@@ -8,7 +8,7 @@
 
 use teifs_crypto::LocalKms;
 use teifs_iam::{
-    Iam, MinioError, MinioUserChange, NewServiceAccount, ServiceAccountChange, SessionKind,
+    Iam, MinioError, MinioUserChange, NewServiceAccount, Owner, ServiceAccountChange, SessionKind,
 };
 use teifs_policy::Date;
 use zeroize::Zeroizing;
@@ -384,10 +384,12 @@ async fn service_accounts_go_with_their_parent() {
     let dir = tempfile::tempdir().unwrap();
     let iam = open(dir.path()).await;
     add_writer(&iam, "alice");
+    add_writer(&iam, "bob");
     let first = iam.minio_add_service_account("alice", read_only()).unwrap();
     let theirs = iam
         .minio_add_service_account(ROOT, NewServiceAccount::default())
         .unwrap();
+    let bobs = iam.minio_add_service_account("bob", read_only()).unwrap();
     // IAM's DeleteUser refuses while it has some; MinIO's remove-user takes them.
     iam.minio_set_user(
         "alice",
@@ -408,6 +410,34 @@ async fn service_accounts_go_with_their_parent() {
     assert!(iam.credential(&first.access_key).is_none());
     assert!(iam.minio_service_accounts("alice").is_empty());
     assert!(iam.minio_service_account(&theirs.access_key).is_ok());
+    assert!(may(&iam, &bobs.access_key, "s3:GetObject"));
+}
+
+#[tokio::test]
+async fn an_implied_policy_leaves_out_disabled_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let iam = open(dir.path()).await;
+    add_writer(&iam, "alice");
+    iam.minio_update_group("devs", &["alice".to_owned()], false, None)
+        .unwrap();
+    iam.minio_associate(Owner::Group("devs"), &["diagnostics".to_owned()], true)
+        .unwrap();
+    let made = iam
+        .minio_add_service_account("alice", NewServiceAccount::default())
+        .unwrap();
+    let policy = |iam: &Iam| iam.minio_service_account(&made.access_key).unwrap().policy;
+    assert!(
+        policy(&iam).contains("admin:ServerTrace"),
+        "{}",
+        policy(&iam)
+    );
+    iam.minio_set_group_enabled("devs", false).unwrap();
+    assert!(
+        !policy(&iam).contains("admin:ServerTrace"),
+        "{}",
+        policy(&iam)
+    );
+    assert!(policy(&iam).contains("s3:*"));
 }
 
 #[tokio::test]
@@ -478,4 +508,13 @@ async fn service_accounts_export_and_import() {
         "EntityAlreadyExists"
     );
     assert!(to.minio_users().is_empty(), "all or nothing");
+
+    // Nor does one made later than now.
+    let mut export = iam.export(true);
+    export.service_accounts[0].created_ms = now_ms() + HOUR_MS;
+    let other = tempfile::tempdir().unwrap();
+    let to = open(other.path()).await;
+    let refused = to.import(&export, false).unwrap_err();
+    assert_eq!(refused.code(), "InvalidInput");
+    assert!(refused.to_string().contains("impossible time"), "{refused}");
 }

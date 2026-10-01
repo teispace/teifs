@@ -873,6 +873,9 @@ async fn others_service_accounts_need_the_admin_actions() {
         200
     );
     attach(&server, "svc-admin", "alice").await;
+    // Every user's keys need `admin:ListUsers` as well.
+    let path = "list-access-keys-bulk?listType=all&all=true";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
     let (status, made) = add_account(&server, alice, &for_bob).await;
     assert_eq!(status, 200);
     let made = made["credentials"]["accessKey"]
@@ -927,6 +930,14 @@ async fn the_root_user_s_service_accounts_and_bad_ones() {
     assert_eq!(lists(&server, svc).await, "ok");
     let (_, list) = secret_call(&server, ROOT, "GET", "list-service-accounts", None).await;
     assert_eq!(list["accounts"][0]["parentUser"], ACCESS_KEY);
+    // The root user's implied policy is `consoleAdmin`'s.
+    let path = format!("info-service-account?accessKey={}", svc.0);
+    let (_, info) = secret_call(&server, ROOT, "GET", &path, None).await;
+    let policy = info["policy"].as_str().unwrap();
+    assert!(
+        policy.contains("admin:*") && policy.contains("kms:*"),
+        "{policy}"
+    );
     // A root service account manages its parent's, but isn't the root user.
     let (status, list) = secret_call(&server, svc, "GET", "list-service-accounts", None).await;
     assert_eq!(
@@ -971,6 +982,49 @@ async fn the_root_user_s_service_accounts_and_bad_ones() {
     }
     let (status, _) = add_account(&server, ROOT, &json!({"expiration": "soon"})).await;
     assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_narrowed_key_makes_and_removes_service_accounts_only_with_the_actions() {
+    let server = start().await;
+    assert_eq!(add_user(&server, ROOT, "bob", "bob-secret").await.0, 200);
+    attach(&server, "readwrite", "bob").await;
+    let bob = ("bob", "bob-secret");
+    let reads = json!({"accessKey": "bobreader", "secretKey": "bobreader-secret",
+        "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+            "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::*"]}]}});
+    assert_eq!(add_account(&server, bob, &reads).await.0, 200);
+    let keys = json!({"accessKey": "bobsvc", "secretKey": "bobsvc-secret"});
+    assert_eq!(add_account(&server, bob, &keys).await.0, 200);
+    let reader = ("bobreader", "bobreader-secret");
+
+    // Bob makes and removes his own; a key narrowed below him may not, or it could
+    // make one with all he may do.
+    assert_eq!(add_account(&server, reader, &json!({})).await.0, 403);
+    let path = "delete-service-account?accessKey=bobsvc";
+    assert_eq!(call(&server, reader, "DELETE", path, b"").await.0, 403);
+    let (status, list) = secret_call(&server, reader, "GET", "list-service-accounts", None).await;
+    assert_eq!(
+        (status, list["accounts"].as_array().unwrap().len()),
+        (200, 2)
+    );
+
+    // With the actions it may.
+    let svc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:CreateServiceAccount","admin:RemoveServiceAccount"]}]}"#;
+    let path = "add-canned-policy?name=svc-admin";
+    assert_eq!(
+        call(&server, ROOT, "PUT", path, svc.as_bytes()).await.0,
+        200
+    );
+    attach(&server, "svc-admin", "bob").await;
+    let admin = json!({"accessKey": "bobadmin", "secretKey": "bobadmin-secret",
+        "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+            "Action": ["admin:CreateServiceAccount", "admin:RemoveServiceAccount"]}]}});
+    assert_eq!(add_account(&server, bob, &admin).await.0, 200);
+    let admin = ("bobadmin", "bobadmin-secret");
+    assert_eq!(add_account(&server, admin, &json!({})).await.0, 200);
+    let path = "delete-service-account?accessKey=bobsvc";
+    assert_eq!(call(&server, admin, "DELETE", path, b"").await.0, 204);
 }
 
 /// Credentials from an `add-service-account` answer.

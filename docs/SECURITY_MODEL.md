@@ -133,7 +133,14 @@ no key may take the root's id), only into an empty IAM, in one transaction. The 
 user can replace a root key the drive generated (`POST root-key`): the new key is saved
 to the owner-only credentials file first (written beside it and renamed over it), and
 only then does the old key stop working, so a failure leaves the old key in use. A key
-given through the environment, flags or a file is never rewritten by the server. The table refuses unsigned requests
+given through the environment, flags or a file is never rewritten by the server. A `MinIO` service account never
+has more than its parent: its policy is a session policy on the parent's identity, a
+root user's service account isn't the root user, STS gives service accounts no
+temporary credentials, and a caller signing with a service account's or temporary keys
+makes or deletes service accounts only with the action, so a narrowed key can't mint
+one with all its parent may do. Its secret is sealed like an access key's, shown once when it's
+made, and exported only with secrets. An update that leaves out the policy keeps it,
+where `MinIO` drops it and widens the account. The table refuses unsigned requests
 and unknown keys and decides the action before the handler runs; a test walks every
 endpoint as an anonymous caller and as a user without permissions. The health check is
 the one unsigned endpoint (above). Profiling and debug endpoints will be off by default

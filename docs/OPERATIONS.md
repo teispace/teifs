@@ -254,7 +254,32 @@ one is replaced only when the client asks to override it (madmin's `overrideBuil
 as on MinIO. Each
 call needs MinIO's admin action (`admin:CreateUser`, `admin:UpdatePolicyAssociation`…),
 which `consoleAdmin` and `iamAdmin` grant; a user may always read itself and change its
-own secret (`mc admin user svcacct` and access keys come next).
+own secret.
+
+### Service accounts
+
+A service account is an access key a user (or the root user) makes for a program: it
+acts as its user, narrowed by a policy of its own when it has one, and it can expire.
+
+```sh
+mc admin user svcacct add teifs alice --name backup --expiry 2027-06-30T00:00
+mc admin user svcacct add teifs alice --policy only-backups.json
+mc admin user svcacct ls teifs alice
+mc admin user svcacct disable teifs TKIA...
+mc admin accesskey ls teifs --all
+mc admin user svcacct rm teifs TKIA...
+```
+
+Anyone may make, list, read and delete service accounts for their own user unless a
+policy denies it; for another user's they need `admin:CreateServiceAccount`,
+`admin:ListServiceAccounts` or `admin:RemoveServiceAccount`. Signing with a service
+account's or temporary keys, making or deleting even your own needs the action too.
+Changing one, even your own, needs `admin:UpdateServiceAccount`. An expiry is between 15 minutes and 365 days
+away. A disabled or expired service account doesn't sign, and it can't get temporary
+credentials from STS. When its user is disabled it stops signing, and when its user is
+removed it goes too. The IAM API refuses to delete a user that still has service
+accounts. They're kept in IAM exports (`teifs admin iam export`), with their secrets
+when the export includes secrets.
 
 ## LDAP sign-in
 

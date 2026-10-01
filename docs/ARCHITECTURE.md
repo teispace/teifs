@@ -362,7 +362,17 @@ IAM: a user is the IAM user named as its access key, a canned policy the managed
 a name names. Secrets in bodies are encrypted with the caller's secret key as madmin
 does it (`teifs_crypto::madmin`, Argon2id run one at a time off the async workers).
 Users and groups have a `disabled` flag: the snapshot leaves out a disabled user (its
-keys and sessions find no one) and a disabled group's policies. Quotas are
+keys and sessions find no one) and a disabled group's policies. `MinIO`'s service
+accounts (`minio_service_accounts.rs`, `ops/service_accounts.rs`) have their own table
+(`iam_service_accounts`, parent by the user's unique id, none for the root user). The
+snapshot gives each active one a credential: its parent's identity with a
+`SessionKind::Service` session that carries the account's policy as a session policy
+and its expiry, which `Snapshot::credential` checks on every request. A root user's
+service account is a user principal with an allow-all policy, never the root user, so
+its session policy still narrows it. Their routes are `Needs::OrOwnAccount`: anything
+but an explicit deny passes the table, which tells the handler whether the caller holds
+the action; without it, the handler allows only the accounts of the user the caller
+acts as (`Iam::minio_parent`). Quotas are
 enforced in `Drive::check_write`, before a write's body is read, against the bucket's
 usage counters (`Store::bucket_usage`, every version), so the check reads counters,
 never a listing. Its messages are in `teifs_types::admin`, for the server and

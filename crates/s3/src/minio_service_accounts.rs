@@ -199,9 +199,10 @@ fn own(iam: &Iam, identity: &Identity, req: &S3Request<Body>) -> String {
         .unwrap_or_else(|| caller_key(req).unwrap_or_default().to_owned())
 }
 
-/// Whether `user` names the caller: its own `MinIO` user or the key that signed.
-fn is_own(iam: &Iam, identity: &Identity, req: &S3Request<Body>, user: &str) -> bool {
-    caller_key(req) == Some(user) || iam.minio_parent(identity).as_deref() == Some(user)
+/// Whether `user` is the `MinIO` user the caller acts as. A caller that acts as none (a
+/// role's session, a federated user) owns no service accounts.
+fn is_own(iam: &Iam, identity: &Identity, user: &str) -> bool {
+    iam.minio_parent(identity).as_deref() == Some(user)
 }
 
 /// `204 No Content`, which `madmin` expects of an update or a delete.
@@ -209,6 +210,13 @@ fn no_content() -> S3Response<Body> {
     let mut response = S3Response::new(Body::empty());
     response.status = Some(StatusCode::NO_CONTENT);
     response
+}
+
+/// Whether the caller signs with session credentials (a service account's or temporary
+/// ones): those make or remove service accounts only with the action, or a narrowed
+/// session could mint keys with all of its parent's rights.
+fn narrowed(identity: &Identity) -> bool {
+    identity.session().is_some()
 }
 
 fn denied() -> S3Error {
@@ -224,8 +232,8 @@ pub(crate) async fn add(
     mut req: S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
     let request: AddRequest = decrypted(&mut req).await?;
-    let mine = request.target_user.is_empty() || is_own(iam, identity, &req, &request.target_user);
-    if !mine && !privileged {
+    let mine = request.target_user.is_empty() || is_own(iam, identity, &request.target_user);
+    if !privileged && (!mine || narrowed(identity)) {
         return Err(denied());
     }
     let parent = if mine {
@@ -317,7 +325,7 @@ pub(crate) async fn info(
     if !privileged
         && !account
             .as_ref()
-            .is_ok_and(|a| is_own(iam, identity, req, &a.parent))
+            .is_ok_and(|a| is_own(iam, identity, &a.parent))
     {
         return Err(denied());
     }
@@ -336,7 +344,7 @@ pub(crate) async fn list(
         .into_iter()
         .find(|(n, v)| n == "user" && !v.is_empty())
         .map_or_else(|| own(iam, identity, req), |(_, v)| v);
-    if !privileged && !is_own(iam, identity, req, &user) {
+    if !privileged && !is_own(iam, identity, &user) {
         return Err(denied());
     }
     let accounts = iam
@@ -357,10 +365,13 @@ pub(crate) fn delete(
 ) -> S3Result<S3Response<Body>> {
     let access_key = required(req, "accessKey")?;
     if !privileged {
+        if narrowed(identity) {
+            return Err(denied());
+        }
         let account = iam
             .minio_service_account(&access_key)
             .map_err(minio_error)?;
-        if !is_own(iam, identity, req, &account.parent) {
+        if !is_own(iam, identity, &account.parent) {
             return Err(minio_error(MinioError::NoSuchServiceAccount));
         }
     }
@@ -388,7 +399,7 @@ pub(crate) async fn info_access_key(
     if !privileged
         && !account
             .as_ref()
-            .is_ok_and(|a| is_own(iam, identity, req, &a.parent))
+            .is_ok_and(|a| is_own(iam, identity, &a.parent))
     {
         return Err(denied());
     }
@@ -435,8 +446,7 @@ pub(crate) async fn list_bulk(
     if all && identity.decide(context, "admin:ListUsers", "*", None) != Decision::Allow {
         return Err(denied());
     }
-    let mine =
-        !all && (users.is_empty() || (users.len() == 1 && is_own(iam, identity, req, &users[0])));
+    let mine = !all && (users.is_empty() || (users.len() == 1 && is_own(iam, identity, &users[0])));
     if !mine && !privileged {
         return Err(denied());
     }
