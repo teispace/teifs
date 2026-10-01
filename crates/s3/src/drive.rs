@@ -38,6 +38,7 @@ use crate::{
     observe,
     post_form::{self, Form},
     quota,
+    request_metrics::RequestMetrics,
     sse::{self, set_sse},
     tagging, website,
 };
@@ -75,6 +76,8 @@ pub struct Drive {
     account: Option<Arc<str>>,
     /// Where requests' access log records go, turned on once a bucket logs.
     access_log: Option<Arc<AccessLog>>,
+    /// Where answered requests go for request metrics, watched once a bucket has some.
+    request_metrics: Option<Arc<RequestMetrics>>,
 }
 
 impl Drive {
@@ -96,6 +99,7 @@ impl Drive {
             legacy_bucket_defaults,
             account: account.map(Arc::from),
             access_log: None,
+            request_metrics: None,
         }
     }
 
@@ -103,6 +107,13 @@ impl Drive {
     #[must_use]
     pub(crate) fn with_access_log(mut self, access_log: Arc<AccessLog>) -> Self {
         self.access_log = Some(access_log);
+        self
+    }
+
+    /// Where answered requests go for buckets' request metrics, which a metrics
+    /// configuration's put starts watching.
+    pub(crate) fn with_request_metrics(mut self, metrics: Arc<RequestMetrics>) -> Self {
+        self.request_metrics = Some(metrics);
         self
     }
 
@@ -2340,6 +2351,9 @@ impl S3 for Drive {
             |c| &mut c.metrics,
         )
         .await?;
+        if let Some(metrics) = &self.request_metrics {
+            metrics.turn_on();
+        }
         Ok(S3Response::new(
             dto::PutBucketMetricsConfigurationOutput::default(),
         ))

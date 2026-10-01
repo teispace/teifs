@@ -34,6 +34,7 @@ mod observe;
 mod post_form;
 mod proxy;
 mod quota;
+mod request_metrics;
 mod routes;
 mod sig_v2;
 mod sse;
@@ -113,6 +114,9 @@ pub struct Options {
     /// Whether some bucket logs its requests as the server starts (see
     /// [`Store::any_bucket_logging`]): requests are watched from the first.
     pub access_logging: bool,
+    /// Whether some bucket has a request metrics configuration as the server starts
+    /// (see [`Store::any_bucket_metrics`]): requests are watched from the first.
+    pub request_metrics: bool,
     /// How often each bucket's access log records are delivered as a log object; `None`
     /// is every five minutes.
     pub access_log_interval: Option<std::time::Duration>,
@@ -126,6 +130,8 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let metrics = metrics::Metrics::new(&store, Arc::clone(&notifier));
     let (access_log, records) =
         access_log::AccessLog::new(options.access_logging, metrics.access_log());
+    let (request_metrics, answered) =
+        request_metrics::RequestMetrics::new(options.request_metrics, metrics.request_series());
     let drive = Drive::new(
         store.clone(),
         options.default_layout,
@@ -133,20 +139,16 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         Arc::clone(&notifier),
         options.iam.as_ref().map(|iam| iam.account()).as_deref(),
     )
-    .with_access_log(Arc::clone(&access_log));
-    let worker = AccessLogWorker::new(
-        records,
-        Arc::clone(&access_log),
-        drive.clone(),
-        store.clone(),
-        options
-            .access_log_interval
-            .unwrap_or(access_log::DEFAULT_INTERVAL),
+    .with_access_log(Arc::clone(&access_log))
+    .with_request_metrics(Arc::clone(&request_metrics));
+    let interval = options
+        .access_log_interval
+        .unwrap_or(access_log::DEFAULT_INTERVAL);
+    let workers = Workers::new(
+        (&drive, &store),
+        (records, Arc::clone(&access_log), interval),
+        (answered, Arc::clone(&request_metrics)),
     );
-    let workers = Workers {
-        access_log: worker,
-        inventory: inventory::Worker::new(drive.clone(), store.clone()),
-    };
     let events = drive.events();
     // A store serves one service: a second is told nothing new.
     let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
@@ -166,7 +168,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         options.audit,
         Arc::clone(&tracers),
         store.format().drive.clone(),
-        Arc::clone(&access_log),
+        (Arc::clone(&access_log), Arc::clone(&request_metrics)),
     );
     let mut builder = S3ServiceBuilder::new(drive);
     let mut config = S3Config::default();
@@ -197,6 +199,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             tracers,
             events,
             access_log,
+            request_metrics,
         });
     }
     let host = if options.domains.is_empty() {

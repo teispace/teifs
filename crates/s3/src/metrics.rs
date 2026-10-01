@@ -63,7 +63,7 @@ struct ApiError {
 }
 
 /// Seconds: 1 ms to about a minute, doubling.
-fn latency() -> Histogram {
+pub(crate) fn latency() -> Histogram {
     Histogram::new(exponential_buckets(0.001, 2.0, 17))
 }
 
@@ -81,6 +81,7 @@ pub struct Metrics {
     sent: Family<Api, Counter>,
     audit_dropped: Counter,
     access_log: crate::access_log::Counters,
+    request_series: crate::request_metrics::Series,
     store: Store,
 }
 
@@ -96,7 +97,6 @@ impl Metrics {
         let received = Family::default();
         let sent = Family::default();
         let audit_dropped = Counter::default();
-        let access_log = crate::access_log::Counters::default();
         registry.register(
             "s3_requests",
             "Requests answered, by operation and HTTP status",
@@ -152,21 +152,8 @@ impl Metrics {
             "Audit entries lost because their destination couldn't keep up",
             audit_dropped.clone(),
         );
-        registry.register(
-            "access_log_records",
-            "Server access log records kept for delivery",
-            access_log.records.clone(),
-        );
-        registry.register(
-            "access_log_objects",
-            "Server access log objects delivered",
-            access_log.objects.clone(),
-        );
-        registry.register(
-            "access_log_dropped",
-            "Server access log records lost: the queue was full, the spool couldn't be written, or the target refused them",
-            access_log.dropped.clone(),
-        );
+        let access_log = crate::access_log::Counters::register(&mut registry);
+        let request_series = crate::request_metrics::Series::register(&mut registry);
         registry.register_collector(Box::new(Server {
             store: store.clone(),
             started: SystemTime::now(),
@@ -184,8 +171,14 @@ impl Metrics {
             sent,
             audit_dropped,
             access_log,
+            request_series,
             store: store.clone(),
         }
+    }
+
+    /// The series of buckets' request metrics, which their worker moves.
+    pub(crate) fn request_series(&self) -> crate::request_metrics::Series {
+        self.request_series.clone()
     }
 
     /// The access log's counters, which its records and deliveries move.

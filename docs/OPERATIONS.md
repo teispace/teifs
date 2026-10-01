@@ -250,6 +250,8 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_access_log_records_total` | counter | | Server access log records kept for delivery |
 | `teifs_access_log_objects_total` | counter | | Log objects delivered to target buckets |
 | `teifs_access_log_dropped_total` | counter | | Records lost: too many waited, the spool couldn't be written, or the target refused them |
+| `teifs_request_metrics_…` | | `bucket`, `filter_id` | Each bucket's [request metrics](#request-metrics), by metrics configuration |
+| `teifs_request_metrics_dropped_total` | counter | | Requests left out of them because too many waited |
 | `teifs_start_time_seconds` | gauge | | When the server started (Unix time) |
 | `teifs_build_info` | info | `version` | The TeiFS version |
 
@@ -405,6 +407,59 @@ logging is best effort: a record can arrive in a later object than its neighbour
 records of the last second before a crash can be lost. A request to a
 [website](#static-websites) is recorded as S3 records it: `WEBSITE.GET.OBJECT` or
 `WEBSITE.HEAD.OBJECT`, on the object it answered with.
+
+## Request metrics
+
+A bucket's metrics configurations count its requests as S3's request metrics do in
+CloudWatch, served with the server's [metrics](#metrics) and labeled by `bucket` and
+`filter_id` (the configuration's id). A configuration without a filter counts every
+request to the bucket (the S3 console names it `EntireBucket`); one with a prefix or
+tags counts only requests on objects whose key starts with the prefix and that carry
+every tag.
+
+```sh
+teifs metrics add local/app EntireBucket
+teifs metrics add local/app docs --prefix docs/ --tag team=red
+teifs metrics ls local/app
+teifs metrics info local/app docs
+teifs metrics rm local/app docs
+```
+
+Like any other configuration it can be set through S3 (`PutBucketMetricsConfiguration`).
+
+| Metric | CloudWatch's | What |
+|---|---|---|
+| `teifs_request_metrics_all_requests_total` | `AllRequests` | Every request |
+| `teifs_request_metrics_get_requests_total` | `GetRequests` | `GET` on objects (`ListParts` too), not listings |
+| `teifs_request_metrics_put_requests_total` | `PutRequests` | `PUT` on objects (uploads, parts, copies, tags…) |
+| `teifs_request_metrics_delete_requests_total` | `DeleteRequests` | `DELETE` on objects, and `DeleteObjects` |
+| `teifs_request_metrics_head_requests_total` | `HeadRequests` | `HEAD` on objects |
+| `teifs_request_metrics_post_requests_total` | `PostRequests` | `POST`s, but `DeleteObjects` and `SelectObjectContent` |
+| `teifs_request_metrics_list_requests_total` | `ListRequests` | `ListObjects`, `ListObjectsV2`, `ListObjectVersions`, `ListMultipartUploads` |
+| `teifs_request_metrics_select_object_content_requests_total` | `SelectObjectContentRequests` | `SelectObjectContent` |
+| `teifs_request_metrics_downloaded_bytes_total` | `BytesDownloaded` | Answer body bytes sent |
+| `teifs_request_metrics_uploaded_bytes_total` | `BytesUploaded` | Request body bytes read |
+| `teifs_request_metrics_4xx_errors_total` | `4xxErrors` | Requests answered with a 4xx status |
+| `teifs_request_metrics_5xx_errors_total` | `5xxErrors` | Requests answered with a 5xx status |
+| `teifs_request_metrics_first_byte_latency_seconds` | `FirstByteLatency` | Histogram: time until the answer's headers were ready |
+| `teifs_request_metrics_total_request_latency_seconds` | `TotalRequestLatency` | Histogram: time until its last byte was sent |
+
+CloudWatch's sums are Prometheus counters (take their `rate`), its averages and
+percentiles of latency the histograms' (in seconds, not milliseconds):
+
+```promql
+sum by (bucket) (rate(teifs_request_metrics_all_requests_total{filter_id="EntireBucket"}[5m]))
+rate(teifs_request_metrics_4xx_errors_total[5m]) / rate(teifs_request_metrics_all_requests_total[5m])
+histogram_quantile(0.99, rate(teifs_request_metrics_first_byte_latency_seconds_bucket{bucket="app"}[5m]))
+```
+
+Requests are watched from the moment a bucket has a configuration (from the start, when
+one has one as the server starts), and counted once their answer is done with, a few
+milliseconds later. A client that leaves early is counted, but not as an error. Tags are
+the object's once the request is answered, so a deleted object's requests match no tag
+filter. Access point filters match nothing: TeiFS has no access points. A configuration's
+series go within a minute of it being removed; with many requests on tag filters, the
+ones too many to count are left out and counted in `teifs_request_metrics_dropped_total`.
 
 ## Inventory reports
 

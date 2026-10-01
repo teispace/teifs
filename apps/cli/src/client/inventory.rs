@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::{
     Error,
     alias::Aliases,
+    pages,
     service_policy::{self, Grant},
     target::{Remote, Target},
 };
@@ -280,13 +281,11 @@ fn fields(names: &[String]) -> Result<Vec<InventoryOptionalField>, Error> {
         .collect()
 }
 
-/// Every configuration of a bucket, a page at a time.
+/// Every configuration of a bucket.
 async fn all(remote: &Remote) -> Result<Vec<InventoryConfiguration>, Error> {
     let bucket = remote.bucket()?;
-    let client = remote.alias.client();
-    let mut configs = Vec::new();
-    let mut token = None;
-    loop {
+    let client = &remote.alias.client();
+    pages::every(|token| async move {
         let out = client
             .list_bucket_inventory_configurations()
             .bucket(bucket)
@@ -299,12 +298,13 @@ async fn all(remote: &Remote) -> Result<Vec<InventoryConfiguration>, Error> {
                     &e,
                 )
             })?;
-        configs.extend(out.inventory_configuration_list().iter().cloned());
-        token = out.next_continuation_token().map(str::to_owned);
-        if !out.is_truncated().unwrap_or(false) || token.is_none() {
-            return Ok(configs);
-        }
-    }
+        Ok(pages::Page {
+            items: out.inventory_configuration_list().to_vec(),
+            truncated: out.is_truncated().unwrap_or(false),
+            next: out.next_continuation_token().map(str::to_owned),
+        })
+    })
+    .await
 }
 
 async fn ls(remote: &Remote) -> Result<(), Error> {

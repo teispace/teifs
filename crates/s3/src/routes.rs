@@ -442,6 +442,8 @@ pub(crate) struct Routes {
     pub(crate) events: Events,
     /// Where requests' access log records go, turned on when an import makes a bucket log.
     pub(crate) access_log: Arc<crate::access_log::AccessLog>,
+    /// Where answered requests go for buckets' request metrics.
+    pub(crate) request_metrics: Arc<crate::request_metrics::RequestMetrics>,
 }
 
 #[async_trait::async_trait]
@@ -629,7 +631,10 @@ impl Routes {
                     &self.store,
                     &self.rules,
                     self.events.notifier(),
-                    (&self.iam.account(), &self.access_log),
+                    (
+                        &self.iam.account(),
+                        (&self.access_log, &self.request_metrics),
+                    ),
                     req,
                 )
                 .await

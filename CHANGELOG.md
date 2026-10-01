@@ -227,6 +227,11 @@ behaviour; the on-disk format is always upgraded automatically.
   `s3.amazonaws.com` into a destination whose bucket policy lets it in, encrypted as the
   configuration asks. `teifs inventory add|ls|info|rm` manages them and lets S3
   Inventory into the destination.
+- Request metrics, as S3's in CloudWatch: each metrics configuration counts the
+  requests it matches (every request to its bucket, or those on objects with its prefix
+  and tags) as `teifs_request_metrics_…` Prometheus metrics labeled by bucket and
+  `filter_id`, with CloudWatch's names: requests by kind, bytes up and down, 4xx and 5xx
+  errors, and first-byte and total latency. `teifs metrics add|ls|info|rm` manages them.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
   reload; it used to stop.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,

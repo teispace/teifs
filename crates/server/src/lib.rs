@@ -453,6 +453,14 @@ impl Server {
                     path: config.dir.clone(),
                     source,
                 })?;
+        let request_metrics =
+            store
+                .any_bucket_metrics()
+                .await
+                .map_err(|source| ServerError::Open {
+                    path: config.dir.clone(),
+                    source,
+                })?;
         check_website_domains(&config.domains, &config.website_domains)?;
         let service = teifs_s3::service(
             store.clone(),
@@ -470,6 +478,7 @@ impl Server {
                 audit,
                 notifier: Some(Arc::clone(&notifier)),
                 access_logging,
+                request_metrics,
                 access_log_interval: config.access_log_interval,
                 config: Some(admin_config),
                 root_keys,

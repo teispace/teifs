@@ -25,6 +25,7 @@ use crate::{
     access_log::{AccessLog, Also, Arrival},
     audit::{self, Asked, AuditSink},
     metrics::{Metrics, Scrapers},
+    request_metrics::RequestMetrics,
     trace::Tracers,
 };
 
@@ -54,6 +55,8 @@ pub(crate) struct Seen {
     also: Mutex<Vec<Also>>,
     /// Whether it came to a website endpoint.
     website: AtomicBool,
+    /// Its HTTP method, when it's known.
+    method: Option<http::Method>,
 }
 
 impl Seen {
@@ -71,7 +74,18 @@ impl Seen {
             acl_required: AtomicBool::new(false),
             also: Mutex::new(Vec::new()),
             website: AtomicBool::new(false),
+            method: None,
         }
+    }
+
+    /// Records its HTTP method.
+    pub(crate) fn with_method(mut self, method: http::Method) -> Self {
+        self.method = Some(method);
+        self
+    }
+
+    pub(crate) fn method(&self) -> Option<&http::Method> {
+        self.method.as_ref()
     }
 
     /// Records who asked (an IAM ARN, or the owner's canonical id for the root user).
@@ -329,6 +343,8 @@ pub(crate) struct Watch {
     drive: String,
     /// Where requests' access log records go.
     pub(crate) access_log: Arc<AccessLog>,
+    /// Where requests go for buckets' request metrics.
+    request_metrics: Arc<RequestMetrics>,
 }
 
 impl Watch {
@@ -338,7 +354,7 @@ impl Watch {
         audit: Option<Arc<dyn AuditSink>>,
         tracers: Arc<Tracers>,
         drive: String,
-        access_log: Arc<AccessLog>,
+        (access_log, request_metrics): (Arc<AccessLog>, Arc<RequestMetrics>),
     ) -> Self {
         Self {
             metrics,
@@ -347,6 +363,7 @@ impl Watch {
             tracers,
             drive,
             access_log,
+            request_metrics,
         }
     }
 
@@ -366,6 +383,7 @@ impl Watch {
         if let Some(arrival) = arrival {
             arrival.finish(seen, answer, &self.access_log);
         }
+        self.request_metrics.record(seen, answer);
         self.audit(asked, seen, answer, headers);
     }
 
@@ -643,13 +661,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = teifs_store::Store::open(dir.path()).unwrap();
         let sink: Arc<dyn AuditSink> = Arc::clone(sink) as _;
+        let metrics = Metrics::new(&store, Arc::new(teifs_notify::Notifier::none()));
+        let request_metrics = RequestMetrics::new(false, metrics.request_series()).0;
         let watch = Watch::new(
-            Metrics::new(&store, Arc::new(teifs_notify::Notifier::none())),
+            metrics,
             Scrapers::Anyone,
             Some(sink),
             Arc::new(Tracers::new()),
             "drive".into(),
-            crate::access_log::AccessLog::new(false, crate::access_log::Counters::default()).0,
+            (
+                crate::access_log::AccessLog::new(false, crate::access_log::Counters::default()).0,
+                request_metrics,
+            ),
         );
         (dir, Arc::new(watch))
     }

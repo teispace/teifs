@@ -12,7 +12,9 @@ mod inventory;
 mod listing;
 mod lock;
 mod logging;
+mod metrics;
 mod migrate;
+mod pages;
 mod quota;
 mod service_policy;
 mod sse;
@@ -171,6 +173,12 @@ pub enum Command {
     Inventory {
         #[command(subcommand)]
         action: inventory::InventoryAction,
+    },
+    /// Count a bucket's requests as S3's request metrics do (`CloudWatch`'s names, served
+    /// as Prometheus metrics): add, list, show or remove its metrics configurations.
+    Metrics {
+        #[command(subcommand)]
+        action: metrics::MetricsAction,
     },
     /// Serve a bucket as a static website (its index and error documents and
     /// redirects, as S3's website hosting), or show or remove its configuration.

@@ -487,7 +487,7 @@ impl Service {
                 return Ok(response);
             }
         }
-        let seen = Arc::new(Seen::new());
+        let seen = Arc::new(Seen::new().with_method(req.method().clone()));
         let asked = self.watch.audits().then(|| {
             let client = self.proxies.client(self.client, req.headers());
             Asked::of(&req, client.ip)

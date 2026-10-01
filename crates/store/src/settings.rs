@@ -478,6 +478,19 @@ impl Store {
         Ok(false)
     }
 
+    /// Whether any bucket has a request metrics configuration (reads every bucket's
+    /// configurations: for a start).
+    pub async fn any_bucket_metrics(&self) -> Result<bool> {
+        for bucket in self.list_buckets().await? {
+            match self.bucket_configurations(&bucket.name).await {
+                Ok(configurations) if !configurations.metrics.is_empty() => return Ok(true),
+                Ok(_) | Err(StoreError::NoSuchBucket) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(false)
+    }
+
     /// Replaces where a bucket's access log goes (checked by the caller); `None` stops it.
     pub async fn set_bucket_logging(
         &self,

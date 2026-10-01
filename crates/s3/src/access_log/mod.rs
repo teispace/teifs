@@ -77,6 +77,29 @@ pub(crate) struct Counters {
     pub(crate) dropped: Counter,
 }
 
+impl Counters {
+    /// The counters, registered with the server's metrics.
+    pub(crate) fn register(registry: &mut prometheus_client::registry::Registry) -> Self {
+        let counters = Self::default();
+        registry.register(
+            "access_log_records",
+            "Server access log records kept for delivery",
+            counters.records.clone(),
+        );
+        registry.register(
+            "access_log_objects",
+            "Server access log objects delivered",
+            counters.objects.clone(),
+        );
+        registry.register(
+            "access_log_dropped",
+            "Server access log records lost: the queue was full, the spool couldn't be written, or the target refused them",
+            counters.dropped.clone(),
+        );
+        counters
+    }
+}
+
 impl AccessLog {
     /// The access log, watching requests from the start when `on` (some bucket logs),
     /// and what its worker takes the records from.

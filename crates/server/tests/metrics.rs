@@ -367,3 +367,209 @@ async fn reads_and_writes_are_timed_by_stage() {
         );
     }
 }
+
+/// Puts a metrics configuration on `bucket`.
+async fn measure(
+    s3: &aws_sdk_s3::Client,
+    bucket: &str,
+    id: &str,
+    filter: Option<aws_sdk_s3::types::MetricsFilter>,
+) {
+    let config = aws_sdk_s3::types::MetricsConfiguration::builder()
+        .id(id)
+        .set_filter(filter)
+        .build()
+        .unwrap();
+    s3.put_bucket_metrics_configuration()
+        .bucket(bucket)
+        .id(id)
+        .metrics_configuration(config)
+        .send()
+        .await
+        .unwrap();
+}
+
+/// A bucket's request metrics series `metric` for configuration `id`.
+fn of(metric: &str, bucket: &str, id: &str) -> String {
+    format!("teifs_request_metrics_{metric}{{bucket=\"{bucket}\",filter_id=\"{id}\"}}")
+}
+
+#[tokio::test]
+async fn buckets_request_metrics_count_what_each_configuration_matches() {
+    use aws_sdk_s3::types::{Delete, MetricsFilter, ObjectIdentifier, Tag};
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("measured").send().await.unwrap();
+    s3.create_bucket().bucket("other").send().await.unwrap();
+    // Nothing is watched before a bucket has a configuration.
+    s3.put_object()
+        .bucket("measured")
+        .key("early")
+        .send()
+        .await
+        .unwrap();
+    measure(&s3, "measured", "EntireBucket", None).await;
+    measure(
+        &s3,
+        "measured",
+        "docs",
+        Some(MetricsFilter::Prefix("docs/".to_owned())),
+    )
+    .await;
+    let red = Tag::builder().key("team").value("red").build().unwrap();
+    measure(&s3, "measured", "red", Some(MetricsFilter::Tag(red))).await;
+    s3.put_object()
+        .bucket("measured")
+        .key("docs/a")
+        .tagging("team=red")
+        .body(ByteStream::from(vec![1; 100]))
+        .send()
+        .await
+        .unwrap();
+    let got = s3
+        .get_object()
+        .bucket("measured")
+        .key("docs/a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.body.collect().await.unwrap().into_bytes().len(), 100);
+    assert!(
+        s3.get_object()
+            .bucket("measured")
+            .key("docs/missing")
+            .send()
+            .await
+            .is_err()
+    );
+    s3.list_objects_v2()
+        .bucket("measured")
+        .send()
+        .await
+        .unwrap();
+    s3.list_objects_v2().bucket("other").send().await.unwrap();
+    let early = ObjectIdentifier::builder().key("early").build().unwrap();
+    let delete = Delete::builder().objects(early).build().unwrap();
+    s3.delete_objects()
+        .bucket("measured")
+        .delete(delete)
+        .send()
+        .await
+        .unwrap();
+    s3.head_object()
+        .bucket("measured")
+        .key("docs/a")
+        .send()
+        .await
+        .unwrap();
+
+    // The worker counts in order, so the last request seen means every one was.
+    let text = metrics_with(
+        &server,
+        &[(&of("head_requests_total", "measured", "red"), 1.0)],
+    )
+    .await;
+    let count = |metric: &str, id: &str| value(&text, &of(metric, "measured", id));
+    for (metric, id, expected) in [
+        ("put_requests_total", "docs", Some(1.0)),
+        ("put_requests_total", "red", Some(1.0)),
+        ("get_requests_total", "docs", Some(2.0)),
+        ("get_requests_total", "red", Some(1.0)),
+        ("head_requests_total", "docs", Some(1.0)),
+        ("list_requests_total", "EntireBucket", Some(1.0)),
+        ("list_requests_total", "docs", None),
+        ("delete_requests_total", "EntireBucket", Some(1.0)),
+        ("delete_requests_total", "docs", None),
+        ("all_requests_total", "docs", Some(4.0)),
+        ("all_requests_total", "red", Some(3.0)),
+        ("4xx_errors_total", "docs", Some(1.0)),
+        ("4xx_errors_total", "red", None),
+        ("uploaded_bytes_total", "docs", Some(100.0)),
+        ("first_byte_latency_seconds_count", "docs", Some(4.0)),
+        ("total_request_latency_seconds_count", "red", Some(3.0)),
+    ] {
+        assert_eq!(count(metric, id), expected, "{metric} {id}\n{text}");
+    }
+    // The object, and the missing one's error.
+    assert!(count("downloaded_bytes_total", "docs") > Some(100.0));
+    // Configurations put after watching starts count their own puts' successors only:
+    // early's put came before any.
+    assert!(count("all_requests_total", "EntireBucket") >= Some(8.0));
+    assert_eq!(count("put_requests_total", "EntireBucket"), Some(1.0));
+    assert!(!text.contains("bucket=\"other\""), "{text}");
+    assert_eq!(
+        value(&text, "teifs_request_metrics_dropped_total"),
+        Some(0.0)
+    );
+}
+
+#[tokio::test]
+async fn request_metrics_are_watched_from_the_start_after_a_restart() {
+    let (dir, keys) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let run = || {
+        let config = common::config(dir.path(), keys.path());
+        async move {
+            let server = teifs_server::Server::bind(config).await.unwrap();
+            let endpoint = format!("http://{}", server.local_addr().unwrap());
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let running = tokio::spawn(server.run(async {
+                let _ = stopped.await;
+            }));
+            (endpoint, stop, running)
+        }
+    };
+    let (endpoint, stop, running) = run().await;
+    let s3 = common::client_at(&endpoint, ACCESS_KEY, SECRET_KEY);
+    s3.create_bucket().bucket("measured").send().await.unwrap();
+    measure(&s3, "measured", "all", None).await;
+    drop(stop);
+    running.await.unwrap();
+
+    let (endpoint, _stop, _running) = run().await;
+    let s3 = common::client_at(&endpoint, ACCESS_KEY, SECRET_KEY);
+    s3.head_bucket().bucket("measured").send().await.unwrap();
+    let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
+    let series = of("all_requests_total", "measured", "all");
+    for _ in 0..100 {
+        let text = reqwest::Client::new()
+            .get(format!("{endpoint}{METRICS_PATH}"))
+            .bearer_auth(token.as_str())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        if let Some(count) = value(&text, &series) {
+            assert!((count - 1.0).abs() < f64::EPSILON, "{text}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the request was never counted");
+}
+
+#[tokio::test]
+async fn an_imported_metrics_configuration_starts_watching() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("imported").send().await.unwrap();
+    let admin = teifs_client::Client::new(
+        &server.endpoint,
+        ACCESS_KEY,
+        teifs_client::Zeroizing::new(SECRET_KEY.into()),
+    )
+    .unwrap();
+    let mut export = admin.export_buckets(Some("imported")).await.unwrap();
+    export.buckets[0].settings.insert(
+        "configurations".to_owned(),
+        serde_json::json!({"metrics": {"all": {}}}),
+    );
+    admin.import_buckets(&export).await.unwrap();
+    s3.head_bucket().bucket("imported").send().await.unwrap();
+    metrics_with(
+        &server,
+        &[(&of("all_requests_total", "imported", "all"), 1.0)],
+    )
+    .await;
+}

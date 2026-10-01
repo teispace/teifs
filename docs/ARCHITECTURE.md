@@ -375,6 +375,14 @@ symlink, the manifest and its checksum through `Drive::deliver` as `s3.amazonaws
 The day or week each configuration last had its report is a store note (`Store::note`),
 so restarts neither repeat nor skip one; stopping ends a report after its current page,
 never in the middle of a store call.
+Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
+(`Store::any_bucket_metrics` at the start, or a put or an import), `Watch::done` queues
+each S3 request on a bucket (its method, which `Seen` keeps, operation, key, status,
+bytes and times) on a bounded queue without waiting. The request metrics worker, one of
+the `Workers`, matches it against the bucket's cached configurations (reading the
+object's tags only for a tag filter) and moves the Prometheus families registered with
+the server's `Metrics`, labeled by bucket and `filter_id`; every minute it removes the
+series of configurations that are gone.
 `GET /.teifs/metrics` is answered before s3s, like the health check, because a
 scrape carries a bearer token (`teifs_iam::metrics_token`, a JWT signed with an access
 key's secret) rather than a signature.

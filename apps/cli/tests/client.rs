@@ -1978,6 +1978,72 @@ async fn inventories_are_added_listed_delivered_and_removed() {
 }
 
 #[tokio::test]
+async fn metrics_configurations_are_added_listed_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/app"]).await;
+    let ls = async || records(&cli.ok(&["--json", "metrics", "ls", "t/app"]).await);
+    assert!(ls().await.is_empty());
+    let text = cli.ok(&["metrics", "add", "t/app", "EntireBucket"]).await;
+    assert!(
+        text.contains("Metrics EntireBucket of t/app: every request"),
+        "{text}"
+    );
+    let add = [
+        "metrics", "add", "t/app", "docs", "--prefix", "docs/", "--tag", "team=red",
+    ];
+    let text = cli.ok(&add).await;
+    assert!(
+        text.contains("Metrics docs of t/app: requests on docs/* and team=red"),
+        "{text}"
+    );
+    // Adding again replaces it.
+    cli.ok(&add).await;
+    let listed = ls().await;
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        (&listed[1]["id"], &listed[1]["prefix"], &listed[1]["tags"]),
+        (
+            &"docs".into(),
+            &"docs/".into(),
+            &serde_json::json!({"team": "red"})
+        )
+    );
+    let info = cli.ok(&["metrics", "info", "t/app", "docs"]).await;
+    assert!(info.contains("filter_id=\"docs\""), "{info}");
+
+    // Listings go on past a page of 100.
+    let s3 = client(&server, SECRET_KEY);
+    for i in 0..100 {
+        let id = format!("m-{i:03}");
+        let config = aws_sdk_s3::types::MetricsConfiguration::builder()
+            .id(&id)
+            .build()
+            .unwrap();
+        s3.put_bucket_metrics_configuration()
+            .bucket("app")
+            .id(id)
+            .metrics_configuration(config)
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(ls().await.len(), 102);
+    let text = cli.ok(&["metrics", "rm", "t/app", "docs"]).await;
+    assert!(text.contains("Metrics docs of t/app: removed"), "{text}");
+    assert_eq!(ls().await.len(), 101);
+    let err = cli.fails(&["metrics", "info", "t/app", "docs"], 5).await;
+    assert!(
+        err.contains("can't read the metrics docs of t/app"),
+        "{err}"
+    );
+    let err = cli
+        .fails(&["metrics", "add", "t/app", "x", "--tag", "red"], 2)
+        .await;
+    assert!(err.contains("red isn't a tag"), "{err}");
+}
+
+#[tokio::test]
 async fn websites_are_set_shown_and_removed() {
     let server = start().await;
     let cli = Client::new(&server);

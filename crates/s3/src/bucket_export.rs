@@ -31,6 +31,7 @@ use crate::{
     configs, cors,
     errors::StoreResultExt,
     lifecycle, logging, object_lock, quota,
+    request_metrics::RequestMetrics,
     routes::{s3_refusal, signed_body},
     tagging, website,
 };
@@ -104,7 +105,7 @@ pub(crate) async fn import(
     store: &Store,
     rules: &Rules,
     notifier: &Notifier,
-    (account, access_log): (&str, &AccessLog),
+    (account, (access_log, request_metrics)): (&str, (&AccessLog, &RequestMetrics)),
     mut req: S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
     let body = signed_body(&mut req, admin::MAX_IMPORT_BYTES)
@@ -138,6 +139,13 @@ pub(crate) async fn import(
         };
         import.bucket(bucket).await;
         rules.forget(&bucket.name);
+        if store
+            .bucket_configurations(&bucket.name)
+            .await
+            .is_ok_and(|configurations| !configurations.metrics.is_empty())
+        {
+            request_metrics.turn_on();
+        }
     }
     for bucket in &export.buckets {
         let Some(value) = bucket.settings.get("logging") else {

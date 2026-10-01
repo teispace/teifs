@@ -89,7 +89,8 @@ applications that upload with public ACLs; it is off by default. The account's B
 Public Access settings (S3 Control) apply with every bucket's, each setting on where
 either has it, so one setting closes every bucket at once.
 
-Prometheus metrics (`/.teifs/metrics`) name operations, error codes and the disk's size,
+Prometheus metrics (`/.teifs/metrics`) name operations, error codes, the disk's size and
+(with request metrics) buckets and their metrics configurations' ids,
 so they need a bearer token (a JWT signed with an access key's secret, checked against
 that key's current policies for `teifs:GetMetrics`) unless the operator serves them
 with `--public-metrics` (`crates/server/tests/metrics.rs`). A live trace
