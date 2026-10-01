@@ -116,7 +116,13 @@ impl Iam {
         Params::parse(body).is_ok_and(|p| {
             matches!(
                 p.optional("Action"),
-                Some(sts::WEB_IDENTITY | sts::LDAP_IDENTITY | sts::CERTIFICATE | sts::CUSTOM_TOKEN)
+                Some(
+                    sts::WEB_IDENTITY
+                        | sts::LDAP_IDENTITY
+                        | sts::CERTIFICATE
+                        | sts::CUSTOM_TOKEN
+                        | sts::CLIENT_GRANTS
+                )
             )
         })
     }
@@ -133,6 +139,11 @@ impl Iam {
         if let Ok(params) = Params::parse(call.body)
             && let Some((iss, kid)) = params
                 .optional("WebIdentityToken")
+                .or_else(|| {
+                    (params.optional("Action") == Some(sts::CLIENT_GRANTS))
+                        .then(|| params.optional("Token"))
+                        .flatten()
+                })
                 .and_then(crate::oidc::issuer)
             && let Ok(Some((url, thumbprints))) = self.read(|s| {
                 Ok(s.oidc_provider_by_issuer(&iss)

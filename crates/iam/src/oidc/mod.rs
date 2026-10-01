@@ -32,6 +32,11 @@ pub(crate) const SOURCE_IDENTITY_CLAIM: &str = "https://aws.amazon.com/source_id
 pub(crate) const POLICY_CLAIM_TAG: &str = "teifs:policy-claim";
 const DEFAULT_POLICY_CLAIM: &str = "policy";
 
+/// The tag that gives a provider MinIO's role policies: its value names the managed
+/// policies (separated by spaces, since a tag can't hold commas) that every token of each of its clients gets, when
+/// the request names that client's role ([`crate::openid_role_arn`]).
+pub(crate) const ROLE_POLICY_TAG: &str = "teifs:role-policy";
+
 /// Whether the issuer `a` is `b`: the same, or the same but for a trailing slash.
 pub(crate) fn same_issuer(a: &str, b: &str) -> bool {
     a == b || a.strip_suffix('/').unwrap_or(a) == b.strip_suffix('/').unwrap_or(b)
@@ -155,7 +160,35 @@ pub(crate) fn policy_claim(provider: &OidcProvider) -> Option<&str> {
         })
 }
 
+/// The managed policies (by name) a provider's role policy names, if it has one
+/// ([`ROLE_POLICY_TAG`]).
+pub(crate) fn role_policies(provider: &OidcProvider) -> Option<Vec<String>> {
+    provider
+        .tags
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(ROLE_POLICY_TAG))
+        .map(|(_, names)| {
+            names
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
 impl State {
+    /// The provider with a role policy whose client's MinIO role is `arn`: its unique
+    /// id, the client, and the role's policies (by name).
+    pub(crate) fn oidc_role(&self, arn: &str) -> Option<(String, String, Vec<String>)> {
+        self.oidc_providers.values().find_map(|p| {
+            let policies = role_policies(p)?;
+            p.client_ids
+                .iter()
+                .find(|client| crate::openid_role_arn(client) == arn)
+                .map(|client| (p.id.clone(), client.clone(), policies))
+        })
+    }
+
     /// The provider whose URL is the issuer `iss`.
     pub(crate) fn oidc_provider_by_issuer(&self, iss: &str) -> Option<&OidcProvider> {
         self.oidc_providers

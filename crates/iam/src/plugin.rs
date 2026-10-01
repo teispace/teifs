@@ -5,7 +5,6 @@
 
 use std::time::Duration;
 
-use base64::Engine as _;
 use reqwest::{Client, StatusCode, Url, header};
 use zeroize::Zeroizing;
 
@@ -111,13 +110,7 @@ impl IdentityPlugin {
                     "the role id {id:?} may have only letters, digits, `_` and `-`"
                 ));
             }
-            None => {
-                let digest = aws_lc_rs::digest::digest(
-                    &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
-                    settings.url.as_bytes(),
-                );
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
-            }
+            None => crate::minio_role_id(&settings.url),
         };
         let http = Client::builder()
             .tls_certs_merge(

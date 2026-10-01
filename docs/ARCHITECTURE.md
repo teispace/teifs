@@ -167,7 +167,10 @@ identity whatever signed it: the trust policy's `Federated` principal matches a
 for a provider tagged `teifs:policy-claim` (`oidc::policy_claim`), the session is
 MinIO's: `Who::Web` keeps the provider's and the named managed policies' unique ids,
 and `Snapshot` resolves them on every request, so a deleted provider ends the session
-and a deleted policy drops out of it.
+and a deleted policy drops out of it. A MinIO role ARN of a client of a provider tagged
+`teifs:role-policy` (`State::oidc_role`, `openid_role_arn`) gives such a session the
+provider's role policies instead. `api/sts/openid.rs` holds both MinIO modes, for
+`AssumeRoleWithWebIdentity` and `AssumeRoleWithClientGrants` alike.
 
 MinIO's `AssumeRoleWithLDAPIdentity` (`ldap/`, `ops/ldap.rs`, `api/sts/ldap.rs`) is the
 other self-proving request. `ldap/mod.rs` holds the settings and checks them offline

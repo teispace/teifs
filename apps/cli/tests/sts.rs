@@ -538,6 +538,7 @@ async fn roles_and_providers_in_one_step() {
         .find(|p| p["url"] == host.as_str())
         .unwrap();
     assert_eq!(ours["policyClaim"], "policy");
+    assert_eq!(ours["roleArns"], serde_json::json!({}));
     assert_eq!(providers.len(), 2);
     cli.fails(
         &[
@@ -607,6 +608,61 @@ async fn roles_and_providers_in_one_step() {
         )
         .await;
     assert!(err.contains("None of the given policies"), "{err}");
+
+    // MinIO's role policies: tokens for a client that name its role get them.
+    let added = records(
+        &cli.ok(&[
+            "--json",
+            "admin",
+            "oidc",
+            "add",
+            "t",
+            "https://1.idp.example.com",
+            "--client-id",
+            "console",
+            "--role-policy",
+            "readonly,extra",
+        ])
+        .await,
+    );
+    let console_role = teifs_iam::openid_role_arn("console");
+    assert_eq!(added[0]["roleArns"]["console"], console_role.as_str());
+    let providers = records(&cli.ok(&["--json", "admin", "oidc", "ls", "t"]).await);
+    let console = providers
+        .iter()
+        .find(|p| p["url"] == "1.idp.example.com")
+        .unwrap();
+    assert_eq!(
+        console["rolePolicy"],
+        serde_json::json!(["readonly", "extra"])
+    );
+    assert_eq!(console["roleArns"]["console"], console_role.as_str());
+    cli.ok(&["-y", "admin", "oidc", "rm", "t", "1.idp.example.com"])
+        .await;
+    server
+        .iam
+        .create_policy("reader", None, None, ALLOW_ALL, &[])
+        .unwrap();
+    server
+        .iam
+        .tag_oidc_provider(
+            &format!("arn:aws:iam::{account}:oidc-provider/{host}"),
+            &[("teifs:role-policy".to_owned(), "reader".to_owned())],
+        )
+        .unwrap();
+    let role_arn = teifs_iam::openid_role_arn("sts.amazonaws.com");
+    cli.ok(&[
+        "sts",
+        "assume-web",
+        &server.endpoint,
+        "--role",
+        &role_arn,
+        "--token-file",
+        token_path,
+        "-o",
+        "-",
+    ])
+    .await;
 
     // Deleting asks first, and without a terminal to ask on it doesn't guess.
     let err = cli.fails(&["admin", "role", "rm", "t", "deploy"], 2).await;

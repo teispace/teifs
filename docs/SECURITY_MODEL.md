@@ -240,7 +240,10 @@ unknown keys asks a provider at most once in 30 seconds. A trust policy's `Feder
 principal names one provider's ARN, without wildcards. A token names managed policies
 for itself (MinIO's way, without a role) only for a provider an administrator tagged
 `teifs:policy-claim`, and only policies that exist; its session ends when the provider
-is deleted, and loses a policy that's deleted. Tests:
+is deleted, and loses a policy that's deleted. A MinIO role policy (a provider tagged
+`teifs:role-policy`) is given only to a token of that provider for the client whose
+role ARN it names (its `aud` or `azp`), so one client's tokens can't take another's
+role. Tests:
 `crates/iam/src/api/tests/sessions.rs`, `crates/iam/src/api/tests/web_identity.rs`,
 `crates/iam/src/oidc/`, `crates/iam/src/sessions.rs`, `crates/server/tests/sts.rs`,
 `crates/server/tests/admin.rs`.

@@ -369,3 +369,23 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
+
+/// The id MinIO derives a role's ARN from `seed` with (an identity plugin's URL, an
+/// OpenID Connect client id): its SHA-1, base64url without padding.
+#[must_use]
+pub fn minio_role_id(seed: &str) -> String {
+    use base64::Engine as _;
+    let digest = aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        seed.as_bytes(),
+    );
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
+}
+
+/// The role ARN MinIO gives an OpenID Connect provider's client `client_id` whose
+/// tokens get the provider's role policies: `arn:minio:iam:::role/<id>`, as a server
+/// without a region names it.
+#[must_use]
+pub fn openid_role_arn(client_id: &str) -> String {
+    format!("arn:minio:iam:::role/{}", minio_role_id(client_id))
+}

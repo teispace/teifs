@@ -76,6 +76,7 @@ fn actions_match_aws_service_reference() {
             super::sts::LDAP_IDENTITY,
             super::sts::CERTIFICATE,
             super::sts::CUSTOM_TOKEN,
+            super::sts::CLIENT_GRANTS,
         ],
     );
     let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();

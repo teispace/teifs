@@ -14,6 +14,8 @@ use crate::{
 };
 
 const URL: &str = "https://idp.example.com";
+/// Another provider, for tokens that aren't [`URL`]'s.
+const OTHER: &str = "https://other.example.com";
 
 /// An identity provider: its signing key, known to the drive as the provider at [`URL`]
 /// for the audience `app`.
@@ -23,8 +25,25 @@ struct Idp {
 
 impl Idp {
     fn new(d: &Drive) -> Self {
-        let signer = Signer::rsa();
         d.oidc(URL);
+        Self::signing(d)
+    }
+
+    /// The provider at [`URL`] for the audiences `clients`.
+    fn for_clients(d: &Drive, clients: &[&str]) -> Self {
+        d.iam
+            .create_oidc_provider(&crate::NewOidcProvider {
+                url: URL,
+                client_ids: &clients.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>(),
+                ..crate::NewOidcProvider::default()
+            })
+            .unwrap();
+        Self::signing(d)
+    }
+
+    /// A signer whose key the drive knows for [`URL`].
+    fn signing(d: &Drive) -> Self {
+        let signer = Signer::rsa();
         let keys = jwt::key_set(&format!(r#"{{"keys":[{}]}}"#, signer.jwk("k1", ""))).unwrap();
         d.iam.web_keys.insert(URL, keys);
         Self { signer }
@@ -787,17 +806,18 @@ async fn without_a_role_tokens_name_the_policies_as_minio_has_it() {
     refused(
         &body(&idp.token("carol", r#""policy":"nothing, ,""#), ""),
         "InvalidParameterValue",
-        "None of the given policies are defined",
+        "None of the given policies (`nothing`) are defined",
     );
     refused(
         &body(&idp.token("carol", r#""policy":7"#), ""),
         "InvalidParameterValue",
         "a list of text",
     );
-    refused(
-        &body(&named, "&RoleArn=arn:minio:iam:::role/dummy"),
-        "InvalidParameterValue",
-        "TeiFS has no MinIO role policies",
+    // A role no provider has counts for nothing when the claim names policies, as on
+    // MinIO.
+    ok(
+        d.web(&body(&named, "&RoleArn=arn:minio:iam:::role/dummy")),
+        "reader",
     );
     for extra in [
         "&DurationSeconds=899",
@@ -884,4 +904,174 @@ async fn providers_are_reached_through_the_certificates_they_pin() {
             assert_eq!(code(&reply, &body), "IDPCommunicationError");
         }
     }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+async fn a_providers_role_policy_is_its_clients_role_as_minio_has_it() {
+    let d = drive().await;
+    let idp = Idp::for_clients(&d, &["app", "cli"]);
+    let provider = provider_arn(&d);
+    d.iam
+        .create_policy(
+            "reader",
+            None,
+            None,
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#,
+            &[],
+        )
+        .unwrap();
+    // MinIO's ARN: the client id's SHA-1, base64url.
+    let app_role = crate::openid_role_arn("app");
+    assert_eq!(app_role, "arn:minio:iam:::role/fRBDRz1Vv6kOhTDTWAHU44G8afA");
+    let cli_role = crate::openid_role_arn("cli");
+    let body = |action: &str, param: &str, token: &str, extra: &str| {
+        format!("Action={action}&{param}={}{extra}", enc(token))
+    };
+    let web = |token: &str, extra: &str| {
+        d.web(&body(
+            "AssumeRoleWithWebIdentity",
+            "WebIdentityToken",
+            token,
+            extra,
+        ))
+    };
+    let refused = |reply: Reply, code_is: &str, message: &str| {
+        assert_eq!(code(&reply, message), code_is);
+        assert!(reply.body.contains(message), "{message} in {}", reply.body);
+    };
+    let token = idp.token("alice", "");
+
+    // Without the tag, the client has no role.
+    refused(
+        web(&token, &format!("&RoleArn={}", enc(&app_role))),
+        "InvalidParameterValue",
+        &format!("Error processing RoleArn parameter: Role {app_role} does not exist"),
+    );
+    d.iam
+        .tag_oidc_provider(
+            &provider,
+            &[(
+                crate::oidc::ROLE_POLICY_TAG.to_owned(),
+                "reader  nothing".to_owned(),
+            )],
+        )
+        .unwrap();
+    let answer = ok(web(&token, &format!("&RoleArn={}", enc(&app_role))), "role");
+    assert!(
+        answer.contains("<SubjectFromWebIdentityToken>alice</SubjectFromWebIdentityToken>"),
+        "{answer}"
+    );
+    let session = d.session(&answer);
+    let allows =
+        |action: &str| session.allows(&session.context(Date::now()), action, "arn:aws:s3:::b/k");
+    assert!(allows("s3:GetObject"));
+    assert!(!allows("s3:PutObject"));
+    assert_eq!(session.session().unwrap().kind(), crate::SessionKind::Web);
+    assert!((590..=600).contains(&(session.session().unwrap().expires() - now_seconds())));
+    let asked = ok(
+        web(
+            &token,
+            &format!("&RoleArn={}&DurationSeconds=900", enc(&app_role)),
+        ),
+        "asked",
+    );
+    let asked = d.session(&asked);
+    assert!((890..=900).contains(&(asked.session().unwrap().expires() - now_seconds())));
+
+    // The token must be for the role's client.
+    refused(
+        web(&token, &format!("&RoleArn={}", enc(&cli_role))),
+        "InvalidParameterValue",
+        "must match configured OpenID Client ID",
+    );
+    let for_cli = idp.token("bob", r#""azp":"cli""#);
+    ok(
+        web(&for_cli, &format!("&RoleArn={}", enc(&cli_role))),
+        "azp",
+    );
+    // Another provider's token, even for a client of the same name, isn't.
+    d.iam
+        .create_oidc_provider(&crate::NewOidcProvider {
+            url: OTHER,
+            client_ids: &["app".to_owned()],
+            ..crate::NewOidcProvider::default()
+        })
+        .unwrap();
+    let keys = jwt::key_set(&format!(r#"{{"keys":[{}]}}"#, idp.signer.jwk("k1", ""))).unwrap();
+    d.iam.web_keys.insert(OTHER, keys);
+    let now = now_seconds();
+    let stranger = idp.signer.token(
+        "RS256",
+        r#""kid":"k1","typ":"JWT""#,
+        &format!(
+            r#"{{"iss":"{OTHER}","sub":"eve","aud":"app","iat":{now},"exp":{}}}"#,
+            now + 600
+        ),
+    );
+    refused(
+        web(&stranger, &format!("&RoleArn={}", enc(&app_role))),
+        "InvalidParameterValue",
+        "must match configured OpenID Client ID",
+    );
+
+    // No policy of the role exists.
+    d.iam
+        .tag_oidc_provider(
+            &provider,
+            &[(
+                crate::oidc::ROLE_POLICY_TAG.to_owned(),
+                "nothing".to_owned(),
+            )],
+        )
+        .unwrap();
+    refused(
+        web(&token, &format!("&RoleArn={}", enc(&app_role))),
+        "InvalidParameterValue",
+        "None of the given policies (`nothing`) are defined",
+    );
+    // Neither a role nor a claim: a role is needed, as on AWS.
+    refused(web(&token, ""), "ValidationError", "roleArn");
+    refused(
+        web(&token, "&RoleArn=urn:other"),
+        "InvalidParameterValue",
+        "an IAM role ARN or a MinIO role",
+    );
+
+    // MinIO's older AssumeRoleWithClientGrants: the token in `Token`.
+    d.iam
+        .tag_oidc_provider(
+            &provider,
+            &[(crate::oidc::ROLE_POLICY_TAG.to_owned(), "reader".to_owned())],
+        )
+        .unwrap();
+    let grants = |extra: &str| {
+        let body = body("AssumeRoleWithClientGrants", "Token", &token, extra);
+        assert!(Iam::proves_itself(body.as_bytes()));
+        d.web(&body)
+    };
+    let answer = ok(grants(&format!("&RoleArn={}", enc(&app_role))), "grants");
+    assert!(
+        answer.contains("<AssumeRoleWithClientGrantsResult>"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("<SubjectFromToken>alice</SubjectFromToken>"),
+        "{answer}"
+    );
+    assert!(!answer.contains("Provider"), "{answer}");
+    assert!(d.session(&answer).allows(
+        &d.session(&answer).context(Date::now()),
+        "s3:GetObject",
+        "arn:aws:s3:::b/k"
+    ));
+    refused(grants(""), "ValidationError", "roleArn");
+    refused(
+        d.web(&format!(
+            "Action=AssumeRoleWithClientGrants&RoleArn={}",
+            enc(&app_role)
+        )),
+        "ValidationError",
+        "&apos;token&apos;",
+    );
 }

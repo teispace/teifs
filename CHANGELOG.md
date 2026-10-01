@@ -255,6 +255,11 @@ behaviour; the on-disk format is always upgraded automatically.
   `MINIO_IDENTITY_PLUGIN_*` variables) lets your own service decide whom a token belongs
   to; clients exchange it for temporary credentials with the role's policies (`teifs sts
   assume-custom`). `teifs doctor` checks that the plugin answers.
+- MinIO's OpenID role policies: `teifs admin oidc add … --role-policy NAMES` gives
+  each of a provider's clients MinIO's role ARN (`arn:minio:iam:::role/…`, shown by
+  `teifs admin oidc ls`), and tokens for that client that name it get those policies.
+  A role ARN no provider has is ignored when the token names policies in a claim, as on
+  MinIO, and MinIO's `AssumeRoleWithClientGrants` works too.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
