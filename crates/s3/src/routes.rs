@@ -1043,19 +1043,7 @@ impl Routes {
                 decision != Decision::ExplicitDeny
             }
             Needs::OnKmsKey(action) => {
-                let default = (endpoint.handler == Handler::MinioKms(minio_kms::Call::KeyStatus))
-                    .then(|| minio_kms::default_key(self.config.as_deref()));
-                let key = minio_kms::named_key(&req, default.as_deref())?;
-                let context = context();
-                identity.decide(&context, action, ANY, None).is_allowed()
-                    && identity
-                        .decide(
-                            &context,
-                            action,
-                            &teifs_policy::minio::kms_key_arn(&key),
-                            None,
-                        )
-                        .is_allowed()
+                self.on_kms_key(&identity, &context(), (action, endpoint.handler), &req)?
             }
             Needs::ServiceAction => {
                 let action = minio_service::Action::asked(req.uri.query())?;
@@ -1082,6 +1070,27 @@ impl Routes {
             query_bucket,
         )
         .await
+    }
+
+    /// Whether the caller may call a KMS action on no key and on the key `?key-id=`
+    /// names (for a key's status, the default key by default).
+    fn on_kms_key(
+        &self,
+        identity: &Identity,
+        context: &Context,
+        (action, handler): (&str, Handler),
+        req: &S3Request<Body>,
+    ) -> S3Result<bool> {
+        // Decided on no key before the key is read, so a caller without the action
+        // learns nothing about the request (as on MinIO).
+        if !identity.decide(context, action, ANY, None).is_allowed() {
+            return Ok(false);
+        }
+        let default = (handler == Handler::MinioKms(minio_kms::Call::KeyStatus))
+            .then(|| minio_kms::default_key(self.config.as_deref()));
+        let key = minio_kms::named_key(req, default.as_deref())?;
+        let on_key = teifs_policy::minio::kms_key_arn(&key);
+        Ok(identity.decide(context, action, &on_key, None).is_allowed())
     }
 
     /// Calls an endpoint the caller may call, with what deciding it read: a tags call's

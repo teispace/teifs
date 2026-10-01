@@ -502,25 +502,50 @@ async fn kms_keys_from_the_command_line() {
     let cli = Client::new(&server);
     let out = cli.ok(&["admin", "kms", "status", "t"]).await;
     assert!(
-        out.contains("TeiFS keyring") && out.contains("teifs-default") && out.contains("local (online)"),
+        out.contains("TeiFS keyring")
+            && out.contains("teifs-default")
+            && out.contains("local (online)"),
         "{out}"
     );
-    let out = cli.ok(&["admin", "kms", "key", "create", "t", "app-1"]).await;
+    let out = cli
+        .ok(&["admin", "kms", "key", "create", "t", "app-1"])
+        .await;
     assert!(out.contains("Created key app-1 at t"), "{out}");
-    let err = cli.fails(&["admin", "kms", "key", "create", "t", "app-1"], 6).await;
+    let err = cli
+        .fails(&["admin", "kms", "key", "create", "t", "app-1"], 6)
+        .await;
     assert!(err.contains("already exists"), "{err}");
-    let listed = records(&cli.ok(&["--json", "admin", "kms", "key", "list", "t", "app"]).await);
+    let listed = records(
+        &cli.ok(&["--json", "admin", "kms", "key", "list", "t", "app"])
+            .await,
+    );
     assert_eq!(listed.len(), 1);
-    assert_eq!((&listed[0]["type"], &listed[0]["name"]), (&"kmsKey".into(), &"app-1".into()));
+    assert_eq!(
+        (&listed[0]["type"], &listed[0]["name"]),
+        (&"kmsKey".into(), &"app-1".into())
+    );
     let out = cli.ok(&["admin", "kms", "key", "list", "t"]).await;
-    assert!(out.contains("app-1") && out.contains("teifs-default"), "{out}");
-    let out = cli.ok(&["admin", "kms", "key", "status", "t", "app-1"]).await;
+    assert!(
+        out.contains("app-1") && out.contains("teifs-default"),
+        "{out}"
+    );
+    let out = cli
+        .ok(&["admin", "kms", "key", "status", "t", "app-1"])
+        .await;
     assert!(out.contains("Sealing") && out.contains("ok"), "{out}");
-    let checked = records(&cli.ok(&["--json", "admin", "kms", "key", "status", "t"]).await);
+    let checked = records(
+        &cli.ok(&["--json", "admin", "kms", "key", "status", "t"])
+            .await,
+    );
     assert_eq!(checked[0]["name"], "teifs-default");
     // A key that doesn't work fails the command.
-    let err = cli.fails(&["admin", "kms", "key", "status", "t", "missing"], 1).await;
-    assert!(err.contains("key missing doesn't seal and unseal data keys"), "{err}");
+    let err = cli
+        .fails(&["admin", "kms", "key", "status", "t", "missing"], 1)
+        .await;
+    assert!(
+        err.contains("key missing doesn't seal and unseal data keys"),
+        "{err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

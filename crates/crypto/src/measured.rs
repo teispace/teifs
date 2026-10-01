@@ -143,7 +143,11 @@ mod tests {
         assert_eq!(kms.unseal(&sealed, &context).await.unwrap(), data_key);
         let other = Context::object("d", "b", "other");
         assert!(kms.unseal(&sealed, &other).await.is_err());
-        assert!(kms.seal(Some("missing"), &context, &data_key).await.is_err());
+        assert!(
+            kms.seal(Some("missing"), &context, &data_key)
+                .await
+                .is_err()
+        );
         kms.create_key("app").await.unwrap();
         kms.keys().await.unwrap();
         let metrics = kms.metrics();

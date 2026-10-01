@@ -108,7 +108,10 @@ fn kms_statements_that_name_keys_are_decided_on_the_key() {
     let some = policy(
         r#"{"Effect":"Allow","Action":["kms:CreateKey","kms:KeyStatus"],"Resource":["arn:minio:kms:::app-*"]}"#,
     );
-    assert_eq!(decide(&some, "kms:CreateKey", &key("app-1")), Decision::Allow);
+    assert_eq!(
+        decide(&some, "kms:CreateKey", &key("app-1")),
+        Decision::Allow
+    );
     assert_eq!(
         decide(&some, "kms:KeyStatus", &key("other")),
         Decision::ImplicitDeny
@@ -135,7 +138,10 @@ fn kms_statements_that_name_keys_are_decided_on_the_key() {
         decide(&but, "kms:KeyStatus", &key("secret-1")),
         Decision::ExplicitDeny
     );
-    assert_eq!(decide(&but, "kms:KeyStatus", &key("public")), Decision::Allow);
+    assert_eq!(
+        decide(&but, "kms:KeyStatus", &key("public")),
+        Decision::Allow
+    );
 }
 
 #[test]

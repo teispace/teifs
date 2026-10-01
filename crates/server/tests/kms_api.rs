@@ -36,9 +36,8 @@ fn names(listed: &Value) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn keys_are_created_listed_and_checked() {
-    // Encrypted objects are in object buckets.
-    let server = start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
+async fn the_kms_describes_itself() {
+    let server = start().await;
     for (method, path) in [
         ("GET", "/minio/kms/v1/status"),
         ("POST", "/minio/admin/v3/kms/status"),
@@ -53,12 +52,17 @@ async fn keys_are_created_listed_and_checked() {
     assert_eq!(version, json!({"version": env!("CARGO_PKG_VERSION")}));
     let apis = json_of(&server, ROOT, "GET", "/minio/kms/v1/apis").await;
     assert!(
-        apis.as_array()
-            .unwrap()
-            .contains(&json!({"Method": "GET", "Path": "/minio/kms/v1/key/list", "MaxBody": 0, "Timeout": 0})),
+        apis.as_array().unwrap().contains(
+            &json!({"Method": "GET", "Path": "/minio/kms/v1/key/list", "MaxBody": 0, "Timeout": 0})
+        ),
         "{apis}"
     );
+}
 
+#[tokio::test]
+async fn keys_are_created_listed_and_checked() {
+    // Encrypted objects are in object buckets.
+    let server = start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
     for path in [
         "/minio/kms/v1/key/create?key-id=app-1",
         "/minio/admin/v3/kms/key/create?key-id=app-2",
@@ -67,10 +71,22 @@ async fn keys_are_created_listed_and_checked() {
         assert_eq!((status, answer.as_str()), (200, ""), "{path}");
     }
     for (path, status, code) in [
-        ("/minio/kms/v1/key/create?key-id=app-1", 409, "kms:KeyAlreadyExists"),
-        ("/minio/kms/v1/key/create?key-id=no%2Fslash", 400, "kms:InvalidKeyName"),
+        (
+            "/minio/kms/v1/key/create?key-id=app-1",
+            409,
+            "kms:KeyAlreadyExists",
+        ),
+        (
+            "/minio/kms/v1/key/create?key-id=no%2Fslash",
+            400,
+            "kms:InvalidKeyName",
+        ),
         ("/minio/kms/v1/key/create", 400, "InvalidRequest"),
-        ("/minio/admin/v3/kms/key/create?key-id=", 400, "InvalidRequest"),
+        (
+            "/minio/admin/v3/kms/key/create?key-id=",
+            400,
+            "InvalidRequest",
+        ),
     ] {
         let (got, answer) = call(&server, ROOT, "POST", path).await;
         assert_eq!(got, status, "{path}: {answer}");
@@ -79,7 +95,10 @@ async fn keys_are_created_listed_and_checked() {
 
     let listed = json_of(&server, ROOT, "GET", "/minio/kms/v1/key/list?pattern=app").await;
     assert_eq!(names(&listed), ["app-1", "app-2"]);
-    assert!(listed[0]["createdAt"].as_str().unwrap().ends_with('Z'), "{listed}");
+    assert!(
+        listed[0]["createdAt"].as_str().unwrap().ends_with('Z'),
+        "{listed}"
+    );
     for pattern in ["*", ""] {
         let all = json_of(
             &server,
@@ -88,7 +107,11 @@ async fn keys_are_created_listed_and_checked() {
             &format!("/minio/kms/v1/key/list?pattern={pattern}"),
         )
         .await;
-        assert_eq!(names(&all), ["app-1", "app-2", "teifs-default"], "{pattern}");
+        assert_eq!(
+            names(&all),
+            ["app-1", "app-2", "teifs-default"],
+            "{pattern}"
+        );
     }
 
     for path in ["/minio/kms/v1/key/status", "/minio/admin/v3/kms/key/status"] {
@@ -99,7 +122,12 @@ async fn keys_are_created_listed_and_checked() {
         // What fails is in the answer.
         let missing = json_of(&server, ROOT, "GET", &format!("{path}?key-id=missing")).await;
         assert_eq!(missing["key-id"], "missing");
-        assert!(missing["encryption-error"].as_str().unwrap().contains("missing"));
+        assert!(
+            missing["encryption-error"]
+                .as_str()
+                .unwrap()
+                .contains("missing")
+        );
         assert!(missing.get("decryption-error").is_none());
     }
 
@@ -136,7 +164,13 @@ async fn keys_are_created_listed_and_checked() {
 #[tokio::test]
 async fn kms_calls_are_decided_per_key() {
     let server = start().await;
-    call(&server, ROOT, "POST", "/minio/kms/v1/key/create?key-id=other").await;
+    call(
+        &server,
+        ROOT,
+        "POST",
+        "/minio/kms/v1/key/create?key-id=other",
+    )
+    .await;
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["kms:CreateKey","kms:KeyStatus","kms:ListKeys"],"Resource":"arn:minio:kms:::app-*"}]}"#;
     user(&server, "apps", Some(policy));
     let key = server.iam.create_access_key("apps").unwrap();
@@ -159,6 +193,20 @@ async fn kms_calls_are_decided_per_key() {
     // Only the keys it may list.
     let listed = json_of(&server, apps, "GET", "/minio/kms/v1/key/list?pattern=*").await;
     assert_eq!(names(&listed), ["app-1"]);
+
+    // As on MinIO, a call is decided on no key first: a Deny of some keys denies
+    // every key's.
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"kms:*"},{"Effect":"Deny","Action":"kms:KeyStatus","Resource":"arn:minio:kms:::secret-*"}]}"#;
+    user(&server, "most", Some(policy));
+    let key = server.iam.create_access_key("most").unwrap();
+    let most = (key.info.id.as_str(), key.secret.as_str());
+    for (method, path, status) in [
+        ("GET", "/minio/kms/v1/key/status?key-id=other", 403),
+        ("POST", "/minio/kms/v1/key/create?key-id=secret-1", 200),
+    ] {
+        let (got, answer) = call(&server, most, method, path).await;
+        assert_eq!(got, status, "{path}: {answer}");
+    }
 
     // The admin API's actions decide on any key.
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:KMSKeyStatus"}]}"#;
@@ -195,5 +243,8 @@ async fn a_bucket_named_minio_keeps_its_other_kms_keys() {
         .send()
         .await
         .unwrap();
-    assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"hello");
+    assert_eq!(
+        got.body.collect().await.unwrap().into_bytes().as_ref(),
+        b"hello"
+    );
 }

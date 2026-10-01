@@ -234,25 +234,32 @@ async fn status(kms: &dyn Kms, config: Option<&ServerConfig>) -> Status {
 /// `MinIO`'s KMS metrics.
 #[derive(Serialize)]
 struct Metrics {
-    kms_req_success: u64,
-    kms_req_error: u64,
-    kms_req_failure: u64,
+    #[serde(rename = "kms_req_success")]
+    succeeded: u64,
+    #[serde(rename = "kms_req_error")]
+    refused: u64,
+    #[serde(rename = "kms_req_failure")]
+    failed: u64,
     /// For each bucket's upper bound, in nanoseconds, the calls that took less.
-    kms_resp_time: BTreeMap<String, u64>,
+    #[serde(rename = "kms_resp_time")]
+    latency: BTreeMap<String, u64>,
 }
 
 fn metrics(routes: &Routes) -> Metrics {
-    let counted = routes.store.kms_metrics().unwrap_or(teifs_crypto::KmsMetrics {
-        ok: 0,
-        errors: 0,
-        failures: 0,
-        latency: [0; LATENCY_BUCKETS.len()],
-    });
+    let counted = routes
+        .store
+        .kms_metrics()
+        .unwrap_or(teifs_crypto::KmsMetrics {
+            ok: 0,
+            errors: 0,
+            failures: 0,
+            latency: [0; LATENCY_BUCKETS.len()],
+        });
     Metrics {
-        kms_req_success: counted.ok,
-        kms_req_error: counted.errors,
-        kms_req_failure: counted.failures,
-        kms_resp_time: LATENCY_BUCKETS
+        succeeded: counted.ok,
+        refused: counted.errors,
+        failed: counted.failures,
+        latency: LATENCY_BUCKETS
             .iter()
             .zip(counted.latency)
             .map(|(bound, n)| (bound.as_nanos().to_string(), n))
@@ -300,7 +307,10 @@ struct KeyInfo {
 fn rfc3339(ms: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
         .ok()
-        .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
+        .and_then(|t| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
         .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned())
 }
 

@@ -4,13 +4,13 @@
 //! --endpoint-url …` speaks too).
 
 mod buckets;
+mod kms;
 mod ldap;
 mod oidc;
 mod policy;
 mod prometheus;
 mod roles;
 mod saml;
-mod kms;
 mod service;
 mod trace;
 mod users;

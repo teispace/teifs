@@ -368,9 +368,7 @@ impl Kms for AwsKms {
                 .send()
                 .await;
             return Err(match err.code() {
-                Some("AlreadyExistsException") => {
-                    CryptoError::KeyExists(name.to_owned())
-                }
+                Some("AlreadyExistsException") => CryptoError::KeyExists(name.to_owned()),
                 _ => failure(&err, name),
             });
         }
