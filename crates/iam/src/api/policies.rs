@@ -6,7 +6,7 @@ use super::{
     ApiError, On, Out, Resource, Run, answer, done, encoded, paged, truncation, with_boundary,
     with_request_tags, xml::Xml,
 };
-use crate::{Iam, Owner, PolicyInfo, PolicyVersionInfo};
+use crate::{Iam, Owner, PolicyInfo, PolicyScope, PolicyVersionInfo};
 
 /// A managed policy as IAM answers with it; `ListPolicies` leaves out the description
 /// and tags, as AWS's does.
@@ -79,13 +79,16 @@ pub(super) fn list(r: &Run<'_>) -> Out {
     let prefix = r.path_prefix()?;
     let page = r.page()?;
     r.check("iam:ListPolicies", &Run::any())?;
-    // TeiFS has no AWS-managed policies.
-    let policies = if scope == Some("AWS") {
-        Vec::new()
-    } else {
-        r.iam.policies(prefix, attached)?
+    let scope = match scope {
+        Some("AWS") => PolicyScope::Aws,
+        Some("Local") => PolicyScope::Local,
+        _ => PolicyScope::All,
     };
-    let (policies, marker) = paged(policies, &page, |p| p.name.to_ascii_lowercase());
+    let policies = r.iam.policies(scope, prefix, attached)?;
+    // An account's policy can have a built-in one's name; its ARN tells them apart.
+    let (policies, marker) = paged(policies, &page, |p| {
+        format!("{}\n{}", p.name.to_ascii_lowercase(), p.arn)
+    });
     answer(|x| {
         x.members("Policies", &policies, |x, p| policy_xml(x, p, false));
         truncation(x, marker.as_deref());

@@ -448,14 +448,7 @@ fn web_role_session(r: &Run<'_>, min_token: usize) -> Out {
 
 /// The unique id of the managed policy `name` (or ARN) names, if there is one.
 fn managed_policy(s: &crate::state::State, name: &str) -> Option<String> {
-    let managed = if name.starts_with("arn:") {
-        s.policy_by_arn(name).ok()
-    } else {
-        s.policies
-            .values()
-            .find(|p| p.row.name.eq_ignore_ascii_case(name))
-    };
-    managed.map(|p| p.row.id.clone())
+    s.policy_named(name).map(|p| p.row.id.clone())
 }
 
 /// A token that isn't accepted, as AWS answers it.

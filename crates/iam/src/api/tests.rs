@@ -457,6 +457,70 @@ async fn documents_and_pages_round_trip() {
     assert_eq!(seen, ["u0", "u1", "u2", "u3", "u4"]);
 }
 
+#[tokio::test]
+async fn built_in_policies_are_listed_by_scope_and_never_changed() {
+    let d = drive().await;
+    let root = d.root();
+    d.ok(
+        &root,
+        &format!(
+            "Action=CreatePolicy&PolicyName=readwrite&PolicyDocument={}",
+            enc(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#)
+        ),
+    );
+    let arns = |scope: &str| {
+        let mut seen = Vec::new();
+        let mut marker = String::new();
+        loop {
+            let body = d.ok(
+                &root,
+                &format!("Action=ListPolicies&MaxItems=4{scope}{marker}"),
+            );
+            seen.extend(
+                body.split("<Arn>")
+                    .skip(1)
+                    .map(|s| s[..s.find('<').unwrap()].to_owned()),
+            );
+            if body.contains("<IsTruncated>false</IsTruncated>") {
+                return seen;
+            }
+            marker = format!("&Marker={}", between(&body, "<Marker>", "</Marker>"));
+        }
+    };
+    let all = arns("");
+    assert_eq!(all.len(), 16, "{all:?}");
+    assert_eq!(all, arns("&Scope=All"));
+    let both = all.iter().position(|a| a.ends_with("/readwrite")).unwrap();
+    assert_eq!(
+        all[both..=both + 1],
+        [
+            d.policy_arn("readwrite"),
+            "arn:aws:iam::aws:policy/readwrite".to_owned()
+        ]
+    );
+    assert_eq!(arns("&Scope=Local"), [d.policy_arn("readwrite")]);
+    let summary = d.ok(&root, "Action=GetAccountSummary");
+    assert!(
+        summary.contains("<key>Policies</key><value>1</value>"),
+        "only the account's own"
+    );
+    let aws = arns("&Scope=AWS");
+    assert_eq!(aws.len(), 15);
+    assert!(aws.contains(&"arn:aws:iam::aws:policy/AdministratorAccess".to_owned()));
+
+    let admin = enc("arn:aws:iam::aws:policy/AdministratorAccess");
+    let body = d.ok(&root, &format!("Action=GetPolicy&PolicyArn={admin}"));
+    assert!(
+        body.contains("<PolicyName>AdministratorAccess</PolicyName>"),
+        "{body}"
+    );
+    let reply = d.call(&root, &format!("Action=DeletePolicy&PolicyArn={admin}"));
+    assert_eq!(
+        (reply.status, code(&reply, "delete")),
+        (403, "AccessDenied".to_owned())
+    );
+}
+
 /// Every parameter any action needs, naming things that exist.
 fn every_parameter(d: &Drive, key: &str) -> String {
     let arn = enc(&d.policy_arn("managed"));

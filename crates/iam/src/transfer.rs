@@ -20,6 +20,9 @@ use crate::{
     state::{Key, State},
 };
 
+/// What a built-in policy's ARN starts with, as an export names it.
+const BUILTIN_ARN: &str = "arn:aws:iam::aws:policy/";
+
 /// The shortest secret key an import takes: 192 bits of base64, less than any TeiFS or
 /// AWS key has, so a weak secret can't be brought in.
 const MIN_SECRET: usize = 32;
@@ -39,11 +42,18 @@ fn pairs(tags: &[Tag]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The names of the policies with these ids, sorted.
+/// The names of the policies with these ids, sorted: a built-in one's ARN, which an
+/// account's own policy may share the name of.
 fn policy_names<'a>(state: &State, ids: impl Iterator<Item = &'a String>) -> Vec<String> {
     let mut names: Vec<String> = ids
         .filter_map(|id| state.policies.get(id))
-        .map(|p| p.row.name.clone())
+        .map(|p| {
+            if p.builtin {
+                state.policy_arn(p)
+            } else {
+                p.row.name.clone()
+            }
+        })
         .collect();
     names.sort_by_cached_key(|n| n.to_ascii_lowercase());
     names
@@ -114,8 +124,7 @@ fn import_saml(d: &mut Draft<'_>, providers: &[ExportedSamlProvider]) -> Result<
 
 fn export(state: &State, secrets: bool, key: &DataKey) -> IamExport {
     let mut policies: Vec<ExportedPolicy> = state
-        .policies
-        .values()
+        .own_policies()
         .map(|p| ExportedPolicy {
             name: p.row.name.clone(),
             path: p.row.path.clone(),
@@ -284,7 +293,7 @@ impl Iam {
             if !(s.users.is_empty()
                 && s.groups.is_empty()
                 && s.roles.is_empty()
-                && s.policies.is_empty()
+                && s.own_policies().next().is_none()
                 && s.oidc_providers.is_empty()
                 && s.saml_providers.is_empty()
                 && s.ldap_policies.is_empty())
@@ -300,13 +309,7 @@ impl Iam {
                 d.write(IamWrite::SetMeta(ACCOUNT.into(), export.account.clone()));
             }
             let arns = import_policies(d, &export.policies)?;
-            let arn = |name: &str| {
-                arns.get(&name.to_ascii_lowercase())
-                    .cloned()
-                    .ok_or_else(|| {
-                        IamError::NoSuchEntity(format!("The export has no policy called {name}."))
-                    })
-            };
+            let arn = |name: &str| exported_arn(&arns, name);
             for group in &export.groups {
                 d.create_group(&group.name, Some(&group.path))?;
                 for (name, document) in &group.inline {
@@ -403,6 +406,17 @@ fn import_roles(
         d.set_trust(&role.name, &role.trust_policy)?;
     }
     Ok(())
+}
+
+/// The ARN of the policy an export names: one of its own by name (`arns`), or a built-in
+/// one by ARN.
+fn exported_arn(arns: &BTreeMap<String, String>, name: &str) -> Result<String> {
+    if name.starts_with(BUILTIN_ARN) {
+        return Ok(name.to_owned());
+    }
+    arns.get(&name.to_ascii_lowercase())
+        .cloned()
+        .ok_or_else(|| IamError::NoSuchEntity(format!("The export has no policy called {name}.")))
 }
 
 /// Creates the policies with every version, the default one in effect: their ARNs by

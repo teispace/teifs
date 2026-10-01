@@ -146,6 +146,14 @@ it names are resolved to their unique ids and kept with the role (`principals`),
 is how AWS keeps a principal that's deleted and made again under the same name from
 inheriting the trust.
 
+The built-in managed policies (`builtin.rs`: AWS's and MinIO's, at
+`arn:aws:iam::aws:policy/NAME`) are documents in the code, so a new release can update
+them; in `system.db` each has only an anchor row, made when IAM opens, under a fixed id
+and its name after a `:` (which no customer's policy name can have, so the names never
+collide), for attachments' foreign keys. `State::load` puts them among the policies
+with `builtin` set; `Draft::own_policy` refuses to change them, and lookups by name
+(`State::policy_named`) take the account's own policy first.
+
 An OpenID Connect provider (`ops/oidc.rs`) is the issuer URL a web identity token must
 name, the audiences it may be for and the certificate thumbprints it may be pinned to;
 its ARN ends in the URL without the scheme, which is also what makes it unique.

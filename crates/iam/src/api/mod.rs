@@ -746,7 +746,7 @@ impl Run<'_> {
                         .boundary
                         .as_ref()
                         .and_then(|id| s.policies.get(id))
-                        .map(|p| s.policy_arn(&p.row)),
+                        .map(|p| s.policy_arn(p)),
                 }))
             })
             .ok()
@@ -786,7 +786,7 @@ impl Run<'_> {
                         .boundary
                         .as_ref()
                         .and_then(|id| s.policies.get(id))
-                        .map(|p| s.policy_arn(&p.row)),
+                        .map(|p| s.policy_arn(p)),
                 }))
             })
             .ok()
@@ -800,7 +800,7 @@ impl Run<'_> {
             .read(|s| {
                 Ok(s.policy_by_arn(arn).ok().map(|p| Resource {
                     on: On::Policy,
-                    arn: s.policy_arn(&p.row),
+                    arn: s.policy_arn(p),
                     name: p.row.name.clone(),
                     path: p.row.path.clone(),
                     tags: p.tags.clone(),
@@ -927,7 +927,7 @@ fn account_summary(r: &Run<'_>) -> Out {
             ("Users", s.users.len()),
             ("Groups", s.groups.len()),
             ("Roles", s.roles.len()),
-            ("Policies", s.policies.len()),
+            ("Policies", s.own_policies().count()),
         ])
     })?;
     let quotas = [

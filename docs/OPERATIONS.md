@@ -208,6 +208,30 @@ material. The identity needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey` and
 `teifs doctor` asks an external KMS: whether it answers, takes TeiFS's credentials, and
 has the default key (with the command that makes it when it hasn't).
 
+## Built-in policies
+
+Every drive has AWS's managed policies for what TeiFS serves and MinIO's canned
+policies, at `arn:aws:iam::aws:policy/NAME`, ready to attach:
+
+| Policy | Grants |
+|---|---|
+| `AdministratorAccess` | Everything |
+| `AmazonS3FullAccess`, `AmazonS3ReadOnlyAccess` | All of S3, or its reads and lists |
+| `IAMFullAccess`, `IAMReadOnlyAccess` | All of IAM, or its reads and lists |
+| `readwrite`, `readonly`, `writeonly`, `consolereadonly` | MinIO's: all of S3, reading objects, writing them, reading and listing them |
+| `consoleAdmin` | MinIO's: everything, the admin API and KMS included |
+| `diagnostics`, `iamAdmin`, `infraAdmin`, `replicationAdmin`, `securityAuditAdmin` | MinIO's admin roles |
+
+```sh
+aws iam attach-user-policy --user-name alice \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess --endpoint-url https://s3.example.com
+aws iam list-policies --scope AWS --endpoint-url https://s3.example.com
+```
+
+They can't be changed or deleted. Where a policy is given by name (LDAP mappings,
+certificates' common names, OpenID Connect claims and roles, the identity plugin), a
+policy of the account's own with that name comes first.
+
 ## LDAP sign-in
 
 Users of an LDAP directory (Active Directory, OpenLDAP, FreeIPA…) can get temporary
@@ -245,7 +269,8 @@ TeiFS checks the settings when it starts (filters, DNs, base DNs that overlap) a
 how to fix what's wrong; `teifs doctor` also connects, signs the lookup account in and
 looks for each base DN.
 
-Map policies to users and groups, by DN in any spelling: TeiFS looks the DN up in the
+Map policies to users and groups, by DN in any spelling (MinIO's canned policies, such
+as `readwrite` or `consoleAdmin`, are built in; see [Built-in policies](#built-in-policies)): TeiFS looks the DN up in the
 directory and keeps it as the directory spells it.
 
 ```sh

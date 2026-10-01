@@ -55,7 +55,7 @@ pub(super) fn role_info(state: &State, role: &Role) -> RoleInfo {
             .boundary
             .as_ref()
             .and_then(|id| state.policies.get(id))
-            .map(|p| state.policy_arn(&p.row)),
+            .map(|p| state.policy_arn(p)),
     }
 }
 

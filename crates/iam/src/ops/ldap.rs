@@ -91,15 +91,8 @@ fn names(state: &State, ids: &BTreeSet<String>) -> Vec<String> {
 
 /// The managed policy a name or ARN names, by id.
 fn policy_id(state: &State, name: &str) -> Result<String> {
-    let found = if name.starts_with("arn:") {
-        state.policy_by_arn(name).ok()
-    } else {
-        state
-            .policies
-            .values()
-            .find(|p| p.row.name.eq_ignore_ascii_case(name))
-    };
-    found
+    state
+        .policy_named(name)
         .map(|p| p.row.id.clone())
         .ok_or_else(|| IamError::NoSuchEntity(format!("Policy {name} does not exist.")))
 }

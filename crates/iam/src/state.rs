@@ -15,7 +15,7 @@ use teifs_meta::{
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
 
-use crate::{IamError, LdapEntity, Result, saml::metadata::Metadata};
+use crate::{IamError, LdapEntity, Result, builtin, saml::metadata::Metadata};
 
 /// A policy document: the text as given (returned as is) and what it says.
 #[derive(Debug, Clone)]
@@ -295,6 +295,8 @@ pub(crate) struct Managed {
     pub(crate) versions: BTreeMap<u32, Version>,
     /// Keys are case sensitive (AWS, for policies).
     pub(crate) tags: Vec<(String, String)>,
+    /// Whether it's one of [`builtin::BUILTINS`], which no one changes.
+    pub(crate) builtin: bool,
 }
 
 impl Managed {
@@ -491,7 +493,27 @@ impl State {
             })
     }
 
-    /// The managed policy with this ARN.
+    /// The account's own managed policies (not the built-in ones).
+    pub(crate) fn own_policies(&self) -> impl Iterator<Item = &Arc<Managed>> {
+        self.policies.values().filter(|p| !p.builtin)
+    }
+
+    /// The managed policy a name or ARN names: by name, the account's own first, then a
+    /// built-in one (as MinIO's policy names are given).
+    pub(crate) fn policy_named(&self, name: &str) -> Option<&Arc<Managed>> {
+        if name.starts_with("arn:") {
+            return self.policy_by_arn(name).ok();
+        }
+        let named = |builtin: bool| {
+            self.policies
+                .values()
+                .find(move |p| p.builtin == builtin && p.row.name.eq_ignore_ascii_case(name))
+        };
+        named(false).or_else(|| named(true))
+    }
+
+    /// The managed policy with this ARN: the account's own, or a built-in one under
+    /// `arn:aws:iam::aws:policy/`.
     pub(crate) fn policy_by_arn(&self, arn: &str) -> Result<&Arc<Managed>> {
         let missing =
             || IamError::NoSuchEntity(format!("Policy {arn} does not exist or is not attachable."));
@@ -506,7 +528,8 @@ impl State {
                 "`{arn}` isn't an IAM policy ARN"
             )));
         };
-        if account != &*self.account {
+        let builtin = account == builtin::ACCOUNT;
+        if !builtin && account != &*self.account {
             return Err(missing());
         }
         let (path, name) = match path_name.rfind('/') {
@@ -516,7 +539,9 @@ impl State {
         let path = format!("/{path}");
         self.policies
             .values()
-            .find(|p| p.row.path == path && p.row.name.eq_ignore_ascii_case(name))
+            .find(|p| {
+                p.builtin == builtin && p.row.path == path && p.row.name.eq_ignore_ascii_case(name)
+            })
             .ok_or_else(missing)
     }
 
@@ -614,8 +639,13 @@ impl State {
         )
     }
 
-    pub(crate) fn policy_arn(&self, policy: &PolicyRow) -> String {
-        arn(&self.account, "policy", &policy.path, &policy.name)
+    pub(crate) fn policy_arn(&self, policy: &Managed) -> String {
+        let account = if policy.builtin {
+            builtin::ACCOUNT
+        } else {
+            &self.account
+        };
+        arn(account, "policy", &policy.row.path, &policy.row.name)
     }
 
     /// Whether a name is taken by another entity of the same kind (without case).
@@ -711,6 +741,20 @@ fn load_policies(
         );
     }
     for row in rows {
+        if let Some(b) = builtin::anchored(&row.name) {
+            let version = Version {
+                document: Document::stored(b.document, &format!("built-in policy {}", b.name))?,
+                created_ms: b.updated_ms,
+            };
+            let policy = Managed {
+                row: b.row(),
+                versions: BTreeMap::from([(b.version, version)]),
+                tags: Vec::new(),
+                builtin: true,
+            };
+            policies.insert(row.id, Arc::new(policy));
+            continue;
+        }
         let versions = versions.remove(&row.id).unwrap_or_default();
         if !versions.contains_key(&row.default_version) {
             return Err(IamError::Stored(format!(
@@ -725,6 +769,7 @@ fn load_policies(
                 row,
                 versions,
                 tags,
+                builtin: false,
             }),
         );
     }
@@ -874,4 +919,68 @@ fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, 
 /// The ARN of the `kind` (`user`, `group`, `role`, `policy`) called `name` under `path`.
 pub(crate) fn arn(account: &str, kind: &str, path: &str, name: &str) -> String {
     format!("arn:aws:iam::{account}:{kind}{path}{name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed(id: &str, name: &str, builtin: bool) -> Arc<Managed> {
+        let document = Document::parse(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+        )
+        .unwrap();
+        Arc::new(Managed {
+            row: PolicyRow {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                path: "/".to_owned(),
+                description: String::new(),
+                default_version: 1,
+                latest_version: 1,
+                created_ms: 0,
+                updated_ms: 0,
+            },
+            versions: BTreeMap::from([(
+                1,
+                Version {
+                    document,
+                    created_ms: 0,
+                },
+            )]),
+            tags: Vec::new(),
+            builtin,
+        })
+    }
+
+    #[test]
+    fn a_name_is_the_accounts_own_policy_before_a_built_in_one() {
+        let mut state = State {
+            account: "123456789012".into(),
+            ..State::default()
+        };
+        // The account's own policy sorts before the built-in one of its name, and after.
+        for (id, name, builtin) in [
+            ("ANPA2", "readonly", false),
+            ("ANPA5", "readonly", true),
+            ("ANPA6", "writeonly", true),
+            ("ANPA7", "WriteOnly", false),
+            ("ANPA8", "diagnostics", true),
+        ] {
+            state
+                .policies
+                .insert(id.to_owned(), managed(id, name, builtin));
+        }
+        let named = |name: &str| state.policy_named(name).map(|p| p.row.id.as_str());
+        assert_eq!(named("READONLY"), Some("ANPA2"));
+        assert_eq!(named("writeonly"), Some("ANPA7"));
+        assert_eq!(named("Diagnostics"), Some("ANPA8"));
+        assert_eq!(named("nothing"), None);
+        assert_eq!(named("arn:aws:iam::aws:policy/writeonly"), Some("ANPA6"));
+        assert_eq!(
+            named("arn:aws:iam::123456789012:policy/writeonly"),
+            Some("ANPA7")
+        );
+        assert_eq!(named("arn:aws:iam::aws:policy/nothing"), None);
+    }
 }

@@ -10,6 +10,7 @@
 
 mod api;
 mod bearer;
+mod builtin;
 pub mod certificate;
 mod ids;
 pub mod ldap;
@@ -50,12 +51,26 @@ pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};
 
 use crate::{snapshot::Snapshot, state::State};
 
+/// Which managed policies `ListPolicies` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyScope {
+    /// The account's own and the built-in ones.
+    All,
+    /// The built-in ones (AWS's managed policies and MinIO's canned ones).
+    Aws,
+    /// The account's own.
+    Local,
+}
+
 /// Why an IAM request failed; the variants are AWS's error codes.
 #[derive(Debug, thiserror::Error)]
 pub enum IamError {
     /// What was named doesn't exist.
     #[error("{0}")]
     NoSuchEntity(String),
+    /// What was named isn't the account's to change (a built-in policy).
+    #[error("{0}")]
+    AccessDenied(String),
     /// Something of that name exists.
     #[error("{0}")]
     EntityAlreadyExists(String),
@@ -97,6 +112,7 @@ impl IamError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoSuchEntity(_) => "NoSuchEntity",
+            Self::AccessDenied(_) => "AccessDenied",
             Self::EntityAlreadyExists(_) => "EntityAlreadyExists",
             Self::DeleteConflict(_) => "DeleteConflict",
             Self::LimitExceeded(_) => "LimitExceeded",
@@ -115,6 +131,7 @@ impl IamError {
     pub fn status(&self) -> u16 {
         match self {
             Self::NoSuchEntity(_) => 404,
+            Self::AccessDenied(_) => 403,
             Self::EntityAlreadyExists(_) | Self::DeleteConflict(_) | Self::LimitExceeded(_) => 409,
             Self::InvalidInput(_)
             | Self::MalformedPolicyDocument(_)
@@ -174,7 +191,7 @@ impl Iam {
         root: Option<RootKey>,
     ) -> Result<Self> {
         let mut db = System::open(path)?;
-        let rows = db.iam_rows()?;
+        let mut rows = db.iam_rows()?;
         let setting = |name: &str| {
             rows.meta
                 .iter()
@@ -198,6 +215,12 @@ impl Iam {
             writes.push(IamWrite::SetMeta(ACCOUNT.into(), account.clone()));
             account
         });
+        for b in builtin::BUILTINS {
+            if !rows.policies.iter().any(|p| p.id == b.id) {
+                writes.push(IamWrite::PutPolicy(b.anchor()));
+                rows.policies.push(b.anchor());
+            }
+        }
         if !writes.is_empty() {
             db.iam_apply(&writes)?;
         }

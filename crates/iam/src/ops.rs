@@ -13,7 +13,7 @@ use teifs_meta::{
 use zeroize::Zeroizing;
 
 use crate::{
-    Draft, Iam, IamError, Result, ids,
+    Draft, Iam, IamError, PolicyScope, Result, ids,
     rules::{
         self, MAX_ATTACHED, MAX_GROUPS, MAX_GROUPS_PER_USER, MAX_KEYS_PER_USER, MAX_POLICIES,
         MAX_TAGS, MAX_USERS, MAX_VERSIONS,
@@ -162,7 +162,7 @@ fn user_info(state: &State, user: &User) -> UserInfo {
             .boundary
             .as_ref()
             .and_then(|id| state.policies.get(id))
-            .map(|p| state.policy_arn(&p.row)),
+            .map(|p| state.policy_arn(p)),
     }
 }
 
@@ -181,7 +181,7 @@ fn policy_info(state: &State, policy: &Managed) -> PolicyInfo {
         id: policy.row.id.clone(),
         name: policy.row.name.clone(),
         path: policy.row.path.clone(),
-        arn: state.policy_arn(&policy.row),
+        arn: state.policy_arn(policy),
         description: policy.row.description.clone(),
         default_version: format!("v{}", policy.row.default_version),
         attachment_count: state.attachments(&policy.row.id),
@@ -327,6 +327,18 @@ impl Draft<'_> {
 
     fn policy(&self, arn: &str) -> Result<Arc<Managed>> {
         self.state.policy_by_arn(arn).cloned()
+    }
+
+    /// The account's own managed policy with this ARN, to `change` it: a built-in one is
+    /// AWS's (or MinIO's), not the account's.
+    fn own_policy(&self, arn: &str, change: &str) -> Result<Arc<Managed>> {
+        let policy = self.policy(arn)?;
+        if policy.builtin {
+            return Err(IamError::AccessDenied(format!(
+                "Cannot {change} policies outside your own account."
+            )));
+        }
+        Ok(policy)
     }
 
     fn save_user(&mut self, user: User) {
@@ -509,15 +521,14 @@ impl Draft<'_> {
         managed_size(&document)?;
         if self
             .state
-            .policies
-            .values()
+            .own_policies()
             .any(|p| p.row.name.eq_ignore_ascii_case(name))
         {
             return Err(IamError::EntityAlreadyExists(format!(
                 "A policy called {name} already exists. Duplicate names are not allowed."
             )));
         }
-        if self.state.policies.len() >= MAX_POLICIES {
+        if self.state.own_policies().count() >= MAX_POLICIES {
             return Err(IamError::LimitExceeded(format!(
                 "Cannot exceed quota for PoliciesPerAccount: {MAX_POLICIES}"
             )));
@@ -549,6 +560,7 @@ impl Draft<'_> {
             )]),
             row,
             tags,
+            builtin: false,
         };
         for (key, value) in &policy.tags {
             self.write(IamWrite::PutPolicyTag(
@@ -573,7 +585,7 @@ impl Draft<'_> {
     ) -> Result<PolicyVersionInfo> {
         let document = Document::parse(document)?;
         managed_size(&document)?;
-        let mut policy = Arc::unwrap_or_clone(self.policy(arn)?);
+        let mut policy = Arc::unwrap_or_clone(self.own_policy(arn, "create versions of")?);
         if policy.versions.len() >= MAX_VERSIONS {
             return Err(IamError::LimitExceeded(format!(
                 "A managed policy can have up to {MAX_VERSIONS} versions. Before you create a new version, you \
@@ -605,7 +617,8 @@ impl Draft<'_> {
     /// [`Iam::set_default_policy_version`], as part of a change.
     pub(crate) fn set_default_policy_version(&mut self, arn: &str, version: &str) -> Result<()> {
         let number = rules::version_id(version)?;
-        let mut policy = Arc::unwrap_or_clone(self.policy(arn)?);
+        let mut policy =
+            Arc::unwrap_or_clone(self.own_policy(arn, "change the default version of")?);
         if !policy.versions.contains_key(&number) {
             return Err(no_such_version(arn, version));
         }
@@ -1159,7 +1172,7 @@ impl Iam {
     pub fn tag_policy(&self, arn: &str, tags: &[(String, String)]) -> Result<()> {
         checked_tags(TagKeys::Policy, tags)?;
         self.change(|d| {
-            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
+            let mut policy = Arc::unwrap_or_clone(d.own_policy(arn, "tag")?);
             policy.tags = merged(TagKeys::Policy, &policy.tags, tags)?;
             for (key, value) in tags {
                 d.write(IamWrite::PutPolicyTag(
@@ -1178,7 +1191,7 @@ impl Iam {
     /// Removes a managed policy's tags; absent keys are ignored (`UntagPolicy`).
     pub fn untag_policy(&self, arn: &str, keys: &[String]) -> Result<()> {
         self.change(|d| {
-            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
+            let mut policy = Arc::unwrap_or_clone(d.own_policy(arn, "untag")?);
             for key in removed(TagKeys::Policy, &mut policy.tags, keys) {
                 d.write(IamWrite::DeletePolicyTag(
                     policy.row.id.clone(),
@@ -1197,18 +1210,30 @@ impl Iam {
         self.read(|s| Ok(policy_info(s, s.policy_by_arn(arn)?)))
     }
 
-    /// Managed policies whose path starts with `prefix`, by name; only those attached to
-    /// something if `attached` (`ListPolicies` with Scope=Local).
-    pub fn policies(&self, prefix: Option<&str>, attached: bool) -> Result<Vec<PolicyInfo>> {
+    /// The managed policies of `scope` whose path starts with `prefix`, by name (the
+    /// account's own before a built-in one of the same name); only those attached to
+    /// something if `attached` (`ListPolicies`).
+    pub fn policies(
+        &self,
+        scope: PolicyScope,
+        prefix: Option<&str>,
+        attached: bool,
+    ) -> Result<Vec<PolicyInfo>> {
         let under = under(prefix)?;
         self.read(|s| {
-            let policies = s
+            let mut policies: Vec<(bool, PolicyInfo)> = s
                 .policies
                 .values()
+                .filter(|p| match scope {
+                    PolicyScope::All => true,
+                    PolicyScope::Aws => p.builtin,
+                    PolicyScope::Local => !p.builtin,
+                })
                 .filter(|p| under(&p.row.path) && (!attached || s.attachments(&p.row.id) > 0))
-                .map(|p| policy_info(s, p))
+                .map(|p| (p.builtin, policy_info(s, p)))
                 .collect();
-            Ok(by_name(policies, |p: &PolicyInfo| &p.name))
+            policies.sort_by_cached_key(|(builtin, p)| (p.name.to_ascii_lowercase(), *builtin));
+            Ok(policies.into_iter().map(|(_, p)| p).collect())
         })
     }
 
@@ -1216,7 +1241,7 @@ impl Iam {
     /// (`DeletePolicy`).
     pub fn delete_policy(&self, arn: &str) -> Result<()> {
         self.change(|d| {
-            let policy = d.policy(arn)?;
+            let policy = d.own_policy(arn, "delete")?;
             let id = &policy.row.id;
             if d.state.attachments(id) > 0 {
                 return Err(IamError::DeleteConflict("Cannot delete a policy attached to entities.".into()));
@@ -1284,7 +1309,7 @@ impl Iam {
     pub fn delete_policy_version(&self, arn: &str, version: &str) -> Result<()> {
         let number = rules::version_id(version)?;
         self.change(|d| {
-            let mut policy = Arc::unwrap_or_clone(d.policy(arn)?);
+            let mut policy = Arc::unwrap_or_clone(d.own_policy(arn, "delete versions of")?);
             if !policy.versions.contains_key(&number) {
                 return Err(no_such_version(arn, version));
             }
@@ -1355,7 +1380,7 @@ impl Iam {
                 .filter(|p| under(&p.row.path))
                 .map(|p| AttachedPolicy {
                     name: p.row.name.clone(),
-                    arn: s.policy_arn(&p.row),
+                    arn: s.policy_arn(p),
                 })
                 .collect();
             Ok(by_name(policies, |p: &AttachedPolicy| &p.name))

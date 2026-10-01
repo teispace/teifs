@@ -746,6 +746,12 @@ async fn without_a_role_tokens_name_the_policies_as_minio_has_it() {
     let session = d.session(&answer);
     assert!(allows(&session, "s3:GetObject") && allows(&session, "s3:PutObject"));
     assert!(session.session().unwrap().expires() - now_seconds() > 31_535_000);
+    // A name no policy of the account has is a built-in one's, as MinIO's.
+    let canned = d.session(&ok(
+        d.web(&body(&idp.token("carol", r#""policy":"writeonly""#), "")),
+        "canned",
+    ));
+    assert!(allows(&canned, "s3:PutObject") && !allows(&canned, "s3:GetObject"));
 
     // Its session may assume a role, as a role's session: a chain, of an hour at most.
     may(

@@ -295,6 +295,17 @@ behaviour; the on-disk format is always upgraded automatically.
   and TeiFS's admin actions answer to MinIO's names of the same permission
   (`admin:ServerInfo` grants `teifs:GetServerInfo`, `admin:ServerTrace` the trace,
   `admin:Prometheus` the metrics…).
+- Built-in managed policies, as AWS and MinIO have them: AWS's `AdministratorAccess`,
+  `AmazonS3FullAccess`, `AmazonS3ReadOnlyAccess`, `IAMFullAccess` and
+  `IAMReadOnlyAccess`, and MinIO's `readwrite`, `readonly`, `writeonly`,
+  `consolereadonly`, `diagnostics`, `consoleAdmin`, `iamAdmin`, `infraAdmin`,
+  `replicationAdmin` and `securityAuditAdmin`, each at
+  `arn:aws:iam::aws:policy/NAME`. They attach to users, groups and roles, serve as
+  boundaries and session policies, and are listed by `ListPolicies` (`Scope=AWS`, or
+  `All`, the default); they can't be changed, tagged or deleted (`AccessDenied`). A
+  MinIO policy name (an LDAP mapping, a certificate's common name, a token's `policy`
+  claim, an identity plugin's or OpenID role's policies) names the account's own policy
+  of that name, else the built-in one. IAM exports name them by ARN.
 - `teifs sts assume-saml SERVER --role-arn ARN --principal-arn ARN --assertion-file FILE`
   exchanges a SAML response (base64, or its XML; `-` reads standard input) for a role's
   credentials, saved as an alias or written for `aws`.

@@ -9,7 +9,7 @@
 use std::{path::Path, sync::Arc};
 
 use teifs_crypto::LocalKms;
-use teifs_iam::{Iam, IamError, NewOidcProvider, NewRole, Owner, RootKey};
+use teifs_iam::{Iam, IamError, NewOidcProvider, NewRole, Owner, PolicyScope, RootKey};
 use teifs_policy::{Context, Date, Decision, Policies, Request, evaluate};
 use zeroize::Zeroizing;
 
@@ -97,7 +97,7 @@ async fn state_and_secrets_survive_a_restart_sealed() {
     let before = (
         iam.users(None).unwrap(),
         iam.groups(None).unwrap(),
-        iam.policies(None, false).unwrap(),
+        iam.policies(PolicyScope::Local, None, false).unwrap(),
         iam.access_keys("alice").unwrap(),
     );
     drop(iam);
@@ -118,7 +118,7 @@ async fn state_and_secrets_survive_a_restart_sealed() {
     let after = (
         iam.users(None).unwrap(),
         iam.groups(None).unwrap(),
-        iam.policies(None, false).unwrap(),
+        iam.policies(PolicyScope::Local, None, false).unwrap(),
         iam.access_keys("alice").unwrap(),
     );
     assert_eq!(before, after);
@@ -444,8 +444,9 @@ async fn managed_policies_keep_five_versions_numbered_for_ever() {
         "NoSuchEntity"
     );
     assert_eq!(
-        code(iam.policy("arn:aws:iam::aws:policy/AmazonS3FullAccess")),
-        "NoSuchEntity"
+        code(iam.policy("arn:aws:iam::aws:policy/team/Read")),
+        "NoSuchEntity",
+        "an account's policy isn't AWS's"
     );
     assert_eq!(code(iam.policy("Read")), "InvalidInput");
 
@@ -507,7 +508,182 @@ async fn managed_policies_keep_five_versions_numbered_for_ever() {
     iam.set_user_boundary("alice", None).unwrap();
     assert_eq!(code(iam.set_user_boundary("alice", None)), "NoSuchEntity");
     iam.delete_policy(arn).unwrap();
-    assert!(iam.policies(None, false).unwrap().is_empty());
+    assert!(
+        iam.policies(PolicyScope::Local, None, false)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+const S3_READ_ONLY: &str = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess";
+
+#[tokio::test]
+async fn built_in_policies_are_attached_by_their_arns_and_never_change() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    let policy = iam.policy(S3_READ_ONLY).unwrap();
+    assert_eq!(
+        (
+            policy.name.as_str(),
+            policy.path.as_str(),
+            policy.default_version.as_str(),
+            policy.updated_ms
+        ),
+        ("AmazonS3ReadOnlyAccess", "/", "v3", 1_691_703_060_000)
+    );
+    let versions = iam.policy_versions(S3_READ_ONLY).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert!(versions[0].is_default && versions[0].document.contains("s3:Get*"));
+    assert_eq!(
+        code(iam.policy("arn:aws:iam::aws:policy/nothing")),
+        "NoSuchEntity"
+    );
+    let own = iam.account().clone();
+    assert_eq!(
+        code(iam.policy(&format!("arn:aws:iam::{own}:policy/AmazonS3ReadOnlyAccess"))),
+        "NoSuchEntity",
+        "AWS's policy isn't the account's"
+    );
+
+    // The account's own policies are apart from the built-in ones, even by name.
+    let builtins = iam.policies(PolicyScope::Aws, None, false).unwrap();
+    assert_eq!(builtins.len(), 15);
+    assert!(
+        builtins
+            .iter()
+            .all(|p| p.arn.starts_with("arn:aws:iam::aws:policy/"))
+    );
+    assert!(
+        iam.policies(PolicyScope::Local, None, false)
+            .unwrap()
+            .is_empty()
+    );
+    let mine = iam
+        .create_policy("ReadWrite", None, None, READ_PHOTOS, &[])
+        .unwrap();
+    let all = iam.policies(PolicyScope::All, None, false).unwrap();
+    assert_eq!(all.len(), 16);
+    let named: Vec<&str> = all
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case("readwrite"))
+        .map(|p| p.arn.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        [mine.arn.as_str(), "arn:aws:iam::aws:policy/readwrite"]
+    );
+    assert_eq!(
+        iam.policies(PolicyScope::Local, None, false).unwrap().len(),
+        1
+    );
+
+    iam.create_user("alice", None, &[], None).unwrap();
+    iam.attach(Owner::User("alice"), S3_READ_ONLY).unwrap();
+    let key = iam.create_access_key("alice").unwrap().info.id;
+    assert_eq!(
+        decide(&iam, &key, "s3:GetObject", "arn:aws:s3:::photos/a"),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide(&iam, &key, "s3:PutObject", "arn:aws:s3:::photos/a"),
+        Decision::ImplicitDeny
+    );
+    assert_eq!(iam.policy(S3_READ_ONLY).unwrap().attachment_count, 1);
+    assert_eq!(
+        iam.policies(PolicyScope::Aws, None, true).unwrap().len(),
+        1,
+        "only the attached one"
+    );
+
+    for refused in [
+        code(iam.delete_policy(S3_READ_ONLY)),
+        code(iam.create_policy_version(S3_READ_ONLY, ALLOW_ALL, true)),
+        code(iam.set_default_policy_version(S3_READ_ONLY, "v3")),
+        code(iam.delete_policy_version(S3_READ_ONLY, "v1")),
+        code(iam.tag_policy(S3_READ_ONLY, &[("a".into(), "b".into())])),
+        code(iam.untag_policy(S3_READ_ONLY, &["a".into()])),
+    ] {
+        assert_eq!(refused, "AccessDenied");
+    }
+    assert_eq!(
+        iam.delete_policy(S3_READ_ONLY).unwrap_err().to_string(),
+        "Cannot delete policies outside your own account."
+    );
+}
+
+#[tokio::test]
+async fn built_in_policies_survive_a_restart_and_move_by_their_arns() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    let mine = iam
+        .create_policy("ReadWrite", None, None, READ_PHOTOS, &[])
+        .unwrap();
+    iam.create_user("alice", None, &[], None).unwrap();
+    iam.attach(Owner::User("alice"), S3_READ_ONLY).unwrap();
+
+    // The anchors are kept once: a restart finds the attachment, and adds nothing.
+    drop(iam);
+    let iam = drive.open().await;
+    assert_eq!(iam.policy(S3_READ_ONLY).unwrap().attachment_count, 1);
+    assert_eq!(
+        iam.policies(PolicyScope::All, None, false).unwrap().len(),
+        16
+    );
+
+    // An export names a built-in policy by its ARN, which an import attaches.
+    iam.attach(Owner::User("alice"), "arn:aws:iam::aws:policy/readwrite")
+        .unwrap();
+    iam.attach(Owner::User("alice"), &mine.arn).unwrap();
+    let export = iam.export(false);
+    assert_eq!(
+        export
+            .policies
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["ReadWrite"]
+    );
+    assert_eq!(
+        export.users[0].attached,
+        [
+            S3_READ_ONLY,
+            "arn:aws:iam::aws:policy/readwrite",
+            "ReadWrite"
+        ]
+    );
+    let to = Drive::new().open().await;
+    to.import(&export, false).unwrap();
+    assert_eq!(to.export(false).users[0].attached, export.users[0].attached);
+    assert_eq!(to.policy(S3_READ_ONLY).unwrap().attachment_count, 1);
+}
+
+#[tokio::test]
+async fn the_policy_quota_counts_the_accounts_own_policies() {
+    let iam = Drive::new().open().await;
+    let mut export = iam.export(false);
+    export.policies = (0..1500)
+        .map(|i| teifs_types::admin::ExportedPolicy {
+            name: format!("p{i}"),
+            path: "/".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            versions: vec![teifs_types::admin::ExportedVersion {
+                document: ALLOW_ALL.into(),
+                is_default: true,
+            }],
+        })
+        .collect();
+    iam.import(&export, false).unwrap();
+    let error = iam
+        .create_policy("one-more", None, None, ALLOW_ALL, &[])
+        .unwrap_err();
+    assert_eq!(
+        (error.code(), error.to_string().as_str()),
+        (
+            "LimitExceeded",
+            "Cannot exceed quota for PoliciesPerAccount: 1500"
+        )
+    );
 }
 
 #[tokio::test]
@@ -606,8 +782,14 @@ async fn attachments_are_limited_and_listed() {
     let (groups, users, roles) = iam.entities_for_policy(&arns[0]).unwrap();
     assert!(roles.is_empty());
     assert_eq!((groups.len(), users.len()), (1, 1));
-    assert_eq!(iam.policies(None, true).unwrap().len(), 10);
-    assert_eq!(iam.policies(None, false).unwrap().len(), 11);
+    assert_eq!(
+        iam.policies(PolicyScope::Local, None, true).unwrap().len(),
+        10
+    );
+    assert_eq!(
+        iam.policies(PolicyScope::Local, None, false).unwrap().len(),
+        11
+    );
 }
 
 #[tokio::test]
