@@ -22,7 +22,7 @@ mod versions;
 pub use db::{backup, intact};
 pub use iam::{
     AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, LdapPolicyRow, LdapSessionRow,
-    OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow, UserRow,
+    OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow, UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System, Versioning};

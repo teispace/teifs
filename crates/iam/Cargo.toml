@@ -23,6 +23,7 @@ rustls.workspace = true
 rustls-platform-verifier.workspace = true
 rustls-webpki.workspace = true
 x509-parser.workspace = true
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

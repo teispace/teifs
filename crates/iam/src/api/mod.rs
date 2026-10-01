@@ -12,6 +12,7 @@ mod oidc;
 mod params;
 mod policies;
 mod roles;
+mod saml;
 mod sts;
 mod users;
 mod xml;
@@ -415,7 +416,7 @@ impl ApiError {
 }
 
 /// A parameter's name as AWS's messages give it: `userName`.
-fn camel(name: &str) -> String {
+pub(super) fn camel(name: &str) -> String {
     let mut chars = name.chars();
     chars
         .next()
@@ -482,6 +483,7 @@ enum On {
     Role,
     Policy,
     OidcProvider,
+    SamlProvider,
     /// STS's `federated-user`.
     FederatedUser,
 }
@@ -614,6 +616,14 @@ actions! {
     TagOpenIDConnectProvider: OidcProvider, TAGGING, oidc::tag;
     UntagOpenIDConnectProvider: OidcProvider, TAG_KEYS, oidc::untag;
     ListOpenIDConnectProviderTags: OidcProvider, &[], oidc::list_tags;
+    CreateSAMLProvider: SamlProvider, TAGGING, saml::create;
+    GetSAMLProvider: SamlProvider, &[], saml::get;
+    ListSAMLProviders: Any, &[], saml::list;
+    UpdateSAMLProvider: SamlProvider, &[], saml::update;
+    DeleteSAMLProvider: SamlProvider, &[], saml::delete;
+    TagSAMLProvider: SamlProvider, TAGGING, saml::tag;
+    UntagSAMLProvider: SamlProvider, TAG_KEYS, saml::untag;
+    ListSAMLProviderTags: SamlProvider, &[], saml::list_tags;
     GetAccountSummary: Any, &[], account_summary;
 }
 
@@ -695,7 +705,7 @@ impl Run<'_> {
             On::Group => "group",
             On::Role => "role",
             On::Policy => "policy",
-            On::Any | On::OidcProvider | On::FederatedUser => {
+            On::Any | On::OidcProvider | On::SamlProvider | On::FederatedUser => {
                 unreachable!("only IAM's entities with paths are made")
             }
         };
@@ -825,6 +835,31 @@ impl Run<'_> {
             .flatten()
             .unwrap_or_else(|| Resource {
                 on: On::OidcProvider,
+                arn: arn.to_owned(),
+                name: String::new(),
+                path: String::new(),
+                tags: Vec::new(),
+                boundary: None,
+            })
+    }
+
+    /// The SAML provider with this ARN, or the ARN as given.
+    fn saml_provider(&self, arn: &str) -> Resource {
+        self.iam
+            .read(|s| {
+                Ok(s.saml_provider_by_arn(arn).ok().map(|p| Resource {
+                    on: On::SamlProvider,
+                    arn: s.saml_provider_arn(p),
+                    name: p.name.clone(),
+                    path: String::new(),
+                    tags: p.tags.clone(),
+                    boundary: None,
+                }))
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Resource {
+                on: On::SamlProvider,
                 arn: arn.to_owned(),
                 name: String::new(),
                 path: String::new(),

@@ -5,14 +5,17 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use teifs_crypto::DataKey;
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
-    ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole, ExportedUser,
-    ExportedVersion, IAM_FORMAT, IamExport, ImportReport, LdapPolicyMapping, Tag,
+    ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole,
+    ExportedSamlProvider, ExportedUser, ExportedVersion, IAM_FORMAT, IamExport, ImportReport,
+    LdapPolicyMapping, Tag,
 };
 
 use crate::{
-    ACCOUNT, Draft, Iam, IamError, LdapEntity, NewOidcProvider, NewRole, Owner, Result, ldap,
+    ACCOUNT, Draft, Iam, IamError, LdapEntity, NewOidcProvider, NewRole, NewSamlProvider, Owner,
+    Result, SamlProviderUpdate, ldap,
     rules::MAX_KEYS_PER_USER,
     state::{Key, State},
 };
@@ -53,7 +56,63 @@ fn inline(documents: &BTreeMap<String, crate::state::Document>) -> BTreeMap<Stri
         .collect()
 }
 
-fn export(state: &State, secrets: bool) -> IamExport {
+/// The SAML providers, with their private keys if `key` is given to open them.
+fn export_saml(state: &State, key: Option<&DataKey>) -> Vec<ExportedSamlProvider> {
+    let mut providers: Vec<ExportedSamlProvider> = state
+        .saml_providers
+        .values()
+        .map(|p| ExportedSamlProvider {
+            name: p.name.clone(),
+            metadata: p.metadata.to_string(),
+            assertion_encryption_mode: p.encryption.map(|e| e.as_str().to_owned()),
+            private_keys: key
+                .map(|key| {
+                    p.keys
+                        .iter()
+                        .filter_map(|k| key.open_secret(k.id.as_bytes(), &k.sealed).ok())
+                        .map(|der| crate::saml::private_key::pem(&der))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            tags: tags(&p.tags),
+        })
+        .collect();
+    providers.sort_by_cached_key(|p| p.name.to_ascii_lowercase());
+    providers
+}
+
+/// Makes the exported SAML providers, with their keys.
+fn import_saml(d: &mut Draft<'_>, providers: &[ExportedSamlProvider]) -> Result<()> {
+    for provider in providers {
+        let mode = provider.assertion_encryption_mode.as_deref();
+        if mode == Some("Required") && provider.private_keys.is_empty() {
+            return Err(IamError::InvalidInput(format!(
+                "SAML provider {} takes only encrypted assertions, and the export has no \
+                 private key for it: export with secrets.",
+                provider.name
+            )));
+        }
+        let created = d.create_saml_provider(&NewSamlProvider {
+            name: &provider.name,
+            metadata: &provider.metadata,
+            encryption: mode,
+            private_key: provider.private_keys.first().map(String::as_str),
+            tags: &pairs(&provider.tags),
+        })?;
+        for pem in provider.private_keys.iter().skip(1) {
+            d.update_saml_provider(
+                &created.arn,
+                &SamlProviderUpdate {
+                    add_key: Some(pem),
+                    ..SamlProviderUpdate::default()
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn export(state: &State, secrets: bool, key: &DataKey) -> IamExport {
     let mut policies: Vec<ExportedPolicy> = state
         .policies
         .values()
@@ -148,6 +207,7 @@ fn export(state: &State, secrets: bool) -> IamExport {
         users,
         roles,
         oidc_providers,
+        saml_providers: export_saml(state, secrets.then_some(key)),
         ldap_policies: export_ldap(state),
     }
 }
@@ -200,7 +260,8 @@ impl Iam {
     /// The account's IAM; access keys' secrets only if `secrets`.
     #[must_use]
     pub fn export(&self, secrets: bool) -> IamExport {
-        export(&self.inner().state, secrets)
+        let inner = self.inner();
+        export(&inner.state, secrets, &inner.key)
     }
 
     /// Makes `export` in this IAM, which must have no users, groups, roles, policies,
@@ -225,11 +286,12 @@ impl Iam {
                 && s.roles.is_empty()
                 && s.policies.is_empty()
                 && s.oidc_providers.is_empty()
+                && s.saml_providers.is_empty()
                 && s.ldap_policies.is_empty())
             {
                 return Err(IamError::EntityAlreadyExists(
-                    "IAM already has users, groups, roles, policies or OpenID Connect \
-                     providers: import only into an empty IAM."
+                    "IAM already has users, groups, roles, policies or identity providers: \
+                     import only into an empty IAM."
                         .into(),
                 ));
             }
@@ -261,6 +323,7 @@ impl Iam {
                 users: export.users.len(),
                 roles: export.roles.len(),
                 oidc_providers: export.oidc_providers.len(),
+                saml_providers: export.saml_providers.len(),
                 ldap_policies: export.ldap_policies.len(),
                 access_keys: 0,
                 keys_without_secrets: Vec::new(),
@@ -300,6 +363,7 @@ impl Iam {
                     tags: &pairs(&provider.tags),
                 })?;
             }
+            import_saml(d, &export.saml_providers)?;
             import_roles(d, &export.roles, &arn)?;
             import_ldap(d, &export.ldap_policies, &arn)?;
             Ok(report)

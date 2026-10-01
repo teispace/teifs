@@ -78,7 +78,7 @@ pub struct NewRole<'a> {
 
 /// The users and roles of this account that a trust policy names, bound to their
 /// unique ids; one that doesn't exist makes the policy invalid, as on AWS, and so does
-/// an OpenID Connect provider of this account it names as `Federated`.
+/// an OpenID Connect or SAML provider of this account it names as `Federated`.
 fn bind_principals(state: &State, trust: &Document) -> Result<BTreeMap<String, String>> {
     let mut bound = BTreeMap::new();
     for arn in trust.policy.principal_arns() {
@@ -101,16 +101,25 @@ fn bind_principals(state: &State, trust: &Document) -> Result<BTreeMap<String, S
         })?;
         bound.insert(arn.to_owned(), id.to_owned());
     }
-    // This account's OpenID Connect providers must exist, as on AWS; other identity
-    // providers (SAML, another account's) stay as written and match no one.
+    // This account's OpenID Connect and SAML providers must exist, as on AWS; other
+    // identity providers (another account's, `cognito-identity.amazonaws.com`) stay as
+    // written and match no one.
     for provider in trust.policy.federated_providers() {
-        let ours = provider
+        let resource = provider
             .strip_prefix("arn:aws:iam::")
             .and_then(|rest| rest.split_once(':'))
-            .is_some_and(|(account, resource)| {
-                account == &*state.account && resource.starts_with("oidc-provider/")
-            });
-        if ours && state.oidc_provider_by_arn(provider).is_err() {
+            .filter(|(account, _)| *account == &*state.account)
+            .map(|(_, resource)| resource);
+        let missing = match resource {
+            Some(r) if r.starts_with("oidc-provider/") => {
+                state.oidc_provider_by_arn(provider).is_err()
+            }
+            Some(r) if r.starts_with("saml-provider/") => {
+                state.saml_provider_by_arn(provider).is_err()
+            }
+            _ => false,
+        };
+        if missing {
             return Err(IamError::MalformedPolicyDocument(format!(
                 "Invalid principal in policy: \"Federated\":\"{provider}\""
             )));

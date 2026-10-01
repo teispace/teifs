@@ -9,6 +9,7 @@ mod oidc;
 mod policy;
 mod prometheus;
 mod roles;
+mod saml;
 mod trace;
 mod users;
 
@@ -87,6 +88,12 @@ pub enum AdminAction {
     Oidc {
         #[command(subcommand)]
         action: oidc::OidcAction,
+    },
+    /// Add, list, change and delete SAML providers, whose responses get a role's
+    /// credentials.
+    Saml {
+        #[command(subcommand)]
+        action: saml::SamlAction,
     },
     /// Map managed policies to LDAP users and groups, whose sessions (`teifs sts
     /// assume-ldap`) get them.
@@ -195,6 +202,7 @@ pub async fn run(action: AdminAction) -> Result<(), Error> {
         AdminAction::User { action } => users::run(aliases, action).await,
         AdminAction::Role { action } => roles::run(&aliases, action).await,
         AdminAction::Oidc { action } => oidc::run(&aliases, action).await,
+        AdminAction::Saml { action } => saml::run(&aliases, action).await,
         AdminAction::Ldap { action } => ldap::run(&aliases, action).await,
     }
 }
@@ -704,13 +712,14 @@ async fn import(client: &Client, file: &Path, adopt_account: bool) -> Result<(),
     }
     ui::done(
         format!(
-            "Imported {} users, {} groups, {} roles, {} policies, {} OpenID Connect providers \
-             and {} access keys into account {}",
+            "Imported {} users, {} groups, {} roles, {} policies, {} OpenID Connect providers, \
+             {} SAML providers and {} access keys into account {}",
             report.users,
             report.groups,
             report.roles,
             report.policies,
             report.oidc_providers,
+            report.saml_providers,
             report.access_keys,
             report.account
         ),

@@ -76,7 +76,8 @@ apps/cli        teifs          The `teifs` command: parses arguments, calls the 
                                `src/init.rs` is `teifs init`; `src/admin/` is
                                `teifs admin`, on `teifs-client`, and its `users.rs`
                                `teifs admin user`, `roles.rs` `teifs admin role`
-                               and `oidc.rs` `teifs admin oidc`, on the AWS SDK's
+                               `oidc.rs` `teifs admin oidc` and `saml.rs`
+                               `teifs admin saml`, on the AWS SDK's
                                IAM client, with `policy.rs` their policy presets;
                                `src/sts.rs` is `teifs sts`, on its STS client.
                                `Alias::credentials` gives every client the alias's
@@ -124,8 +125,8 @@ narrows" on thousands of random policies.
 
 ### IAM
 
-`teifs-iam` keeps a drive's users, access keys, groups, roles, OpenID Connect providers
-and policies in `system.db` and
+`teifs-iam` keeps a drive's users, access keys, groups, roles, OpenID Connect and SAML
+providers and policies in `system.db` and
 the whole state in memory. A change (`Iam::change`) edits a copy of the state (entities
 are behind `Arc`s, so the copy is cheap), checks AWS's rules against it, writes every
 row it touched in one transaction, and only then swaps the copy in and rebuilds the
@@ -148,6 +149,15 @@ inheriting the trust.
 An OpenID Connect provider (`ops/oidc.rs`) is the issuer URL a web identity token must
 name, the audiences it may be for and the certificate thumbprints it may be pinned to;
 its ARN ends in the URL without the scheme, which is also what makes it unique.
+
+A SAML provider (`ops/saml.rs`) is a metadata document, kept as given and read when it's
+set (`saml/metadata.rs`: the `entityID` that responses must name as their issuer, and
+the IdP's signing keys), plus up to two private keys that decrypt its assertions. The
+metadata is read by `saml/xml.rs`, a small tree over quick-xml that keeps namespaces and
+refuses what a signed document must never have: a DTD (so no entity expansion), unknown
+entities, more than one root, and deep nesting. Private keys (`saml/private_key.rs`,
+PKCS#8 or PKCS#1 PEM) are stored as PKCS#8 sealed under the IAM key, bound to their key
+id, like access keys' secrets.
 
 `AssumeRoleWithWebIdentity` (`oidc/`) checks such a token before the trust policy sees
 it. `oidc/jwt.rs` reads the token strictly (a JSON member named twice is refused) and

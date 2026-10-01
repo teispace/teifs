@@ -4249,6 +4249,7 @@ dependencies = [
  "ldap3",
  "ldap3_proto",
  "percent-encoding",
+ "quick-xml",
  "rcgen",
  "reqwest",
  "rustls",

@@ -267,6 +267,15 @@ behaviour; the on-disk format is always upgraded automatically.
   NAMES | --openid-claim-name CLAIM] [--openid-claim-userinfo]` (or MinIO's
   `MINIO_IDENTITY_OPENID_*` variables, one provider for each suffix) makes the provider
   when the server starts, or brings it in line; `teifs admin config` shows them.
+- IAM SAML providers, as on AWS: `CreateSAMLProvider`, `GetSAMLProvider`,
+  `ListSAMLProviders`, `UpdateSAMLProvider`, `DeleteSAMLProvider` and their tags, with
+  AWS's checks of the metadata document (its issuer and signing certificates), its
+  limits (100 providers, two private keys each) and its messages. Private keys for
+  encrypted assertions (`AddPrivateKey`, `RemovePrivateKey`,
+  `AssertionEncryptionMode`) are stored sealed and never shown; an IAM export carries
+  them only with `--secrets`. A role's trust policy can name a SAML provider of the
+  account as its `Federated` principal once it exists. `teifs admin saml
+  add|ls|update|rm` manages them.
 - The audit log no longer records the LDAP password, web identity token or custom token
   that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to

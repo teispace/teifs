@@ -118,6 +118,32 @@ pub(crate) const OIDC_MIGRATION: &str = "
         PRIMARY KEY (provider_id, key)
     ) WITHOUT ROWID;";
 
+/// SAML providers: migration 9. Their private keys (which decrypt assertions) are
+/// sealed under IAM's key.
+pub(crate) const SAML_MIGRATION: &str = "
+    CREATE TABLE iam_saml_providers (
+        id             TEXT    PRIMARY KEY,
+        name           TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+        uuid           TEXT    NOT NULL,
+        metadata       TEXT    NOT NULL,
+        encryption     TEXT    NOT NULL,
+        created_ms     INTEGER NOT NULL,
+        valid_until_ms INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE iam_saml_provider_keys (
+        provider_id TEXT    NOT NULL REFERENCES iam_saml_providers (id) ON DELETE CASCADE,
+        key_id      TEXT    NOT NULL,
+        sealed      BLOB    NOT NULL,
+        created_ms  INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, key_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE iam_saml_provider_tags (
+        provider_id TEXT NOT NULL REFERENCES iam_saml_providers (id) ON DELETE CASCADE,
+        key         TEXT NOT NULL COLLATE NOCASE,
+        value       TEXT NOT NULL,
+        PRIMARY KEY (provider_id, key)
+    ) WITHOUT ROWID;";
+
 /// LDAP sign-in: migration 8. The managed policies mapped to directory users' and
 /// groups' DNs, and a record of each directory user with live sessions.
 pub(crate) const LDAP_MIGRATION: &str = "
@@ -191,6 +217,48 @@ pub struct OidcProviderRow {
     pub thumbprints: String,
     /// When it was created, in milliseconds since the Unix epoch.
     pub created_ms: i64,
+}
+
+/// A SAML identity provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamlProviderRow {
+    /// Its unique id.
+    pub id: String,
+    /// Its name, the last part of its ARN, unique without case.
+    pub name: String,
+    /// The identifier AWS calls its `SAMLProviderUUID`.
+    pub uuid: String,
+    /// Its metadata document, as given.
+    pub metadata: String,
+    /// Whether assertions must be encrypted (`Required`, `Allowed`, or empty if unsaid).
+    pub encryption: String,
+    /// When it was created, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+    /// Its `ValidUntil`, in milliseconds since the Unix epoch.
+    pub valid_until_ms: i64,
+}
+
+/// A private key of a SAML provider, which decrypts its assertions.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SamlKeyRow {
+    /// The provider's id.
+    pub provider_id: String,
+    /// The key's id.
+    pub key_id: String,
+    /// The key (PEM), sealed.
+    pub sealed: Vec<u8>,
+    /// When it was added, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+}
+
+impl std::fmt::Debug for SamlKeyRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamlKeyRow")
+            .field("provider_id", &self.provider_id)
+            .field("key_id", &self.key_id)
+            .field("created_ms", &self.created_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A managed policy mapped to an LDAP user's or group's DN.
@@ -328,6 +396,12 @@ pub struct IamRows {
     pub oidc_providers: Vec<OidcProviderRow>,
     /// Their tags: (provider id, key, value).
     pub oidc_provider_tags: Vec<(String, String, String)>,
+    /// SAML providers.
+    pub saml_providers: Vec<SamlProviderRow>,
+    /// Their private keys.
+    pub saml_keys: Vec<SamlKeyRow>,
+    /// Their tags: (provider id, key, value).
+    pub saml_provider_tags: Vec<(String, String, String)>,
     /// Managed policies.
     pub policies: Vec<PolicyRow>,
     /// Their tags: (policy id, key, value); keys are case sensitive.
@@ -384,6 +458,18 @@ pub enum IamWrite {
     PutOidcProviderTag(String, String, String),
     /// Removes a provider's tag.
     DeleteOidcProviderTag(String, String),
+    /// Adds or updates a SAML provider.
+    PutSamlProvider(SamlProviderRow),
+    /// Deletes a SAML provider (and its keys and tags).
+    DeleteSamlProvider(String),
+    /// Adds a SAML provider's private key.
+    PutSamlKey(SamlKeyRow),
+    /// Removes a SAML provider's private key: (provider id, key id).
+    DeleteSamlKey(String, String),
+    /// Sets a SAML provider's tag (keys compare without case; the given case is kept).
+    PutSamlProviderTag(String, String, String),
+    /// Removes a SAML provider's tag.
+    DeleteSamlProviderTag(String, String),
     /// Adds or updates a managed policy.
     PutPolicy(PolicyRow),
     /// Deletes a managed policy and its versions.
@@ -465,6 +551,13 @@ impl System {
             oidc_provider_tags: tag_rows(
                 conn,
                 "SELECT provider_id, key, value FROM iam_oidc_provider_tags
+                 ORDER BY provider_id, key",
+            )?,
+            saml_providers: saml_providers(conn)?,
+            saml_keys: saml_keys(conn)?,
+            saml_provider_tags: tag_rows(
+                conn,
+                "SELECT provider_id, key, value FROM iam_saml_provider_tags
                  ORDER BY provider_id, key",
             )?,
             policies: all(
@@ -595,6 +688,43 @@ fn oidc_providers(conn: &rusqlite::Connection) -> Result<Vec<OidcProviderRow>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
+fn saml_providers(conn: &rusqlite::Connection) -> Result<Vec<SamlProviderRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT id, name, uuid, metadata, encryption, created_ms, valid_until_ms
+             FROM iam_saml_providers ORDER BY id",
+        )?
+        .query_map([], |r| {
+            Ok(SamlProviderRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                uuid: r.get(2)?,
+                metadata: r.get(3)?,
+                encryption: r.get(4)?,
+                created_ms: r.get(5)?,
+                valid_until_ms: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+fn saml_keys(conn: &rusqlite::Connection) -> Result<Vec<SamlKeyRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT provider_id, key_id, sealed, created_ms FROM iam_saml_provider_keys
+             ORDER BY provider_id, created_ms, key_id",
+        )?
+        .query_map([], |r| {
+            Ok(SamlKeyRow {
+                provider_id: r.get(0)?,
+                key_id: r.get(1)?,
+                sealed: r.get(2)?,
+                created_ms: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 fn roles(conn: &rusqlite::Connection) -> Result<Vec<RoleRow>> {
     Ok(conn
         .prepare(
@@ -708,6 +838,44 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         ),
         IamWrite::DeleteOidcProviderTag(provider, key) => run(
             "DELETE FROM iam_oidc_provider_tags WHERE provider_id = ?1 AND key = ?2",
+            params![provider, key],
+        ),
+        IamWrite::PutSamlProvider(p) => run(
+            "INSERT INTO iam_saml_providers
+               (id, name, uuid, metadata, encryption, created_ms, valid_until_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (id) DO UPDATE SET metadata = excluded.metadata,
+               encryption = excluded.encryption",
+            params![
+                p.id,
+                p.name,
+                p.uuid,
+                p.metadata,
+                p.encryption,
+                p.created_ms,
+                p.valid_until_ms
+            ],
+        ),
+        IamWrite::DeleteSamlProvider(id) => {
+            run("DELETE FROM iam_saml_providers WHERE id = ?1", params![id])
+        }
+        IamWrite::PutSamlKey(k) => run(
+            "INSERT INTO iam_saml_provider_keys (provider_id, key_id, sealed, created_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![k.provider_id, k.key_id, k.sealed, k.created_ms],
+        ),
+        IamWrite::DeleteSamlKey(provider, key) => run(
+            "DELETE FROM iam_saml_provider_keys WHERE provider_id = ?1 AND key_id = ?2",
+            params![provider, key],
+        ),
+        IamWrite::PutSamlProviderTag(provider, key, value) => run(
+            "INSERT INTO iam_saml_provider_tags (provider_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (provider_id, key) DO UPDATE SET key = excluded.key,
+               value = excluded.value",
+            params![provider, key, value],
+        ),
+        IamWrite::DeleteSamlProviderTag(provider, key) => run(
+            "DELETE FROM iam_saml_provider_tags WHERE provider_id = ?1 AND key = ?2",
             params![provider, key],
         ),
         IamWrite::PutPolicy(p) => run(
@@ -1037,6 +1205,83 @@ mod tests {
             .unwrap();
         let rows = system.iam_rows().unwrap();
         assert!(rows.oidc_providers.is_empty() && rows.oidc_provider_tags.is_empty());
+    }
+
+    #[test]
+    fn saml_providers_keys_and_tags_round_trip() {
+        let (_dir, mut system) = open();
+        let provider = SamlProviderRow {
+            id: "S1".into(),
+            name: "Okta".into(),
+            uuid: "SAMLAAAAAAAAAAAAAAAAAAAA".into(),
+            metadata: "<md/>".into(),
+            encryption: String::new(),
+            created_ms: 1,
+            valid_until_ms: 2,
+        };
+        let key = |id: &str, at: i64| SamlKeyRow {
+            provider_id: "S1".into(),
+            key_id: id.into(),
+            sealed: vec![1, 2, 3],
+            created_ms: at,
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutSamlProvider(provider.clone()),
+                IamWrite::PutSamlKey(key("K2", 5)),
+                IamWrite::PutSamlKey(key("K1", 4)),
+                IamWrite::PutSamlProviderTag("S1".into(), "Team".into(), "a".into()),
+            ])
+            .unwrap();
+        // An update changes the metadata and encryption, never the name or dates.
+        let changed = SamlProviderRow {
+            metadata: "<md2/>".into(),
+            encryption: "Required".into(),
+            ..provider.clone()
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutSamlProvider(SamlProviderRow {
+                    name: "Other".into(),
+                    created_ms: 9,
+                    valid_until_ms: 9,
+                    ..changed.clone()
+                }),
+                IamWrite::PutSamlProviderTag("S1".into(), "team".into(), "b".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert_eq!(rows.saml_providers, [changed]);
+        assert_eq!(rows.saml_keys, [key("K1", 4), key("K2", 5)]);
+        assert!(!format!("{:?}", rows.saml_keys[0]).contains("sealed"));
+        assert_eq!(
+            rows.saml_provider_tags,
+            [("S1".into(), "team".into(), "b".into())]
+        );
+        system
+            .iam_apply(&[IamWrite::DeleteSamlKey("S1".into(), "K1".into())])
+            .unwrap();
+        assert_eq!(system.iam_rows().unwrap().saml_keys, [key("K2", 5)]);
+        system
+            .iam_apply(&[
+                IamWrite::DeleteSamlProviderTag("S1".into(), "TEAM".into()),
+                IamWrite::DeleteSamlProvider("S1".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert!(rows.saml_providers.is_empty() && rows.saml_keys.is_empty());
+        assert!(rows.saml_provider_tags.is_empty());
+        // Deleting a provider takes its keys and tags with it.
+        system
+            .iam_apply(&[
+                IamWrite::PutSamlProvider(provider),
+                IamWrite::PutSamlKey(key("K1", 4)),
+                IamWrite::PutSamlProviderTag("S1".into(), "Team".into(), "a".into()),
+                IamWrite::DeleteSamlProvider("S1".into()),
+            ])
+            .unwrap();
+        let rows = system.iam_rows().unwrap();
+        assert!(rows.saml_keys.is_empty() && rows.saml_provider_tags.is_empty());
     }
 
     #[test]

@@ -37,6 +37,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE buckets ADD COLUMN versioning TEXT;",
     // 8: IAM's LDAP sign-in: policies mapped to DNs, and directory users' records.
     crate::iam::LDAP_MIGRATION,
+    // 9: IAM SAML providers, their private keys and tags.
+    crate::iam::SAML_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

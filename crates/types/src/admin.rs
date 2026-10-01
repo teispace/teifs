@@ -181,6 +181,9 @@ pub struct IamExport {
     /// OpenID Connect providers.
     #[serde(default)]
     pub oidc_providers: Vec<ExportedOidcProvider>,
+    /// SAML providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saml_providers: Vec<ExportedSamlProvider>,
     /// The managed policies mapped to LDAP users' and groups' DNs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ldap_policies: Vec<LdapPolicyMapping>,
@@ -346,6 +349,37 @@ pub struct ExportedOidcProvider {
     pub tags: Vec<Tag>,
 }
 
+/// A SAML identity provider.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedSamlProvider {
+    /// Its name: the last part of its ARN.
+    pub name: String,
+    /// Its metadata document.
+    pub metadata: String,
+    /// `Required` or `Allowed`, if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion_encryption_mode: Option<String>,
+    /// The private keys (PEM) that decrypt its assertions, oldest first: only in an
+    /// export with secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_keys: Vec<String>,
+    /// Its tags.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+}
+
+impl std::fmt::Debug for ExportedSamlProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportedSamlProvider")
+            .field("name", &self.name)
+            .field("assertion_encryption_mode", &self.assertion_encryption_mode)
+            .field("private_keys", &self.private_keys.len())
+            .field("tags", &self.tags)
+            .finish_non_exhaustive()
+    }
+}
+
 /// An access key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -401,6 +435,9 @@ pub struct ImportReport {
     /// OpenID Connect providers created.
     #[serde(default)]
     pub oidc_providers: usize,
+    /// SAML providers created.
+    #[serde(default)]
+    pub saml_providers: usize,
     /// LDAP users and groups given policies.
     #[serde(default)]
     pub ldap_policies: usize,

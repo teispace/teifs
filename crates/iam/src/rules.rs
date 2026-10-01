@@ -22,6 +22,10 @@ pub(crate) const MAX_VERSIONS: usize = 5;
 pub(crate) const MAX_TAGS: usize = 50;
 /// OpenID Connect providers per account.
 pub(crate) const MAX_OIDC_PROVIDERS: usize = 100;
+/// SAML providers per account.
+pub(crate) const MAX_SAML_PROVIDERS: usize = 100;
+/// Private keys of one SAML provider.
+pub(crate) const MAX_SAML_KEYS: usize = 2;
 /// Audiences (client ids) of one OpenID Connect provider.
 pub(crate) const MAX_CLIENT_IDS: usize = 100;
 /// Certificate thumbprints of one OpenID Connect provider.

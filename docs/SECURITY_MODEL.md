@@ -185,7 +185,9 @@ A key that's deactivated or deleted stops working at the next request.
 IAM access keys' secrets are stored sealed (AES-256-GCM, each bound to its access key
 id) under an IAM key the drive's KMS seals, so `system.db` alone (or a snapshot of it in
 `.teifs/backups/`) doesn't reveal them;
-they're never logged, and shown once, when the key is created.
+they're never logged, and shown once, when the key is created. SAML providers' private
+keys are sealed the same way and never shown at all; errors about a key or a metadata
+document name the parameter, never its value.
 Changing IAM is itself an IAM permission: every action of the IAM API is authorized
 before it runs, as on AWS, so a user can manage only what its policies grant, and
 delegated administrators can be held to specific policies and boundaries

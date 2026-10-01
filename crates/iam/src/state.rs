@@ -10,12 +10,12 @@ use std::{
 use teifs_crypto::DataKey;
 use teifs_meta::{
     AccessKeyRow, IamRows, InlineRow, LdapPolicyRow, LdapSessionRow, OidcProviderRow, PolicyRow,
-    PolicyVersionRow, RoleRow,
+    PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow,
 };
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
 
-use crate::{IamError, LdapEntity, Result};
+use crate::{IamError, LdapEntity, Result, saml::metadata::Metadata};
 
 /// A policy document: the text as given (returned as is) and what it says.
 #[derive(Debug, Clone)]
@@ -164,6 +164,96 @@ impl OidcProvider {
     }
 }
 
+/// Whether a SAML provider's assertions must be encrypted (`AssertionEncryptionMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encryption {
+    Required,
+    Allowed,
+}
+
+impl Encryption {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "Required",
+            Self::Allowed => "Allowed",
+        }
+    }
+
+    /// The mode AWS names `text`.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text {
+            "Required" => Some(Self::Required),
+            "Allowed" => Some(Self::Allowed),
+            _ => None,
+        }
+    }
+}
+
+/// A private key that decrypts a SAML provider's assertions, sealed under IAM's key.
+#[derive(Clone)]
+pub(crate) struct SamlKey {
+    pub(crate) id: String,
+    pub(crate) sealed: Vec<u8>,
+    pub(crate) created_ms: i64,
+}
+
+impl std::fmt::Debug for SamlKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamlKey")
+            .field("id", &self.id)
+            .field("created_ms", &self.created_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A SAML identity provider: whose responses `AssumeRoleWithSAML` takes.
+#[derive(Debug, Clone)]
+pub(crate) struct SamlProvider {
+    pub(crate) id: String,
+    /// Its name: the last part of its ARN.
+    pub(crate) name: String,
+    /// Its `SAMLProviderUUID`.
+    pub(crate) uuid: String,
+    /// Its metadata document, as given.
+    pub(crate) metadata: Arc<str>,
+    /// What the metadata says.
+    pub(crate) parsed: Arc<Metadata>,
+    pub(crate) encryption: Option<Encryption>,
+    /// Its private keys, oldest first.
+    pub(crate) keys: Vec<SamlKey>,
+    pub(crate) created_ms: i64,
+    pub(crate) valid_until_ms: i64,
+    /// Keys compare without case, as for users.
+    pub(crate) tags: Vec<(String, String)>,
+}
+
+impl SamlProvider {
+    /// The row that stores it.
+    pub(crate) fn row(&self) -> SamlProviderRow {
+        SamlProviderRow {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            uuid: self.uuid.clone(),
+            metadata: self.metadata.to_string(),
+            encryption: self
+                .encryption
+                .map_or(String::new(), |e| e.as_str().to_owned()),
+            created_ms: self.created_ms,
+            valid_until_ms: self.valid_until_ms,
+        }
+    }
+
+    /// The row that stores its key `key`.
+    pub(crate) fn key_row(&self, key: &SamlKey) -> SamlKeyRow {
+        SamlKeyRow {
+            provider_id: self.id.clone(),
+            key_id: key.id.clone(),
+            sealed: key.sealed.clone(),
+            created_ms: key.created_ms,
+        }
+    }
+}
+
 /// The managed policies mapped to an LDAP user's or group's DN.
 #[derive(Debug, Clone)]
 pub(crate) struct LdapMapping {
@@ -247,6 +337,7 @@ pub(crate) struct State {
     pub(crate) groups: BTreeMap<String, Arc<Group>>,
     pub(crate) roles: BTreeMap<String, Arc<Role>>,
     pub(crate) oidc_providers: BTreeMap<String, Arc<OidcProvider>>,
+    pub(crate) saml_providers: BTreeMap<String, Arc<SamlProvider>>,
     pub(crate) policies: BTreeMap<String, Arc<Managed>>,
     pub(crate) keys: BTreeMap<String, Arc<Key>>,
     /// The policies mapped to LDAP DNs, by DN.
@@ -263,6 +354,11 @@ impl State {
             policies: load_policies(rows.policies, rows.versions, rows.policy_tags)?,
             keys: load_keys(rows.keys, key)?,
             oidc_providers: load_oidc_providers(rows.oidc_providers, rows.oidc_provider_tags)?,
+            saml_providers: load_saml_providers(
+                rows.saml_providers,
+                rows.saml_keys,
+                rows.saml_provider_tags,
+            )?,
             ldap_policies: load_ldap_policies(rows.ldap_policies)?,
             ldap_sessions: load_ldap_sessions(rows.ldap_sessions)?,
             ..Self::default()
@@ -485,6 +581,31 @@ impl State {
         arn(&self.account, "role", &role.path, &role.name)
     }
 
+    /// The SAML provider with this ARN (its name compared without case).
+    pub(crate) fn saml_provider_by_arn(&self, arn: &str) -> Result<&Arc<SamlProvider>> {
+        let name = arn
+            .strip_prefix("arn:aws:iam::")
+            .and_then(|rest| rest.split_once(':'))
+            .and_then(|(account, rest)| Some((account, rest.strip_prefix("saml-provider/")?)))
+            .filter(|(_, name)| !name.is_empty());
+        let Some((account, name)) = name else {
+            return Err(IamError::InvalidInput(format!(
+                "`{arn}` isn't a SAML provider's ARN"
+            )));
+        };
+        self.saml_providers
+            .values()
+            .find(|p| account == &*self.account && p.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| IamError::NoSuchEntity(format!("Manifest not found for arn {arn}")))
+    }
+
+    pub(crate) fn saml_provider_arn(&self, provider: &SamlProvider) -> String {
+        format!(
+            "arn:aws:iam::{}:saml-provider/{}",
+            self.account, provider.name
+        )
+    }
+
     pub(crate) fn oidc_provider_arn(&self, provider: &OidcProvider) -> String {
         format!(
             "arn:aws:iam::{}:oidc-provider/{}",
@@ -669,6 +790,53 @@ fn load_oidc_providers(
             Ok((p.id, provider))
         })
         .collect::<Result<_>>()?;
+    for (provider, key, value) in tags {
+        if let Some(p) = providers.get_mut(&provider) {
+            p.tags.push((key, value));
+        }
+    }
+    Ok(providers
+        .into_iter()
+        .map(|(id, p)| (id, Arc::new(p)))
+        .collect())
+}
+
+fn load_saml_providers(
+    rows: Vec<SamlProviderRow>,
+    keys: Vec<SamlKeyRow>,
+    tags: Vec<(String, String, String)>,
+) -> Result<BTreeMap<String, Arc<SamlProvider>>> {
+    let mut providers: BTreeMap<String, SamlProvider> = rows
+        .into_iter()
+        .map(|p| {
+            let parsed = crate::saml::metadata::parse(&p.metadata).map_err(|e| {
+                IamError::Stored(format!("SAML provider {}'s metadata: {e}", p.name))
+            })?;
+            let provider = SamlProvider {
+                id: p.id.clone(),
+                name: p.name,
+                uuid: p.uuid,
+                metadata: p.metadata.into(),
+                parsed: Arc::new(parsed),
+                encryption: Encryption::parse(&p.encryption),
+                keys: Vec::new(),
+                created_ms: p.created_ms,
+                valid_until_ms: p.valid_until_ms,
+                tags: Vec::new(),
+            };
+            Ok((p.id, provider))
+        })
+        .collect::<Result<_>>()?;
+    // The rows come oldest first.
+    for row in keys {
+        if let Some(p) = providers.get_mut(&row.provider_id) {
+            p.keys.push(SamlKey {
+                id: row.key_id,
+                sealed: row.sealed,
+                created_ms: row.created_ms,
+            });
+        }
+    }
     for (provider, key, value) in tags {
         if let Some(p) = providers.get_mut(&provider) {
             p.tags.push((key, value));

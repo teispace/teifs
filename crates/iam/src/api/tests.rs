@@ -48,6 +48,7 @@ fn check_reference(service: &serde_json::Value, actions: &[Action], minio: &[&st
             On::Role => Some("role"),
             On::Policy => Some("policy"),
             On::OidcProvider => Some("oidc-provider"),
+            On::SamlProvider => Some("saml-provider"),
             On::FederatedUser => Some("federated-user"),
         };
         assert_eq!(
@@ -99,7 +100,7 @@ fn actions_match_aws_service_reference() {
             .map(str::to_owned)
             .into()
     );
-    for kind in ["policy", "oidc-provider"] {
+    for kind in ["policy", "oidc-provider", "saml-provider"] {
         assert_eq!(
             resource_keys(kind),
             ["aws:ResourceTag/${TagKey}".to_owned()].into(),
@@ -466,11 +467,13 @@ fn every_parameter(d: &Drive, key: &str) -> String {
          &TagKeys.member.1=k&NewPath=%2Fmoved%2F&AssumeRolePolicyDocument={}\
          &Description=d&MaxSessionDuration=7200&OpenIDConnectProviderArn={}\
          &Url=https%3A%2F%2Fidp.example.com&ClientID=app&ClientIDList.member.1=app\
-         &ThumbprintList.member.1={}",
+         &ThumbprintList.member.1={}&Name=new&SAMLMetadataDocument={}&SAMLProviderArn={}",
         enc(ALLOW_ALL),
         enc(&d.trust_account()),
         enc(&d.oidc_arn("idp.example.com")),
-        "a".repeat(40)
+        "a".repeat(40),
+        enc(&saml::document("https://idp.example.com/saml")),
+        enc(&format!("arn:aws:iam::{}:saml-provider/saml", d.account)),
     )
 }
 
@@ -482,6 +485,13 @@ async fn every_action_is_authorized() {
     d.iam.create_group("group", None).unwrap();
     d.role("role");
     d.oidc("https://idp.example.com");
+    d.iam
+        .create_saml_provider(&crate::NewSamlProvider {
+            name: "saml",
+            metadata: &saml::document("https://idp.example.com/saml"),
+            ..crate::NewSamlProvider::default()
+        })
+        .unwrap();
     d.iam
         .create_policy("managed", None, None, ALLOW_ALL, &[])
         .unwrap();
@@ -1111,5 +1121,6 @@ async fn role_condition_keys_hold_back_escalation() {
 }
 
 mod oidc;
+mod saml;
 mod sessions;
 mod web_identity;

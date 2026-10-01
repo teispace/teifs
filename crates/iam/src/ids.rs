@@ -15,6 +15,8 @@ pub(crate) enum Kind {
     Role,
     /// An OpenID Connect provider, which AWS gives no id; this one is never shown.
     OidcProvider,
+    /// A SAML provider, whose id is never shown either (its `SAMLProviderUUID` is).
+    SamlProvider,
 }
 
 /// A new unique id: the kind's prefix and 17 random base32 characters (21 in all).
@@ -25,8 +27,15 @@ pub(crate) fn unique(kind: Kind) -> String {
         Kind::Policy => "ANPA",
         Kind::Role => "AROA",
         Kind::OidcProvider => "AOPA",
+        Kind::SamlProvider => "ASPA",
     };
     format!("{prefix}{}", base32(17))
+}
+
+/// A new SAML provider UUID or private key id: `SAML` and 18 base32 characters, 22 in
+/// all, as AWS's (`SAMLPKOQIX75IETFBAK8F6`).
+pub(crate) fn saml() -> String {
+    format!("SAML{}", base32(18))
 }
 
 /// A new access key id: `TKIA` and 16 base32 characters, 20 in all like AWS's `AKIA…`
@@ -78,6 +87,9 @@ mod tests {
         assert!(id.starts_with("AIDA"));
         assert!(id.bytes().all(|b| BASE32.contains(&b)));
         assert!(unique(Kind::Group).starts_with("AGPA"));
+        let saml = saml();
+        assert_eq!(saml.len(), 22);
+        assert!(saml.starts_with("SAML") && saml.bytes().all(|b| BASE32.contains(&b)));
         assert!(unique(Kind::Policy).starts_with("ANPA"));
         assert!(unique(Kind::Role).starts_with("AROA"));
         assert!(unique(Kind::OidcProvider).starts_with("AOPA"));

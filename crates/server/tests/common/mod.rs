@@ -4,6 +4,7 @@
 
 pub mod certs;
 pub mod idp;
+pub mod saml;
 
 use aws_sdk_s3::{
     Client,

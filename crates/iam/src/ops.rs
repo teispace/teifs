@@ -3,6 +3,7 @@
 mod ldap;
 mod oidc;
 mod roles;
+mod saml;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -24,6 +25,7 @@ pub(crate) use ldap::LdapSignIn;
 pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
+pub use saml::{NewSamlProvider, SamlProviderInfo, SamlProviderUpdate};
 
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,12 +233,14 @@ enum TagKeys {
     Policy,
     /// An OpenID Connect provider's: without case, like a user's.
     OidcProvider,
+    /// A SAML provider's: without case too.
+    SamlProvider,
 }
 
 impl TagKeys {
     fn same(self, a: &str, b: &str) -> bool {
         match self {
-            Self::User | Self::OidcProvider => a.eq_ignore_ascii_case(b),
+            Self::User | Self::OidcProvider | Self::SamlProvider => a.eq_ignore_ascii_case(b),
             Self::Policy => a == b,
         }
     }
@@ -246,6 +250,7 @@ impl TagKeys {
             Self::User => "A user",
             Self::Policy => "A policy",
             Self::OidcProvider => "An OpenID Connect provider",
+            Self::SamlProvider => "A SAML provider",
         }
     }
 }
@@ -285,7 +290,7 @@ fn merged(
     }
     // The order the store lists them in, so a reload changes nothing.
     match kind {
-        TagKeys::User | TagKeys::OidcProvider => {
+        TagKeys::User | TagKeys::OidcProvider | TagKeys::SamlProvider => {
             tags.sort_by_cached_key(|(k, _)| k.to_ascii_lowercase());
         }
         TagKeys::Policy => tags.sort(),
@@ -372,6 +377,7 @@ impl Draft<'_> {
                 && !self.state.roles.contains_key(&id)
                 && !self.state.policies.contains_key(&id)
                 && !self.state.oidc_providers.contains_key(&id)
+                && !self.state.saml_providers.contains_key(&id)
             {
                 return id;
             }

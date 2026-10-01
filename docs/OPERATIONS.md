@@ -338,6 +338,25 @@ for another. Their client secrets, scopes and redirect URLs are for MinIO's cons
 aren't needed. Roles with trust policies, as on AWS, need none of this: a role that
 trusts the provider is assumed with `teifs sts assume-web`.
 
+## SAML providers
+
+A SAML identity provider (Okta, Microsoft Entra ID, Keycloak, AD FS) is added to the
+account from the metadata document its administration exports, as on AWS:
+
+```sh
+teifs admin saml add local Okta --metadata okta-metadata.xml
+teifs admin saml ls local
+```
+
+When the provider encrypts its assertions, give it the private key that decrypts them
+(`--private-key key.pem`, a PEM file, unencrypted) and, to refuse plain assertions,
+`--encryption required`. A provider holds two keys at most, so a key is rotated by adding
+the new one (`teifs admin saml update local Okta --add-key new.pem`), switching the
+provider over, then removing the old one (`--remove-key ID`, the id `ls` shows). A new
+metadata document, when the provider's certificates change, is `update … --metadata
+FILE` (`-` reads standard input). Private keys are stored sealed under the drive's IAM
+key, never shown, and carried by `teifs admin iam export` only with `--secrets`.
+
 ## Identity plugin sign-in
 
 An identity plugin is your own web service that decides who an opaque token belongs to:

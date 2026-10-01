@@ -14,7 +14,12 @@ mod harness;
 
 use std::fs;
 
-use common::{Server, idp::Idp, start, start_with, user};
+use common::{
+    Server,
+    idp::Idp,
+    saml::{SamlIdp, private_key_pem},
+    start, start_with, user,
+};
 use harness::{Client, records};
 use teifs_iam::{NewRole, Owner};
 
@@ -731,4 +736,102 @@ async fn the_settings_openid_providers_are_shown() {
     assert_eq!(json[0]["openid"][1]["policyClaim"], "groups");
     let listed = cli.ok(&["admin", "oidc", "ls", "t"]).await;
     assert!(listed.contains("sso.example.com"), "{listed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saml_providers_are_added_changed_and_deleted() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    let idp = SamlIdp::new("https://idp.example.com/saml");
+    let (metadata, key) = (cli.path("idp.xml"), cli.path("key.pem"));
+    fs::write(&metadata, &idp.metadata).unwrap();
+    fs::write(&key, private_key_pem()).unwrap();
+    let (metadata, key) = (metadata.to_str().unwrap(), key.to_str().unwrap());
+    let added = records(
+        &cli.ok(&[
+            "--json",
+            "admin",
+            "saml",
+            "add",
+            "t",
+            "Okta",
+            "--metadata",
+            metadata,
+            "--private-key",
+            key,
+            "--encryption",
+            "required",
+        ])
+        .await,
+    );
+    let arn = format!("arn:aws:iam::{}:saml-provider/Okta", server.iam.account());
+    assert_eq!(added[0]["arn"], arn.as_str());
+    let listed = records(&cli.ok(&["--json", "admin", "saml", "ls", "t"]).await);
+    assert_eq!(listed[0]["name"], "Okta");
+    assert_eq!(listed[0]["issuer"], idp.entity_id.as_str());
+    assert_eq!(listed[0]["encryption"], "Required");
+    let first = listed[0]["privateKeys"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let table = cli.ok(&["admin", "saml", "ls", "t"]).await;
+    assert!(
+        table.contains(&first) && table.contains("Required"),
+        "{table}"
+    );
+
+    // Keys rotate: a second is added, then the first removed; the server's rules hold.
+    cli.ok(&["admin", "saml", "update", "t", "okta", "--add-key", key])
+        .await;
+    let err = cli
+        .fails(
+            &["admin", "saml", "update", "t", "Okta", "--add-key", key],
+            6,
+        )
+        .await;
+    assert!(err.contains("Private key limit of 2"), "{err}");
+    cli.ok(&["admin", "saml", "update", "t", &arn, "--remove-key", &first])
+        .await;
+    let listed = records(&cli.ok(&["--json", "admin", "saml", "ls", "t"]).await);
+    assert_eq!(listed[0]["privateKeys"].as_array().unwrap().len(), 1);
+    // A new metadata document from standard input.
+    let other = SamlIdp::new("https://other.example.com/saml");
+    let run = cli
+        .run_with(
+            &["admin", "saml", "update", "t", "Okta", "--metadata", "-"],
+            &other.metadata,
+        )
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let listed = records(&cli.ok(&["--json", "admin", "saml", "ls", "t"]).await);
+    assert_eq!(listed[0]["issuer"], other.entity_id.as_str());
+    // A file that isn't a key is refused, and its contents aren't repeated.
+    let err = cli
+        .fails(
+            &[
+                "admin",
+                "saml",
+                "update",
+                "t",
+                "Okta",
+                "--add-key",
+                metadata,
+            ],
+            1,
+        )
+        .await;
+    assert!(
+        err.contains("Invalid private key") && !err.contains("X509"),
+        "{err}"
+    );
+
+    let err = cli.fails(&["admin", "saml", "rm", "t", "Okta"], 2).await;
+    assert!(err.contains("--yes"), "{err}");
+    cli.ok(&["-y", "admin", "saml", "rm", "t", "Okta"]).await;
+    let empty = cli.ok(&["admin", "saml", "ls", "t"]).await;
+    assert!(!empty.contains("Okta"), "{empty}");
+    let err = cli
+        .fails(&["-y", "admin", "saml", "rm", "t", "Okta"], 5)
+        .await;
+    assert!(err.contains("teifs admin saml ls"), "{err}");
 }
