@@ -237,6 +237,8 @@ behaviour; the on-disk format is always upgraded automatically.
   group, and `ALL`) to `PREFIX/BUCKET/ID.csv` in its destination, written by
   `s3.amazonaws.com` into a bucket whose policy lets it in. `teifs analytics
   add|ls|info|rm` manages them and lets S3 into the destination.
+- `teifs tiering add|ls|info|rm` for Intelligent-Tiering configurations and
+  `teifs requester-pays enable|disable|info`.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
   reload; it used to stop.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,

@@ -8,6 +8,7 @@ mod commands;
 mod copy;
 mod encrypt;
 mod event;
+mod filters;
 mod ilm;
 mod inventory;
 mod listing;
@@ -17,10 +18,12 @@ mod metrics;
 mod migrate;
 mod pages;
 mod quota;
+mod requester_pays;
 mod service_policy;
 mod sse;
 pub(crate) mod status;
 mod target;
+mod tiering;
 mod transfer;
 pub(crate) mod trust;
 mod versions;
@@ -187,6 +190,19 @@ pub enum Command {
     Analytics {
         #[command(subcommand)]
         action: analytics::AnalyticsAction,
+    },
+    /// Keep S3 Intelligent-Tiering's archive settings for a bucket's objects: add,
+    /// list, show or remove its Intelligent-Tiering configurations (every object stays
+    /// `STANDARD`).
+    Tiering {
+        #[command(subcommand)]
+        action: tiering::TieringAction,
+    },
+    /// Make requesters pay for a bucket (S3's Requester Pays): anonymous requests are
+    /// refused; or show who pays.
+    RequesterPays {
+        #[command(subcommand)]
+        action: requester_pays::RequesterPaysAction,
     },
     /// Serve a bucket as a static website (its index and error documents and
     /// redirects, as S3's website hosting), or show or remove its configuration.

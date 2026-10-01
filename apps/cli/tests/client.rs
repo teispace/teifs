@@ -2120,6 +2120,83 @@ async fn analytics_configurations_are_added_listed_and_removed() {
 }
 
 #[tokio::test]
+async fn tiering_configurations_are_added_listed_and_removed() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/app"]).await;
+    let ls = async || records(&cli.ok(&["--json", "tiering", "ls", "t/app"]).await);
+    assert!(ls().await.is_empty());
+    let add = [
+        "tiering",
+        "add",
+        "t/app",
+        "cold",
+        "--prefix",
+        "logs/",
+        "--archive-days",
+        "90",
+        "--deep-archive-days",
+        "180",
+    ];
+    let text = cli.ok(&add).await;
+    assert!(
+        text.contains(
+            "Tiering cold of t/app: objects logs/*: archive after 90 days, deep archive after 180 days"
+        ),
+        "{text}"
+    );
+    cli.ok(&add).await;
+    let listed = ls().await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (
+            &listed[0]["prefix"],
+            &listed[0]["archiveDays"],
+            &listed[0]["deepArchiveDays"],
+            &listed[0]["enabled"]
+        ),
+        (&"logs/".into(), &90.into(), &180.into(), &true.into())
+    );
+    let info = cli.ok(&["tiering", "info", "t/app", "cold"]).await;
+    assert!(info.contains("archive after 90 days"), "{info}");
+    // S3's checks: the archive tier is 90 to 730 days, and a tier is needed.
+    let err = cli
+        .fails(&["tiering", "add", "t/app", "x", "--archive-days", "30"], 1)
+        .await;
+    assert!(err.contains("can't set the tiering x of t/app"), "{err}");
+    cli.fails(&["tiering", "add", "t/app", "x"], 2).await;
+    let text = cli.ok(&["tiering", "rm", "t/app", "cold"]).await;
+    assert!(text.contains("Tiering cold of t/app: removed"), "{text}");
+    assert!(ls().await.is_empty());
+}
+
+#[tokio::test]
+async fn requester_pays_is_turned_on_shown_and_off() {
+    let server = start().await;
+    let cli = Client::new(&server);
+    cli.ok(&["mb", "t/app"]).await;
+    let info =
+        async || records(&cli.ok(&["--json", "requester-pays", "info", "t/app"]).await).remove(0);
+    assert_eq!(info().await["enabled"], false);
+    let text = cli.ok(&["requester-pays", "enable", "t/app"]).await;
+    assert!(
+        text.contains("t/app: requesters pay: anonymous requests are refused"),
+        "{text}"
+    );
+    assert_eq!(info().await["enabled"], true);
+    let shown = cli.ok(&["requester-pays", "info", "t/app"]).await;
+    assert!(
+        shown.contains("Requester pays") && shown.contains("on"),
+        "{shown}"
+    );
+    let text = cli.ok(&["requester-pays", "disable", "t/app"]).await;
+    assert!(text.contains("t/app: the owner pays"), "{text}");
+    assert_eq!(info().await["enabled"], false);
+    let err = cli.fails(&["requester-pays", "info", "t/app/key"], 2).await;
+    assert!(err.contains("who pays is a bucket's"), "{err}");
+}
+
+#[tokio::test]
 async fn websites_are_set_shown_and_removed() {
     let server = start().await;
     let cli = Client::new(&server);

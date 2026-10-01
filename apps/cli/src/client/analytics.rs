@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use aws_sdk_s3::types::{
     AnalyticsAndOperator, AnalyticsConfiguration, AnalyticsExportDestination, AnalyticsFilter,
     AnalyticsS3BucketDestination, AnalyticsS3ExportFileFormat, StorageClassAnalysis,
-    StorageClassAnalysisDataExport, StorageClassAnalysisSchemaVersion, Tag,
+    StorageClassAnalysisDataExport, StorageClassAnalysisSchemaVersion,
 };
 use clap::Subcommand;
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::{
     Error,
     alias::Aliases,
-    metrics::tag,
+    filters::{self, Shape},
     pages,
     service_policy::{self, Grant},
     target::{Remote, Target},
@@ -42,7 +42,7 @@ pub enum AnalyticsAction {
         #[arg(long)]
         prefix: Option<String>,
         /// Only objects with this tag, as `KEY=VALUE`; repeat for several.
-        #[arg(long = "tag", value_parser = tag)]
+        #[arg(long = "tag", value_parser = filters::tag)]
         tags: Vec<(String, String)>,
         /// `ALIAS/DESTINATION[/PREFIX]`: where the daily CSV goes, as
         /// `PREFIX/BUCKET/ID.csv`.
@@ -153,22 +153,16 @@ fn configuration(
     destination: Option<(&str, &str)>,
 ) -> Result<AnalyticsConfiguration, Error> {
     let usage = |e: aws_sdk_s3::error::BuildError| Error::usage(e.to_string());
-    let mut tags = tags
-        .into_iter()
-        .map(|(key, value)| Tag::builder().key(key).value(value).build())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(usage)?;
-    let filter = match (prefix, tags.len()) {
-        (None, 0) => None,
-        (Some(prefix), 0) => Some(AnalyticsFilter::Prefix(prefix)),
-        (None, 1) => tags.pop().map(AnalyticsFilter::Tag),
-        (prefix, _) => Some(AnalyticsFilter::And(
+    let filter = filters::shape(prefix, tags)?.map(|shape| match shape {
+        Shape::Prefix(prefix) => AnalyticsFilter::Prefix(prefix),
+        Shape::Tag(tag) => AnalyticsFilter::Tag(tag),
+        Shape::And(prefix, tags) => AnalyticsFilter::And(
             AnalyticsAndOperator::builder()
                 .set_prefix(prefix)
                 .set_tags(Some(tags))
                 .build(),
-        )),
-    };
+        ),
+    });
     let export = destination
         .map(|(target, prefix)| {
             let mut s3 = AnalyticsS3BucketDestination::builder()
@@ -202,13 +196,10 @@ fn configuration(
 
 /// The filter's prefix and tags.
 fn filter(config: &AnalyticsConfiguration) -> (Option<&str>, BTreeMap<&str, &str>) {
-    fn pairs(tags: &[Tag]) -> BTreeMap<&str, &str> {
-        tags.iter().map(|t| (t.key(), t.value())).collect()
-    }
     match config.filter() {
         Some(AnalyticsFilter::Prefix(prefix)) => (Some(prefix.as_str()), BTreeMap::new()),
-        Some(AnalyticsFilter::Tag(tag)) => (None, pairs(std::slice::from_ref(tag))),
-        Some(AnalyticsFilter::And(and)) => (and.prefix(), pairs(and.tags())),
+        Some(AnalyticsFilter::Tag(tag)) => (None, filters::pairs(std::slice::from_ref(tag))),
+        Some(AnalyticsFilter::And(and)) => (and.prefix(), filters::pairs(and.tags())),
         _ => (None, BTreeMap::new()),
     }
 }
@@ -216,13 +207,10 @@ fn filter(config: &AnalyticsConfiguration) -> (Option<&str>, BTreeMap<&str, &str
 /// The objects analysed, in words: `every object`, or their prefix and tags.
 fn objects(config: &AnalyticsConfiguration) -> String {
     let (prefix, tags) = filter(config);
-    let mut parts: Vec<String> = prefix.map(|p| format!("{p}*")).into_iter().collect();
-    parts.extend(tags.iter().map(|(key, value)| format!("{key}={value}")));
-    if parts.is_empty() {
-        "every object".to_owned()
-    } else {
-        format!("objects {}", parts.join(" and "))
-    }
+    filters::words(prefix, &tags).map_or_else(
+        || "every object".to_owned(),
+        |words| format!("objects {words}"),
+    )
 }
 
 /// Where the daily figures go: `BUCKET[/PREFIX]`, or nothing.

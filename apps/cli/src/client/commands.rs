@@ -63,10 +63,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
             versions,
             bypass,
         } => {
-            let targets = targets
-                .iter()
-                .map(|target| remote(target, "rm"))
-                .collect::<Result<Vec<_>, _>>()?;
+            let targets = remotes(&targets, "rm", &aliases)?;
             rm_all(
                 targets,
                 (recursive, force),
@@ -106,6 +103,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Inventory { action } => super::inventory::inventory(action, &aliases).await,
         Command::Metrics { action } => super::metrics::metrics(action, &aliases).await,
         Command::Analytics { action } => super::analytics::analytics(action, &aliases).await,
+        Command::Tiering { action } => super::tiering::tiering(action, &aliases).await,
+        Command::RequesterPays { action } => super::requester_pays::run(action, &aliases).await,
         Command::Website { action } => super::website::website(action, &aliases).await,
         Command::Quota { action } => super::quota::quota(action, &aliases).await,
         Command::Presign {
@@ -129,6 +128,14 @@ pub async fn run(command: Command) -> Result<(), Error> {
             super::copy::mirror(source, destination, remove, dry_run, transfer).await
         }
     }
+}
+
+/// The remote targets `what` was given.
+fn remotes(texts: &[String], what: &str, aliases: &Aliases) -> Result<Vec<Remote>, Error> {
+    texts
+        .iter()
+        .map(|text| Target::parse(text, aliases)?.remote(what))
+        .collect()
 }
 
 /// `teifs rm`: objects, one version of each, or every version.

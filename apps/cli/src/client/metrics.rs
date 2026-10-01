@@ -5,13 +5,14 @@
 
 use std::collections::BTreeMap;
 
-use aws_sdk_s3::types::{MetricsAndOperator, MetricsConfiguration, MetricsFilter, Tag};
+use aws_sdk_s3::types::{MetricsAndOperator, MetricsConfiguration, MetricsFilter};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
 use super::{
     Error,
     alias::Aliases,
+    filters::{self, Shape},
     pages,
     target::{Remote, Target},
 };
@@ -31,7 +32,7 @@ pub enum MetricsAction {
         #[arg(long)]
         prefix: Option<String>,
         /// Only requests on objects with this tag, as `KEY=VALUE`; repeat for several.
-        #[arg(long = "tag", value_parser = tag)]
+        #[arg(long = "tag", value_parser = filters::tag)]
         tags: Vec<(String, String)>,
     },
     /// List a bucket's metrics configurations.
@@ -53,14 +54,6 @@ pub enum MetricsAction {
         /// The configuration's id.
         id: String,
     },
-}
-
-/// A `KEY=VALUE` tag.
-pub(super) fn tag(given: &str) -> Result<(String, String), String> {
-    match given.split_once('=') {
-        Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
-        _ => Err(format!("{given} isn't a tag: give KEY=VALUE")),
-    }
 }
 
 /// `teifs metrics …`.
@@ -112,39 +105,29 @@ fn configuration(
     prefix: Option<String>,
     tags: Vec<(String, String)>,
 ) -> Result<MetricsConfiguration, Error> {
-    let usage = |e: aws_sdk_s3::error::BuildError| Error::usage(e.to_string());
-    let mut tags = tags
-        .into_iter()
-        .map(|(key, value)| Tag::builder().key(key).value(value).build())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(usage)?;
-    let filter = match (prefix, tags.len()) {
-        (None, 0) => None,
-        (Some(prefix), 0) => Some(MetricsFilter::Prefix(prefix)),
-        (None, 1) => tags.pop().map(MetricsFilter::Tag),
-        (prefix, _) => Some(MetricsFilter::And(
+    let filter = filters::shape(prefix, tags)?.map(|shape| match shape {
+        Shape::Prefix(prefix) => MetricsFilter::Prefix(prefix),
+        Shape::Tag(tag) => MetricsFilter::Tag(tag),
+        Shape::And(prefix, tags) => MetricsFilter::And(
             MetricsAndOperator::builder()
                 .set_prefix(prefix)
                 .set_tags(Some(tags))
                 .build(),
-        )),
-    };
+        ),
+    });
     MetricsConfiguration::builder()
         .id(id)
         .set_filter(filter)
         .build()
-        .map_err(usage)
+        .map_err(|e| Error::usage(e.to_string()))
 }
 
 /// The filter's prefix and tags.
 fn filter(config: &MetricsConfiguration) -> (Option<&str>, BTreeMap<&str, &str>) {
-    fn pairs(tags: &[Tag]) -> BTreeMap<&str, &str> {
-        tags.iter().map(|t| (t.key(), t.value())).collect()
-    }
     match config.filter() {
         Some(MetricsFilter::Prefix(prefix)) => (Some(prefix.as_str()), BTreeMap::new()),
-        Some(MetricsFilter::Tag(tag)) => (None, pairs(std::slice::from_ref(tag))),
-        Some(MetricsFilter::And(and)) => (and.prefix(), pairs(and.tags())),
+        Some(MetricsFilter::Tag(tag)) => (None, filters::pairs(std::slice::from_ref(tag))),
+        Some(MetricsFilter::And(and)) => (and.prefix(), filters::pairs(and.tags())),
         _ => (None, BTreeMap::new()),
     }
 }
@@ -152,13 +135,10 @@ fn filter(config: &MetricsConfiguration) -> (Option<&str>, BTreeMap<&str, &str>)
 /// The requests counted, in words: `every request`, or the objects' prefix and tags.
 fn requests(config: &MetricsConfiguration) -> String {
     let (prefix, tags) = filter(config);
-    let mut parts: Vec<String> = prefix.map(|p| format!("{p}*")).into_iter().collect();
-    parts.extend(tags.iter().map(|(key, value)| format!("{key}={value}")));
-    if parts.is_empty() {
-        "every request".to_owned()
-    } else {
-        format!("requests on {}", parts.join(" and "))
-    }
+    filters::words(prefix, &tags).map_or_else(
+        || "every request".to_owned(),
+        |words| format!("requests on {words}"),
+    )
 }
 
 /// Every configuration of a bucket.
@@ -275,25 +255,6 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
-    }
-
-    #[test]
-    fn tags_are_key_equals_value() {
-        assert_eq!(
-            tag("team=red").unwrap(),
-            ("team".to_owned(), "red".to_owned())
-        );
-        assert_eq!(
-            tag("note=a=b").unwrap(),
-            ("note".to_owned(), "a=b".to_owned())
-        );
-        assert_eq!(tag("empty=").unwrap(), ("empty".to_owned(), String::new()));
-        for wrong in ["team", "=red"] {
-            assert!(
-                tag(wrong).unwrap_err().contains("give KEY=VALUE"),
-                "{wrong}"
-            );
-        }
     }
 
     #[test]

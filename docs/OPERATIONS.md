@@ -555,6 +555,28 @@ would move objects to `STANDARD_IA`. A destination that doesn't let the
 service in, or doesn't exist, gets nothing that day (with a warning in the server's log);
 a failure of the drive is tried again within 15 minutes.
 
+## Intelligent-Tiering and Requester Pays
+
+A bucket's Intelligent-Tiering configurations are kept and answered as S3 answers them,
+with its checks (the Archive Access tier after 90 to 730 days without access, Deep
+Archive Access after 180 to 730 and later than Archive Access), so tools that set them
+work. Every object is `STANDARD`, so none is moved to an archive tier.
+
+```sh
+teifs tiering add local/app cold --prefix logs/ --archive-days 90 --deep-archive-days 180
+teifs tiering ls local/app
+teifs tiering rm local/app cold
+```
+
+A Requester Pays bucket refuses anonymous requests, whatever its policy allows, and
+can't be an access log's target; TeiFS bills no one, so that's all it changes.
+
+```sh
+teifs requester-pays enable local/app
+teifs requester-pays info local/app
+teifs requester-pays disable local/app
+```
+
 ## Static websites
 
 A bucket with a website configuration is a static website, as on S3's website endpoint,
