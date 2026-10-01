@@ -7,6 +7,7 @@
 //! own permissions, narrowed by a session policy, for up to a year.
 
 mod certificate;
+mod custom;
 mod ldap;
 
 use std::ops::RangeInclusive;
@@ -40,6 +41,7 @@ const ASSUME_ROLE: &[&str] = &[
 pub(super) const WEB_IDENTITY: &str = "AssumeRoleWithWebIdentity";
 
 pub(super) use certificate::CERTIFICATE;
+pub(super) use custom::{CUSTOM_TOKEN, request as custom_request};
 pub(super) use ldap::{LDAP_IDENTITY, request as ldap_request};
 
 /// The condition keys `AssumeRoleWithWebIdentity` sets besides the provider's own
@@ -71,6 +73,12 @@ pub(super) const ACTIONS: &[Action] = &[
         on: On::Any,
         keys: &[],
         run: ldap::assume_role_with_ldap_identity,
+    },
+    Action {
+        name: CUSTOM_TOKEN,
+        on: On::Any,
+        keys: &[],
+        run: custom::assume_role_with_custom_token,
     },
     Action {
         name: CERTIFICATE,
@@ -110,7 +118,10 @@ pub(super) const ACTIONS: &[Action] = &[
 /// call `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity` and
 /// `AssumeRoleWithCertificate`, which prove who is asking themselves.
 pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
-    if matches!(action, WEB_IDENTITY | LDAP_IDENTITY | CERTIFICATE) {
+    if matches!(
+        action,
+        WEB_IDENTITY | LDAP_IDENTITY | CERTIFICATE | CUSTOM_TOKEN
+    ) {
         return true;
     }
     match kind {
@@ -118,7 +129,8 @@ pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
         | SessionKind::User
         | SessionKind::Web
         | SessionKind::Ldap
-        | SessionKind::Certificate => !matches!(action, "GetSessionToken" | "GetFederationToken"),
+        | SessionKind::Certificate
+        | SessionKind::Custom => !matches!(action, "GetSessionToken" | "GetFederationToken"),
         SessionKind::SessionToken => matches!(action, "AssumeRole" | "GetCallerIdentity"),
         SessionKind::Federated => action == "GetCallerIdentity",
     }
@@ -191,6 +203,7 @@ fn assume_role(r: &Run<'_>) -> Out {
                 | SessionKind::Web
                 | SessionKind::Ldap
                 | SessionKind::Certificate
+                | SessionKind::Custom
         )
     );
     let Inherited {

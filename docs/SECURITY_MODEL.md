@@ -51,7 +51,7 @@ field the form sends. Its fields are read before any decision, at most 64 KiB of
 and the upload is authorized on the key the form names, as a PutObject would be; a form
 that couldn't be read is refused, never decided as if it had no fields. Error messages
 that quote a request are XML-escaped.
-The one unsigned request besides `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity` and `AssumeRoleWithCertificate` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
+The one unsigned request besides `AssumeRoleWithWebIdentity`, `AssumeRoleWithLDAPIdentity`, `AssumeRoleWithCertificate` and `AssumeRoleWithCustomToken` (section 4) is the health check, `GET`/`HEAD /.teifs/health`: it answers
 `200 OK` and nothing else (no version, no drive details), can't shadow a bucket (bucket
 names never start with a dot), and on a virtual-hosted bucket's host the path is an
 ordinary key that needs a signature. `MinIO`'s health checks (`/minio/health/live`,
@@ -255,6 +255,18 @@ marked for client authentication, with at most ten intermediate CAs. A session l
 longer than the certificate, and has only the managed policy its common name names; a
 policy that doesn't exist means no session. Verification can be turned off for tests
 only, which `teifs doctor` flags.
+
+MinIO's `AssumeRoleWithCustomToken` is answered unsigned too: the identity plugin, a
+service the operator runs, decides whom the token belongs to. The request is checked
+before the plugin is asked (a token, the plugin role's ARN, a duration, a role policy
+that exists), so nobody can make the server call the plugin with a malformed request.
+The token goes to the plugin's configured URL only, in its query as MinIO sends it,
+with the operator's `Authorization` header (from the environment only); the call has a
+five-second limit, follows no redirect and reads at most 64 KiB. The token is
+redacted from the audit log (with `LDAPPassword` and `WebIdentityToken`, which MinIO's
+clients also send in the query), never logged, and dropped from errors; the URL's query
+is never shown. A session has only the role's policies that existed when it began, lasts
+no longer than the plugin allows, and loses a policy that's deleted.
 
 MinIO's `AssumeRoleWithLDAPIdentity` is answered unsigned too, and only the directory
 decides who is asking. Both the name and the password are needed: an empty password is

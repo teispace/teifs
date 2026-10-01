@@ -271,6 +271,7 @@ requests live. See
 | `teifs sts assume-web SERVER [--role ARN] [--token-file F] … --save-alias NEW\|-o FILE` | A CI job's OpenID Connect token for temporary credentials (reads `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`) |
 | `teifs sts assume-ldap SERVER -u NAME [--password-stdin] … --save-alias NEW\|-o FILE` | An LDAP user's name and password for temporary credentials (MinIO's `AssumeRoleWithLDAPIdentity`; the password from standard input, `TEIFS_LDAP_PASSWORD` or a prompt) |
 | `teifs sts assume-cert SERVER --cert FILE --key FILE … --save-alias NEW\|-o FILE` | A client certificate for temporary credentials with the policy its common name names (MinIO's `AssumeRoleWithCertificate`) |
+| `teifs sts assume-custom SERVER --role-arn ARN [--token-stdin] … --save-alias NEW\|-o FILE` | A token the server's identity plugin vouches for, for temporary credentials with the plugin role's policies (MinIO's `AssumeRoleWithCustomToken`) |
 | `teifs health [ADDRESS\|URL] [--timeout 5s]` | Check that a server answers its health check, over HTTP or HTTPS |
 | `teifs status [ALIAS]` | Check how a server is doing: answers and how fast, drive serving and taking writes, clocks, certificate expiry, version, disks, jobs, scrubs; exit code 1 when a check fails |
 | `teifs doctor [DIR]` | Check a drive on this machine, with the settings `teifs serve` would use: its format, databases, file system (network or FUSE ones warn), room, keys, keyring, certificates and listen address, each problem with what to do; exit code 1 when a check fails |
@@ -291,7 +292,7 @@ requests live. See
 | Integrity | Content-MD5 and every S3 checksum algorithm (also as trailers), CRC64NVME by default, full-object and composite checksums for multipart uploads, returned with checksum mode; stored bytes read back and checked against them every 30 days (`--scrub-every`), or on demand with `teifs verify` |
 | Auth | Signature V4 (headers, presigned URLs and POST forms); Signature V2 with `serve --allow-sigv2`; path-style and virtual-hosted-style |
 | IAM | users, access keys, groups, roles, OpenID Connect providers, managed and inline policies, versions, permissions boundaries, tags, with AWS's rules and error codes; every S3 request and IAM action decided by the signer's policies; the IAM API and STS on the S3 endpoint (`aws iam --endpoint-url …`) |
-| Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `AssumeRoleWithWebIdentity` for OpenID Connect ID tokens (GitHub Actions, GitLab, Kubernetes, Keycloak…); `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRoleWithLDAPIdentity` for users of an LDAP directory (Active Directory, OpenLDAP) with the policies mapped to them and their groups; MinIO's `AssumeRoleWithCertificate` for clients with a certificate your CA issued; MinIO's `AssumeRole` for a user's own permissions and `AssumeRoleWithWebIdentity` with the policies a token's claim names; signed S3 requests, presigned links and browser uploads with the session token |
+| Temporary credentials | STS `AssumeRole` with trust policies, session policies, session tags and source identity; `AssumeRoleWithWebIdentity` for OpenID Connect ID tokens (GitHub Actions, GitLab, Kubernetes, Keycloak…); `GetSessionToken`; `GetFederationToken`; MinIO's `AssumeRoleWithLDAPIdentity` for users of an LDAP directory (Active Directory, OpenLDAP) with the policies mapped to them and their groups; MinIO's `AssumeRoleWithCertificate` for clients with a certificate your CA issued; MinIO's `AssumeRoleWithCustomToken` for tokens your own identity plugin vouches for; MinIO's `AssumeRole` for a user's own permissions and `AssumeRoleWithWebIdentity` with the policies a token's claim names; signed S3 requests, presigned links and browser uploads with the session token |
 | Bucket policies | Put/Get/DeleteBucketPolicy and GetBucketPolicyStatus, AWS's policy language; anonymous requests get only what a policy grants everyone; Block Public Access per bucket, on for every new bucket, `RestrictPublicBuckets` on every read and list; account-wide Block Public Access (`aws s3control put-public-access-block`) |
 | Ownership and ACLs | Object Ownership (ACLs disabled on new buckets, as on AWS), bucket and object ACLs where it enables them, canned and granted, under Block Public Access; `serve --legacy-bucket-defaults` for applications that expect S3's pre-2023 buckets |
 
@@ -328,6 +329,12 @@ them and their groups (`teifs admin ldap policy attach`). See
 `MINIO_IDENTITY_TLS_*` variables work too) lets clients with a certificate your CA issued
 get temporary credentials with the policy its common name names (`teifs sts
 assume-cert`). See [Operations](docs/OPERATIONS.md#client-certificate-sign-in).
+
+**Identity plugin sign-in**, as MinIO's: `teifs serve --identity-plugin-url …
+--identity-plugin-role-policy readonly` (MinIO's `MINIO_IDENTITY_PLUGIN_*` variables work
+too) lets your own service decide whom a token belongs to, and clients exchange it for
+temporary credentials with the role's policies (`teifs sts assume-custom`). See
+[Operations](docs/OPERATIONS.md#identity-plugin-sign-in).
 
 **Bucket notifications**, as S3's and MinIO's: `teifs serve --notify-webhook
 orders=https://hooks.example/s3` (or `--notify-elasticsearch`, `--notify-redis`, `--notify-nsq`, `--notify-nats`, `--notify-mqtt`, `--notify-kafka`, `--notify-amqp`, `--notify-postgresql`, `--notify-mysql`, `--notify-sqs`, `--notify-sns`, `--notify-lambda`, `--notify-eventbridge`) gives the server a target, and a bucket's rules

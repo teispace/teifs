@@ -42,8 +42,9 @@ use teifs_types::admin::{
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
     ExportedBucket, ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion,
-    IamExport, ImportReport, JobInfo, KmsConfig, LdapConfig, LdapPolicyChanged, LdapPolicyMapping,
-    LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, Snapshot, Tag,
+    IamExport, IdentityPluginConfig, ImportReport, JobInfo, KmsConfig, LdapConfig,
+    LdapPolicyChanged, LdapPolicyMapping, LdapPolicyRequest, RootKeyRotated, ServerConfig,
+    ServerInfo, Snapshot, Tag,
 };
 pub use teifs_types::audit::{AuditEntry, TraceFilter};
 pub use teifs_types::notify::{EventRecord, ListenFilter, event_key_decoded};
@@ -356,6 +357,38 @@ impl Client {
         ];
         form.extend(policy.map(|p| ("Policy", p)));
         form.extend(seconds.as_deref().map(|s| ("DurationSeconds", s)));
+        self.unsigned_sts(form).await
+    }
+
+    /// Exchanges a token an identity plugin vouches for (MinIO's
+    /// `AssumeRoleWithCustomToken`), unsigned: the credentials of a session with the
+    /// plugin role `role_arn`'s policies, narrowed by `policy`, for as long as the plugin
+    /// allows or `seconds` if that's less.
+    pub async fn assume_role_with_custom_token(
+        &self,
+        role_arn: &str,
+        token: &str,
+        policy: Option<&str>,
+        seconds: Option<i32>,
+    ) -> Result<TemporaryCredentials, ClientError> {
+        let seconds = seconds.map(|s| s.to_string());
+        let mut form = vec![
+            ("Action", "AssumeRoleWithCustomToken"),
+            ("Version", "2011-06-15"),
+            ("RoleArn", role_arn),
+            ("Token", token),
+        ];
+        form.extend(policy.map(|p| ("Policy", p)));
+        form.extend(seconds.as_deref().map(|s| ("DurationSeconds", s)));
+        self.unsigned_sts(form).await
+    }
+
+    /// Sends an STS action that proves itself, unsigned, as a form in the body (not the
+    /// query, which proxies may log).
+    async fn unsigned_sts(
+        &self,
+        form: Vec<(&str, &str)>,
+    ) -> Result<TemporaryCredentials, ClientError> {
         let body = Zeroizing::new(
             form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(form)

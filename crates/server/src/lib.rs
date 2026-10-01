@@ -19,7 +19,9 @@ use std::{
 use std::sync::Arc;
 use teifs_iam::{CertificateDer, Iam, RootKey, certificate::CertificateSignIn};
 use teifs_s3::Options;
-use teifs_types::admin::{CertificateConfig, KmsConfig, LdapConfig, NotifyTarget, ServerConfig};
+use teifs_types::admin::{
+    CertificateConfig, IdentityPluginConfig, KmsConfig, LdapConfig, NotifyTarget, ServerConfig,
+};
 
 use teifs_store::{BucketEncryption, Layout, Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
@@ -32,7 +34,10 @@ pub use kms::{
     with_default_key,
 };
 pub use serve::{DRAIN, Limits, serve};
-pub use teifs_iam::{Directory, LdapSettings, SrvRecord, Transport};
+pub use teifs_iam::{
+    Directory, LdapSettings, SrvRecord, Transport,
+    plugin::{IdentityPlugin, PluginSettings},
+};
 use teifs_notify::Notifier;
 pub use teifs_notify::{
     Acks, Amqp, AwsCredentials, Compression, Elasticsearch, EventBridge, Exchange, Format, Kafka,
@@ -114,6 +119,9 @@ pub struct Config {
     /// Sign in clients with certificates (`AssumeRoleWithCertificate`); needs `tls`.
     /// None by default.
     pub client_certificates: Option<ClientCertificates>,
+    /// The identity plugin custom tokens are checked with (`AssumeRoleWithCustomToken`);
+    /// none by default.
+    pub identity_plugin: Option<PluginSettings>,
 }
 
 /// How clients sign in with certificates.
@@ -175,6 +183,9 @@ pub enum ServerError {
     /// Client certificates can't sign in as asked.
     #[error("client certificates can't sign in: {0}")]
     ClientCertificates(String),
+    /// The identity plugin's settings are wrong.
+    #[error("the identity plugin's settings are wrong: {0}")]
+    IdentityPlugin(String),
     /// The audit log couldn't be opened.
     #[error("can't open the audit log {target}: {source}")]
     Audit {
@@ -390,23 +401,81 @@ fn admin_config(config: &Config, kms: &KmsLocation, listen: SocketAddr) -> Serve
             group_filter: ldap.group_filter.clone(),
         }),
         certificates: None,
+        identity_plugin: None,
     }
 }
 
-/// Opens the drive's IAM, signing users in with `directory` and client certificates as
-/// `certificates` says, if they do.
+/// How users sign in besides with keys: an LDAP directory, client certificates, an
+/// identity plugin.
+struct SignIns {
+    directory: Option<Directory>,
+    certificates: Option<CertificateSignIn>,
+    /// How the admin API shows the certificates' sign-in.
+    shown_certificates: Option<CertificateConfig>,
+    plugin: Option<IdentityPlugin>,
+}
+
+impl SignIns {
+    /// The sign-ins `config` asks for, checked before the drive is opened.
+    fn new(config: &Config) -> Result<Self, ServerError> {
+        let (certificates, shown_certificates) = client_certificates(config)?.unzip();
+        let directory = config
+            .ldap
+            .clone()
+            .map(Directory::new)
+            .transpose()
+            .map_err(ServerError::Ldap)?;
+        // MinIO's role ARNs name the server's region, which is none by default.
+        let plugin = config
+            .identity_plugin
+            .clone()
+            .map(|settings| IdentityPlugin::new(settings, ""))
+            .transpose()
+            .map_err(ServerError::IdentityPlugin)?;
+        Ok(Self {
+            directory,
+            certificates,
+            shown_certificates,
+            plugin,
+        })
+    }
+
+    /// Shows them in the admin API's configuration (never a secret).
+    fn show(&self, admin: &mut ServerConfig) {
+        admin.certificates.clone_from(&self.shown_certificates);
+        admin.identity_plugin = self.plugin.as_ref().map(|plugin| IdentityPluginConfig {
+            url: plugin.shown_url(),
+            role_arn: plugin.role_arn().to_owned(),
+            role_policies: plugin.role_policies().to_vec(),
+        });
+    }
+}
+
+/// Opens the drive's IAM, signing users in as `sign_ins` says.
 async fn open_iam(
     store: &Store,
     kms: &dyn teifs_store::Kms,
     root: RootKey,
-    directory: Option<Directory>,
-    certificates: Option<CertificateSignIn>,
+    sign_ins: SignIns,
 ) -> Result<Iam, ServerError> {
     let mut iam = Iam::open(&store.system_db(), &store.format().drive, kms, Some(root))
         .await
         .map_err(ServerError::Iam)?;
+    let SignIns {
+        directory,
+        certificates,
+        plugin,
+        ..
+    } = sign_ins;
     if let Some(certificates) = certificates {
         iam = iam.with_certificates(certificates);
+    }
+    if let Some(plugin) = plugin {
+        // A plugin that's down now may be up when someone signs in.
+        if let Err(err) = plugin.check().await {
+            tracing::warn!(error = %err, "the identity plugin can't be asked yet");
+        }
+        iam = iam.with_plugin(plugin);
     }
     let Some(directory) = directory else {
         return Ok(iam);
@@ -501,17 +570,11 @@ impl Server {
             .transpose()
             .map_err(ServerError::Tls)?
             .map(Arc::new);
-        let (certificates, shown_certificates) = client_certificates(&config)?.unzip();
-        let directory = config
-            .ldap
-            .clone()
-            .map(Directory::new)
-            .transpose()
-            .map_err(ServerError::Ldap)?;
+        let sign_ins = SignIns::new(&config)?;
         let (store, kms, location) = open_drive(&config).await?;
         let (listener, listen) = listen(config.listen).await?;
         let mut admin_config = admin_config(&config, &location, listen);
-        admin_config.certificates = shown_certificates;
+        sign_ins.show(&mut admin_config);
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
             config.credentials.is_none().then(|| {
                 Arc::new(credentials::DriveKeys {
@@ -527,7 +590,7 @@ impl Server {
             access_key: credentials.access_key,
             secret: Zeroizing::new(credentials.secret_key),
         };
-        let iam = Arc::new(open_iam(&store, kms.as_ref(), root, directory, certificates).await?);
+        let iam = Arc::new(open_iam(&store, kms.as_ref(), root, sign_ins).await?);
         let (audit, audit_writers) = start_audit(&config.audit)?;
         let notifier = Arc::new(
             Notifier::start(&store.events_db(), config.notify).map_err(ServerError::Notify)?,

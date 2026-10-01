@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use teifs_server::{Directory, ExternalKms, Tls, credentials, default_keyring};
+use teifs_server::{Directory, ExternalKms, IdentityPlugin, Tls, credentials, default_keyring};
 use teifs_store::DEFAULT_KEY;
 use teifs_store::{Database, Diagnosis, Disk, FORMAT, SYSTEM_DIR};
 
@@ -23,7 +23,8 @@ use crate::{
     config, error, tls_source,
 };
 
-/// How long an external KMS or the LDAP directory may take to answer.
+/// How long an external KMS, the LDAP directory or the identity plugin may take to
+/// answer.
 const ASK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `teifs doctor`.
@@ -35,6 +36,7 @@ pub(crate) async fn doctor(args: &ServeArgs) -> Result<(), error::Error> {
     };
     let mut checks = checks(args, kms, |name| std::env::var(name).ok());
     checks.extend(ldap(args).await);
+    checks.extend(identity_plugin(args).await);
     checks::finish(&checks, ("drive", &args.dir.display().to_string()))
 }
 
@@ -286,6 +288,27 @@ async fn ldap(args: &ServeArgs) -> Option<Check> {
             State::Ok,
             format!("{words}: the lookup account signs in and the base DNs exist"),
         )),
+        Ok(Err(err)) => failed(format!("{words}: {err}")),
+        Err(_) => failed(format!("{words}: it didn't answer in time")),
+    }
+}
+
+/// The identity plugin custom tokens are checked with, if there's one: its settings
+/// are right, and it answers.
+async fn identity_plugin(args: &ServeArgs) -> Option<Check> {
+    const NAME: &str = "Identity plugin";
+    let failed = |detail: String| Some(Check::new(NAME, State::Failed, detail));
+    let settings = match args.identity_plugin.settings() {
+        Ok(settings) => settings?,
+        Err(err) => return failed(err.to_string()),
+    };
+    let plugin = match IdentityPlugin::new(settings, "") {
+        Ok(plugin) => plugin,
+        Err(err) => return failed(err),
+    };
+    let words = format!("{} for {}", plugin.shown_url(), plugin.role_arn());
+    match tokio::time::timeout(ASK_TIMEOUT, plugin.check()).await {
+        Ok(Ok(())) => Some(Check::new(NAME, State::Ok, format!("{words}: it answers"))),
         Ok(Err(err)) => failed(format!("{words}: {err}")),
         Err(_) => failed(format!("{words}: it didn't answer in time")),
     }

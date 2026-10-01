@@ -63,6 +63,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         limits: teifs_server::Limits::default(),
         ldap: None,
         client_certificates: None,
+        identity_plugin: None,
     }
 }
 
@@ -72,7 +73,8 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     let keys = tempfile::tempdir().unwrap();
     let mut config = config(dir.path(), keys.path());
     adjust(&mut config);
-    let server = TeiFS::bind(config).await.unwrap();
+    // Boxed: a server's start is a large future, and so would every test's be.
+    let server = Box::pin(TeiFS::bind(config)).await.unwrap();
     let endpoint = format!("{}://{}", server.scheme(), server.local_addr().unwrap());
     let iam = server.iam().clone();
     let tls = server.tls().cloned();

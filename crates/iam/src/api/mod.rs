@@ -23,8 +23,17 @@ use zeroize::Zeroizing;
 use crate::{
     Iam, IamError, Identity,
     ldap::{LdapError, SignedIn},
+    plugin::{PluginError, PluginUser},
     rules, state,
 };
+
+/// What a self-proving request's proof said, asked before its action runs: the
+/// directory's answer to an LDAP sign-in, or the identity plugin's to a custom token.
+#[derive(Debug)]
+pub(crate) enum Proved {
+    Ldap(Result<SignedIn, LdapError>),
+    Plugin(Result<PluginUser, PluginError>),
+}
 
 use self::{
     params::{Page, Params, paged},
@@ -83,7 +92,7 @@ impl Iam {
     }
 
     /// [`Self::serve_sts`], with what the directory said of an LDAP sign-in.
-    fn serve_sts_with(&self, call: &Call<'_>, ldap: Option<&Result<SignedIn, LdapError>>) -> Reply {
+    fn serve_sts_with(&self, call: &Call<'_>, proved: Option<&Proved>) -> Reply {
         serve(call, STS_VERSION, STS_NAMESPACE, |name, params| {
             let action = find(sts::ACTIONS, name, STS_VERSION)?;
             if let Some(session) = call.identity.session()
@@ -94,20 +103,20 @@ impl Iam {
                     action.name
                 )));
             }
-            self.run(call, action, params, ldap)
+            self.run(call, action, params, proved)
         })
     }
 
     /// Whether a form is an STS request that carries its own proof of who is asking (a
-    /// web identity token, MinIO's LDAP user name and password, or the connection's
-    /// client certificate): it's answered
+    /// web identity token, MinIO's LDAP user name and password or custom token, or the
+    /// connection's client certificate): it's answered
     /// whether it's signed or not, as on AWS, and whoever signed it has no part in it.
     #[must_use]
     pub fn proves_itself(body: &[u8]) -> bool {
         Params::parse(body).is_ok_and(|p| {
             matches!(
                 p.optional("Action"),
-                Some(sts::WEB_IDENTITY | sts::LDAP_IDENTITY | sts::CERTIFICATE)
+                Some(sts::WEB_IDENTITY | sts::LDAP_IDENTITY | sts::CERTIFICATE | sts::CUSTOM_TOKEN)
             )
         })
     }
@@ -115,14 +124,11 @@ impl Iam {
     /// Answers a [`Self::proves_itself`] request, which `call` gives with the anonymous
     /// identity. For a web identity, first fetches the signing keys of the provider its
     /// token names, if they aren't known or the token is signed with a key that isn't;
-    /// for an LDAP user, first asks the directory, unless the request is refused before.
+    /// for an LDAP user, first asks the directory, and for a custom token the identity
+    /// plugin, unless the request is refused before.
     pub async fn serve_self_proving(&self, call: &Call<'_>) -> Reply {
-        if let Some((username, password)) = self.ldap_sign_in(call) {
-            let signed_in = match &self.ldap {
-                Some(directory) => directory.sign_in(&username, &password).await,
-                None => Err(LdapError::NotSetUp),
-            };
-            return self.serve_sts_with(call, Some(&signed_in));
+        if let Some(proved) = self.prove(call).await {
+            return self.serve_sts_with(call, Some(&proved));
         }
         if let Ok(params) = Params::parse(call.body)
             && let Some((iss, kid)) = params
@@ -140,29 +146,46 @@ impl Iam {
         self.serve_sts(call)
     }
 
-    /// The name and password of an LDAP sign-in to ask the directory about: none when
-    /// the request isn't one, or the action refuses it before the directory is asked.
-    fn ldap_sign_in(&self, call: &Call<'_>) -> Option<(String, Zeroizing<String>)> {
+    /// Asks the directory about an LDAP sign-in, or the identity plugin about a custom
+    /// token: none when the request is neither, or its action refuses it before.
+    async fn prove(&self, call: &Call<'_>) -> Option<Proved> {
         let params = Params::parse(call.body).ok()?;
-        if params.optional("Action") != Some(sts::LDAP_IDENTITY)
-            || params.optional("Version").is_some_and(|v| v != STS_VERSION)
-        {
+        if params.optional("Version").is_some_and(|v| v != STS_VERSION) {
             return None;
         }
+        let action = params.optional("Action")?.to_owned();
         let run = Run {
             iam: self,
             identity: call.identity,
             base: call.context,
             p: params,
             account: self.account(),
-            ldap: None,
+            proved: None,
             certificates: call.certificates,
         };
-        let request = sts::ldap_request(&run).ok()?;
-        Some((
-            request.username.to_owned(),
-            Zeroizing::new(request.password.to_owned()),
-        ))
+        match action.as_str() {
+            sts::LDAP_IDENTITY => {
+                let (username, password) = {
+                    let request = sts::ldap_request(&run).ok()?;
+                    (
+                        request.username.to_owned(),
+                        Zeroizing::new(request.password.to_owned()),
+                    )
+                };
+                Some(Proved::Ldap(match &self.ldap {
+                    Some(directory) => directory.sign_in(&username, &password).await,
+                    None => Err(LdapError::NotSetUp),
+                }))
+            }
+            sts::CUSTOM_TOKEN => {
+                let token = Zeroizing::new(sts::custom_request(&run).ok()?.token.to_owned());
+                Some(Proved::Plugin(match &self.plugin {
+                    Some(plugin) => plugin.authenticate(&token).await,
+                    None => Err(PluginError::NotSetUp),
+                }))
+            }
+            _ => None,
+        }
     }
 
     fn run(
@@ -170,7 +193,7 @@ impl Iam {
         call: &Call<'_>,
         action: &Action,
         params: Params,
-        ldap: Option<&Result<SignedIn, LdapError>>,
+        proved: Option<&Proved>,
     ) -> Result<(&'static str, Option<Xml>), ApiError> {
         let run = Run {
             iam: self,
@@ -178,7 +201,7 @@ impl Iam {
             base: call.context,
             p: params,
             account: self.account(),
-            ldap,
+            proved,
             certificates: call.certificates,
         };
         (action.run)(&run).map(|result| (action.name, result))
@@ -580,9 +603,9 @@ struct Run<'a> {
     base: &'a Context,
     p: Params,
     account: String,
-    /// What the directory said of an LDAP sign-in, which only
+    /// What a self-proving request's proof said, which only
     /// [`Iam::serve_self_proving`] asks.
-    ldap: Option<&'a Result<SignedIn, LdapError>>,
+    proved: Option<&'a Proved>,
     /// The client's certificates, from [`Call::certificates`].
     certificates: &'a [CertificateDer<'static>],
 }

@@ -72,7 +72,11 @@ fn actions_match_aws_service_reference() {
     check_reference(
         &reference["sts"],
         super::sts::ACTIONS,
-        &[super::sts::LDAP_IDENTITY, super::sts::CERTIFICATE],
+        &[
+            super::sts::LDAP_IDENTITY,
+            super::sts::CERTIFICATE,
+            super::sts::CUSTOM_TOKEN,
+        ],
     );
     let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
     for action in ACTIONS {

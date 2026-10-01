@@ -302,6 +302,48 @@ Any client of MinIO's API works: the call is a `POST /` over the TLS connection 
 `Policy`) in the query or a form body, unsigned. `teifs doctor` reads the authorities
 and says when each expires; `teifs admin config` shows how many there are.
 
+## Identity plugin sign-in
+
+An identity plugin is your own web service that decides who an opaque token belongs to:
+an internal SSO session, an API key of another system, anything. As with MinIO's
+`AssumeRoleWithCustomToken`, clients exchange such a token for temporary credentials with
+the policies of the plugin's role.
+
+```sh
+export TEIFS_IDENTITY_PLUGIN_AUTH_TOKEN="Bearer $(cat /etc/teifs/plugin.token)"
+teifs serve /srv/drive --identity-plugin-url https://auth.internal/teifs \
+  --identity-plugin-role-policy readonly
+teifs admin config local          # shows the role ARN clients name
+printf %s "$TOKEN" | teifs sts assume-custom https://s3.example.com \
+  --role-arn arn:minio:iam:::role/idmp-… --token-stdin --save-alias me
+```
+
+| Setting | What it is |
+|---|---|
+| `--identity-plugin-url URL` | Where the plugin is asked (`http` or `https`). MinIO's `MINIO_IDENTITY_PLUGIN_URL` works too |
+| `--identity-plugin-role-policy NAMES` | The managed policies its users' sessions get (comma-separated or repeated); at least one must exist when someone signs in |
+| `--identity-plugin-role-id ID` | The id in the role ARN, `arn:minio:iam:::role/idmp-<ID>`; by default derived from the URL as MinIO derives it, so a MinIO deployment's ARN stays the same |
+| `--identity-plugin-ca PATH` | Certificate authorities (PEM: a file, or a folder of files) the plugin's certificate may be issued by, besides the system's |
+| `TEIFS_IDENTITY_PLUGIN_AUTH_TOKEN` | The `Authorization` header sent to the plugin, as it is (`Bearer …`). Only from the environment; MinIO's `MINIO_IDENTITY_PLUGIN_AUTH_TOKEN` works too |
+
+For each sign-in TeiFS sends `POST <URL>?token=<token>` with that header, waits at most
+five seconds and follows no redirect. The plugin answers:
+
+- `200` with `{"user": "alice", "maxValiditySeconds": 3600, "claims": {…}}`: the
+  session is `alice`'s, and lasts `maxValiditySeconds` (15 minutes to 365 days), or
+  `DurationSeconds` if the client asks for less;
+- `403` with `{"reason": "…"}`: the client gets `AccessDenied` with that reason;
+- anything else: the client gets `InvalidParameterValue`.
+
+The request is checked before the plugin is asked (a token, the role ARN, a duration
+TeiFS allows, a role policy that exists), so a malformed request never reaches it. The
+token never appears in TeiFS's logs, errors, or audit log, and the URL's query is
+hidden in `teifs admin config`. `teifs doctor` checks the settings and that the plugin
+answers (`HEAD`). Clients send `POST /` with
+`Action=AssumeRoleWithCustomToken&Version=2011-06-15&RoleArn=…&Token=…` (and optionally
+`DurationSeconds`, `Policy`) in a form body or, as MinIO's clients do, in the query,
+unsigned.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

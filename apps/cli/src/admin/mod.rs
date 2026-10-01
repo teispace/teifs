@@ -447,25 +447,17 @@ async fn config(client: &Client) -> Result<(), Error> {
                 "Client certificates",
                 certificate_words(config.certificates.as_ref()),
             ),
+            (
+                "Identity plugin",
+                plugin_words(config.identity_plugin.as_ref()),
+            ),
             ("SSE-C allowed", yes_no(config.allow_sse_c)),
             ("Plain HTTP secure", yes_no(config.plain_http_is_secure)),
             ("Signature V2", yes_no(config.allow_sig_v2)),
             ("Legacy buckets", yes_no(config.legacy_bucket_defaults)),
             ("Public metrics", yes_no(config.public_metrics)),
-            (
-                "Audit log",
-                config
-                    .audit_log
-                    .clone()
-                    .unwrap_or_else(|| "none".to_owned()),
-            ),
-            (
-                "Audit webhook",
-                config
-                    .audit_webhook
-                    .clone()
-                    .unwrap_or_else(|| "none".to_owned()),
-            ),
+            ("Audit log", or_none(config.audit_log.as_deref())),
+            ("Audit webhook", or_none(config.audit_webhook.as_deref())),
             (
                 "Notify targets",
                 if config.notify_targets.is_empty() {
@@ -503,6 +495,26 @@ async fn config(client: &Client) -> Result<(), Error> {
         || record("serverConfig", &config),
     );
     Ok(())
+}
+
+/// `value`, or "none".
+fn or_none(value: Option<&str>) -> String {
+    value.unwrap_or("none").to_owned()
+}
+
+/// The identity plugin custom tokens are checked with, in words.
+fn plugin_words(plugin: Option<&teifs_client::IdentityPluginConfig>) -> String {
+    plugin.map_or_else(
+        || "none".to_owned(),
+        |p| {
+            format!(
+                "{} for {} ({})",
+                p.url,
+                p.role_arn,
+                p.role_policies.join(", ")
+            )
+        },
+    )
 }
 
 /// The LDAP directory users sign in with, in words.

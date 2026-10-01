@@ -6,6 +6,7 @@
 
 use super::{ApiError, Out, Run, answer, credentials, duration, min_token_size, session_policies};
 use crate::{
+    api::Proved,
     ldap::LdapError,
     ops::LdapSignIn,
     sessions::{Claims, Who, now_seconds},
@@ -56,11 +57,11 @@ pub(in crate::api) fn request<'p>(r: &'p Run<'_>) -> Result<LdapRequest<'p>, Api
 /// none is mapped.
 pub(in crate::api) fn assume_role_with_ldap_identity(r: &Run<'_>) -> Out {
     let request = request(r)?;
-    let signed_in = match r.ldap {
-        Some(Ok(signed_in)) => signed_in,
-        Some(Err(err)) => return Err(refused(err)),
+    let signed_in = match r.proved {
+        Some(Proved::Ldap(Ok(signed_in))) => signed_in,
+        Some(Proved::Ldap(Err(err))) => return Err(refused(err)),
         // Only [`crate::Iam::serve_self_proving`] asks the directory.
-        None => {
+        _ => {
             return Err(refused(&LdapError::Failed(
                 "the directory wasn't asked".into(),
             )));

@@ -239,6 +239,24 @@ behaviour; the on-disk format is always upgraded automatically.
   add|ls|info|rm` manages them and lets S3 into the destination.
 - `teifs tiering add|ls|info|rm` for Intelligent-Tiering configurations and
   `teifs requester-pays enable|disable|info`.
+- External KMS: a Vault or OpenBao transit engine, KES (MinIO's `MINIO_KMS_KES_*`
+  variables work) or AWS KMS hold the keys instead of the local keyring;
+  `--kms-default-key` uses an existing key for SSE-S3, and `teifs doctor` asks the KMS.
+- LDAP sign-in, as MinIO's `AssumeRoleWithLDAPIdentity`: `teifs serve --ldap-server …`
+  (or MinIO's `MINIO_IDENTITY_LDAP_*` variables) lets a directory's users get temporary
+  credentials with their name and password (`teifs sts assume-ldap`), with the policies
+  mapped to them and their groups (`teifs admin ldap policy attach|detach|ls`). Users
+  the directory no longer has lose their sessions within ten minutes.
+- Client certificate sign-in, as MinIO's `AssumeRoleWithCertificate`: `teifs serve
+  --identity-tls` lets clients with a certificate your CA issued get temporary
+  credentials with the policy its common name names (`teifs sts assume-cert`).
+- Identity plugin sign-in, as MinIO's `AssumeRoleWithCustomToken`: `teifs serve
+  --identity-plugin-url URL --identity-plugin-role-policy NAMES` (or MinIO's
+  `MINIO_IDENTITY_PLUGIN_*` variables) lets your own service decide whom a token belongs
+  to; clients exchange it for temporary credentials with the role's policies (`teifs sts
+  assume-custom`). `teifs doctor` checks that the plugin answers.
+- The audit log no longer records the LDAP password, web identity token or custom token
+  that MinIO's clients send in an STS request's query.
 - `teifs serve` keeps serving on `SIGHUP` (`systemctl reload`) when it has nothing to
   reload; it used to stop.
 - Linux packages: a `.deb` and an `.rpm` for x86_64 and arm64 with every release,

@@ -55,16 +55,21 @@ a table, authorizes it and answers in AWS's XML.
    Every action that issues credentials takes `min_token_size(r)?` and issues with
    `Iam::issue_at_least`, so `MinimumSessionTokenSize` works everywhere.
    An action whose request proves who is asking by itself (`AssumeRoleWithWebIdentity`,
-   MinIO's `AssumeRoleWithLDAPIdentity` and `AssumeRoleWithCertificate`) is answered
+   MinIO's `AssumeRoleWithLDAPIdentity`, `AssumeRoleWithCertificate` and
+   `AssumeRoleWithCustomToken`) is answered
    unsigned: `Iam::proves_itself`
    picks it out in `crates/s3/src/iam_api.rs`, and `Iam::serve_self_proving` does the
-   async part (fetching the provider's keys, signing in with the directory) before the
-   sync handler runs as the anonymous identity; the directory's answer reaches the
-   handler as `Run.ldap`, and the connection's client certificates as `Run.certificates`
+   async part (fetching the provider's keys, asking the directory or the identity
+   plugin, in `Iam::prove` after the action's own request check) before the sync handler
+   runs as the anonymous identity; their answer reaches the handler as `Run.proved`
+   (`Proved::Ldap`, `Proved::Plugin`), and the connection's client certificates as
+   `Run.certificates`
    (from `Call::certificates`). Tests get a local identity provider from
    `oidc::keys::tests::publishing` (plain HTTP) or `publishing_with` and
    `oidc::tls::tests::Authority` (TLS, own CA), and a directory from
-   `ldap::fake::FakeLdap` (feature `fake-ldap` outside the crate).
+   `ldap::fake::FakeLdap` (feature `fake-ldap` outside the crate), and a plugin from
+   `plugin::fake::FakePlugin` (feature `fake-plugin`). A query parameter that carries a
+   proof goes in `SECRET_QUERY` in `crates/s3/src/audit.rs`.
    A MinIO action AWS doesn't have goes in `check_reference`'s `minio` list in
    `crates/iam/src/api/tests.rs`, which checks the others against AWS's reference.
 6. **Tests**:

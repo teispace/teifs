@@ -39,6 +39,8 @@ zeroize.workspace = true
 [features]
 # The fake LDAP directory (`ldap::fake`), for other crates' tests.
 fake-ldap = ["dep:ldap3_proto", "dep:tokio-util", "dep:futures"]
+# The fake identity plugin (`plugin::fake`), for other crates' tests.
+fake-plugin = []
 
 [dev-dependencies]
 ldap3_proto.workspace = true

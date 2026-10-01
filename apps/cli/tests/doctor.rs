@@ -451,3 +451,56 @@ fn client_certificate_authorities_are_checked() {
     let (_, checks) = run(&[], &[]);
     assert!(checks.iter().all(|c| c["name"] != NAME));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_identity_plugin_is_asked() {
+    const NAME: &str = "Identity plugin";
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let f = folder.to_str().unwrap().to_owned();
+    let plugin = teifs_iam::plugin::fake::FakePlugin::start().await;
+    let url = plugin.url().to_owned();
+    let home_dir = home.path().to_owned();
+    let run = move |url: String, policy: &'static str| {
+        let home = home_dir.clone();
+        let f = f.clone();
+        tokio::task::spawn_blocking(move || {
+            doctor(
+                &home,
+                &[
+                    &f,
+                    "--listen",
+                    FREE,
+                    "--identity-plugin-url",
+                    &url,
+                    "--identity-plugin-role-policy",
+                    policy,
+                ],
+                &[("TEIFS_IDENTITY_PLUGIN_AUTH_TOKEN", "Bearer plugin-secret")],
+            )
+        })
+    };
+    let (_, checks) = run(url.clone(), "readonly").await.unwrap();
+    let (state, detail) = check(&checks, NAME);
+    assert_eq!(state, "ok", "{detail}");
+    assert!(detail.ends_with(": it answers"), "{detail}");
+    assert!(!detail.contains("tenant"), "the query is shown: {detail}");
+    let seen = plugin.seen();
+    assert_eq!(seen.last().unwrap().method, "HEAD");
+    assert_eq!(
+        seen.last().unwrap().authorization.as_deref(),
+        Some("Bearer plugin-secret")
+    );
+
+    let gone = std::net::TcpListener::bind(FREE).unwrap();
+    let closed = format!("http://{}/auth", gone.local_addr().unwrap());
+    drop(gone);
+    let (code, checks) = run(closed, "readonly").await.unwrap();
+    assert_eq!(code, 1);
+    assert_eq!(check(&checks, NAME).0, "failed");
+    let (_, checks) = run(url, " ").await.unwrap();
+    let (state, detail) = check(&checks, NAME);
+    assert_eq!(state, "failed");
+    assert!(detail.contains("name the policies"), "{detail}");
+}

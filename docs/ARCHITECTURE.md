@@ -196,6 +196,13 @@ authorities read at start, and the action issues `Who::Certificate { cn, policy 
 policy by unique id. MinIO's clients send the parameters in the query with no body,
 which `iam_api.rs` takes as the form.
 
+MinIO's `AssumeRoleWithCustomToken` (`plugin.rs`, `api/sts/custom.rs`) is the fourth.
+`IdentityPlugin` holds the plugin's URL, role and HTTP client; `Iam::serve_self_proving`
+checks the request (`custom::request`), asks the plugin, and hands its answer to the
+action as `Proved::Plugin` (an LDAP sign-in's is `Proved::Ldap`). The action issues
+`Who::Custom { user, policies }`, the role's policies by unique id. `plugin/fake.rs`
+(behind the `fake-plugin` feature) is a plugin for tests.
+
 Temporary credentials (`sessions.rs`) are stateless: nothing about a session is
 stored. Its access key id is `TSIA` and 16 random base32 characters; its secret is
 derived from the id under the IAM key (HKDF, then HMAC), so a signature can be checked

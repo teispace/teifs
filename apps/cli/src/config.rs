@@ -24,7 +24,7 @@ use clap::{
 use crate::{Cli, ServeArgs};
 
 /// Settings that are paths: relative ones in the settings file are relative to its folder.
-const PATHS: [&str; 11] = [
+const PATHS: [&str; 12] = [
     "dir",
     "kms_keyring",
     "kms_kes_cert",
@@ -32,6 +32,7 @@ const PATHS: [&str; 11] = [
     "kms_kes_ca",
     "ldap_ca",
     "identity_tls_ca",
+    "identity_plugin_ca",
     "secret_key_file",
     "certs_dir",
     "tls_cert",

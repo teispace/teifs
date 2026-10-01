@@ -576,6 +576,23 @@ pub struct ServerConfig {
     /// don't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificates: Option<CertificateConfig>,
+    /// The identity plugin custom tokens are checked with
+    /// (`AssumeRoleWithCustomToken`); none when there's none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_plugin: Option<IdentityPluginConfig>,
+}
+
+/// The identity plugin a server checks custom tokens with (never its auth token, nor
+/// its URL's query).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityPluginConfig {
+    /// Where it's asked, without the query.
+    pub url: String,
+    /// The role ARN clients name.
+    pub role_arn: String,
+    /// The managed policies its users' sessions get.
+    pub role_policies: Vec<String>,
 }
 
 /// How a server signs in clients with certificates.

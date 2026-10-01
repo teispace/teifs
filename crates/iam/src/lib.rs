@@ -15,6 +15,7 @@ mod ids;
 pub mod ldap;
 mod oidc;
 mod ops;
+pub mod plugin;
 mod rules;
 mod sessions;
 mod snapshot;
@@ -138,6 +139,8 @@ pub struct Iam {
     ldap: Option<Arc<ldap::Directory>>,
     /// Whom client certificates are trusted from, if they sign in at all.
     certificates: Option<Arc<certificate::CertificateSignIn>>,
+    /// The identity plugin custom tokens are checked with, if there's one.
+    plugin: Option<Arc<plugin::IdentityPlugin>>,
 }
 
 struct Inner {
@@ -206,6 +209,7 @@ impl Iam {
             web_keys: oidc::KeyCache::default(),
             ldap: None,
             certificates: None,
+            plugin: None,
         })
     }
 
@@ -214,6 +218,19 @@ impl Iam {
     pub fn with_ldap(mut self, directory: ldap::Directory) -> Self {
         self.ldap = Some(Arc::new(directory));
         self
+    }
+
+    /// Checks custom tokens with `plugin` (`AssumeRoleWithCustomToken`).
+    #[must_use]
+    pub fn with_plugin(mut self, plugin: plugin::IdentityPlugin) -> Self {
+        self.plugin = Some(Arc::new(plugin));
+        self
+    }
+
+    /// The identity plugin custom tokens are checked with, if there's one.
+    #[must_use]
+    pub fn identity_plugin(&self) -> Option<&Arc<plugin::IdentityPlugin>> {
+        self.plugin.as_ref()
     }
 
     /// Signs in whoever connects with a client certificate `sign_in` trusts

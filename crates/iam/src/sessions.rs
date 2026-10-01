@@ -125,6 +125,9 @@ pub(crate) enum Who {
     /// MinIO's `AssumeRoleWithCertificate`: a client certificate's subject common name,
     /// and the managed policy (by unique id) it names.
     Certificate { cn: String, policy: String },
+    /// MinIO's `AssumeRoleWithCustomToken`: the user an identity plugin vouched for, and
+    /// its role's managed policies (by unique id).
+    Custom { user: String, policies: Vec<String> },
 }
 
 impl Claims {

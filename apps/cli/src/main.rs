@@ -22,6 +22,7 @@ mod init;
 mod kms;
 mod ldap;
 mod notify;
+mod plugin;
 mod repair;
 mod sts;
 mod ui;
@@ -220,6 +221,8 @@ pub(crate) struct ServeArgs {
     kms: kms::KmsArgs,
     #[command(flatten)]
     ldap: ldap::LdapArgs,
+    #[command(flatten)]
+    identity_plugin: plugin::PluginArgs,
     /// Sign in clients that connect with a certificate (MinIO's
     /// `AssumeRoleWithCertificate`): the session has the policy the certificate's subject
     /// common name names. Needs HTTPS. MinIO's `MINIO_IDENTITY_TLS_ENABLE=on` works too.
@@ -1605,6 +1608,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
     let ldap = args.ldap.settings().map_err(|e| e.to_string())?;
+    let identity_plugin = args.identity_plugin.settings().map_err(|e| e.to_string())?;
     let client_certificates = client_certificates(
         (
             args.identity_tls,
@@ -1674,6 +1678,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
             max_connections: args.max_connections,
         },
         ldap,
+        identity_plugin,
         client_certificates,
     })
     .await

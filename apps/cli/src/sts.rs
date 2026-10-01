@@ -1,7 +1,9 @@
 //! `teifs sts`: temporary credentials, over AWS's STS API as `aws sts` speaks it — who an
 //! alias signs as, a role's session (or, without a role, MinIO's session for the user's
 //! own permissions), a role's session for an OpenID Connect ID token (a CI job's), and
-//! a session for an LDAP user's name and password (MinIO's `AssumeRoleWithLDAPIdentity`).
+//! a session for an LDAP user's name and password (MinIO's `AssumeRoleWithLDAPIdentity`),
+//! a client certificate (`AssumeRoleWithCertificate`) or a token an identity plugin
+//! vouches for (`AssumeRoleWithCustomToken`).
 //!
 //! The credentials go into an alias (with their session token and when they expire), or
 //! to an owner-only file or standard output in the AWS CLI's `credential_process` format,
@@ -44,6 +46,28 @@ pub enum StsAction {
     /// Sign in with a client certificate for temporary credentials with the policy its
     /// subject common name names, where the server takes certificates. Needs no keys.
     AssumeCert(CertArgs),
+    /// Exchange a token the server's identity plugin vouches for for temporary
+    /// credentials with the plugin role's policies. Needs no keys.
+    AssumeCustom(CustomArgs),
+}
+
+/// `sts assume-custom`'s arguments.
+#[derive(Args)]
+pub struct CustomArgs {
+    /// The server, like `https://s3.example.com`, or an alias for it.
+    server: String,
+    /// The plugin role's ARN, `arn:minio:iam:…:role/idmp-…`, as the server shows it.
+    #[arg(long, value_name = "ARN")]
+    role_arn: String,
+    /// Read the token from standard input (else `TEIFS_STS_CUSTOM_TOKEN`, else it's
+    /// asked for).
+    #[arg(long)]
+    token_stdin: bool,
+    /// The region to sign for.
+    #[arg(long, default_value = alias::DEFAULT_REGION)]
+    region: String,
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 /// `sts assume-cert`'s arguments.
@@ -173,6 +197,7 @@ pub async fn run(action: StsAction) -> Result<(), Error> {
         StsAction::AssumeWeb(args) => assume_web(args, &mut aliases).await,
         StsAction::AssumeLdap(args) => assume_ldap(args, &mut aliases).await,
         StsAction::AssumeCert(args) => assume_cert(args, &mut aliases).await,
+        StsAction::AssumeCustom(args) => assume_custom(args, &mut aliases).await,
     }
 }
 
@@ -288,7 +313,13 @@ async fn assume_ldap(args: LdapArgs, aliases: &mut Aliases) -> Result<(), Error>
     let server = unsigned_server(aliases, &args.server, args.region)?;
     args.session.output.check(aliases)?;
     let policy = args.session.policy()?;
-    let password = ldap_password(args.password_stdin)?;
+    let password = secret(Secret {
+        from_stdin: args.password_stdin,
+        env: "TEIFS_LDAP_PASSWORD",
+        what: "LDAP password",
+        prompt: "LDAP password:",
+        flag: "--password-stdin",
+    })?;
     let answer = unsigned_client(&server)
         .map_err(|e| Error::admin("can't reach the server", &e))?
         .assume_role_with_ldap_identity(
@@ -324,6 +355,30 @@ async fn assume_cert(args: CertArgs, aliases: &mut Aliases) -> Result<(), Error>
     deliver_temporary(&server, answer, &args.session.output, aliases)
 }
 
+async fn assume_custom(args: CustomArgs, aliases: &mut Aliases) -> Result<(), Error> {
+    let server = unsigned_server(aliases, &args.server, args.region)?;
+    args.session.output.check(aliases)?;
+    let policy = args.session.policy()?;
+    let token = secret(Secret {
+        from_stdin: args.token_stdin,
+        env: "TEIFS_STS_CUSTOM_TOKEN",
+        what: "token",
+        prompt: "Token:",
+        flag: "--token-stdin",
+    })?;
+    let answer = unsigned_client(&server)
+        .map_err(|e| Error::admin("can't reach the server", &e))?
+        .assume_role_with_custom_token(
+            &args.role_arn,
+            &token,
+            policy.as_deref(),
+            args.session.seconds()?,
+        )
+        .await
+        .map_err(|e| Error::admin("the server didn't take the token", &e))?;
+    deliver_temporary(&server, answer, &args.session.output, aliases)
+}
+
 /// A client for an unsigned sign-in to `server`, trusting what its alias trusts.
 fn unsigned_client(server: &Alias) -> Result<teifs_client::Client, teifs_client::ClientError> {
     let client = teifs_client::Client::new(&server.url, "", Zeroizing::new(String::new()))?;
@@ -350,33 +405,55 @@ fn deliver_temporary(
     deliver(server, &credentials, output, aliases)
 }
 
-/// The LDAP password: from standard input, `TEIFS_LDAP_PASSWORD`, or a hidden prompt.
-fn ldap_password(from_stdin: bool) -> Result<Zeroizing<String>, Error> {
-    let password = if from_stdin {
+/// A secret a sign-in needs, and where it may come from.
+#[derive(Clone, Copy)]
+struct Secret {
+    /// Read it from standard input.
+    from_stdin: bool,
+    /// The variable it may be in.
+    env: &'static str,
+    /// What it is, for errors.
+    what: &'static str,
+    /// What it's asked for with.
+    prompt: &'static str,
+    /// The flag that reads it from standard input.
+    flag: &'static str,
+}
+
+/// A secret: from standard input, its variable, or a hidden prompt.
+fn secret(asked: Secret) -> Result<Zeroizing<String>, Error> {
+    let Secret {
+        from_stdin,
+        env,
+        what,
+        prompt,
+        flag,
+    } = asked;
+    let value = if from_stdin {
         let mut line = Zeroizing::new(String::new());
         std::io::stdin()
             .read_line(&mut line)
-            .map_err(|e| Error::general(format!("can't read the password: {e}")))?;
+            .map_err(|e| Error::general(format!("can't read the {what}: {e}")))?;
         Zeroizing::new(line.trim_end_matches(['\n', '\r']).to_owned())
-    } else if let Some(password) = crate::config::env("TEIFS_LDAP_PASSWORD") {
-        Zeroizing::new(password)
+    } else if let Some(value) = crate::config::env(env) {
+        Zeroizing::new(value)
     } else if ui::interactive() {
         Zeroizing::new(
-            inquire::Password::new("LDAP password:")
+            inquire::Password::new(prompt)
                 .without_confirmation()
                 .with_display_mode(inquire::PasswordDisplayMode::Hidden)
                 .prompt()
                 .map_err(|e| Error::usage(e.to_string()))?,
         )
     } else {
-        return Err(Error::usage(
-            "give the password with --password-stdin or TEIFS_LDAP_PASSWORD",
-        ));
+        return Err(Error::usage(format!(
+            "give the {what} with {flag} or {env}"
+        )));
     };
-    if password.is_empty() {
-        return Err(Error::usage("the LDAP password is empty"));
+    if value.is_empty() {
+        return Err(Error::usage(format!("the {what} is empty")));
     }
-    Ok(password)
+    Ok(value)
 }
 
 /// The alias `name`, to sign with.

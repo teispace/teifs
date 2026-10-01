@@ -84,6 +84,9 @@ pub enum SessionKind {
     /// MinIO's `AssumeRoleWithCertificate`: the managed policy a client certificate's
     /// common name names, narrowed by the session policy if there is one.
     Certificate,
+    /// MinIO's `AssumeRoleWithCustomToken`: the identity plugin role's managed policies,
+    /// narrowed by the session policy if there is one.
+    Custom,
 }
 
 impl Session {
@@ -128,6 +131,7 @@ impl Session {
                 | SessionKind::Web
                 | SessionKind::Ldap
                 | SessionKind::Certificate
+                | SessionKind::Custom
         )
     }
 }
@@ -639,27 +643,47 @@ impl Snapshot {
             } => {
                 self.ldap_identity(dn, username, *generation, session(SessionKind::Ldap, false))?
             }
-            Who::Certificate { cn, policy } => {
-                self.certificate_identity(cn, policy, session(SessionKind::Certificate, false))
+            Who::Custom { user, policies } => {
+                self.managed_identity(user, policies, session(SessionKind::Custom, false))
             }
-            Who::Federated { user, name } => {
-                let (policies, boundary, tags) = match user {
-                    Some(user) => {
-                        let base = self.users.get(user.as_str())?;
-                        (base.policies.clone(), base.boundary.clone(), &*base.tags)
-                    }
-                    None => (Box::from([Arc::clone(&ALLOW_ALL)]), None, &[][..]),
-                };
-                Identity {
-                    principal: Principal::federated(&self.account, name),
-                    root: false,
-                    tags: merged(tags, &claims.tags),
-                    policies,
-                    boundary,
-                    entity: None,
-                    session: Some(session(SessionKind::Federated, true)),
-                }
+            Who::Certificate { cn, policy } => self.managed_identity(
+                cn,
+                std::slice::from_ref(policy),
+                session(SessionKind::Certificate, false),
+            ),
+            Who::Federated { user, name } => self.federated_identity(
+                user.as_deref(),
+                name,
+                &claims.tags,
+                session(SessionKind::Federated, true),
+            )?,
+        })
+    }
+
+    /// `GetFederationToken`'s session: the calling user's policies (all of them for the
+    /// root user), the session's tags over the user's.
+    fn federated_identity(
+        &self,
+        user: Option<&str>,
+        name: &str,
+        session_tags: &[(String, String)],
+        base: Session,
+    ) -> Option<Identity> {
+        let (policies, boundary, tags) = match user {
+            Some(user) => {
+                let base = self.users.get(user)?;
+                (base.policies.clone(), base.boundary.clone(), &*base.tags)
             }
+            None => (Box::from([Arc::clone(&ALLOW_ALL)]), None, &[][..]),
+        };
+        Some(Identity {
+            principal: Principal::federated(&self.account, name),
+            root: false,
+            tags: merged(tags, session_tags),
+            policies,
+            boundary,
+            entity: None,
+            session: Some(base),
         })
     }
 
@@ -699,14 +723,19 @@ impl Snapshot {
         })
     }
 
-    /// A client certificate's session: the managed policy (by unique id) its common name
-    /// named, while it exists.
-    fn certificate_identity(&self, cn: &str, policy: &str, base: Session) -> Identity {
+    /// A session of `name` (an identity plugin's user, a client certificate's common
+    /// name) with the managed policies (by unique id) it was issued with, while they
+    /// exist.
+    fn managed_identity(&self, name: &str, policies: &[String], base: Session) -> Identity {
         Identity {
-            principal: Principal::federated(&self.account, cn),
+            principal: Principal::federated(&self.account, name),
             root: false,
             tags: Box::default(),
-            policies: self.managed.get(policy).cloned().into_iter().collect(),
+            policies: policies
+                .iter()
+                .filter_map(|id| self.managed.get(id.as_str()))
+                .cloned()
+                .collect(),
             boundary: None,
             entity: None,
             session: Some(base),
