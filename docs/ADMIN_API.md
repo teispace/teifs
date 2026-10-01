@@ -105,6 +105,14 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/minio/admin/v3/idp/builtin/policy/attach` | Attaches policies to a user or group (an encrypted `PolicyAssociationReq`), answering what changed, encrypted: `mc admin policy attach` | `admin:UpdatePolicyAssociation` |
 | `POST` | `/minio/admin/v3/idp/builtin/policy/detach` | Detaches policies from a user or group, as `attach`: `mc admin policy detach` | `admin:UpdatePolicyAssociation` |
 | `GET` | `/minio/admin/v3/idp/builtin/policy-entities` | Who has which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc admin policy entities` | `admin:ListUserPolicies` |
+| `PUT` | `/minio/admin/v3/add-service-account` | Makes a service account for the encrypted `AddServiceAccountReq`'s `targetUser` (the caller's own user by default) and answers its credentials, encrypted: `mc admin user svcacct add`, `mc admin accesskey create` | `admin:CreateServiceAccount`, or anyone on their own key unless denied |
+| `POST` | `/minio/admin/v3/update-service-account` | Changes service account `?accessKey=` as the encrypted `UpdateServiceAccountReq` says; what it leaves out stays: `mc admin user svcacct edit` | `admin:UpdateServiceAccount` |
+| `GET` | `/minio/admin/v3/info-service-account` | Service account `?accessKey=`: its parent, status, policy (its parent's when implied), name, description and expiry, encrypted: `mc admin user svcacct info` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
+| `GET` | `/minio/admin/v3/list-service-accounts` | The service accounts of `?user=` (the caller's own user by default), encrypted: `mc admin user svcacct list` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
+| `DELETE` | `/minio/admin/v3/delete-service-account` | Deletes service account `?accessKey=`: `mc admin user svcacct rm` | `admin:RemoveServiceAccount`, or anyone on their own key unless denied |
+| `GET` | `/minio/admin/v3/list-access-keys-bulk` | The service accounts of `?users=` (repeated), every user's with `all=true` (which needs `admin:ListUsers`), or the caller's, by `listType` (`users-only`, `sts-only`, `svcacc-only`, `all`), encrypted: `mc admin accesskey ls` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
+| `GET` | `/minio/admin/v3/info-access-key` | Access key `?accessKey=` (the caller's by default) when it's a service account, encrypted: `mc admin accesskey info` | `admin:ListServiceAccounts`, or anyone on their own key unless denied |
+| `GET` | `/minio/admin/v3/temporary-account-info` | Temporary credentials `?accessKey=`: TeiFS keeps nothing about a session, so always `XMinioAdminNoSuchAccessKey` | `admin:ListTemporaryAccounts` |
 
 <!-- end generated -->
 

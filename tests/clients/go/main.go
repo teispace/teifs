@@ -228,6 +228,41 @@ func minioIAM(ctx context.Context, adm *madmin.AdminClient) {
 	check(account.AccountName == os.Getenv("AWS_ACCESS_KEY_ID") && mine,
 		fmt.Sprintf("the account's info: %+v", account))
 
+	step("service accounts, as mc admin user svcacct and mc admin accesskey make them")
+	root := os.Getenv("AWS_ACCESS_KEY_ID")
+	creds, err := adm.AddServiceAccount(ctx, madmin.AddServiceAccountReq{Name: "go-svc", Description: "the go client's"})
+	must(err)
+	check(lists(ctx, creds.AccessKey, creds.SecretKey), "a root service account lists buckets")
+	svc, err := adm.InfoServiceAccount(ctx, creds.AccessKey)
+	must(err)
+	check(svc.ParentUser == root && svc.ImpliedPolicy && svc.Name == "go-svc" && svc.Expiration == nil,
+		fmt.Sprintf("the service account: %+v", svc))
+	expires := time.Now().Add(48 * time.Hour).Truncate(time.Second).UTC()
+	userSvc, err := adm.AddServiceAccount(ctx, madmin.AddServiceAccountReq{
+		TargetUser: "go-user", AccessKey: "go-user-svc", SecretKey: "go-user-svc-secret",
+		Policy: lister, Expiration: &expires,
+	})
+	must(err)
+	check(userSvc.AccessKey == "go-user-svc" && userSvc.Expiration.Equal(expires),
+		fmt.Sprintf("the user's service account: %+v", userSvc))
+	listed, err := adm.ListServiceAccounts(ctx, "go-user")
+	must(err)
+	check(len(listed.Accounts) == 1 && listed.Accounts[0].AccessKey == "go-user-svc" &&
+		!listed.Accounts[0].ImpliedPolicy, fmt.Sprintf("the user's service accounts: %+v", listed))
+	must(adm.UpdateServiceAccount(ctx, creds.AccessKey, madmin.UpdateServiceAccountReq{NewStatus: "off"}))
+	check(!lists(ctx, creds.AccessKey, creds.SecretKey), "a disabled service account signs")
+	keys, err := adm.ListAccessKeysBulk(ctx, nil, madmin.ListAccessKeysOpts{ListType: madmin.AccessKeyListSvcaccOnly, All: true})
+	must(err)
+	check(len(keys["go-user"].ServiceAccounts) == 1 && len(keys[root].ServiceAccounts) >= 1,
+		fmt.Sprintf("the access keys: %+v", keys))
+	accessKey, err := adm.InfoAccessKey(ctx, "go-user-svc")
+	must(err)
+	check(accessKey.UserType == "Service Account" && accessKey.ParentUser == "go-user",
+		fmt.Sprintf("the access key: %+v", accessKey))
+	must(adm.DeleteServiceAccount(ctx, creds.AccessKey))
+	_, err = adm.InfoServiceAccount(ctx, creds.AccessKey)
+	check(err != nil, "a deleted service account is still there")
+
 	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", Members: []string{"go-user"}, IsRemove: true}))
 	must(adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: "go-group", IsRemove: true}))
 	must(adm.RemoveCannedPolicy(ctx, "go-lister"))

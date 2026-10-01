@@ -32,7 +32,7 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_iam,
+    iam_api, listen, minio_iam, minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -71,6 +71,9 @@ pub(crate) enum Needs {
     OrOwnKey(&'static str),
     /// Anything but an explicit deny of this action: a call on the caller's own key.
     NotDenied(&'static str),
+    /// Anything but an explicit deny of this action; the handler then lets a caller
+    /// without it act only on its own service accounts (as `MinIO` decides them).
+    OrOwnAccount(&'static str),
     /// Any caller who signs: the call answers about the caller alone.
     Signed,
     /// The Query APIs name an action in each call's body, and IAM decides it.
@@ -140,6 +143,14 @@ enum Handler {
     DetachPolicy,
     PolicyEntities,
     AccountInfo,
+    AddServiceAccount,
+    UpdateServiceAccount,
+    InfoServiceAccount,
+    ListServiceAccounts,
+    DeleteServiceAccount,
+    ListAccessKeysBulk,
+    InfoAccessKey,
+    TemporaryAccountInfo,
 }
 
 impl Handler {
@@ -187,6 +198,14 @@ impl Handler {
             Self::DetachPolicy => "DetachPolicy",
             Self::PolicyEntities => "ListPolicyMappingEntities",
             Self::AccountInfo => "AccountInfo",
+            Self::AddServiceAccount => "AddServiceAccount",
+            Self::UpdateServiceAccount => "UpdateServiceAccount",
+            Self::InfoServiceAccount => "InfoServiceAccount",
+            Self::ListServiceAccounts => "ListServiceAccounts",
+            Self::DeleteServiceAccount => "DeleteServiceAccount",
+            Self::ListAccessKeysBulk => "ListAccessKeysBulk",
+            Self::InfoAccessKey => "InfoAccessKey",
+            Self::TemporaryAccountInfo => "TemporaryAccountInfo",
         }
     }
 }
@@ -542,6 +561,70 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::PolicyEntities,
         about: "Who has which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc admin policy entities`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/add-service-account",
+        needs: Needs::OrOwnAccount("admin:CreateServiceAccount"),
+        handler: Handler::AddServiceAccount,
+        about: "Makes a service account for the encrypted `AddServiceAccountReq`'s `targetUser` (the caller's own user by default) and answers its credentials, encrypted: `mc admin user svcacct add`, `mc admin accesskey create`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/update-service-account",
+        needs: Needs::Action("admin:UpdateServiceAccount", ANY),
+        handler: Handler::UpdateServiceAccount,
+        about: "Changes service account `?accessKey=` as the encrypted `UpdateServiceAccountReq` says; what it leaves out stays: `mc admin user svcacct edit`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/info-service-account",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::InfoServiceAccount,
+        about: "Service account `?accessKey=`: its parent, status, policy (its parent's when implied), name, description and expiry, encrypted: `mc admin user svcacct info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/list-service-accounts",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::ListServiceAccounts,
+        about: "The service accounts of `?user=` (the caller's own user by default), encrypted: `mc admin user svcacct list`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/delete-service-account",
+        needs: Needs::OrOwnAccount("admin:RemoveServiceAccount"),
+        handler: Handler::DeleteServiceAccount,
+        about: "Deletes service account `?accessKey=`: `mc admin user svcacct rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/list-access-keys-bulk",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::ListAccessKeysBulk,
+        about: "The service accounts of `?users=` (repeated), every user's with `all=true` (which needs `admin:ListUsers`), or the caller's, by `listType` (`users-only`, `sts-only`, `svcacc-only`, `all`), encrypted: `mc admin accesskey ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/info-access-key",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::InfoAccessKey,
+        about: "Access key `?accessKey=` (the caller's by default) when it's a service account, encrypted: `mc admin accesskey info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/temporary-account-info",
+        needs: Needs::Action("admin:ListTemporaryAccounts", ANY),
+        handler: Handler::TemporaryAccountInfo,
+        about: "Temporary credentials `?accessKey=`: TeiFS keeps nothing about a session, so always `XMinioAdminNoSuchAccessKey`",
+    },
 ];
 
 /// `MinIO`'s admin API, as its clients reach it.
@@ -595,13 +678,14 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OnBucket(action)
             | Needs::OnQueryBucket(action)
             | Needs::OrOwnKey(action)
-            | Needs::NotDenied(action) => Some(action),
+            | Needs::NotDenied(action)
+            | Needs::OrOwnAccount(action) => Some(action),
             Needs::PerCall | Needs::Root | Needs::Signed => None,
         },
         root_only: e.needs == Needs::Root,
         own_key: matches!(
             e.needs,
-            Needs::OrOwnKey(_) | Needs::NotDenied(_) | Needs::Signed
+            Needs::OrOwnKey(_) | Needs::NotDenied(_) | Needs::OrOwnAccount(_) | Needs::Signed
         ),
         api: e.api,
         about: e.about,
@@ -778,6 +862,8 @@ impl Routes {
         // A call on a bucket's tags is decided with what it asks for, read first.
         let mut on_bucket = None;
         let mut query_bucket = None;
+        // Whether the caller has the action itself, beyond its own service accounts.
+        let mut privileged = false;
         let allowed = match endpoint.needs {
             Needs::Action(action, resource) => identity
                 .decide(&context(), action, resource, None)
@@ -816,6 +902,11 @@ impl Routes {
             Needs::NotDenied(action) => {
                 identity.decide(&context(), action, ANY, None) != Decision::ExplicitDeny
             }
+            Needs::OrOwnAccount(action) => {
+                let decision = identity.decide(&context(), action, ANY, None);
+                privileged = decision.is_allowed();
+                decision != Decision::ExplicitDeny
+            }
             Needs::Root => identity.is_root(),
             Needs::Signed => true,
             Needs::PerCall => false,
@@ -830,7 +921,7 @@ impl Routes {
         self.call(
             endpoint.handler,
             req,
-            (&identity, &context),
+            (&identity, &context, privileged),
             on_bucket,
             query_bucket,
         )
@@ -843,7 +934,7 @@ impl Routes {
         &self,
         handler: Handler,
         req: S3Request<Body>,
-        (identity, context): (&Identity, &Context),
+        (identity, context, privileged): (&Identity, &Context, bool),
         on_bucket: Option<(String, control::TagCall)>,
         query_bucket: Option<String>,
     ) -> S3Result<S3Response<Body>> {
@@ -921,6 +1012,27 @@ impl Routes {
                 )
                 .await
             }
+            Handler::AddServiceAccount => {
+                minio_service_accounts::add(&self.iam, identity, privileged, req).await
+            }
+            Handler::UpdateServiceAccount => minio_service_accounts::update(&self.iam, req).await,
+            Handler::InfoServiceAccount => {
+                minio_service_accounts::info(&self.iam, identity, privileged, &req).await
+            }
+            Handler::ListServiceAccounts => {
+                minio_service_accounts::list(&self.iam, identity, privileged, &req).await
+            }
+            Handler::DeleteServiceAccount => {
+                minio_service_accounts::delete(&self.iam, identity, privileged, &req)
+            }
+            Handler::ListAccessKeysBulk => {
+                minio_service_accounts::list_bulk(&self.iam, (identity, context), privileged, &req)
+                    .await
+            }
+            Handler::InfoAccessKey => {
+                minio_service_accounts::info_access_key(&self.iam, identity, privileged, &req).await
+            }
+            Handler::TemporaryAccountInfo => minio_service_accounts::temporary_account_info(&req),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -1227,7 +1339,8 @@ mod tests {
                 }
                 Needs::OnQueryBucket(action)
                 | Needs::OrOwnKey(action)
-                | Needs::NotDenied(action) => {
+                | Needs::NotDenied(action)
+                | Needs::OrOwnAccount(action) => {
                     assert!(e.api == Api::Minio && action.starts_with("admin:"), "{e:?}");
                 }
             }

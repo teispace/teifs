@@ -299,7 +299,8 @@ impl Iam {
     }
 
     /// The root user's access key, if the server has one.
-    fn root_access_key(&self) -> Option<String> {
+    #[must_use]
+    pub fn root_access_key(&self) -> Option<String> {
         self.inner().root.as_ref().map(|r| r.access_key.clone())
     }
 

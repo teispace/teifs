@@ -36,7 +36,7 @@ const ENABLED: &str = "enabled";
 const DISABLED: &str = "disabled";
 
 /// A `MinIO` admin error, with its code and status.
-fn minio_error(err: MinioError) -> S3Error {
+pub(crate) fn minio_error(err: MinioError) -> S3Error {
     let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if status.is_server_error() {
         tracing::error!(error = %err, "a MinIO admin request failed in IAM");
@@ -45,7 +45,7 @@ fn minio_error(err: MinioError) -> S3Error {
     admin::error(status, err.code(), err.to_string())
 }
 
-fn invalid(message: impl Into<String>) -> S3Error {
+pub(crate) fn invalid(message: impl Into<String>) -> S3Error {
     admin::error(
         StatusCode::BAD_REQUEST,
         "XMinioAdminInvalidArgument",
@@ -54,14 +54,14 @@ fn invalid(message: impl Into<String>) -> S3Error {
 }
 
 /// The query's parameters.
-fn query(req: &S3Request<Body>) -> Vec<(String, String)> {
+pub(crate) fn query(req: &S3Request<Body>) -> Vec<(String, String)> {
     form_urlencoded::parse(req.uri.query().unwrap_or_default().as_bytes())
         .into_owned()
         .collect()
 }
 
 /// The value of query parameter `name`, which must be there and not be empty.
-fn required(req: &S3Request<Body>, name: &str) -> S3Result<String> {
+pub(crate) fn required(req: &S3Request<Body>, name: &str) -> S3Result<String> {
     query(req)
         .into_iter()
         .find(|(n, _)| n == name)
@@ -94,7 +94,9 @@ async fn body(req: &mut S3Request<Body>) -> S3Result<bytes::Bytes> {
 }
 
 /// The request's body, decrypted with the caller's secret key and read as JSON.
-async fn decrypted<T: for<'de> Deserialize<'de>>(req: &mut S3Request<Body>) -> S3Result<T> {
+pub(crate) async fn decrypted<T: for<'de> Deserialize<'de>>(
+    req: &mut S3Request<Body>,
+) -> S3Result<T> {
     let secret = caller_secret(req)?;
     let body = body(req).await?;
     // Argon2id takes a while and 64 MiB: off the async workers.
@@ -110,7 +112,10 @@ async fn decrypted<T: for<'de> Deserialize<'de>>(req: &mut S3Request<Body>) -> S
 }
 
 /// An answer of `value` as JSON, encrypted with the caller's secret key.
-async fn encrypted(req: &S3Request<Body>, value: &impl Serialize) -> S3Result<S3Response<Body>> {
+pub(crate) async fn encrypted(
+    req: &S3Request<Body>,
+    value: &impl Serialize,
+) -> S3Result<S3Response<Body>> {
     let secret = caller_secret(req)?;
     let plain = Zeroizing::new(serde_json::to_vec(value).map_err(S3Error::internal_error)?);
     let data = tokio::task::spawn_blocking(move || teifs_crypto::madmin::encrypt(&secret, &plain))
@@ -135,14 +140,14 @@ fn empty() -> S3Response<Body> {
 }
 
 /// A time in milliseconds since the Unix epoch, as Go's JSON writes it.
-fn time(ms: i64) -> String {
+pub(crate) fn time(ms: i64) -> String {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
         .format(&Rfc3339)
         .unwrap_or_default()
 }
 
-const fn status(enabled: bool) -> &'static str {
+pub(crate) const fn status(enabled: bool) -> &'static str {
     if enabled { ENABLED } else { DISABLED }
 }
 

@@ -56,7 +56,7 @@ async fn secret_call(
         signed_response(server, key, method, &format!("{ADMIN}{path}"), &[], &body).await;
     let status = response.status().as_u16();
     let bytes = response.bytes().await.unwrap();
-    if status != 200 {
+    if !(200..300).contains(&status) {
         return (status, serde_json::from_slice(&bytes).unwrap());
     }
     if bytes.is_empty() {
@@ -711,4 +711,332 @@ async fn account_info_shows_a_user_its_policies_and_the_buckets_it_may_use() {
         names,
         [(json!("photos"), json!({"read": true, "write": false}))]
     );
+}
+
+/// Attaches canned policy `policy` to user `user`, as the root user.
+async fn attach(server: &Server, policy: &str, user: &str) {
+    let body = json!({"policies": [policy], "user": user});
+    let path = "idp/builtin/policy/attach";
+    assert_eq!(
+        secret_call(server, ROOT, "POST", path, Some(&body)).await.0,
+        200
+    );
+}
+
+/// `add-service-account` with `body`, as `key`.
+async fn add_account(server: &Server, key: (&str, &str), body: &Value) -> (u16, Value) {
+    secret_call(server, key, "PUT", "add-service-account", Some(body)).await
+}
+
+#[tokio::test]
+async fn service_accounts_are_made_listed_changed_and_removed_as_mc_does() {
+    let server = start().await;
+    assert_eq!(add_user(&server, ROOT, "bob", "bob-secret").await.0, 200);
+    attach(&server, "readwrite", "bob").await;
+    let bob = ("bob", "bob-secret");
+
+    // `mc admin user svcacct add` of its own: made keys, never expiring, acting as bob.
+    let (status, made) = add_account(&server, bob, &json!({"name": "backup"})).await;
+    assert_eq!(status, 200);
+    let made = &made["credentials"];
+    assert_eq!(made["expiration"], "1970-01-01T00:00:00Z");
+    let made = (
+        made["accessKey"].as_str().unwrap().to_owned(),
+        made["secretKey"].as_str().unwrap().to_owned(),
+    );
+    let svc = (made.0.as_str(), made.1.as_str());
+    assert_eq!(lists(&server, svc).await, "ok");
+
+    // Its own keys, narrowed by a policy of its own, expiring in 30 days.
+    let expires = (time::OffsetDateTime::now_utc() + time::Duration::days(30))
+        .replace_nanosecond(0)
+        .unwrap()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let narrow = json!({"accessKey": "bobreader", "secretKey": "bobreader-secret",
+        "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+            "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::*"]}]},
+        "description": "reads", "expiration": expires});
+    let (status, made) = add_account(&server, bob, &narrow).await;
+    assert_eq!(status, 200, "{made}");
+    assert_eq!(made["credentials"]["expiration"], expires.as_str());
+    let reader = ("bobreader", "bobreader-secret");
+    assert_eq!(lists(&server, reader).await, "AccessDenied");
+
+    let (status, list) = secret_call(&server, bob, "GET", "list-service-accounts", None).await;
+    assert_eq!(status, 200);
+    let accounts = list["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(accounts[0]["accessKey"], svc.0);
+    assert_eq!(accounts[0]["name"], "backup");
+    assert_eq!(accounts[0]["impliedPolicy"], true);
+    assert_eq!(accounts[1]["parentUser"], "bob");
+    assert_eq!(accounts[1]["impliedPolicy"], false);
+
+    let path = "info-service-account?accessKey=bobreader";
+    let (status, info) = secret_call(&server, bob, "GET", path, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(info["accountStatus"], "enabled");
+    assert_eq!(info["description"], "reads");
+    assert_eq!(info["expiration"], expires.as_str());
+    assert!(info["policy"].as_str().unwrap().contains("s3:GetObject"));
+    let path = format!("info-service-account?accessKey={}", svc.0);
+    let (_, info) = secret_call(&server, bob, "GET", &path, None).await;
+    assert!(info["policy"].as_str().unwrap().contains("s3:*"), "{info}");
+    assert!(info.get("expiration").is_none());
+
+    // Changing one needs `admin:UpdateServiceAccount`, even one's own.
+    let path = format!("update-service-account?accessKey={}", svc.0);
+    let off = json!({"newStatus": "off"});
+    assert_eq!(
+        secret_call(&server, bob, "POST", &path, Some(&off)).await.0,
+        403
+    );
+    assert_eq!(
+        secret_call(&server, ROOT, "POST", &path, Some(&off))
+            .await
+            .0,
+        204
+    );
+    assert_ne!(lists(&server, svc).await, "ok");
+    let on = json!({"newStatus": "on", "newPolicy": {"Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": ["s3:ListAllMyBuckets"], "Resource": ["*"]}]}});
+    assert_eq!(
+        secret_call(&server, ROOT, "POST", &path, Some(&on)).await.0,
+        204
+    );
+    assert_eq!(lists(&server, svc).await, "ok");
+    let bad = json!({"newStatus": "maybe"});
+    assert_eq!(
+        secret_call(&server, ROOT, "POST", &path, Some(&bad))
+            .await
+            .0,
+        400
+    );
+
+    // Deleting its own; then bob's going takes the rest.
+    let path = "delete-service-account?accessKey=bobreader";
+    assert_eq!(call(&server, bob, "DELETE", path, b"").await.0, 204);
+    assert_ne!(lists(&server, reader).await, "ok");
+    let (status, answer) = call(&server, bob, "DELETE", path, b"").await;
+    assert_eq!(
+        (status, &answer["Code"]),
+        (404, &error("XMinioInvalidIAMCredentials"))
+    );
+    assert_eq!(
+        call(&server, ROOT, "DELETE", "remove-user?accessKey=bob", b"")
+            .await
+            .0,
+        200
+    );
+    assert_ne!(lists(&server, svc).await, "ok");
+    let path = format!("info-service-account?accessKey={}", svc.0);
+    assert_eq!(secret_call(&server, ROOT, "GET", &path, None).await.0, 404);
+}
+
+#[tokio::test]
+async fn others_service_accounts_need_the_admin_actions() {
+    let server = start().await;
+    for (name, secret) in [("bob", "bob-secret"), ("alice", "alice-secret")] {
+        assert_eq!(add_user(&server, ROOT, name, secret).await.0, 200);
+        attach(&server, "readwrite", name).await;
+    }
+    let (bob, alice) = (("bob", "bob-secret"), ("alice", "alice-secret"));
+    let keys = json!({"accessKey": "bobsvc", "secretKey": "bobsvc-secret"});
+    assert_eq!(add_account(&server, bob, &keys).await.0, 200);
+
+    // Alice may not see, make or delete bob's.
+    let for_bob = json!({"targetUser": "bob"});
+    assert_eq!(add_account(&server, alice, &for_bob).await.0, 403);
+    let path = "info-service-account?accessKey=bobsvc";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
+    let path = "list-service-accounts?user=bob";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
+    let path = "list-access-keys-bulk?listType=all&users=bob";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
+    let path = "list-access-keys-bulk?listType=all&all=true";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
+    let path = "info-access-key?accessKey=bobsvc";
+    assert_eq!(secret_call(&server, alice, "GET", path, None).await.0, 403);
+    let path = "delete-service-account?accessKey=bobsvc";
+    let (status, answer) = call(&server, alice, "DELETE", path, b"").await;
+    assert_eq!(
+        (status, &answer["Code"]),
+        (404, &error("XMinioInvalidIAMCredentials"))
+    );
+
+    // With the actions, she may.
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:CreateServiceAccount","admin:ListServiceAccounts","admin:RemoveServiceAccount"]}]}"#;
+    let path = "add-canned-policy?name=svc-admin";
+    assert_eq!(
+        call(&server, ROOT, "PUT", path, policy.as_bytes()).await.0,
+        200
+    );
+    attach(&server, "svc-admin", "alice").await;
+    let (status, made) = add_account(&server, alice, &for_bob).await;
+    assert_eq!(status, 200);
+    let made = made["credentials"]["accessKey"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = "list-service-accounts?user=bob";
+    let (_, list) = secret_call(&server, alice, "GET", path, None).await;
+    assert_eq!(list["accounts"].as_array().unwrap().len(), 2);
+    assert_eq!(list["accounts"][1]["accessKey"], made.as_str());
+    let path = "delete-service-account?accessKey=bobsvc";
+    assert_eq!(call(&server, alice, "DELETE", path, b"").await.0, 204);
+    let nobody = json!({"targetUser": "nobody"});
+    let (status, answer) = add_account(&server, alice, &nobody).await;
+    assert_eq!(
+        (status, &answer["Code"]),
+        (404, &error("XMinioAdminNoSuchUser"))
+    );
+    assert_eq!(
+        answer["Message"],
+        "Specified target user nobody does not exist"
+    );
+
+    // An explicit deny takes even one's own away.
+    let deny = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":["admin:CreateServiceAccount","admin:ListServiceAccounts"],"Resource":"*"}]}"#;
+    let path = "add-canned-policy?name=no-svc";
+    assert_eq!(
+        call(&server, ROOT, "PUT", path, deny.as_bytes()).await.0,
+        200
+    );
+    attach(&server, "no-svc", "bob").await;
+    assert_eq!(add_account(&server, bob, &json!({})).await.0, 403);
+    assert_eq!(
+        secret_call(&server, bob, "GET", "list-service-accounts", None)
+            .await
+            .0,
+        403
+    );
+}
+
+#[tokio::test]
+async fn the_root_user_s_service_accounts_and_bad_ones() {
+    let server = start().await;
+    let (status, made) = add_account(&server, ROOT, &json!({})).await;
+    assert_eq!(status, 200);
+    let made = &made["credentials"];
+    let svc = (
+        made["accessKey"].as_str().unwrap().to_owned(),
+        made["secretKey"].as_str().unwrap().to_owned(),
+    );
+    let svc = (svc.0.as_str(), svc.1.as_str());
+    assert_eq!(lists(&server, svc).await, "ok");
+    let (_, list) = secret_call(&server, ROOT, "GET", "list-service-accounts", None).await;
+    assert_eq!(list["accounts"][0]["parentUser"], ACCESS_KEY);
+    // A root service account manages its parent's, but isn't the root user.
+    let (status, list) = secret_call(&server, svc, "GET", "list-service-accounts", None).await;
+    assert_eq!(
+        (status, list["accounts"].as_array().unwrap().len()),
+        (200, 1)
+    );
+    let body = json!({"secretKey": "root-secret-new"});
+    let (status, _) = secret_call(&server, svc, "POST", "change-my-password", Some(&body)).await;
+    assert_ne!(status, 200);
+
+    let refused = [
+        (
+            json!({"accessKey": "onlykey"}),
+            400,
+            "XMinioAdminNoSecretKey",
+        ),
+        (
+            json!({"secretKey": "only-secret"}),
+            400,
+            "XMinioAdminNoAccessKey",
+        ),
+        (
+            json!({"accessKey": ACCESS_KEY, "secretKey": "some-secret"}),
+            403,
+            "XMinioInvalidIAMCredentials",
+        ),
+        (
+            json!({"accessKey": svc.0, "secretKey": "some-secret"}),
+            400,
+            "XMinioIAMServiceAccountNotAllowed",
+        ),
+        (json!({"name": "1st"}), 400, "XMinioInvalidResource"),
+        (
+            json!({"expiration": "2000-01-01T00:00:00Z"}),
+            400,
+            "XMinioAdminInvalidArgument",
+        ),
+    ];
+    for (body, status, code) in refused {
+        let (got, answer) = add_account(&server, ROOT, &body).await;
+        assert_eq!((got, &answer["Code"]), (status, &error(code)), "{body}");
+    }
+    let (status, _) = add_account(&server, ROOT, &json!({"expiration": "soon"})).await;
+    assert_eq!(status, 400);
+}
+
+/// Credentials from an `add-service-account` answer.
+fn credentials(made: &Value) -> (String, String) {
+    let made = &made["credentials"];
+    (
+        made["accessKey"].as_str().unwrap().to_owned(),
+        made["secretKey"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn access_keys_are_listed_and_described_as_mc_admin_accesskey_does() {
+    let server = start().await;
+    assert_eq!(add_user(&server, ROOT, "bob", "bob-secret").await.0, 200);
+    attach(&server, "readwrite", "bob").await;
+    let bob = ("bob", "bob-secret");
+    let (status, made) = add_account(&server, bob, &json!({})).await;
+    assert_eq!(status, 200);
+    let made = credentials(&made);
+    let svc = (made.0.as_str(), made.1.as_str());
+    let keys = json!({"accessKey": "bobreader", "secretKey": "bobreader-secret"});
+    assert_eq!(add_account(&server, bob, &keys).await.0, 200);
+
+    let path = "info-access-key?accessKey=bobreader";
+    let (status, info) = secret_call(&server, bob, "GET", path, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(info["AccessKey"], "bobreader");
+    assert_eq!(info["userType"], "Service Account");
+    assert_eq!(info["parentUser"], "bob");
+    let (status, info) = secret_call(&server, svc, "GET", "info-access-key", None).await;
+    assert_eq!((status, &info["AccessKey"]), (200, &json!(svc.0)));
+    let path = "info-access-key?accessKey=bob";
+    assert_eq!(secret_call(&server, bob, "GET", path, None).await.0, 403);
+    let (status, answer) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!(
+        (status, &answer["Code"]),
+        (404, &error("XMinioAdminNoSuchAccessKey"))
+    );
+    let path = "temporary-account-info?accessKey=TSIAANY";
+    let (status, answer) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!(
+        (status, &answer["Code"]),
+        (404, &error("XMinioAdminNoSuchAccessKey"))
+    );
+
+    let path = "list-access-keys-bulk?listType=svcacc-only";
+    let (status, keys) = secret_call(&server, bob, "GET", path, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(keys["bob"]["serviceAccounts"].as_array().unwrap().len(), 2);
+    let path = "list-access-keys-bulk?listType=all&all=true";
+    let (status, keys) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!(status, 200);
+    assert!(
+        keys.get(ACCESS_KEY).is_some() && keys.get("bob").is_some(),
+        "{keys}"
+    );
+    let path = "list-access-keys-bulk?listType=svcacc-only&all=true";
+    let (_, keys) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!(keys.as_object().unwrap().len(), 1, "{keys}");
+    let path = "list-access-keys-bulk?listType=sts-only&users=bob";
+    let (_, keys) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!(keys, json!({}));
+    let path = "list-access-keys-bulk?listType=all&all=true&users=bob";
+    let (status, answer) = secret_call(&server, ROOT, "GET", path, None).await;
+    assert_eq!((status, &answer["Code"]), (400, &error("InvalidRequest")));
+    let path = "list-access-keys-bulk?listType=some";
+    assert_eq!(secret_call(&server, bob, "GET", path, None).await.0, 400);
 }
