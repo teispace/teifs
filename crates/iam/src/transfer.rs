@@ -9,8 +9,8 @@ use teifs_crypto::DataKey;
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
     ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole,
-    ExportedSamlProvider, ExportedUser, ExportedVersion, IAM_FORMAT, IamExport, ImportReport,
-    LdapPolicyMapping, Tag,
+    ExportedSamlProvider, ExportedServiceAccount, ExportedUser, ExportedVersion, IAM_FORMAT,
+    IamExport, ImportReport, LdapPolicyMapping, Tag,
 };
 
 use crate::{
@@ -216,7 +216,35 @@ fn export(state: &State, secrets: bool, key: &DataKey) -> IamExport {
         oidc_providers,
         saml_providers: export_saml(state, secrets.then_some(key)),
         ldap_policies: export_ldap(state),
+        service_accounts: export_service_accounts(state, secrets),
     }
+}
+
+/// The service accounts, oldest first, with their secrets if `secrets`.
+fn export_service_accounts(state: &State, secrets: bool) -> Vec<ExportedServiceAccount> {
+    let mut accounts: Vec<ExportedServiceAccount> = state
+        .service_accounts
+        .values()
+        .filter_map(|a| {
+            let parent = match &a.parent {
+                Some(id) => Some(state.users.get(id)?.name.clone()),
+                None => None,
+            };
+            Some(ExportedServiceAccount {
+                id: a.id.clone(),
+                parent,
+                active: a.active,
+                policy: a.policy.as_ref().map(|p| p.text.to_string()),
+                name: a.name.clone(),
+                description: a.description.clone(),
+                expires_ms: a.expires_ms,
+                created_ms: a.created_ms,
+                secret: secrets.then(|| a.secret.as_str().to_owned()),
+            })
+        })
+        .collect();
+    accounts.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
+    accounts
 }
 
 /// The policies mapped to LDAP users and groups, by name.
@@ -294,7 +322,8 @@ impl Iam {
                 && s.own_policies().next().is_none()
                 && s.oidc_providers.is_empty()
                 && s.saml_providers.is_empty()
-                && s.ldap_policies.is_empty())
+                && s.ldap_policies.is_empty()
+                && s.service_accounts.is_empty())
             {
                 return Err(IamError::EntityAlreadyExists(
                     "IAM already has users, groups, roles, policies or identity providers: \
@@ -332,9 +361,18 @@ impl Iam {
                 saml_providers: export.saml_providers.len(),
                 ldap_policies: export.ldap_policies.len(),
                 access_keys: 0,
+                service_accounts: 0,
                 keys_without_secrets: Vec::new(),
             };
             import_users(d, &export.users, &arn, &mut report)?;
+            for account in &export.service_accounts {
+                if account.secret.is_some() {
+                    d.import_service_account(account)?;
+                    report.service_accounts += 1;
+                } else {
+                    report.keys_without_secrets.push(account.id.clone());
+                }
+            }
             // Before the roles, whose trust policies may name them.
             for provider in &export.oidc_providers {
                 d.create_oidc_provider(&NewOidcProvider {

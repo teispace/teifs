@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     sessions::{Claims, SamlClaims, WebClaims, Who},
-    state::{LdapSeen, State},
+    state::{LdapSeen, ServiceAccount, State},
 };
 
 /// Who signed a request, and the policies that decide what they may do.
@@ -89,6 +89,10 @@ pub enum SessionKind {
     /// MinIO's `AssumeRoleWithCustomToken`: the identity plugin role's managed policies,
     /// narrowed by the session policy if there is one.
     Custom,
+    /// A `MinIO` service account: its parent's permissions (all of them for the root
+    /// user's), narrowed by its policy if it has one. A long-term key that never calls
+    /// STS but `GetCallerIdentity`.
+    Service,
 }
 
 impl Session {
@@ -134,6 +138,7 @@ impl Session {
                 | SessionKind::Ldap
                 | SessionKind::Certificate
                 | SessionKind::Custom
+                | SessionKind::Service
         )
     }
 }
@@ -427,6 +432,73 @@ pub(crate) struct Snapshot {
     sessions: RwLock<HashMap<Box<str>, Cached>>,
 }
 
+/// The policies mapped to each LDAP DN.
+fn ldap_policies(state: &State) -> HashMap<Box<str>, Box<[Arc<Policy>]>> {
+    state
+        .ldap_policies
+        .values()
+        .map(|m| {
+            let policies: Box<[Arc<Policy>]> = m
+                .policies
+                .iter()
+                .filter_map(|id| state.policies.get(id))
+                .map(|p| p.default_document().policy.clone())
+                .collect();
+            (m.dn.as_str().into(), policies)
+        })
+        .collect()
+}
+
+/// A service account's credential: its parent's identity (none if the parent is a
+/// disabled or missing user, or the root user of a server without a root key) with a
+/// [`SessionKind::Service`] session that narrows it to its policy and ends at its expiry.
+fn service_credential(
+    state: &State,
+    users: &HashMap<Box<str>, Arc<Identity>>,
+    root: Option<&RootKey>,
+    account: &ServiceAccount,
+) -> Option<Credential> {
+    let base = if let Some(user) = &account.parent {
+        Identity::clone(users.get(user.as_str())?)
+    } else {
+        let root = root?;
+        Identity {
+            // The root user's, but not root: all it may do is narrowed by its policy
+            // (an account principal would skip the narrowing).
+            principal: Principal::user(&state.account, "/", &root.access_key, &root.access_key),
+            root: false,
+            tags: Box::default(),
+            policies: Box::from([Arc::clone(&ALLOW_ALL)]),
+            boundary: None,
+            entity: None,
+            session: None,
+        }
+    };
+    let session = Session {
+        kind: SessionKind::Service,
+        policies: account
+            .policy
+            .as_ref()
+            .map(|p| Box::from([Arc::clone(&p.policy)])),
+        issued: account.created_ms.div_euclid(1000),
+        expires: account
+            .expires_ms
+            .map_or(i64::MAX, |ms| ms.div_euclid(1000)),
+        source_identity: None,
+        transitive: Box::default(),
+        web: None,
+        saml: None,
+        ldap: None,
+    };
+    Some(Credential {
+        secret: account.secret.clone(),
+        identity: Arc::new(Identity {
+            session: Some(session),
+            ..base
+        }),
+    })
+}
+
 /// A policy that allows everything: the root user's, for a federated user it starts,
 /// whose session policies then decide.
 static ALLOW_ALL: LazyLock<Arc<Policy>> = LazyLock::new(|| {
@@ -481,6 +553,13 @@ impl Snapshot {
                 );
             }
         }
+        for account in state.service_accounts.values().filter(|a| a.active) {
+            if !keys.contains_key(account.id.as_str())
+                && let Some(credential) = service_credential(state, &users, root, account)
+            {
+                keys.insert(account.id.as_str().into(), credential);
+            }
+        }
         let roles = state
             .roles
             .values()
@@ -507,19 +586,7 @@ impl Snapshot {
             .keys()
             .map(|id| id.as_str().into())
             .collect();
-        let ldap_policies = state
-            .ldap_policies
-            .values()
-            .map(|m| {
-                let policies: Box<[Arc<Policy>]> = m
-                    .policies
-                    .iter()
-                    .filter_map(|id| state.policies.get(id))
-                    .map(|p| p.default_document().policy.clone())
-                    .collect();
-                (m.dn.as_str().into(), policies)
-            })
-            .collect();
+        let ldap_policies = ldap_policies(state);
         let ldap_users = state
             .ldap_sessions
             .values()
@@ -539,8 +606,15 @@ impl Snapshot {
         }
     }
 
-    pub(crate) fn credential(&self, access_key: &str) -> Option<Credential> {
-        self.keys.get(access_key).cloned()
+    /// The credential of an access key at `now` (seconds since the Unix epoch): none
+    /// for a service account that has expired.
+    pub(crate) fn credential(&self, access_key: &str, now: i64) -> Option<Credential> {
+        let credential = self.keys.get(access_key)?;
+        let expired = credential
+            .identity
+            .session()
+            .is_some_and(|s| s.kind == SessionKind::Service && now >= s.expires);
+        (!expired).then(|| credential.clone())
     }
 
     /// The identity already built for the session with access key `id` from this very

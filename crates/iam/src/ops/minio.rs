@@ -46,6 +46,33 @@ pub enum MinioError {
     /// Something else asked is impossible.
     #[error("{0}")]
     InvalidArgument(String),
+    /// No service account has that access key.
+    #[error("The specified service account is not found")]
+    NoSuchServiceAccount,
+    /// No service account or session has that access key.
+    #[error("The specified access key does not exist.")]
+    NoSuchAccessKey,
+    /// The access key asked for is the root user's.
+    #[error("Credential is not allowed to be same as admin access key")]
+    RootCredentials,
+    /// An access key was given without a secret key.
+    #[error("No secret key was provided.")]
+    NoSecretKey,
+    /// A secret key was given without an access key.
+    #[error("No access key was provided.")]
+    NoAccessKey,
+    /// The service account can't be made: its access key is taken.
+    #[error("{0}")]
+    ServiceAccountNotAllowed(String),
+    /// The service account would act as itself.
+    #[error("{0}")]
+    ActionNotAllowed(String),
+    /// A service account's policy is longer than `MinIO` keeps.
+    #[error("Service account's session policy exceeds the maximum size of 4096 characters.")]
+    PolicyTooLarge,
+    /// A name, description or expiry `MinIO`'s client would have refused.
+    #[error("{0}")]
+    InvalidResource(String),
     /// IAM refused, as its own API would.
     #[error(transparent)]
     Iam(#[from] IamError),
@@ -64,6 +91,14 @@ impl MinioError {
             Self::PolicyInUse => "XMinioIAMPolicyInUse",
             Self::InvalidAccessKey(_) => "XMinioAdminInvalidAccessKey",
             Self::InvalidSecretKey(_) => "XMinioAdminInvalidSecretKey",
+            Self::NoSuchServiceAccount | Self::RootCredentials => "XMinioInvalidIAMCredentials",
+            Self::NoSuchAccessKey => "XMinioAdminNoSuchAccessKey",
+            Self::NoSecretKey => "XMinioAdminNoSecretKey",
+            Self::NoAccessKey => "XMinioAdminNoAccessKey",
+            Self::ServiceAccountNotAllowed(_) => "XMinioIAMServiceAccountNotAllowed",
+            Self::ActionNotAllowed(_) => "XMinioIAMActionNotAllowed",
+            Self::PolicyTooLarge => "XMinioIAMServiceAccountSessionPolicyTooLarge",
+            Self::InvalidResource(_) => "XMinioInvalidResource",
             Self::InvalidArgument(_)
             | Self::Iam(IamError::InvalidInput(_) | IamError::LimitExceeded(_)) => {
                 "XMinioAdminInvalidArgument"
@@ -77,8 +112,18 @@ impl MinioError {
     #[must_use]
     pub fn status(&self) -> u16 {
         match self {
-            Self::NoSuchUser | Self::NoSuchGroup | Self::NoSuchPolicy => 404,
-            Self::GroupNotEmpty
+            Self::NoSuchUser
+            | Self::NoSuchGroup
+            | Self::NoSuchPolicy
+            | Self::NoSuchServiceAccount
+            | Self::NoSuchAccessKey => 404,
+            Self::RootCredentials | Self::ActionNotAllowed(_) => 403,
+            Self::NoSecretKey
+            | Self::NoAccessKey
+            | Self::ServiceAccountNotAllowed(_)
+            | Self::PolicyTooLarge
+            | Self::InvalidResource(_)
+            | Self::GroupNotEmpty
             | Self::AlreadyApplied
             | Self::PolicyInUse
             | Self::InvalidAccessKey(_)
@@ -207,7 +252,7 @@ fn names(state: &State, ids: &BTreeSet<String>) -> Vec<String> {
     )
 }
 
-fn user_named<'s>(state: &'s State, name: &str) -> Result<&'s Arc<User>> {
+pub(super) fn user_named<'s>(state: &'s State, name: &str) -> Result<&'s Arc<User>> {
     state.user_named(name).map_err(|_| MinioError::NoSuchUser)
 }
 
@@ -285,6 +330,11 @@ impl Draft<'_> {
                 "A user named {} exists.",
                 user.name
             )));
+        }
+        if self.state.service_accounts.contains_key(access_key) {
+            return Err(MinioError::InvalidAccessKey(
+                "The access key is a service account's.".into(),
+            ));
         }
         if let Some(key) = self.state.keys.get(access_key)
             && existing.as_ref().is_none_or(|u| u.id != key.user)
@@ -394,6 +444,7 @@ impl Draft<'_> {
             self.state.keys.remove(&id);
             self.write(IamWrite::DeleteKey(id));
         }
+        self.remove_service_accounts_of(&user.id);
         for inline in user.inline.keys() {
             self.write(IamWrite::DeleteInline(user.id.clone(), inline.clone()));
         }
@@ -849,7 +900,7 @@ impl Iam {
 }
 
 /// The texts of inline policies and of the attached ones' versions in effect.
-fn documents<'a>(
+pub(super) fn documents<'a>(
     state: &'a State,
     inline: &'a std::collections::BTreeMap<String, crate::state::Document>,
     attached: &'a BTreeSet<String>,
@@ -863,7 +914,7 @@ fn documents<'a>(
 }
 
 /// One policy of every statement of `documents`, as `MinIO` merges a user's policies.
-fn merged<'a>(documents: impl IntoIterator<Item = &'a str>) -> String {
+pub(super) fn merged<'a>(documents: impl IntoIterator<Item = &'a str>) -> String {
     let mut statements = Vec::new();
     for text in documents {
         // IAM checked every document when it was stored.

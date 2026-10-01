@@ -10,7 +10,7 @@ use std::{
 use teifs_crypto::DataKey;
 use teifs_meta::{
     AccessKeyRow, IamRows, InlineRow, LdapPolicyRow, LdapSessionRow, OidcProviderRow, PolicyRow,
-    PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow,
+    PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow, ServiceAccountRow,
 };
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
@@ -335,6 +335,52 @@ impl std::fmt::Debug for Key {
     }
 }
 
+/// A `MinIO` service account: a key that acts as its parent, narrowed by its policy.
+#[derive(Clone)]
+pub(crate) struct ServiceAccount {
+    pub(crate) id: String,
+    /// The unique id of the user it acts for; `None` for the root user.
+    pub(crate) parent: Option<String>,
+    /// The secret, sealed as stored.
+    pub(crate) sealed: Vec<u8>,
+    pub(crate) secret: Arc<Zeroizing<String>>,
+    pub(crate) active: bool,
+    /// What it's narrowed to; `None` for all its parent may do.
+    pub(crate) policy: Option<Document>,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    /// When it stops signing, in milliseconds since the Unix epoch.
+    pub(crate) expires_ms: Option<i64>,
+    pub(crate) created_ms: i64,
+}
+
+impl ServiceAccount {
+    pub(crate) fn row(&self) -> ServiceAccountRow {
+        ServiceAccountRow {
+            id: self.id.clone(),
+            parent: self.parent.clone().unwrap_or_default(),
+            secret: self.sealed.clone(),
+            active: self.active,
+            policy: self.policy.as_ref().map(|p| p.text.to_string()),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            expires_ms: self.expires_ms,
+            created_ms: self.created_ms,
+        }
+    }
+}
+
+impl std::fmt::Debug for ServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccount")
+            .field("id", &self.id)
+            .field("parent", &self.parent)
+            .field("active", &self.active)
+            .field("expires_ms", &self.expires_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything IAM knows, by id.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct State {
@@ -346,6 +392,8 @@ pub(crate) struct State {
     pub(crate) saml_providers: BTreeMap<String, Arc<SamlProvider>>,
     pub(crate) policies: BTreeMap<String, Arc<Managed>>,
     pub(crate) keys: BTreeMap<String, Arc<Key>>,
+    /// `MinIO`'s service accounts, by access key id.
+    pub(crate) service_accounts: BTreeMap<String, Arc<ServiceAccount>>,
     /// The policies mapped to LDAP DNs, by DN.
     pub(crate) ldap_policies: BTreeMap<String, Arc<LdapMapping>>,
     /// Directory users with live sessions, by DN.
@@ -359,6 +407,7 @@ impl State {
             account: account.into(),
             policies: load_policies(rows.policies, rows.versions, rows.policy_tags)?,
             keys: load_keys(rows.keys, key)?,
+            service_accounts: load_service_accounts(rows.service_accounts, key)?,
             oidc_providers: load_oidc_providers(rows.oidc_providers, rows.oidc_provider_tags)?,
             saml_providers: load_saml_providers(
                 rows.saml_providers,
@@ -899,21 +948,55 @@ fn load_saml_providers(
         .collect())
 }
 
+/// The secret sealed for access key `id`.
+fn open_secret(key: &DataKey, id: &str, sealed: &[u8]) -> Result<Arc<Zeroizing<String>>> {
+    let mut secret = key
+        .open_secret(id.as_bytes(), sealed)
+        .map_err(|_| IamError::Stored(format!("access key {id} doesn't open")))?;
+    let secret = String::from_utf8(std::mem::take(&mut *secret))
+        .map_err(|_| IamError::Stored(format!("access key {id} isn't text")))?;
+    Ok(Arc::new(Zeroizing::new(secret)))
+}
+
+fn load_service_accounts(
+    rows: Vec<ServiceAccountRow>,
+    key: &DataKey,
+) -> Result<BTreeMap<String, Arc<ServiceAccount>>> {
+    let mut accounts = BTreeMap::new();
+    for row in rows {
+        let policy = row
+            .policy
+            .as_deref()
+            .map(|text| Document::stored(text, &format!("service account {}", row.id)))
+            .transpose()?;
+        let account = ServiceAccount {
+            secret: open_secret(key, &row.id, &row.secret)?,
+            parent: Some(row.parent).filter(|p| !p.is_empty()),
+            sealed: row.secret,
+            active: row.active,
+            policy,
+            name: row.name,
+            description: row.description,
+            expires_ms: row.expires_ms,
+            created_ms: row.created_ms,
+            id: row.id,
+        };
+        accounts.insert(account.id.clone(), Arc::new(account));
+    }
+    Ok(accounts)
+}
+
 fn load_keys(rows: Vec<AccessKeyRow>, key: &DataKey) -> Result<BTreeMap<String, Arc<Key>>> {
     let mut keys = BTreeMap::new();
     for row in rows {
-        let mut secret = key
-            .open_secret(row.id.as_bytes(), &row.secret)
-            .map_err(|_| IamError::Stored(format!("access key {} doesn't open", row.id)))?;
-        let secret = String::from_utf8(std::mem::take(&mut *secret))
-            .map_err(|_| IamError::Stored(format!("access key {} isn't text", row.id)))?;
+        let secret = open_secret(key, &row.id, &row.secret)?;
         keys.insert(
             row.id.clone(),
             Arc::new(Key {
                 id: row.id,
                 user: row.user_id,
                 sealed: row.secret,
-                secret: Arc::new(Zeroizing::new(secret)),
+                secret,
                 active: row.active,
                 created_ms: row.created_ms,
             }),

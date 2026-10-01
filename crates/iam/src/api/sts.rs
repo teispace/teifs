@@ -140,7 +140,8 @@ pub(super) const ACTIONS: &[Action] = &[
 
 /// The STS actions a session made in some way may call, as on AWS: a role's any but
 /// `GetSessionToken` and `GetFederationToken`; `GetSessionToken`'s only `AssumeRole`
-/// and `GetCallerIdentity`; a federated user's only `GetCallerIdentity`. Anyone may
+/// and `GetCallerIdentity`; a federated user's and a `MinIO` service account's (as
+/// `MinIO` refuses them temporary credentials) only `GetCallerIdentity`. Anyone may
 /// call `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, `AssumeRoleWithLDAPIdentity`
 /// and `AssumeRoleWithCertificate`, which prove who is asking themselves.
 pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
@@ -158,7 +159,7 @@ pub(super) fn permitted(kind: SessionKind, action: &str) -> bool {
         | SessionKind::Certificate
         | SessionKind::Custom => !matches!(action, "GetSessionToken" | "GetFederationToken"),
         SessionKind::SessionToken => matches!(action, "AssumeRole" | "GetCallerIdentity"),
-        SessionKind::Federated => action == "GetCallerIdentity",
+        SessionKind::Federated | SessionKind::Service => action == "GetCallerIdentity",
     }
 }
 

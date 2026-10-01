@@ -40,11 +40,12 @@ pub use api::{Call, Reply};
 pub use bearer::metrics_token;
 pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
-    AccessKeyInfo, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo, GroupPolicies,
-    LdapEntity, LdapPolicies, LdapPolicyChange, MinioAccount, MinioError, MinioGroup, MinioPolicy,
-    MinioUser, MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider,
-    OidcProviderInfo, Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo,
-    RoleInfo, SamlProviderInfo, SamlProviderUpdate, UserInfo, UserPolicies,
+    AccessKeyInfo, AddedServiceAccount, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo,
+    GroupPolicies, LdapEntity, LdapPolicies, LdapPolicyChange, MinioAccount, MinioError,
+    MinioGroup, MinioPolicy, MinioServiceAccount, MinioUser, MinioUserChange, NewAccessKey,
+    NewOidcProvider, NewRole, NewSamlProvider, NewServiceAccount, OidcProviderInfo, Owner,
+    PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo, RoleInfo, SamlProviderInfo,
+    SamlProviderUpdate, ServiceAccountChange, UserInfo, UserPolicies,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
@@ -289,11 +290,17 @@ impl Iam {
         self.inner().state.account.to_string()
     }
 
-    /// The secret and identity of an active long-term access key (the root's
-    /// included).
+    /// The secret and identity of an active long-term access key (the root's and
+    /// unexpired service accounts' included).
     #[must_use]
     pub fn credential(&self, access_key: &str) -> Option<Credential> {
-        self.snapshot().credential(access_key)
+        self.snapshot()
+            .credential(access_key, sessions::now_seconds())
+    }
+
+    /// The root user's access key, if the server has one.
+    fn root_access_key(&self) -> Option<String> {
+        self.inner().root.as_ref().map(|r| r.access_key.clone())
     }
 
     fn snapshot(&self) -> Arc<Snapshot> {
@@ -374,6 +381,7 @@ impl Iam {
             ));
         }
         if inner.state.keys.contains_key(&new.access_key)
+            || inner.state.service_accounts.contains_key(&new.access_key)
             || inner
                 .root
                 .as_ref()

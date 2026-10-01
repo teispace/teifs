@@ -250,7 +250,8 @@ impl Iam {
                 return Err(AuthError::InvalidToken);
             }
             return self
-                .credential(access_key)
+                .snapshot()
+                .credential(access_key, now)
                 .map(|c| c.identity)
                 .ok_or(AuthError::UnknownKey);
         }

@@ -5,6 +5,7 @@ mod minio;
 mod oidc;
 mod roles;
 mod saml;
+mod service_accounts;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -31,6 +32,9 @@ pub use minio::{
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};
 pub use saml::{NewSamlProvider, SamlProviderInfo, SamlProviderUpdate};
+pub use service_accounts::{
+    AddedServiceAccount, MinioServiceAccount, NewServiceAccount, ServiceAccountChange,
+};
 
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -892,6 +896,13 @@ impl Iam {
             let user = d.user(name)?;
             let conflict = if d.state.keys.values().any(|k| k.user == user.id) {
                 Some("access keys")
+            } else if d
+                .state
+                .service_accounts
+                .values()
+                .any(|a| a.parent.as_deref() == Some(&*user.id))
+            {
+                Some("service accounts")
             } else if !user.inline.is_empty() {
                 Some("inline policies")
             } else if !user.attached.is_empty() {
@@ -975,7 +986,10 @@ impl Iam {
             }
             let id = loop {
                 let id = ids::access_key();
-                if !d.state.keys.contains_key(&id) && d.root != Some(id.as_str()) {
+                if !d.state.keys.contains_key(&id)
+                    && !d.state.service_accounts.contains_key(&id)
+                    && d.root != Some(id.as_str())
+                {
                     break id;
                 }
             };

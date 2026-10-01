@@ -187,6 +187,52 @@ pub struct IamExport {
     /// The managed policies mapped to LDAP users' and groups' DNs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ldap_policies: Vec<LdapPolicyMapping>,
+    /// `MinIO`'s service accounts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_accounts: Vec<ExportedServiceAccount>,
+}
+
+/// A `MinIO` service account: a key that acts as its parent, narrowed by its policy.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedServiceAccount {
+    /// Its access key.
+    pub id: String,
+    /// The name of the user it acts for; `None` for the root user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Whether requests signed with it are accepted.
+    pub active: bool,
+    /// The policy that narrows it; `None` for all its parent may do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    /// Its name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Its description.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// When it stops signing, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+    /// When it was created.
+    pub created_ms: i64,
+    /// Its secret key: only in an export with secrets. An import skips one without it
+    /// (and reports it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+impl std::fmt::Debug for ExportedServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportedServiceAccount")
+            .field("id", &self.id)
+            .field("parent", &self.parent)
+            .field("active", &self.active)
+            .field("expires_ms", &self.expires_ms)
+            .field("secret", &self.secret.as_ref().map(|_| "…"))
+            .finish_non_exhaustive()
+    }
 }
 
 /// The managed policies mapped to an LDAP user's or group's DN.
@@ -449,7 +495,11 @@ pub struct ImportReport {
     pub ldap_policies: usize,
     /// Access keys imported.
     pub access_keys: usize,
-    /// Access keys skipped because the export has no secret for them.
+    /// `MinIO` service accounts imported.
+    #[serde(default)]
+    pub service_accounts: usize,
+    /// Access keys (and service accounts) skipped because the export has no secret for
+    /// them.
     pub keys_without_secrets: Vec<String>,
 }
 

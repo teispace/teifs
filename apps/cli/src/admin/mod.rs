@@ -705,15 +705,15 @@ async fn import(client: &Client, file: &Path, adopt_account: bool) -> Result<(),
         .map_err(|e| Error::admin("can't import IAM", &e))?;
     if !report.keys_without_secrets.is_empty() {
         ui::warn(format!(
-            "{} access keys weren't imported: the export has no secrets for them (export with \
-             --secrets to bring them)",
+            "{} access keys and service accounts weren't imported: the export has no secrets \
+             for them (export with --secrets to bring them)",
             report.keys_without_secrets.len()
         ));
     }
     ui::done(
         format!(
             "Imported {} users, {} groups, {} roles, {} policies, {} OpenID Connect providers, \
-             {} SAML providers and {} access keys into account {}",
+             {} SAML providers, {} access keys and {} service accounts into account {}",
             report.users,
             report.groups,
             report.roles,
@@ -721,6 +721,7 @@ async fn import(client: &Client, file: &Path, adopt_account: bool) -> Result<(),
             report.oidc_providers,
             report.saml_providers,
             report.access_keys,
+            report.service_accounts,
             report.account
         ),
         || record("iamImport", &report),

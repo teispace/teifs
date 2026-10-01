@@ -799,6 +799,29 @@ async fn minio_assume_role_narrows_the_users_own_permissions() {
 }
 
 #[tokio::test]
+async fn service_accounts_get_no_temporary_credentials() {
+    // As MinIO refuses them: a service account only asks who it is.
+    let d = drive().await;
+    d.user("alice", &allow(&["s3:*", "sts:*"]));
+    d.open_role("open");
+    let made = d
+        .iam
+        .minio_add_service_account("alice", crate::NewServiceAccount::default())
+        .unwrap();
+    let service = d.iam.credential(&made.access_key).unwrap().identity;
+    for body in [
+        "Action=AssumeRole".to_owned(),
+        "Action=GetSessionToken".to_owned(),
+        "Action=GetFederationToken&Name=fed".to_owned(),
+        assuming(&d, "open", "s1", ""),
+    ] {
+        assert_eq!(d.sts_code(&service, &body), "AccessDenied", "{body}");
+    }
+    let body = d.sts_ok(&service, "Action=GetCallerIdentity");
+    assert!(body.contains(":user/alice"), "{body}");
+}
+
+#[tokio::test]
 async fn session_tokens_are_padded_to_the_size_asked_for() {
     let d = drive().await;
     d.open_role("wide");
