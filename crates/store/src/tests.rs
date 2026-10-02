@@ -454,7 +454,7 @@ async fn preconditions_guard_writes() {
         if_none_match: Some(Match::Any),
         ..Precondition::default()
     };
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"1").await.unwrap();
     let first = store
         .commit(
@@ -467,7 +467,7 @@ async fn preconditions_guard_writes() {
         .await
         .unwrap();
 
-    let staged = store.stage().await.unwrap();
+    let staged = store.stage();
     assert!(matches!(
         store
             .commit("photos", "k", staged, ObjectAttrs::default(), create_only)
@@ -478,7 +478,7 @@ async fn preconditions_guard_writes() {
         if_match: Some(Match::ETag("\"nope\"".into())),
         ..Precondition::default()
     };
-    let staged = store.stage().await.unwrap();
+    let staged = store.stage();
     assert!(matches!(
         store
             .commit("photos", "k", staged, ObjectAttrs::default(), wrong)
@@ -489,7 +489,7 @@ async fn preconditions_guard_writes() {
         if_match: Some(Match::ETag(format!("\"{}\"", first.etag))),
         ..Precondition::default()
     };
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"2").await.unwrap();
     store
         .commit("photos", "k", staged, ObjectAttrs::default(), right)
@@ -501,7 +501,7 @@ async fn preconditions_guard_writes() {
 #[tokio::test]
 async fn failed_uploads_leave_nothing_behind() {
     let (dir, store) = with_bucket().await;
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"partial").await.unwrap();
     drop(staged);
     assert!(
@@ -590,7 +590,7 @@ async fn multipart_uploads_join_parts_with_s3s_etag() {
     let first = vec![1u8; usize::try_from(MIN_PART_SIZE).unwrap()];
     let mut etags = Vec::new();
     for (number, bytes) in [(1, first.as_slice()), (2, b"tail".as_slice())] {
-        let mut staged = store.stage().await.unwrap();
+        let mut staged = store.stage();
         staged.write(bytes).await.unwrap();
         etags.push((
             number,
@@ -663,7 +663,7 @@ async fn a_capped_upload_stores_parts_only_up_to_its_total() {
         let store = &store;
         let id = upload.id.clone();
         async move {
-            let mut staged = store.stage().await.unwrap();
+            let mut staged = store.stage();
             staged.write(bytes).await.unwrap();
             store.put_part(&id, number, staged, BTreeMap::new()).await
         }
@@ -718,7 +718,7 @@ async fn multipart_rules_are_enforced() {
         .unwrap();
     let mut etags = Vec::new();
     for number in [1, 2] {
-        let mut staged = store.stage().await.unwrap();
+        let mut staged = store.stage();
         staged.write(b"small").await.unwrap();
         etags.push((
             number,
@@ -844,7 +844,7 @@ async fn reopening_keeps_metadata_and_clears_leftovers() {
         .put_bytes("photos", "a", b"1", attrs.clone())
         .await
         .unwrap();
-    let staged = store.stage().await.unwrap();
+    let staged = store.stage();
     std::mem::forget(staged); // As if the process died mid-upload.
     drop(store);
 

@@ -654,15 +654,16 @@ impl Store {
     }
 
     /// Starts writing an object's bytes; commit them with [`Store::commit`].
-    pub async fn stage(&self) -> Result<Staged> {
-        Staged::create(&self.inner.tmp).await
+    #[must_use]
+    pub fn stage(&self) -> Staged {
+        Staged::create(&self.inner.tmp)
     }
 
     /// Starts writing an object's bytes for `bucket`, encrypted as `encryption` asks.
     /// Encryption needs an object bucket.
     pub async fn stage_for(&self, bucket: &str, encryption: &Encryption) -> Result<Staged> {
         if matches!(encryption, Encryption::None) {
-            return self.stage().await;
+            return Ok(self.stage());
         }
         let name = bucket.to_owned();
         let bucket_id = self
@@ -685,13 +686,12 @@ impl Store {
         .await?
         .ok_or(StoreError::InvalidRequest("no encryption was asked for"))?;
         stages::record(&self.inner.stages, "write", "key", since);
-        Staged::create_sealed(
+        Ok(Staged::create_sealed(
             &self.inner.tmp,
             keyed,
             bucket_id,
             teifs_crypto::PartId::from(1),
-        )
-        .await
+        ))
     }
 
     /// Puts staged bytes in place as `bucket`/`key`, replacing what was there.
@@ -734,8 +734,13 @@ impl Store {
                     (etag, Some((object, crypt)), stored)
                 }
             };
+            // Only an object bucket takes held bytes as they are.
+            if !matches!(bucket, Bucket::Object(_)) {
+                staged.spill()?;
+            }
             let finished = Finished {
                 tmp: staged.path(),
+                held: staged.held(),
                 size: staged.size(),
                 stored_len,
                 etag,
@@ -790,7 +795,7 @@ impl Store {
         bytes: &[u8],
         attrs: ObjectAttrs,
     ) -> Result<ObjectInfo> {
-        let mut staged = self.stage().await?;
+        let mut staged = self.stage();
         staged.write(bytes).await?;
         self.commit(bucket, key, staged, attrs, Precondition::default())
             .await

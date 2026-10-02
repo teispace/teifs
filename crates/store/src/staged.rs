@@ -6,6 +6,10 @@
 //! blocking thread while the next one arrives, so the network, the hashing and the disk
 //! overlap. At most one batch is in flight per upload, and none holds a thread while it
 //! waits for the client.
+//!
+//! An upload that ends before its first batch is written never gets a file: its bytes
+//! (ciphertext when encrypted) are held, to be kept in the index as a small object, or
+//! written out ([`Staged::spill`]) where a file is needed.
 
 use std::{
     fs,
@@ -37,6 +41,8 @@ pub struct Staged {
     size: u64,
     kept: bool,
     sealing: Option<Sealing>,
+    /// A finished upload's stored bytes, when it never needed a file.
+    held: Option<Vec<u8>>,
 }
 
 /// An encrypted upload's key.
@@ -52,22 +58,34 @@ pub(crate) struct Sealing {
 /// What batches are written with; it goes to the blocking thread with each batch.
 #[derive(Debug)]
 struct Sink {
-    file: fs::File,
+    path: PathBuf,
+    /// Created with the first batch written.
+    file: Option<fs::File>,
     md5: Md5,
     encryptor: Option<PartEncryptor>,
     scratch: Vec<u8>,
 }
 
 impl Sink {
+    fn file(&mut self) -> io::Result<&mut fs::File> {
+        if self.file.is_none() {
+            self.file = Some(fs::File::create(&self.path)?);
+        }
+        self.file.as_mut().ok_or_else(broken)
+    }
+
     fn write(&mut self, batch: &[u8]) -> io::Result<()> {
         self.md5.update(batch);
         match self.encryptor.as_mut() {
             Some(encryptor) => {
                 self.scratch.clear();
                 encryptor.update(batch, &mut self.scratch);
-                self.file.write_all(&self.scratch)
+                let scratch = std::mem::take(&mut self.scratch);
+                let written = self.file().and_then(|file| file.write_all(&scratch));
+                self.scratch = scratch;
+                written
             }
-            None => self.file.write_all(batch),
+            None => self.file()?.write_all(batch),
         }
     }
 
@@ -76,11 +94,35 @@ impl Sink {
         if let Some(encryptor) = self.encryptor.take() {
             self.scratch.clear();
             encryptor.finish(&mut self.scratch);
-            self.file.write_all(&self.scratch)?;
+            let scratch = std::mem::take(&mut self.scratch);
+            self.file()?.write_all(&scratch)?;
         }
         Ok(self.md5.finalize().into())
     }
+
+    /// The whole upload, `bytes`, kept in memory: its MD5 and stored bytes.
+    fn hold(mut self: Box<Self>, bytes: Vec<u8>) -> ([u8; 16], Vec<u8>) {
+        self.md5.update(&bytes);
+        let stored = match self.encryptor.take() {
+            Some(mut encryptor) => {
+                let mut sealed = Vec::with_capacity(sealed_len(bytes.len()));
+                encryptor.update(&bytes, &mut sealed);
+                encryptor.finish(&mut sealed);
+                sealed
+            }
+            None => bytes,
+        };
+        (self.md5.finalize().into(), stored)
+    }
 }
+
+/// How long `len` plaintext bytes are once encrypted.
+fn sealed_len(len: usize) -> usize {
+    usize::try_from(teifs_crypto::ciphertext_len(len as u64)).unwrap_or(len)
+}
+
+/// Uploads up to this long are hashed and encrypted on the request's thread when held.
+const HOLD_INLINE: usize = 64 * 1024;
 
 /// A batch being written: the sink and the batch's buffer come back with the outcome.
 type Writing = JoinHandle<(Box<Sink>, Vec<u8>, io::Result<()>)>;
@@ -102,17 +144,12 @@ fn broken() -> io::Error {
 }
 
 impl Staged {
-    pub(crate) async fn create(dir: &Path) -> Result<Self> {
-        Self::open(dir, None, None).await
+    pub(crate) fn create(dir: &Path) -> Self {
+        Self::open(dir, None, None)
     }
 
     /// A staged upload encrypted with `keyed`'s data key as part `part`.
-    pub(crate) async fn create_sealed(
-        dir: &Path,
-        keyed: Keyed,
-        bucket_id: String,
-        part: PartId,
-    ) -> Result<Self> {
+    pub(crate) fn create_sealed(dir: &Path, keyed: Keyed, bucket_id: String, part: PartId) -> Self {
         let encryptor =
             PartCipher::layered(&keyed.data_key, keyed.outer.as_ref(), part).encryptor();
         let sealing = Sealing {
@@ -120,25 +157,21 @@ impl Staged {
             bucket_id,
             part,
         };
-        Self::open(dir, Some(encryptor), Some(sealing)).await
+        Self::open(dir, Some(encryptor), Some(sealing))
     }
 
-    async fn open(
-        dir: &Path,
-        encryptor: Option<PartEncryptor>,
-        sealing: Option<Sealing>,
-    ) -> Result<Self> {
+    fn open(dir: &Path, encryptor: Option<PartEncryptor>, sealing: Option<Sealing>) -> Self {
         let path = dir.join(uuid::Uuid::new_v4().to_string());
-        let file = tokio::fs::File::create(&path).await?.into_std().await;
         let scratch = if encryptor.is_some() {
             Vec::with_capacity(BATCH + BATCH / 4)
         } else {
             Vec::new()
         };
-        Ok(Self {
-            path,
+        Self {
+            path: path.clone(),
             state: State::Idle(Box::new(Sink {
-                file,
+                path,
+                file: None,
                 md5: Md5::new(),
                 encryptor,
                 scratch,
@@ -148,7 +181,8 @@ impl Staged {
             size: 0,
             kept: false,
             sealing,
-        })
+            held: None,
+        }
     }
 
     /// Appends bytes.
@@ -223,6 +257,20 @@ impl Staged {
         }
         let mut sink = self.sink().await?;
         let batch = std::mem::take(&mut self.batch);
+        self.spare = Vec::new();
+        // Nothing written yet: the upload is held, not written.
+        if sink.file.is_none() {
+            let (md5, stored) = if batch.len() <= HOLD_INLINE {
+                sink.hold(batch)
+            } else {
+                tokio::task::spawn_blocking(move || sink.hold(batch))
+                    .await
+                    .map_err(io::Error::other)?
+            };
+            self.held = Some(stored);
+            self.state = State::Finished(md5);
+            return Ok(());
+        }
         let md5 = tokio::task::spawn_blocking(move || {
             sink.write(&batch)?;
             sink.finish()
@@ -230,10 +278,26 @@ impl Staged {
         .await
         .map_err(io::Error::other)??;
         self.state = State::Finished(md5);
-        self.spare = Vec::new();
         Ok(())
     }
 
+    /// A finished upload's stored bytes, when they're held rather than in a file.
+    pub(crate) fn held(&self) -> Option<&[u8]> {
+        self.held.as_deref()
+    }
+
+    /// Writes held bytes out to the upload's file, where a file is needed. Blocks.
+    pub(crate) fn spill(&mut self) -> io::Result<()> {
+        if let Some(bytes) = self.held.take()
+            && let Err(err) = fs::write(&self.path, &bytes)
+        {
+            self.held = Some(bytes);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// The upload's file; held bytes must be [`Staged::spill`]ed first.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -374,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn batches_reach_the_file_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        let mut staged = Staged::create(dir.path()).await.unwrap();
+        let mut staged = Staged::create(dir.path());
         let mut sent = Vec::new();
         // Pieces smaller and bigger than a batch.
         for (i, len) in [1, BATCH - 1, 3, 2 * BATCH + 5, 0, 77]

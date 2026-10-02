@@ -219,6 +219,8 @@ pub(crate) struct Finished<'a> {
     /// The staged file: the stored bytes (ciphertext when encrypted), maybe followed by
     /// leftovers to cut off.
     pub tmp: &'a Path,
+    /// The stored bytes, when they were held rather than written to `tmp`.
+    pub held: Option<&'a [u8]>,
     /// The object's size (before encryption).
     pub size: u64,
     /// How many bytes of `tmp` are the object's stored bytes.
@@ -238,6 +240,7 @@ impl<'a> Finished<'a> {
     pub(crate) fn plain(tmp: &'a Path, size: u64, etag: String, attrs: ObjectAttrs) -> Self {
         Self {
             tmp,
+            held: None,
             size,
             stored_len: size,
             etag,
@@ -487,6 +490,7 @@ impl Inner {
         teifs_types::check_object_key(key)?;
         let Finished {
             tmp,
+            held,
             size,
             stored_len,
             etag,
@@ -520,16 +524,24 @@ impl Inner {
         // file's old footer), and the staged file goes.
         if written.parts.is_none() && self.inline_max > 0 && stored_len <= self.inline_max {
             let len = usize::try_from(stored_len).map_err(io::Error::other)?;
-            let mut bytes = Vec::with_capacity(len);
-            fs::File::open(tmp)?
-                .take(stored_len)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() != len {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            let bytes = if let Some(held) = held {
+                held.get(..len).map(<[u8]>::to_vec)
+            } else {
+                let mut bytes = Vec::with_capacity(len);
+                fs::File::open(tmp)?
+                    .take(stored_len)
+                    .read_to_end(&mut bytes)?;
+                let _ = fs::remove_file(tmp);
+                Some(bytes)
+            };
+            match bytes {
+                Some(bytes) if bytes.len() == len => written.inline = Some(bytes),
+                _ => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
             }
-            let _ = fs::remove_file(tmp);
-            written.inline = Some(bytes);
             return Ok(written);
+        }
+        if let Some(held) = held {
+            fs::write(tmp, held)?;
         }
         // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()

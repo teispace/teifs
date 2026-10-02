@@ -130,7 +130,7 @@ async fn bigger_objects_and_uploads_in_parts_get_files() {
         )
         .await
         .unwrap();
-    let mut staged = drive.store.stage().await.unwrap();
+    let mut staged = drive.store.stage();
     staged.write(b"one part").await.unwrap();
     let part = drive
         .store
@@ -275,4 +275,45 @@ async fn small_objects_survive_reopening_the_drive() {
     drop(store);
     let store = open(dir.path(), &keys);
     assert_eq!(read_all(&store, "k").await, b"kept");
+}
+
+#[tokio::test]
+async fn a_small_upload_is_held_without_a_staged_file() {
+    let drive = drive().await;
+    let staged_files = || std::fs::read_dir(&drive.store.inner.tmp).unwrap().count();
+    let mut small = drive
+        .store
+        .stage_for("docs", &Encryption::S3)
+        .await
+        .unwrap();
+    small.write(&pattern(1000)).await.unwrap();
+    small.finish().await.unwrap();
+    assert_eq!(staged_files(), 0);
+    // Bigger than a batch: written as it arrives.
+    let big_bytes = pattern(300 * 1024);
+    let mut big = drive
+        .store
+        .stage_for("docs", &Encryption::S3)
+        .await
+        .unwrap();
+    big.write(&big_bytes).await.unwrap();
+    big.finish().await.unwrap();
+    assert_eq!(staged_files(), 1);
+    for (key, staged) in [("small", small), ("big", big)] {
+        drive
+            .store
+            .commit(
+                "docs",
+                key,
+                staged,
+                ObjectAttrs::default(),
+                Precondition::default(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(staged_files(), 0);
+    assert_eq!(read_all(&drive.store, "small").await, pattern(1000));
+    assert_eq!(read_all(&drive.store, "big").await, big_bytes);
+    assert_eq!(data_files(&drive), 1);
 }

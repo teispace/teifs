@@ -719,7 +719,7 @@ async fn folders_and_failed_writes_make_no_versions() {
     assert_eq!(folder.version_id.as_deref(), Some(NULL_VERSION));
     let v1 = put(&store, "a.txt", b"one").await;
     // A write refused by its precondition keeps nothing.
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"two").await.unwrap();
     let refused = store
         .commit(

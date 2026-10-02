@@ -146,7 +146,7 @@ impl Store {
             if customer.is_some() {
                 return Err(StoreError::CustomerKeyNotApplicable);
             }
-            return self.stage().await;
+            return Ok(self.stage());
         };
         let crypt: Crypt = serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata)?;
         let bucket_id = self.object_bucket_id(&upload.bucket).await?;
@@ -166,7 +166,12 @@ impl Store {
             crypt,
         };
         // A salt of its own, so a part number sent again never reuses a key.
-        Staged::create_sealed(&self.inner.tmp, keyed, bucket_id, PartId::salted(number)).await
+        Ok(Staged::create_sealed(
+            &self.inner.tmp,
+            keyed,
+            bucket_id,
+            PartId::salted(number),
+        ))
     }
 
     /// How many bytes part `number` of an upload may have: what its size cap leaves
@@ -224,6 +229,8 @@ impl Store {
         staged.finish().await?;
         let id = id.to_owned();
         self.blocking(move |inner| {
+            // A part is kept as a file, however small.
+            staged.spill()?;
             let conn = inner.lock();
             let upload = conn.get_upload(&id)?.ok_or(StoreError::NoSuchUpload)?;
             let md5 = staged.md5();

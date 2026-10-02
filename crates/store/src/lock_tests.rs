@@ -406,7 +406,7 @@ async fn an_upload_in_parts_gets_the_default_retention(layout: Layout) {
         )
         .await
         .unwrap();
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"part").await.unwrap();
     let part = store
         .put_part(&upload.id, 1, staged, std::collections::BTreeMap::new())

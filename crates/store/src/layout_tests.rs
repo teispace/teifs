@@ -393,7 +393,7 @@ async fn multipart_uploads_complete_into_object_buckets() {
     let part = vec![7u8; usize::try_from(MIN_PART_SIZE).unwrap()];
     let mut etags = Vec::new();
     for (number, bytes) in [(1, part.as_slice()), (2, b"tail".as_slice())] {
-        let mut staged = store.stage().await.unwrap();
+        let mut staged = store.stage();
         staged.write(bytes).await.unwrap();
         let stored = store
             .put_part(&upload.id, number, staged, BTreeMap::new())
@@ -440,7 +440,7 @@ async fn completed_uploads_remember_their_parts() {
             (1, first.as_slice(), sums.clone()),
             (2, b"end".as_slice(), BTreeMap::new()),
         ] {
-            let mut staged = store.stage().await.unwrap();
+            let mut staged = store.stage();
             staged.write(bytes).await.unwrap();
             let part = store
                 .put_part(&upload.id, number, staged, checksums)
@@ -620,7 +620,7 @@ async fn conditional_writes_and_deletes_follow_aws() {
         let put = |pre: Precondition| {
             let store = store.clone();
             async move {
-                let mut staged = store.stage().await.unwrap();
+                let mut staged = store.stage();
                 staged.write(b"v").await.unwrap();
                 store
                     .commit("bkt", "k", staged, ObjectAttrs::default(), pre)

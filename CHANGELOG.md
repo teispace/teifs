@@ -810,6 +810,10 @@ behaviour; the on-disk format is always upgraded automatically.
 - Completing a multipart upload, or copying into an object bucket from another bucket,
   no longer holds up other writes while the new object is synced: its data file goes in
   place before the drive's commit lock, as an upload's does.
+- Uploads smaller than 256 KiB never get a staged file: their bytes are held in
+  memory and go straight into the index when the object is kept there, or to its file
+  otherwise. Writing small objects takes about a quarter of the CPU it did (a sixth of
+  the system time), and about 1.7× as many go in per second through the store.
 - Listings rolled up by a delimiter (`delimiter=/`) in object buckets read a few rows
   after each common prefix instead of a full page: 100 folders of a 1M-object bucket
   list in about 3 ms instead of 60–500 ms.

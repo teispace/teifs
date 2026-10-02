@@ -27,7 +27,7 @@ async fn concurrently(
         .map(|i| {
             let (store, key, precondition) = (store.clone(), key(i), precondition.clone());
             tokio::spawn(async move {
-                let mut staged = store.stage().await?;
+                let mut staged = store.stage();
                 staged.write(format!("write {i}").as_bytes()).await?;
                 store
                     .commit("docs", &key, staged, ObjectAttrs::default(), precondition)
@@ -120,9 +120,10 @@ fn resolved(store: &Store) -> ObjectBucket {
 
 /// Writes `bytes` as `key` without recording it; also returns its data file.
 async fn write(store: &Store, key: &str, bytes: &[u8]) -> (Written, PathBuf) {
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(bytes).await.unwrap();
     staged.finish().await.unwrap();
+    staged.spill().unwrap();
     let etag = teifs_types::hex(&staged.md5());
     let finished = Finished::plain(staged.path(), staged.size(), etag, ObjectAttrs::default());
     let written = store
@@ -531,7 +532,7 @@ async fn one_part_upload(store: &Store, key: &str) -> (String, Vec<(u32, String)
         )
         .await
         .unwrap();
-    let mut staged = store.stage().await.unwrap();
+    let mut staged = store.stage();
     staged.write(b"parts").await.unwrap();
     let part = store
         .put_part(&upload.id, 1, staged, std::collections::BTreeMap::new())

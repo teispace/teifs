@@ -104,7 +104,7 @@ async fn restored_multipart_files_keep_their_etag() {
     let first = vec![3u8; usize::try_from(MIN_PART_SIZE).unwrap()];
     let mut etags = Vec::new();
     for (number, bytes) in [(1, first.as_slice()), (2, b"tail".as_slice())] {
-        let mut staged = store.stage().await.unwrap();
+        let mut staged = store.stage();
         staged.write(bytes).await.unwrap();
         let part = store
             .put_part(&upload.id, number, staged, BTreeMap::new())
