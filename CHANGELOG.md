@@ -350,6 +350,10 @@ behaviour; the on-disk format is always upgraded automatically.
   Object Lock and versioning (and CORS), each checked as S3's call checks it.
 - MinIO's older `set-user-or-group-policy` (`mc admin policy set` of older `mc`
   releases): exactly the policies named, for a built-in user or group or an LDAP one.
+- MinIO's `revoke-tokens` (`mc admin user revoke`, `mc idp ldap revoke`): a built-in
+  or LDAP user's temporary credentials end before they expire, all of them or those
+  issued with one `TokenRevokeType`, which MinIO's `AssumeRole` and
+  `AssumeRoleWithLDAPIdentity` now take. A user without the admin action ends its own.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the

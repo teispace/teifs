@@ -503,3 +503,52 @@ async fn set_user_or_group_policy_maps_ldap_users_and_groups() {
     let query = "policyName=readonly&userOrGroup=cn=nobody,ou=groups,dc=min,dc=io&isGroup=true";
     assert_eq!(set(query.to_owned()).await, 404);
 }
+
+#[tokio::test]
+async fn revoke_tokens_ends_a_directory_user_s_sessions() {
+    let fake = FakeLdap::start().await;
+    fake.add(group("projectc", &["liza"]));
+    let server = ldap_server(&fake).await;
+    let body = json!({"policies": ["read-photos"], "user": LIZA});
+    assert_eq!(change(&server, "attach", &body).await.0, 200);
+    let sign_in = || async {
+        admin_client(&server, "", "")
+            .assume_role_with_ldap_identity("liza", "liza-password", None, None)
+            .await
+            .unwrap()
+    };
+    let reads = |credentials: &teifs_client::TemporaryCredentials| {
+        let client = session(&server, credentials);
+        async move {
+            code(
+                client
+                    .get_object()
+                    .bucket("photos")
+                    .key("cat.jpg")
+                    .send()
+                    .await,
+            )
+        }
+    };
+    let revoke = |query: &'static str| {
+        let server = &server;
+        async move {
+            let path = format!("{ADMIN}revoke-tokens/ldap?{query}");
+            signed_response(server, (ROOT.id, ROOT.secret), "POST", &path, &[], &[])
+                .await
+                .status()
+                .as_u16()
+        }
+    };
+    // By the name the user signs in with, and by DN in another spelling.
+    for query in [
+        "user=liza&fullRevoke=true",
+        "user=UID=Liza,OU=People,DC=min,DC=io&fullRevoke=true",
+    ] {
+        let credentials = sign_in().await;
+        assert_eq!(reads(&credentials).await, "ok");
+        assert_eq!(revoke(query).await, 204, "{query}");
+        assert_ne!(reads(&credentials).await, "ok", "{query}");
+    }
+    assert_eq!(revoke("user=nobody&fullRevoke=true").await, 404);
+}

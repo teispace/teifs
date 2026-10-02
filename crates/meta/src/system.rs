@@ -47,6 +47,8 @@ const MIGRATIONS: &[&str] = &[
     crate::iam::SERVICE_ACCOUNTS_MIGRATION,
     // 12: service accounts of LDAP users.
     crate::iam::LDAP_SERVICE_ACCOUNTS_MIGRATION,
+    // 13: revoked temporary credentials (`MinIO`'s `revoke-tokens`).
+    crate::iam::REVOCATIONS_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

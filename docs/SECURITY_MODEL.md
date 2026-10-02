@@ -246,7 +246,10 @@ the same key and bound to the access key id, so a token can't be forged, changed
 used with another key, and a long-term key sent with a token is refused. Every request
 rebuilds the session's permissions from IAM as it is now: a role's or user's policies
 changing reach their sessions at once, and deleting the role or user ends them, even
-if one of the same name is made again (sessions name it by unique id). A role session
+if one of the same name is made again (sessions name it by unique id). MinIO's
+`revoke-tokens` ends a user's sessions early by recording when it was asked: sessions
+issued until then (those of one token revoke type, or all) are refused, failing closed
+for tokens that only say their second. A role session
 has only the role's permissions, narrowed by its session policies; `AssumeRole` is
 decided by the trust policy, `sts:TagSession` and `sts:SetSourceIdentity` too when
 tags or a source identity are asked for, and the trust policy must name the principal

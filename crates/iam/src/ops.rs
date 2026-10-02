@@ -4,6 +4,7 @@ mod ldap;
 mod minio;
 mod minio_migrate;
 mod oidc;
+mod revoke;
 mod roles;
 mod saml;
 mod service_accounts;
@@ -35,6 +36,7 @@ pub use minio_migrate::{
     MinioImportUser,
 };
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
+pub use revoke::SessionParent;
 pub use roles::{NewRole, RoleInfo};
 pub use saml::{NewSamlProvider, SamlProviderInfo, SamlProviderUpdate};
 pub use service_accounts::{

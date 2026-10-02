@@ -14,7 +14,7 @@ use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
 use teifs_iam::{
     GroupPolicies, Iam, Identity, LdapEntity, MinioError, MinioGroup, MinioUser, MinioUserChange,
-    Owner, PolicyEntities,
+    Owner, PolicyEntities, Session, SessionParent,
 };
 use teifs_policy::Context;
 use teifs_store::{RetentionPeriod, Store, Versioning};
@@ -515,6 +515,105 @@ pub(crate) async fn set_user_or_group_policy(
         return Err(minio_error(missing));
     }
     Ok(S3Response::new(Body::empty()))
+}
+
+/// `POST revoke-tokens/{userProvider}?user=&tokenRevokeType=&fullRevoke=`: ends a
+/// user's temporary credentials before they expire (`mc admin user revoke`, `mc idp
+/// ldap revoke`), as `MinIO` does: all of them (`fullRevoke=true`) or those issued with
+/// one token revoke type. A caller without `admin:RemoveServiceAccount`, or naming no
+/// user, ends its own; a session that names neither ends those of its own type.
+pub(crate) async fn revoke_tokens(
+    iam: &Iam,
+    identity: &Identity,
+    privileged: bool,
+    req: &S3Request<Body>,
+) -> S3Result<S3Response<Body>> {
+    let provider = req.uri.path().rsplit('/').next().unwrap_or_default();
+    let params = query(req);
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or("", |(_, v)| v.as_str())
+    };
+    let user = param("user");
+    let mut revoke_type = param("tokenRevokeType");
+    let full = param("fullRevoke") == "true";
+    let named = if user.is_empty() {
+        None
+    } else {
+        Some(session_parent(iam, provider, user).await?)
+    };
+    if (named.is_some() && revoke_type.is_empty() && !full) || (!revoke_type.is_empty() && full) {
+        return Err(admin::error(
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+            "Name a token revoke type (tokenRevokeType) or ask for all of them (fullRevoke=true), \
+             not both.",
+        ));
+    }
+    let parent = match named {
+        Some(named) if privileged => named,
+        named => {
+            let own = iam.session_parent(identity);
+            match (own, named) {
+                (Some(own), None) => own,
+                (Some(own), Some(named)) if same_parent(&own, &named) => own,
+                _ => return Err(s3s::s3_error!(AccessDenied, "Access Denied")),
+            }
+        }
+    };
+    if user.is_empty() && revoke_type.is_empty() && !full {
+        revoke_type = identity
+            .session()
+            .and_then(Session::revoke_type)
+            .unwrap_or_default();
+        if revoke_type.is_empty() {
+            return Err(admin::error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "No token revoke type specified and one could not be inferred from the request",
+            ));
+        }
+    }
+    let revoke_type = (!revoke_type.is_empty()).then_some(revoke_type);
+    iam.revoke_sessions(&parent, revoke_type)
+        .map_err(minio_error)?;
+    let mut response = S3Response::new(Body::empty());
+    response.status = Some(StatusCode::NO_CONTENT);
+    Ok(response)
+}
+
+/// The user `revoke-tokens` names: a built-in one (or the root user) by access key, or
+/// a directory user by name or DN. Other providers' tokens aren't revoked by user, as on
+/// `MinIO`.
+async fn session_parent(iam: &Iam, provider: &str, user: &str) -> S3Result<SessionParent> {
+    match provider {
+        "builtin" if iam.root_access_key().as_deref() == Some(user) => Ok(SessionParent::Root),
+        "builtin" => Ok(SessionParent::User(user.to_owned())),
+        "ldap" if iam.ldap().is_some() => match iam.find_ldap_user(user).await {
+            Ok(Some(dn)) => Ok(SessionParent::Ldap(dn)),
+            _ if teifs_iam::ldap::is_dn(user) => teifs_iam::ldap::normalize(user)
+                .map(SessionParent::Ldap)
+                .map_err(|_| minio_error(MinioError::NoSuchUser)),
+            Ok(None) => Err(minio_error(MinioError::NoSuchUser)),
+            Err(err) => Err(minio_error(err.into())),
+        },
+        "ldap" => Err(minio_error(MinioError::ActionNotAllowed(
+            "LDAP isn't configured.".into(),
+        ))),
+        _ => Err(minio_error(MinioError::ActionNotAllowed(format!(
+            "The tokens of {provider:?} users can't be revoked by user."
+        )))),
+    }
+}
+
+/// Whether two parents are the same user (names compare without case, as IAM's do).
+fn same_parent(a: &SessionParent, b: &SessionParent) -> bool {
+    match (a, b) {
+        (SessionParent::User(a), SessionParent::User(b)) => a.eq_ignore_ascii_case(b),
+        (a, b) => a == b,
+    }
 }
 
 /// `madmin.PolicyAssociationResp`.

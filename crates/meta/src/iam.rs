@@ -192,6 +192,17 @@ pub(crate) const LDAP_SERVICE_ACCOUNTS_MIGRATION: &str = "
     ALTER TABLE iam_service_accounts ADD COLUMN ldap_dn TEXT;
     ALTER TABLE iam_service_accounts ADD COLUMN ldap_username TEXT;";
 
+/// Revoked temporary credentials: migration 13. Sessions are kept nowhere, so revoking
+/// them records, per user they act for (`subject`) and per token revoke type (empty for
+/// all of them), when: sessions issued then or before are refused.
+pub(crate) const REVOCATIONS_MIGRATION: &str = "
+    CREATE TABLE iam_revocations (
+        subject     TEXT    NOT NULL,
+        revoke_type TEXT    NOT NULL,
+        cutoff_ms   INTEGER NOT NULL,
+        PRIMARY KEY (subject, revoke_type)
+    ) WITHOUT ROWID;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -320,6 +331,17 @@ pub struct LdapSessionRow {
     pub generation: u32,
     /// Whether the directory no longer has it.
     pub gone: bool,
+}
+
+/// Revoked sessions of a user: those issued at or before `cutoff_ms`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationRow {
+    /// Whom the sessions act for, as `teifs-iam` names it.
+    pub subject: String,
+    /// The sessions' token revoke type; empty for all of them.
+    pub revoke_type: String,
+    /// Sessions issued at or before it (milliseconds since the Unix epoch) are refused.
+    pub cutoff_ms: i64,
 }
 
 /// A group.
@@ -502,6 +524,8 @@ pub struct IamRows {
     pub ldap_policies: Vec<LdapPolicyRow>,
     /// LDAP users with live sessions.
     pub ldap_sessions: Vec<LdapSessionRow>,
+    /// Revoked sessions.
+    pub revocations: Vec<RevocationRow>,
 }
 
 /// One change to IAM's tables. `Put…` inserts or updates in place (never deletes and
@@ -590,6 +614,10 @@ pub enum IamWrite {
     PutLdapSession(LdapSessionRow),
     /// Deletes an LDAP user's record.
     DeleteLdapSession(String),
+    /// Records or moves a revocation.
+    PutRevocation(RevocationRow),
+    /// Forgets a revocation: (subject, revoke type).
+    DeleteRevocation(String, String),
 }
 
 impl System {
@@ -759,6 +787,16 @@ impl System {
                     expires_ms: r.get(4)?,
                     generation: r.get(5)?,
                     gone: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+            revocations: all("SELECT subject, revoke_type, cutoff_ms FROM iam_revocations
+                 ORDER BY subject, revoke_type")?
+            .query_map([], |r| {
+                Ok(RevocationRow {
+                    subject: r.get(0)?,
+                    revoke_type: r.get(1)?,
+                    cutoff_ms: r.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -1104,6 +1142,15 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::DeleteLdapSession(dn) => {
             run("DELETE FROM iam_ldap_sessions WHERE dn = ?1", params![dn])
         }
+        IamWrite::PutRevocation(r) => run(
+            "INSERT INTO iam_revocations (subject, revoke_type, cutoff_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (subject, revoke_type) DO UPDATE SET cutoff_ms = excluded.cutoff_ms",
+            params![r.subject, r.revoke_type, r.cutoff_ms],
+        ),
+        IamWrite::DeleteRevocation(subject, revoke_type) => run(
+            "DELETE FROM iam_revocations WHERE subject = ?1 AND revoke_type = ?2",
+            params![subject, revoke_type],
+        ),
     }
 }
 
@@ -1571,6 +1618,31 @@ mod tests {
             .unwrap();
         let rows = system.iam_rows().unwrap();
         assert!(rows.ldap_policies.is_empty() && rows.ldap_sessions.is_empty());
+    }
+
+    #[test]
+    fn revocations_round_trip() {
+        let (_dir, mut system) = open();
+        let row = |revoke_type: &str, cutoff_ms| RevocationRow {
+            subject: "user:U1".into(),
+            revoke_type: revoke_type.into(),
+            cutoff_ms,
+        };
+        system
+            .iam_apply(&[
+                IamWrite::PutRevocation(row("", 5)),
+                IamWrite::PutRevocation(row("app", 6)),
+                IamWrite::PutRevocation(row("", 7)),
+            ])
+            .unwrap();
+        assert_eq!(
+            system.iam_rows().unwrap().revocations,
+            [row("", 7), row("app", 6)]
+        );
+        system
+            .iam_apply(&[IamWrite::DeleteRevocation("user:U1".into(), String::new())])
+            .unwrap();
+        assert_eq!(system.iam_rows().unwrap().revocations, [row("app", 6)]);
     }
 
     #[test]

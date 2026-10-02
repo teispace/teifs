@@ -593,6 +593,11 @@ func iamTransfer(ctx context.Context, adm *madmin.AdminClient) {
 	must(err)
 	check(user.PolicyName == "go-mover,readonly" || user.PolicyName == "readonly,go-mover", fmt.Sprintf("set: %+v", user))
 	must(adm.ImportIAM(ctx, io.NopCloser(bytes.NewReader(zipped))))
+	// mc admin user revoke: all of a user's temporary credentials, or one type of them;
+	// a request must say which.
+	must(adm.RevokeTokens(ctx, madmin.RevokeTokensReq{User: "go-mover", FullRevoke: true}))
+	must(adm.RevokeTokens(ctx, madmin.RevokeTokensReq{User: "go-mover", TokenRevokeType: "app"}))
+	check(adm.RevokeTokens(ctx, madmin.RevokeTokensReq{User: "go-mover"}) != nil, "a revoke naming neither is refused")
 	must(adm.RemoveUser(ctx, "go-mover"))
 	must(adm.RemoveCannedPolicy(ctx, "go-mover"))
 }

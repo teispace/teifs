@@ -440,6 +440,9 @@ pub(crate) struct State {
     pub(crate) ldap_policies: BTreeMap<String, Arc<LdapMapping>>,
     /// Directory users with live sessions, by DN.
     pub(crate) ldap_sessions: BTreeMap<String, Arc<LdapSeen>>,
+    /// Revoked sessions, by whom they act for and token revoke type (empty for all of
+    /// them): those issued at or before this, in milliseconds since the Unix epoch.
+    pub(crate) revocations: BTreeMap<(String, String), i64>,
 }
 
 impl State {
@@ -458,6 +461,11 @@ impl State {
             )?,
             ldap_policies: load_ldap_policies(rows.ldap_policies)?,
             ldap_sessions: load_ldap_sessions(rows.ldap_sessions)?,
+            revocations: rows
+                .revocations
+                .into_iter()
+                .map(|r| ((r.subject, r.revoke_type), r.cutoff_ms))
+                .collect(),
             ..Self::default()
         };
         let mut users: BTreeMap<String, User> = rows

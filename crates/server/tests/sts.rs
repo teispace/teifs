@@ -17,6 +17,7 @@ use aws_sdk_sts::{
 };
 
 mod common;
+mod signing;
 
 use common::{ACCESS_KEY, SECRET_KEY, Server, code, idp::Idp, start};
 
@@ -119,7 +120,7 @@ fn sts_with(server: &Server, keys: &Keys, form: Option<MinioForm>) -> aws_sdk_st
 /// Sends MinIO's `AssumeRole` form, which has no `RoleArn` or `RoleSessionName` (the
 /// SDK won't build a request without them), signed as the SDK signs its own.
 #[derive(Debug)]
-struct MinioForm(&'static str);
+struct MinioForm(String);
 
 impl Intercept for MinioForm {
     fn name(&self) -> &'static str {
@@ -136,7 +137,7 @@ impl Intercept for MinioForm {
         request
             .headers_mut()
             .insert("content-length", self.0.len().to_string());
-        *request.body_mut() = aws_sdk_s3::primitives::SdkBody::from(self.0);
+        *request.body_mut() = aws_sdk_s3::primitives::SdkBody::from(self.0.clone());
         Ok(())
     }
 }
@@ -415,7 +416,8 @@ async fn minio_assume_role_gives_a_users_own_permissions_narrowed() {
         r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#,
     );
     let form = MinioForm(
-        "Action=AssumeRole&Version=2011-06-15&DurationSeconds=86400&Policy=%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22s3%3AGetObject%22%2C%22Resource%22%3A%22*%22%7D%5D%7D",
+        "Action=AssumeRole&Version=2011-06-15&DurationSeconds=86400&Policy=%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22s3%3AGetObject%22%2C%22Resource%22%3A%22*%22%7D%5D%7D"
+            .into(),
     );
     let out = sts_with(&server, &alice, Some(form))
         .assume_role()
@@ -705,4 +707,104 @@ async fn minio_web_identities_take_the_policies_their_tokens_name() {
         .await
         .unwrap_err();
     assert_eq!(code::<(), _>(Err(err)), "InvalidParameterValue");
+}
+
+/// MinIO's `AssumeRole` for `keys`' user, with `TokenRevokeType` when given.
+async fn minio_session(server: &Server, keys: &Keys, revoke_type: Option<&str>) -> Keys {
+    let form = match revoke_type {
+        Some(revoke_type) => {
+            format!("Action=AssumeRole&Version=2011-06-15&TokenRevokeType={revoke_type}")
+        }
+        None => "Action=AssumeRole&Version=2011-06-15".to_owned(),
+    };
+    let out = sts_with(server, keys, Some(MinioForm(form)))
+        .assume_role()
+        .role_arn("ignored-by-the-form")
+        .role_session_name("ignored")
+        .send()
+        .await
+        .unwrap();
+    Keys::temporary(out.credentials().unwrap())
+}
+
+/// `revoke-tokens/{provider}?{query}`, signed with `keys`: the status and the error code.
+async fn revoke(server: &Server, keys: &Keys, provider: &str, query: &str) -> (u16, String) {
+    let path = format!("/minio/admin/v3/revoke-tokens/{provider}?{query}");
+    let (status, body) = match &keys.token {
+        Some(token) => {
+            signing::signed_session(server, (&keys.id, &keys.secret, token), "POST", &path).await
+        }
+        None => signing::signed(server, (&keys.id, &keys.secret), "POST", &path, &[], &[]).await,
+    };
+    let code = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["Code"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (status, code)
+}
+
+async fn lists(server: &Server, keys: &Keys) -> String {
+    code(s3(server, keys).list_buckets().send().await)
+}
+
+#[tokio::test]
+async fn revoke_tokens_ends_a_users_minio_sessions_as_mc_admin_user_revoke_does() {
+    let server = start().await;
+    let everything = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let alice = Keys::user(&server, "alice", everything);
+    let app = minio_session(&server, &alice, Some("app")).await;
+    let web = minio_session(&server, &alice, Some("web")).await;
+    let plain = minio_session(&server, &alice, None).await;
+    for session in [&app, &web, &plain] {
+        assert_eq!(lists(&server, session).await, "ok");
+    }
+
+    // A session that names nothing ends those of its own type; one without a type
+    // can't.
+    assert_eq!(revoke(&server, &app, "builtin", "").await.0, 204);
+    assert_ne!(lists(&server, &app).await, "ok");
+    assert_eq!(lists(&server, &web).await, "ok");
+    assert_eq!(
+        revoke(&server, &plain, "builtin", "").await,
+        (400, "InvalidArgument".to_owned())
+    );
+
+    // Without admin:RemoveServiceAccount, a user ends only its own.
+    assert_eq!(
+        revoke(&server, &alice, "builtin", "user=root&fullRevoke=true").await,
+        (403, "AccessDenied".to_owned())
+    );
+    let (status, _) = revoke(&server, &alice, "builtin", "user=ALICE&fullRevoke=true").await;
+    assert_eq!(status, 204);
+    assert_ne!(lists(&server, &web).await, "ok");
+    assert_ne!(lists(&server, &plain).await, "ok");
+    assert_eq!(lists(&server, &alice).await, "ok", "long-term keys stay");
+
+    // The root user ends anyone's, by type or all; a request must say which.
+    let root = Keys::root();
+    let later = minio_session(&server, &alice, None).await;
+    let typed = minio_session(&server, &alice, Some("web")).await;
+    for query in [
+        "user=alice",
+        "user=alice&tokenRevokeType=web&fullRevoke=true",
+    ] {
+        assert_eq!(
+            revoke(&server, &root, "builtin", query).await,
+            (400, "InvalidRequest".to_owned()),
+            "{query}"
+        );
+    }
+    let (status, _) = revoke(&server, &root, "builtin", "user=alice&tokenRevokeType=web").await;
+    assert_eq!(status, 204);
+    assert_ne!(lists(&server, &typed).await, "ok");
+    assert_eq!(lists(&server, &later).await, "ok");
+    let (status, _) = revoke(&server, &root, "builtin", "user=nobody&fullRevoke=true").await;
+    assert_eq!(status, 204, "someone who isn't there has nothing to end");
+    for provider in ["openid", "ldap"] {
+        assert_eq!(
+            revoke(&server, &root, provider, "user=alice&fullRevoke=true").await,
+            (403, "XMinioIAMActionNotAllowed".to_owned()),
+            "{provider}"
+        );
+    }
 }

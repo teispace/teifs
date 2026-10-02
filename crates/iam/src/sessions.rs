@@ -60,6 +60,13 @@ pub(crate) struct Claims {
     /// The SAML response that started it (`AssumeRoleWithSAML`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) saml: Option<SamlClaims>,
+    /// When it was issued, in milliseconds, which revocations compare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) iat_ms: Option<i64>,
+    /// MinIO's token revoke type (`TokenRevokeType`), by which `revoke-tokens` may end
+    /// this session alone of its user's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revoke_type: Option<String>,
     /// Filler that makes the token as long as the caller asked
     /// (`MinimumSessionTokenSize`); it means nothing.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -161,9 +168,59 @@ impl Claims {
             source: None,
             web: None,
             saml: None,
+            iat_ms: None,
+            revoke_type: None,
             pad: String::new(),
         }
     }
+
+    /// Claims issued now, valid for `seconds`.
+    pub(crate) fn issued_now(who: Who, seconds: u32) -> Self {
+        let ms = crate::now_ms();
+        let now = ms.div_euclid(1000);
+        Self {
+            iat_ms: Some(ms),
+            ..Self::new(who, now, now + i64::from(seconds))
+        }
+    }
+
+    /// When it was issued, in milliseconds since the Unix epoch; for a token that
+    /// doesn't say, the start of its second, so a revocation in that second ends it.
+    pub(crate) fn issued_ms(&self) -> i64 {
+        self.iat_ms.unwrap_or_else(|| self.iat.saturating_mul(1000))
+    }
+
+    /// Whom revocations name for it: the user it acts as (by unique id), the root user,
+    /// or the LDAP user (by DN). None for sessions `revoke-tokens` doesn't reach.
+    pub(crate) fn revocation_subject(&self) -> Option<String> {
+        match &self.who {
+            Who::User { user }
+            | Who::SessionToken { user: Some(user) }
+            | Who::Federated {
+                user: Some(user), ..
+            } => Some(user_subject(user)),
+            Who::SessionToken { user: None } | Who::Federated { user: None, .. } => {
+                Some(ROOT_SUBJECT.to_owned())
+            }
+            Who::Ldap { dn, .. } => Some(ldap_subject(dn)),
+            Who::Role { .. } | Who::Web { .. } | Who::Certificate { .. } | Who::Custom { .. } => {
+                None
+            }
+        }
+    }
+}
+
+/// How revocations name the root user.
+pub(crate) const ROOT_SUBJECT: &str = "root";
+
+/// How revocations name a user, by unique id.
+pub(crate) fn user_subject(id: &str) -> String {
+    format!("user:{id}")
+}
+
+/// How revocations name an LDAP user, by DN written in one form.
+pub(crate) fn ldap_subject(dn: &str) -> String {
+    format!("ldap:{dn}")
 }
 
 /// Why a request's credentials weren't accepted.

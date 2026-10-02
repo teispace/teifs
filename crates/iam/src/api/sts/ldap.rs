@@ -4,12 +4,15 @@
 //! ([`crate::Iam::serve_self_proving`]); the action checks the request, then issues the
 //! session with what the directory said.
 
-use super::{ApiError, Out, Run, answer, credentials, duration, min_token_size, session_policies};
+use super::{
+    ApiError, Out, Run, answer, credentials, duration, min_token_size, revoke_type,
+    session_policies,
+};
 use crate::{
     api::Proved,
     ldap::LdapError,
     ops::LdapSignIn,
-    sessions::{Claims, Who, now_seconds},
+    sessions::{Claims, Who},
 };
 
 /// The action's name.
@@ -80,7 +83,8 @@ pub(in crate::api) fn assume_role_with_ldap_identity(r: &Run<'_>) -> Out {
             signed_in.groups.join("`,`")
         )));
     }
-    let now = now_seconds();
+    let issued_ms = crate::now_ms();
+    let now = issued_ms.div_euclid(1000);
     let expires = now + i64::from(request.seconds);
     let generation = r.iam.record_ldap_sign_in(&LdapSignIn {
         dn: &signed_in.dn,
@@ -94,7 +98,9 @@ pub(in crate::api) fn assume_role_with_ldap_identity(r: &Run<'_>) -> Out {
         generation,
     };
     let mut claims = Claims::new(who, now, expires);
+    claims.iat_ms = Some(issued_ms);
     claims.policies = request.policies;
+    claims.revoke_type = revoke_type(r);
     let issued = r.iam.issue_at_least(&claims, request.min_token)?;
     tracing::info!(dn = %signed_in.dn, "an LDAP user signed in");
     answer(|x| {

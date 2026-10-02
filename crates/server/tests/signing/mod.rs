@@ -32,7 +32,7 @@ pub async fn signed_response(
     send(
         &reqwest::Client::new(),
         server,
-        key,
+        (key.0, key.1, None),
         (method, path),
         headers,
         body,
@@ -52,7 +52,28 @@ pub async fn signed_over(
     let response = send(
         client,
         server,
-        key,
+        (key.0, key.1, None),
+        (method, path),
+        &[],
+        b"",
+        PercentEncodingMode::Double,
+    )
+    .await;
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+/// [`signed`], with temporary credentials: (access key, secret, session token).
+pub async fn signed_session(
+    server: &crate::common::Server,
+    (access_key, secret, token): (&str, &str, &str),
+    method: &str,
+    path: &str,
+) -> (u16, String) {
+    let response = send(
+        &reqwest::Client::new(),
+        server,
+        (access_key, secret, Some(token)),
         (method, path),
         &[],
         b"",
@@ -76,7 +97,7 @@ pub async fn signed_as_sent(
     let response = send(
         &reqwest::Client::new(),
         server,
-        key,
+        (key.0, key.1, None),
         (method, path),
         headers,
         body,
@@ -90,7 +111,7 @@ pub async fn signed_as_sent(
 async fn send(
     client: &reqwest::Client,
     server: &crate::common::Server,
-    (access_key, secret): (&str, &str),
+    (access_key, secret, token): (&str, &str, Option<&str>),
     (method, path): (&str, &str),
     headers: &[(&str, &str)],
     body: &[u8],
@@ -113,8 +134,14 @@ async fn send(
     {
         all.push(("host", &host));
     }
-    let identity =
-        aws_credential_types::Credentials::new(access_key, secret, None, None, "tests").into();
+    let identity = aws_credential_types::Credentials::new(
+        access_key,
+        secret,
+        token.map(str::to_owned),
+        None,
+        "tests",
+    )
+    .into();
     let mut settings = SigningSettings::default();
     settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
     settings.percent_encoding_mode = encoding;

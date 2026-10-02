@@ -179,6 +179,7 @@ enum Handler {
     MinioBucketMetadata(minio_bucket_metadata::Call),
     /// `MinIO`'s older `set-user-or-group-policy`.
     MinioSetPolicy,
+    RevokeTokens,
 }
 
 impl Handler {
@@ -246,6 +247,7 @@ impl Handler {
             Self::MinioIamTransfer(call) => call.name(),
             Self::MinioBucketMetadata(call) => call.name(),
             Self::MinioSetPolicy => "SetPolicyForUserOrGroup",
+            Self::RevokeTokens => "RevokeTokens",
         }
     }
 }
@@ -648,6 +650,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::OrOwnAccount("admin:RemoveServiceAccount"),
         handler: Handler::DeleteServiceAccount,
         about: "Deletes service account `?accessKey=`: `mc admin user svcacct rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/revoke-tokens/{userProvider}",
+        needs: Needs::OrOwnAccount("admin:RemoveServiceAccount"),
+        handler: Handler::RevokeTokens,
+        about: "Ends the temporary credentials of `?user=` (`builtin` or `ldap` `{userProvider}`; without the action or a user, the caller's own) issued until now: all of them (`fullRevoke=true`) or those of `tokenRevokeType`: `mc admin user revoke`, `mc idp ldap revoke`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1636,6 +1646,9 @@ impl Routes {
             }
             Handler::DeleteServiceAccount => {
                 minio_service_accounts::delete(&self.iam, identity, privileged, &req)
+            }
+            Handler::RevokeTokens => {
+                minio_iam::revoke_tokens(&self.iam, identity, privileged, &req).await
             }
             Handler::ListAccessKeysBulk => {
                 minio_service_accounts::list_bulk(&self.iam, (identity, context), privileged, &req)

@@ -46,7 +46,8 @@ pub use ops::{
     MinioImportResult, MinioImportUser, MinioPolicy, MinioServiceAccount, MinioUser,
     MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider, NewServiceAccount,
     OidcProviderInfo, Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo,
-    RoleInfo, SamlProviderInfo, SamlProviderUpdate, ServiceAccountChange, UserInfo, UserPolicies,
+    RoleInfo, SamlProviderInfo, SamlProviderUpdate, ServiceAccountChange, SessionParent, UserInfo,
+    UserPolicies,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
@@ -434,7 +435,7 @@ pub(crate) struct Draft<'a> {
     pub(crate) now: i64,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))

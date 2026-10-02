@@ -692,6 +692,7 @@ fn assume_as_user(r: &Run<'_>) -> Out {
         seconds,
     );
     claims.policies = policies;
+    claims.revoke_type = revoke_type(r);
     let issued = r.iam.issue_at_least(&claims, min_token)?;
     answer(|x| credentials(x, &issued))
 }
@@ -792,8 +793,15 @@ fn min_token_size(r: &Run<'_>) -> Result<usize, ApiError> {
 }
 
 fn claims(who: Who, seconds: u32) -> Claims {
-    let now = now_seconds();
-    Claims::new(who, now, now + i64::from(seconds))
+    Claims::issued_now(who, seconds)
+}
+
+/// MinIO's `TokenRevokeType`: a name `revoke-tokens` may end these credentials by,
+/// alone of their user's.
+fn revoke_type(r: &Run<'_>) -> Option<String> {
+    r.p.optional("TokenRevokeType")
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
 }
 
 /// The credentials, and how large their token is (in bytes, and as a share of the

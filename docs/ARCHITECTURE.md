@@ -256,8 +256,14 @@ longer token) as JSON sealed with AES-256-GCM under the IAM key and
 bound to the access key id, at most 6 KiB. A token works only with its own key and
 can't be forged or changed. Every request turns the claims into an `Identity` against
 IAM as it is now (`Snapshot::add_session`), so a role's or user's permissions changing
-reaches its sessions at once, and a deleted one takes them with it (`Revoked`). The
-identity is cached per access key id, with the token it was built from, until IAM next
+reaches its sessions at once, and a deleted one takes them with it (`Revoked`). MinIO's
+`revoke-tokens` (`ops/revoke.rs`) ends sessions without storing them: it records, per
+user they act for (`Claims::revocation_subject`: a user by unique id, the root user, an
+LDAP user by DN) and token revoke type (empty for all), the moment it was asked
+(`iam_revocations`); `Snapshot::revoked` refuses a session issued then or before
+(`Claims::issued_ms`, the token's millisecond, or the start of its second for tokens
+from before it was kept). A record goes once it's older than any session can last
+(365 days). The identity is cached per access key id, with the token it was built from, until IAM next
 changes (at most 4096, then the cache starts again). `Session::kind` says how it was
 made, which decides the APIs it may call: role and MinIO-style sessions may use IAM and
 the admin API; `GetSessionToken`'s and federated users' may not, as on AWS without MFA.

@@ -50,6 +50,8 @@ pub struct Session {
     saml: Option<Box<SamlClaims>>,
     /// The directory user it acts for, whose `ldap:` keys its requests have.
     ldap: Option<Box<LdapClaims>>,
+    /// MinIO's token revoke type, which `revoke-tokens` may name.
+    revoke_type: Option<Box<str>>,
 }
 
 /// What an LDAP session's requests know of its user: MinIO's `ldap:user` (the DN),
@@ -125,6 +127,12 @@ impl Session {
     #[must_use]
     pub fn transitive_tags(&self) -> &[(String, String)] {
         &self.transitive
+    }
+
+    /// MinIO's token revoke type it was issued with (`TokenRevokeType`).
+    #[must_use]
+    pub fn revoke_type(&self) -> Option<&str> {
+        self.revoke_type.as_deref()
     }
 
     /// Whether session policies narrow it below what it acts as may do.
@@ -445,6 +453,8 @@ pub(crate) struct Snapshot {
     ldap_policies: LdapPolicyMap,
     /// Directory users with live sessions, by DN.
     ldap_users: HashMap<Box<str>, Arc<LdapSeen>>,
+    /// Revoked sessions, as [`State::revocations`] has them.
+    revocations: std::collections::BTreeMap<(String, String), i64>,
     root: Arc<Identity>,
     /// Whether the root user's key, its service accounts and its sessions are refused
     /// (`MinIO`'s `root_access=off`).
@@ -537,6 +547,7 @@ fn service_credential(
         web: None,
         saml: None,
         ldap,
+        revoke_type: None,
     };
     Some(Credential {
         secret: account.secret.clone(),
@@ -654,6 +665,7 @@ impl Snapshot {
             providers,
             ldap_policies,
             ldap_users,
+            revocations: state.revocations.clone(),
             root: root_identity,
             root_refused,
             sessions: RwLock::default(),
@@ -683,14 +695,17 @@ impl Snapshot {
     }
 
     /// The identity of the session with access key `id`, whose `token` said `claims`:
-    /// none if the user or role it acts as is gone, or a session policy no longer
-    /// parses (fail closed).
+    /// none if the user or role it acts as is gone, `revoke-tokens` ended it, or a
+    /// session policy no longer parses (fail closed).
     pub(crate) fn add_session(
         &self,
         id: &str,
         token: &str,
         claims: &Claims,
     ) -> Option<Arc<Identity>> {
+        if self.revoked(claims) {
+            return None;
+        }
         let identity = Arc::new(self.build_session(claims)?);
         let mut sessions = self
             .sessions
@@ -730,6 +745,7 @@ impl Snapshot {
             web: claims.web.clone().map(Box::new),
             saml: claims.saml.clone().map(Box::new),
             ldap: None,
+            revoke_type: claims.revoke_type.as_deref().map(Into::into),
         };
         Some(match &claims.who {
             Who::Role {
@@ -801,6 +817,21 @@ impl Snapshot {
                 session(SessionKind::Federated, true),
             )?,
         })
+    }
+
+    /// Whether `revoke-tokens` ended the session: all its user's issued since, or those
+    /// of its token revoke type.
+    fn revoked(&self, claims: &Claims) -> bool {
+        let Some(subject) = claims.revocation_subject() else {
+            return false;
+        };
+        let issued = claims.issued_ms();
+        let ended = |revoke_type: &str| {
+            self.revocations
+                .get(&(subject.clone(), revoke_type.to_owned()))
+                .is_some_and(|&cutoff| issued <= cutoff)
+        };
+        ended("") || claims.revoke_type.as_deref().is_some_and(ended)
     }
 
     /// `GetFederationToken`'s session: the calling user's policies (all of them for the
