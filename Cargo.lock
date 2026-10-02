@@ -4809,6 +4809,7 @@ dependencies = [
  "md-5",
  "orc-rust",
  "parquet",
+ "proptest",
  "rcgen",
  "reqwest",
  "rustls",

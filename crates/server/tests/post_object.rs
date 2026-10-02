@@ -504,6 +504,147 @@ async fn anonymous_forms_need_a_bucket_policy_that_allows_them() {
     assert_eq!(post(&server, "drop", &elsewhere, b"x").await.status, 403);
 }
 
+/// A form part: the names its `Content-Disposition` headers give (the last counts), the
+/// file's name, and its value.
+#[derive(Debug, Clone)]
+struct Part {
+    names: Vec<String>,
+    file_name: Option<String>,
+    value: String,
+}
+
+/// A form body of `parts` as they come, the file last.
+fn raw_body(parts: &[Part], file: &Part) -> Vec<u8> {
+    let mut body = Vec::new();
+    for part in parts.iter().chain([file]) {
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        for name in &part.names {
+            let file_name = part
+                .file_name
+                .as_ref()
+                .map(|f| format!("; filename=\"{f}\""))
+                .unwrap_or_default();
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"{file_name}\r\n")
+                    .as_bytes(),
+            );
+        }
+        body.extend_from_slice(format!("\r\n{}\r\n", part.value).as_bytes());
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+/// Forms made of what decides which key a form names: `key` fields spelled any way,
+/// repeated, renamed by a later header, and `${filename}` with any file name.
+fn hostile_form() -> impl proptest::strategy::Strategy<Value = (Vec<Part>, Part)> {
+    use proptest::prelude::*;
+    let name = prop::sample::select(vec!["key", "KEY", "Key", "kEY", "keys", "ke", "acl"]);
+    let pieces = vec![
+        "inbox/",
+        "inbox",
+        "a",
+        "/",
+        "../",
+        "..",
+        "${filename}",
+        "${FILENAME}",
+        "%2e",
+        "x/",
+    ];
+    // Mostly under `inbox/`, so that allowed and refused keys meet in one form.
+    let text = (
+        prop::bool::weighted(0.6),
+        prop::collection::vec(prop::sample::select(pieces), 0..4),
+    )
+        .prop_map(|(inbox, pieces)| {
+            let start = if inbox { "inbox/" } else { "" };
+            format!("{start}{}", pieces.concat())
+        });
+    let part = (prop::collection::vec(name, 1..3), text.clone()).prop_map(|(names, value)| Part {
+        names: names.into_iter().map(str::to_owned).collect(),
+        file_name: None,
+        value,
+    });
+    let file = (
+        prop::sample::select(vec!["file", "FILE", "File"]),
+        prop::option::of(text),
+    )
+        .prop_map(|(name, file_name)| Part {
+            names: vec![name.to_owned()],
+            file_name,
+            value: "data".to_owned(),
+        });
+    (prop::collection::vec(part, 0..5), file)
+}
+
+/// Whatever a form says, an anonymous form allowed only `inbox/*` writes only there:
+/// the key TeiFS authorizes is the key the upload goes to.
+#[test]
+fn a_form_writes_only_the_key_it_was_allowed() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(async {
+        let server = start().await;
+        bucket(&server, "drop").await;
+        let root = client(&server, SECRET_KEY);
+        root.delete_public_access_block()
+            .bucket("drop")
+            .send()
+            .await
+            .unwrap();
+        root.put_bucket_policy()
+            .bucket("drop")
+            .policy(
+                r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                    "Action":"s3:PutObject","Resource":"arn:aws:s3:::drop/inbox/*"}]}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+        server
+    });
+    let http = reqwest::Client::new();
+    let cases = std::env::var("PROPTEST_CASES").map_or(256, |n| n.parse().unwrap());
+    let mut runner =
+        proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(cases));
+    let uploads = std::sync::atomic::AtomicUsize::new(0);
+    runner
+        .run(&hostile_form(), |(parts, file)| {
+            runtime.block_on(async {
+                let status = http
+                    .post(format!("{}/drop", server.endpoint))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={BOUNDARY}"),
+                    )
+                    .body(raw_body(&parts, &file))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+                if status == 204 {
+                    uploads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let listing = client(&server, SECRET_KEY)
+                    .list_objects_v2()
+                    .bucket("drop")
+                    .send()
+                    .await
+                    .unwrap();
+                for object in listing.contents() {
+                    let key = object.key().unwrap();
+                    proptest::prop_assert!(
+                        key.starts_with("inbox/"),
+                        "the bucket holds {key} (this form: {status})"
+                    );
+                }
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert!(uploads.into_inner() > 0, "no form was taken");
+}
+
 #[tokio::test]
 async fn fields_are_read_however_they_arrive_and_only_so_much() {
     let server = start().await;
