@@ -6,10 +6,98 @@ use teifs_types::LockMode;
 use tempfile::TempDir;
 
 use super::*;
+use crate::test_util::in_both_layouts;
 use crate::{
     lock::{DefaultRetention, RetentionPeriod},
     objects::{Finished, Written, read_footer},
 };
+
+in_both_layouts!(
+    only_one_of_many_concurrent_create_only_writes_wins,
+    concurrent_versioned_writes_each_make_a_version,
+);
+
+async fn concurrently(
+    store: &std::sync::Arc<Store>,
+    writes: usize,
+    key: impl Fn(usize) -> String,
+    precondition: Precondition,
+) -> Vec<Result<ObjectInfo>> {
+    let tasks: Vec<_> = (0..writes)
+        .map(|i| {
+            let (store, key, precondition) = (store.clone(), key(i), precondition.clone());
+            tokio::spawn(async move {
+                let mut staged = store.stage().await?;
+                staged.write(format!("write {i}").as_bytes()).await?;
+                store
+                    .commit("docs", &key, staged, ObjectAttrs::default(), precondition)
+                    .await
+            })
+        })
+        .collect();
+    let mut answers = Vec::new();
+    for task in tasks {
+        answers.push(task.await.unwrap());
+    }
+    answers
+}
+
+async fn only_one_of_many_concurrent_create_only_writes_wins(layout: Layout) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+    store.create_bucket("docs", layout).await.unwrap();
+    let only_new = Precondition {
+        if_none_match: Some(Match::Any),
+        ..Precondition::default()
+    };
+    let answers = concurrently(&store, 32, |_| "same.txt".to_owned(), only_new).await;
+    let won: Vec<_> = answers.iter().filter_map(|a| a.as_ref().ok()).collect();
+    assert_eq!(won.len(), 1);
+    assert!(
+        answers
+            .iter()
+            .filter(|a| a.is_err())
+            .all(|a| matches!(a, Err(StoreError::PreconditionFailed)))
+    );
+    let head = store.head("docs", "same.txt").await.unwrap();
+    assert_eq!(head.etag, won[0].etag);
+    // Nothing the losers wrote is left behind.
+    let leftovers = std::fs::read_dir(dir.path().join(".teifs/tmp"))
+        .unwrap()
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+async fn concurrent_versioned_writes_each_make_a_version(layout: Layout) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+    store.create_bucket("docs", layout).await.unwrap();
+    store
+        .set_bucket_versioning("docs", Versioning::Enabled)
+        .await
+        .unwrap();
+    let answers = concurrently(
+        &store,
+        24,
+        |i| format!("k{}", i % 3),
+        Precondition::default(),
+    )
+    .await;
+    let mut ids: Vec<_> = answers
+        .into_iter()
+        .map(|a| a.unwrap().version_id.unwrap())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 24);
+    let query = crate::VersionsQuery {
+        max_keys: 1000,
+        ..crate::VersionsQuery::default()
+    };
+    let listing = store.list_versions("docs", query).await.unwrap();
+    assert_eq!(listing.versions.len(), 24);
+    assert_eq!(listing.versions.iter().filter(|v| v.latest).count(), 3);
+}
 
 async fn object_bucket() -> (TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();

@@ -1,16 +1,18 @@
-//! Group commit: object bucket writes waiting for the commit lock are recorded together.
-//! Whoever gets the lock records every write waiting then, in one transaction, so one
-//! sync of the index covers them all; the others find theirs done when they get it.
-//! Each write is still checked on its own (its precondition sees the writes recorded
-//! before it in the group), and a write that fails leaves the others alone.
+//! Group commit: writes waiting for the commit lock are recorded together. Whoever gets
+//! the lock records every write waiting then, in one transaction, so one sync of the
+//! index covers them all; the others find theirs done when they get it. Each write is
+//! still checked on its own (its precondition sees the writes recorded before it in the
+//! group), and a write that fails leaves the others alone.
 
 use std::{
     io,
+    path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Instant,
 };
 
 use teifs_meta::Index;
+use teifs_types::ObjectAttrs;
 
 use crate::{
     Bucket, Inner, ObjectInfo, Precondition, StoreError,
@@ -22,14 +24,33 @@ use crate::{
 /// A write's answer, filled in by whoever records it.
 type Answer = Arc<Mutex<Option<Result<ObjectInfo>>>>;
 
-/// A written data file waiting to be recorded.
+/// A write waiting to be recorded.
+enum Job {
+    /// An object bucket's data file, already in place ([`Inner::write_object`]).
+    Object {
+        bucket: String,
+        bucket_id: String,
+        written: Box<Written>,
+    },
+    /// A folder bucket's file, synced, to be renamed into place as `key`.
+    File {
+        bucket: String,
+        key: String,
+        tmp: PathBuf,
+        etag: String,
+        attrs: Box<ObjectAttrs>,
+    },
+}
+
 struct Waiting {
-    bucket: String,
-    bucket_id: String,
-    written: Written,
+    job: Job,
     precondition: Precondition,
     answer: Answer,
 }
+
+/// What a recorded write leaves to do once the group's transaction is committed: the
+/// data files of the versions it replaced, in the store that holds them.
+type Recorded = (ObjectInfo, Vec<String>, Option<ObjectBucket>);
 
 /// The writes waiting for the commit lock.
 #[derive(Default)]
@@ -79,11 +100,39 @@ impl Inner {
         written: Written,
         precondition: Precondition,
     ) -> Result<ObjectInfo> {
-        let answer = Answer::default();
-        self.group.waiting().push(Waiting {
+        let job = Job::Object {
             bucket: bucket.to_owned(),
             bucket_id: bucket_id.to_owned(),
-            written,
+            written: Box::new(written),
+        };
+        self.grouped(job, precondition)
+    }
+
+    /// Renames the synced file `tmp` into place as `key` in the folder bucket `bucket`
+    /// and records it ([`Inner::commit_file`]), with whatever other writes are waiting.
+    pub(crate) fn place_grouped(
+        &self,
+        bucket: &str,
+        key: &str,
+        tmp: PathBuf,
+        etag: String,
+        attrs: ObjectAttrs,
+        precondition: Precondition,
+    ) -> Result<ObjectInfo> {
+        let job = Job::File {
+            bucket: bucket.to_owned(),
+            key: key.to_owned(),
+            tmp,
+            etag,
+            attrs: Box::new(attrs),
+        };
+        self.grouped(job, precondition)
+    }
+
+    fn grouped(&self, job: Job, precondition: Precondition) -> Result<ObjectInfo> {
+        let answer = Answer::default();
+        self.group.waiting().push(Waiting {
+            job,
             precondition,
             answer: answer.clone(),
         });
@@ -113,21 +162,20 @@ impl Inner {
     fn record_group(&self, conn: &Index, group: Vec<Waiting>) {
         let mut recorded = Vec::with_capacity(group.len());
         let outcome = conn.try_batch(|conn| -> Result<()> {
-            for waiting in group {
-                let path = waiting.written.path().to_owned();
-                // Each in its own savepoint: one that fails is undone alone.
-                let result = match self.object_bucket(&waiting.bucket, &waiting.bucket_id) {
-                    Ok(bucket) => conn
-                        .try_batch(|conn| {
-                            self.record_row(conn, &bucket, waiting.written, &waiting.precondition)
-                        })
-                        .map(|(info, replaced)| (info, replaced, bucket)),
-                    Err(err) => {
-                        waiting.written.discard();
-                        Err(err)
-                    }
+            for Waiting {
+                job,
+                precondition,
+                answer,
+            } in group
+            {
+                // An object bucket's file isn't anyone's until it's recorded, so it goes
+                // if the transaction fails; a folder bucket's is in place by then.
+                let unrecorded = match &job {
+                    Job::Object { written, .. } => Some(written.path().to_owned()),
+                    Job::File { .. } => None,
                 };
-                recorded.push((waiting.answer, path, result));
+                let result = self.record_job(conn, job, &precondition);
+                recorded.push((answer, unrecorded, result));
             }
             Ok(())
         });
@@ -136,8 +184,8 @@ impl Inner {
                 // The replaced files go once their rows are gone for good.
                 let _ = conn.try_batch(|conn| -> Result<()> {
                     for (_, _, result) in &recorded {
-                        if let Ok((_, replaced, bucket)) = result {
-                            Inner::remove_data_files(conn, bucket, replaced);
+                        if let Ok((_, replaced, Some(store))) = result {
+                            Inner::remove_data_files(conn, store, replaced);
                         }
                     }
                     Ok(())
@@ -147,12 +195,51 @@ impl Inner {
                 }
             }
             Err(err) => {
-                for (answer, path, result) in recorded {
-                    if result.is_ok() {
+                for (answer, unrecorded, result) in recorded {
+                    if let (Ok(_), Some(path)) = (&result, unrecorded) {
                         let _ = std::fs::remove_file(path);
                     }
                     give(&answer, result.and(Err(shared(&err))));
                 }
+            }
+        }
+    }
+
+    /// Records one write of a group in its own savepoint: one that fails is undone alone.
+    fn record_job(&self, conn: &Index, job: Job, precondition: &Precondition) -> Result<Recorded> {
+        match job {
+            Job::Object {
+                bucket,
+                bucket_id,
+                written,
+            } => {
+                let bucket = match self.object_bucket(&bucket, &bucket_id) {
+                    Ok(bucket) => bucket,
+                    Err(err) => {
+                        written.discard();
+                        return Err(err);
+                    }
+                };
+                let (info, replaced) =
+                    conn.try_batch(|conn| self.record_row(conn, &bucket, *written, precondition))?;
+                Ok((info, replaced, Some(bucket)))
+            }
+            Job::File {
+                bucket,
+                key,
+                tmp,
+                etag,
+                attrs,
+            } => {
+                // The bucket may have gone since the write began.
+                let Bucket::Folder(bucket) = self.bucket(&bucket)? else {
+                    return Err(StoreError::NoSuchBucket);
+                };
+                let key = self.new_key(&key)?;
+                let (info, replaced) = conn.try_batch(|conn| {
+                    self.place_file(conn, &bucket, &key, &tmp, etag, *attrs, None, precondition)
+                })?;
+                Ok((info, replaced, bucket.versioned().cloned()))
             }
         }
     }
@@ -178,9 +265,11 @@ impl Inner {
         let group: Vec<Waiting> = writes
             .into_iter()
             .map(|(bucket, bucket_id, written, precondition)| Waiting {
-                bucket,
-                bucket_id,
-                written,
+                job: Job::Object {
+                    bucket,
+                    bucket_id,
+                    written: Box::new(written),
+                },
                 precondition,
                 answer: Answer::default(),
             })

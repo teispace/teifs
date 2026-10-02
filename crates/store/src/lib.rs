@@ -739,6 +739,26 @@ impl Store {
                 staged.keep();
                 return inner.record_grouped(&name, &object_bucket.id, written, precondition);
             }
+            // A folder bucket's file is ours alone until it's renamed into place: synced
+            // before the lock, then renamed and recorded with whatever else is waiting.
+            if let Bucket::Folder(..) = &bucket
+                && finished.sealed.is_none()
+                && stored_len == finished.size
+                && !inner.new_key(&key)?.is_folder()
+            {
+                inner.sync_file(finished.tmp)?;
+                let tmp = finished.tmp.to_owned();
+                let info = inner.place_grouped(
+                    &name,
+                    &key,
+                    tmp,
+                    finished.etag,
+                    finished.attrs,
+                    precondition,
+                )?;
+                staged.keep();
+                return Ok(info);
+            }
             let waited = std::time::Instant::now();
             let conn = inner.lock();
             stages::record(&inner.stages, "write", "lock", waited);
@@ -1406,6 +1426,7 @@ impl Inner {
                     .write(true)
                     .open(finished.tmp)?
                     .set_len(finished.stored_len)?;
+                self.sync_file(finished.tmp)?;
                 let parts = finished.parts.as_ref().map(objects::PartsRecord::to_json);
                 self.commit_file(
                     conn,

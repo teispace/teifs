@@ -796,7 +796,8 @@ behaviour; the on-disk format is always upgraded automatically.
   put in place before the drive's commit lock, and writes waiting for the lock are
   recorded together, with one sync of the index for all of them. Measured in Docker
   with 4 KiB objects and 64 clients: about 2.8× the objects per second with
-  `--durability strict`, 4.7× with `relaxed`.
+  `--durability strict`, 4.7× with `relaxed`. Folder buckets sync a new file before
+  the lock and share the same grouped recording: about 3× at 64 clients.
 - `teifs init` sets up a drive: its folder, keys, keyring (kept off the drive), settings
   and an alias, asking on a terminal or taking flags, then says what to run next.
   `teifs serve DIR` reads the drive's `.teifs/settings.toml` unless `--config` names

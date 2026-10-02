@@ -322,10 +322,33 @@ impl Inner {
         Ok(current)
     }
 
-    /// Renames the finished file `tmp` into place as `key` and records it. With
-    /// versioning, the file it replaces is kept as an older version first. Holds the lock.
+    /// Renames the finished file `tmp`, already synced ([`Inner::sync_file`]), into place
+    /// as `key` and records it. With versioning, the file it replaces is kept as an
+    /// older version first. Holds the lock.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_file(
+        &self,
+        conn: &Index,
+        bucket: &FolderBucket,
+        key: &ObjectKey,
+        tmp: &Path,
+        etag: String,
+        attrs: ObjectAttrs,
+        parts: Option<String>,
+        precondition: &Precondition,
+    ) -> Result<ObjectInfo> {
+        let (info, replaced) =
+            self.place_file(conn, bucket, key, tmp, etag, attrs, parts, precondition)?;
+        if let Some(versions) = bucket.versioned() {
+            Inner::remove_data_files(conn, versions, &replaced);
+        }
+        Ok(info)
+    }
+
+    /// Does what [`Inner::commit_file`] does, but leaves the data files of older versions
+    /// it replaced (queued as garbage) for the caller to remove: their ids.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn place_file(
         &self,
         conn: &Index,
         bucket: &FolderBucket,
@@ -335,13 +358,11 @@ impl Inner {
         mut attrs: ObjectAttrs,
         parts: Option<String>,
         precondition: &Precondition,
-    ) -> Result<ObjectInfo> {
+    ) -> Result<(ObjectInfo, Vec<String>)> {
         let dir = &bucket.dir;
         let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
         self.lock_new_version(bucket.versions.as_ref(), &mut attrs)?;
-        // Flushing needs write access on Windows.
-        self.sync_file(tmp)?;
         let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
         let version_id = bucket.new_version_id();
@@ -394,10 +415,7 @@ impl Inner {
             )?;
             Inner::settle_versions(conn, bucket, key, version_id.as_deref())
         })?;
-        if let Some(versions) = bucket.versioned() {
-            Inner::remove_data_files(conn, versions, &replaced);
-        }
-        Ok(bucket.describe(ObjectInfo {
+        let info = bucket.describe(ObjectInfo {
             key: key.as_str().to_owned(),
             size: stamp.size,
             modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -406,7 +424,8 @@ impl Inner {
             sse: None,
             parts: part_infos,
             version_id,
-        }))
+        });
+        Ok((info, replaced))
     }
 
     /// Creates a folder on purpose (a `key/` object): it stays when its last file goes.
@@ -528,6 +547,8 @@ impl Inner {
             None => (teifs_types::hex(&md5_file(&tmp.path)?), None),
         };
         let attrs = crate::copied_attrs(source.attrs, attrs);
+        // The copy is ours alone until it's in place: synced before the lock.
+        self.sync_file(&tmp.path)?;
         let conn = self.lock();
         let info = self.commit_file(
             &conn,
