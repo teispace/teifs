@@ -676,7 +676,11 @@ steps, items and last error are kept for `teifs status`.
   until the file and its row agree again. A new object bucket data file isn't a change
   until its row is recorded, so it's written and synced without the lock. The system database has its own lock, always
   taken after the index lock when both are needed.
-- Reads don't take the commit lock while streaming.
+- Reads don't take the commit lock while streaming. An object bucket's reads, heads and
+  listings don't take it at all: they read the index through read-only connections
+  (`crates/store/src/readers.rs`; the index is in WAL mode), each in one transaction, so
+  they see the last commit while writes are being recorded. A read whose data file was
+  replaced and removed after its snapshot falls back to reading under the lock.
 
 ## Errors
 

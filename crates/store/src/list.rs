@@ -183,7 +183,9 @@ impl Store {
                 Bucket::Folder(FolderBucket { dir, .. }) => dir,
                 Bucket::Object(object_bucket) => {
                     if query.max_keys > 0 {
-                        list_index(&inner.lock(), &object_bucket, &query, &mut listing)?;
+                        inner.read_index(|conn| {
+                            list_index(conn, &object_bucket, &query, &mut listing)
+                        })?;
                     }
                     return Ok(listing);
                 }
@@ -377,7 +379,9 @@ impl Store {
                 self.blocking(move |inner| {
                     let mut listing = VersionListing::default();
                     if query.max_keys > 0 {
-                        list_versions_index(&inner.lock(), &bucket, &query, &mut listing)?;
+                        inner.read_index(|conn| {
+                            list_versions_index(conn, &bucket, &query, &mut listing)
+                        })?;
                     }
                     Ok(listing)
                 })

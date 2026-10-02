@@ -39,6 +39,16 @@ pub(crate) fn open(path: &Path, migrations: &[&str]) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Opens another connection to the database at `path` (made by [`open`]) that can only
+/// read: in WAL mode it reads the last commit while another connection writes.
+pub(crate) fn open_reader(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.pragma_update(None, "query_only", true)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
+}
+
 /// Writes a consistent copy of the database at `path` to `to` (which must not exist),
 /// including anything still in its write-ahead log.
 pub fn backup(path: &Path, to: &Path) -> Result<()> {

@@ -621,8 +621,9 @@ impl Inner {
     }
 
     /// Opens a version of `key` (`None`: the current one): its description and data
-    /// file. Holding the commit lock while opening means the file can't be replaced and
-    /// removed between reading the row and opening it.
+    /// file. Under the commit lock the file can't be replaced and removed between reading
+    /// the row and opening it; on a snapshot ([`Inner::read_index`]) it can, and opening
+    /// it fails with `NotFound`.
     pub(crate) fn open_object(
         conn: &Index,
         bucket: &ObjectBucket,

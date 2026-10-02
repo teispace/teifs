@@ -29,6 +29,7 @@ mod list;
 mod lock;
 mod multipart;
 mod objects;
+mod readers;
 mod reconcile;
 mod repair;
 mod rewrap;
@@ -271,6 +272,8 @@ struct Inner {
     /// The index, also the commit lock: whoever changes a file holds it until the file
     /// and its row agree again.
     db: Mutex<Index>,
+    /// Read-only connections to the index, for reads that needn't wait for the lock.
+    readers: readers::Readers,
     /// The system database. Taken after `db` when both are needed.
     system: Mutex<System>,
     format: DriveFormat,
@@ -382,7 +385,8 @@ impl Store {
         fs::create_dir_all(&tmp)?;
         sweep_bucket_staging(&root);
         let format = format::prepare(&system_dir)?;
-        let db = Index::open(&system_dir.join(format::INDEX_DB))?;
+        let index_path = system_dir.join(format::INDEX_DB);
+        let db = Index::open(&index_path)?;
         db.set_synchronous(match options.durability {
             Durability::Strict => "FULL",
             Durability::Relaxed => "NORMAL",
@@ -399,6 +403,7 @@ impl Store {
             folders: folders::FolderCache::default(),
             uploads,
             db: Mutex::new(db),
+            readers: readers::Readers::new(index_path),
             system: Mutex::new(system_db),
             format,
             kms: std::sync::OnceLock::new(),
@@ -820,8 +825,16 @@ impl Store {
                 Ok((info, file, None))
             }
             Bucket::Object(bucket) => {
-                let (row, file) =
-                    Inner::open_object(&inner.lock(), &bucket, &key, version_id.as_deref())?;
+                let version_id = version_id.as_deref();
+                let found =
+                    inner.read_index(|conn| Inner::open_object(conn, &bucket, &key, version_id));
+                let (row, file) = match found {
+                    // Replaced and removed since the snapshot: read the current state.
+                    Err(StoreError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
+                        Inner::open_object(&inner.lock(), &bucket, &key, version_id)?
+                    }
+                    found => found?,
+                };
                 let sealed = match objects::crypt_of(&row)? {
                     Some(crypt) => Some((crypt, bucket.id.clone(), objects::sealed_parts(&row)?)),
                     None => None,

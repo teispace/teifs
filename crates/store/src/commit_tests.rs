@@ -287,3 +287,51 @@ async fn concurrent_writes_are_all_recorded() {
         assert_eq!(head.size, key.len() as u64);
     }
 }
+
+#[tokio::test]
+async fn reads_and_listings_dont_wait_for_the_commit_lock() {
+    let (_dir, store) = object_bucket().await;
+    store
+        .put_bytes("docs", "a.txt", b"hello", ObjectAttrs::default())
+        .await
+        .unwrap();
+    let store = std::sync::Arc::new(store);
+    let holder_store = store.clone();
+    // Held as a long write would hold it.
+    let (locked, unlock) = (
+        std::sync::mpsc::channel::<()>(),
+        std::sync::mpsc::channel::<()>(),
+    );
+    let holder = std::thread::spawn(move || {
+        let _conn = holder_store.inner.lock();
+        locked.0.send(()).unwrap();
+        unlock.1.recv().unwrap();
+    });
+    locked.1.recv().unwrap();
+    let reads = async {
+        let head = store.head("docs", "a.txt").await.unwrap();
+        let (info, body) = store.read("docs", "a.txt").await.unwrap();
+        let listing = store
+            .list(
+                "docs",
+                crate::ListQuery {
+                    max_keys: 10,
+                    ..crate::ListQuery::default()
+                },
+            )
+            .await
+            .unwrap();
+        (
+            head.size,
+            info.etag == head.etag && body.is_some(),
+            listing.objects.len(),
+        )
+    };
+    let done = tokio::time::timeout(std::time::Duration::from_secs(10), reads).await;
+    unlock.0.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        done.expect("reads waited for the commit lock"),
+        (5, true, 1)
+    );
+}

@@ -801,6 +801,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - Faster downloads of encrypted objects: about 1 MiB is read and decrypted at a time,
   in place and without a copy, instead of 64 KiB at a time (10 MiB objects at 64
   clients: about 1.5× in Docker).
+- Reads of object buckets no longer wait for writes: GETs, HEADs and listings read the
+  index through their own connections while writes are recorded. 4 KiB GETs during a
+  heavy upload load: about 5× the objects per second in Docker.
 - `teifs init` sets up a drive: its folder, keys, keyring (kept off the drive), settings
   and an alias, asking on a terminal or taking flags, then says what to run next.
   `teifs serve DIR` reads the drive's `.teifs/settings.toml` unless `--config` names

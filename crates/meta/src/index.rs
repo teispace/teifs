@@ -259,6 +259,15 @@ impl Index {
         })
     }
 
+    /// Opens another connection to the index at `path` (already opened, so migrated,
+    /// by [`Index::open`]) that can only read. A read in [`Index::try_batch`] sees one
+    /// snapshot: the commits made before it began.
+    pub fn open_reader(path: &Path) -> Result<Self> {
+        Ok(Self {
+            conn: db::open_reader(path)?,
+        })
+    }
+
     /// How far commits are synced before they return: `FULL` (every commit survives a
     /// power cut), `NORMAL` (the last commits may be lost, the database never breaks), or
     /// `OFF` (the operating system decides).
