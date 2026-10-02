@@ -133,7 +133,8 @@ impl fmt::Debug for Client {
 
 impl Client {
     /// A client for the server at `endpoint` (`http(s)://host[:port]`), signing with this
-    /// key for [`DEFAULT_REGION`].
+    /// key for [`DEFAULT_REGION`]. Fails when the endpoint isn't one, or when TLS can't be
+    /// set up (a system without CA certificates).
     pub fn new(
         endpoint: &str,
         access_key: &str,
@@ -151,7 +152,7 @@ impl Client {
             return Err(invalid());
         }
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder().build()?,
             endpoint: url,
             access_key: access_key.to_owned(),
             secret,

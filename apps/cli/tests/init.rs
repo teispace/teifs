@@ -180,6 +180,47 @@ fn serve_announces_where_it_listens_for_programs() {
     assert!(serving["accessKey"].as_str().unwrap().starts_with("TF"));
 }
 
+/// A system without CA certificates (a minimal container) still serves: only an HTTPS
+/// client the server makes for a target needs them.
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_runs_without_the_system_s_ca_certificates() {
+    let home = tempfile::tempdir().unwrap();
+    let (none, empty) = (home.path().join("none.pem"), home.path().join("certs"));
+    std::fs::write(&none, "").unwrap();
+    std::fs::create_dir(&empty).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teifs"))
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--kms-keyring",
+        ])
+        .args([home.path().join("keys.json"), home.path().join("drive")])
+        .env_clear()
+        .env("SSL_CERT_FILE", &none)
+        .env("SSL_CERT_DIR", &empty)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let serving: Result<serde_json::Value, _> = serde_json::from_str(&line);
+    let healthy = serving.as_ref().ok().map(|serving| {
+        let endpoint = serving["endpoint"].as_str().unwrap();
+        teifs(home.path(), &["-q", "health", endpoint])
+    });
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(serving.unwrap()["type"], "serving", "{line} ({status})");
+    assert!(healthy.unwrap().status.success());
+}
+
 /// Under systemd (`Type=notify`): ready once it listens, stopping on SIGTERM.
 #[cfg(unix)]
 #[test]

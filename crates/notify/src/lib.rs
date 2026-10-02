@@ -343,7 +343,9 @@ impl Target {
 pub struct Notifier {
     targets: BTreeMap<TargetArn, Arc<Target>>,
     queue: Option<Queue>,
-    client: reqwest::Client,
+    /// What targets are sent with; none without targets, since making one needs the
+    /// system's CA certificates, which a minimal container may not have.
+    client: Option<reqwest::Client>,
     stopping: CancellationToken,
     senders: Mutex<Vec<JoinHandle<()>>>,
     /// The most events that wait for one target.
@@ -357,7 +359,7 @@ impl Notifier {
         Self {
             targets: BTreeMap::new(),
             queue: None,
-            client: reqwest::Client::new(),
+            client: None,
             stopping: CancellationToken::new(),
             senders: Mutex::new(Vec::new()),
             limit: QUEUE_LIMIT,
@@ -419,7 +421,7 @@ impl Notifier {
         let notifier = Self {
             targets,
             queue: Some(queue),
-            client,
+            client: Some(client.clone()),
             stopping: CancellationToken::new(),
             senders: Mutex::new(Vec::new()),
             limit,
@@ -431,7 +433,7 @@ impl Notifier {
                 tokio::spawn(deliver(
                     Arc::clone(target),
                     notifier.queue.clone().expect("opened"),
-                    notifier.client.clone(),
+                    client.clone(),
                     notifier.stopping.clone(),
                 ))
             })
@@ -541,7 +543,8 @@ impl Notifier {
             .targets
             .get(arn)
             .ok_or_else(|| format!("no target {arn}"))?;
-        target.test(&self.client, body).await
+        let client = self.client.as_ref().ok_or("no HTTP client")?;
+        target.test(client, body).await
     }
 
     /// How each target is doing.
