@@ -21,6 +21,10 @@ use crate::{admin::error, lines, metrics::SinceStart, minio_info, routes::Routes
 /// Which of the calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Call {
+    /// `GET trace`.
+    Trace,
+    /// `GET log`.
+    Log,
     /// `GET metrics`.
     Metrics,
     /// `GET top/locks`.
@@ -33,6 +37,8 @@ impl Call {
     /// The call's name, as the audit log and traces name it.
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::Trace => "Trace",
+            Self::Log => "ConsoleLog",
             Self::Metrics => "Metrics",
             Self::TopLocks => "TopLocks",
             Self::ForceUnlock => "ForceUnlock",
@@ -41,6 +47,8 @@ impl Call {
 
     pub(crate) fn call(self, routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Response<Body>> {
         match self {
+            Self::Trace => crate::minio_trace::trace(&routes.tracers, req.uri.query()),
+            Self::Log => Ok(crate::console_log::log(routes, req)),
             Self::Metrics => Ok(metrics(routes, req)),
             Self::TopLocks => top_locks(req.uri.query()),
             Self::ForceUnlock => Ok(force_unlock()),

@@ -76,8 +76,8 @@ struct Backend {
 
 /// `madmin.Disk`.
 #[derive(Serialize)]
-struct Disk {
-    endpoint: String,
+pub(crate) struct Disk {
+    pub(crate) endpoint: String,
     path: String,
     state: &'static str,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -269,7 +269,7 @@ struct DataUsageInfo {
 
 /// The disks the drive uses, as `madmin` describes drives; none (logged) when they
 /// can't be read.
-async fn disks(routes: &Routes) -> Vec<Disk> {
+pub(crate) async fn disks(routes: &Routes) -> Vec<Disk> {
     let disks = routes
         .store
         .disks()

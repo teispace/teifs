@@ -147,6 +147,7 @@ func main() {
 	trace(ctx, adm, s3c, *bucket)
 	consoleLog(ctx, adm)
 	realtime(ctx, adm)
+	heal(ctx, adm, *bucket)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -207,6 +208,36 @@ func realtime(ctx context.Context, adm *madmin.AdminClient) {
 	locks, err := adm.TopLocks(ctx)
 	must(err)
 	check(len(locks) == 0, fmt.Sprintf("the locks: %+v", locks))
+}
+
+// heal is mc admin heal: a deep, recursive heal of the bucket polled with its token
+// until it's done, every item intact, then the background heal's status.
+func heal(ctx context.Context, adm *madmin.AdminClient, bucket string) {
+	step("a deep heal of the bucket and the background heal, as mc admin heal runs them")
+	opts := madmin.HealOpts{Recursive: true, ScanMode: madmin.HealDeepScan}
+	started, _, err := adm.Heal(ctx, bucket, "", opts, "", false, false)
+	must(err)
+	check(started.ClientToken != "", fmt.Sprintf("the heal started: %+v", started))
+	var items []madmin.HealResultItem
+	for i := 0; ; i++ {
+		_, status, err := adm.Heal(ctx, bucket, "", opts, started.ClientToken, false, false)
+		must(err)
+		items = append(items, status.Items...)
+		if status.Summary != "running" {
+			check(status.Summary == "finished", fmt.Sprintf("the heal ended: %+v", status))
+			break
+		}
+		check(i < 200, "the heal didn't finish")
+		time.Sleep(50 * time.Millisecond)
+	}
+	check(len(items) > 1 && items[0].Type == madmin.HealItemBucket, fmt.Sprintf("the items: %+v", items))
+	for _, item := range items {
+		b, a := item.GetCorruptedCounts()
+		check(b == 0 && a == 0, fmt.Sprintf("a damaged item: %+v", item))
+	}
+	state, err := adm.BackgroundHealStatus(ctx)
+	must(err)
+	check(len(state.Sets) == 1, fmt.Sprintf("the background heal: %+v", state))
 }
 
 // lists says whether a client signing with this key may list buckets.

@@ -1,6 +1,8 @@
 //! What an integrity check finds: a stored version's verdict, and what a pass over the
 //! drive has found so far.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// What a check found wrong with a stored version.
@@ -40,6 +42,39 @@ pub enum Unverifiable {
     NothingToCompare,
     /// It changed while it was being read (a folder bucket's file being edited).
     ChangedMeanwhile,
+}
+
+impl fmt::Display for Damage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => f.write_str("its data is missing"),
+            Self::Truncated => f.write_str("its data is cut short"),
+            Self::Tampered => f.write_str("its encrypted data doesn't authenticate"),
+            Self::Etag => f.write_str("its bytes don't match its ETag"),
+            Self::Checksum {
+                algorithm,
+                part: None,
+            } => write!(f, "its bytes don't match its {algorithm} checksum"),
+            Self::Checksum {
+                algorithm,
+                part: Some(part),
+            } => write!(
+                f,
+                "part {part}'s bytes don't match its {algorithm} checksum"
+            ),
+        }
+    }
+}
+
+impl fmt::Display for Unverifiable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CustomerKey => "it's encrypted with a key its client keeps (SSE-C)",
+            Self::NoKms => "it's encrypted, and the keyring isn't here (--kms-keyring)",
+            Self::NothingToCompare => "it changed outside TeiFS, so nothing records its bytes",
+            Self::ChangedMeanwhile => "it changed while it was being read",
+        })
+    }
 }
 
 /// The outcome of checking one version.

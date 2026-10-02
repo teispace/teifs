@@ -818,6 +818,24 @@ heal figures are in `teifs admin info` and the Prometheus metrics. It needs
 is never one to wait on or force open, and `mc admin force-unlock` has nothing to do.
 They need `admin:TopLocksInfo` and `admin:ForceUnlock`.
 
+## Heal with `mc admin heal`
+
+A drive keeps one copy of each object, so there is no other to heal from: `mc admin heal`
+checks what the drive holds and reports it, and changes nothing. It goes through every
+bucket (`mc admin heal ALIAS`), or one bucket's objects (`ALIAS/BUCKET`), or those under a
+prefix (`ALIAS/BUCKET/PREFIX`); `--recursive` goes into every folder under it, otherwise
+only the objects right under it are checked. A normal scan reads each version's metadata;
+`--scan deep` also reads its bytes and compares them with what was recorded, as
+`teifs verify` does, and reports a damaged one as `corrupt` (or `missing`, when
+its data is gone) with what's wrong. `--dry-run` and `--remove` change nothing either.
+
+One heal runs at a time on a path and on the paths inside or around it; `--force-start`
+stops the one running and starts again, `--force-stop` stops it. Results are kept for
+the caller to read: up to 1,000 unread before the heal waits, and for 10 minutes after
+it ends. The background heal (`mc admin heal` without a target, its status) is the
+drive's [scrub](#metrics): it reports the versions the scrub checked. Both need
+`admin:Heal`.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the

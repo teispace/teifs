@@ -372,6 +372,10 @@ behaviour; the on-disk format is always upgraded automatically.
   `--errors` and `--response-threshold` applied on the server and secrets redacted.
 - `mc admin logs`: the server keeps its last 10,000 log lines (what `TEIFS_LOG` lets
   through) and sends them, then each new one, as MinIO's console log does.
+- `mc admin heal`: a drive has no other copy to heal from, so a heal checks each bucket
+  and object (a deep scan compares their bytes, as `teifs verify` does) and reports what
+  it found as MinIO's heal results, changing nothing. The background heal's status is the
+  scrub's.
 - MinIO's realtime metrics (the console's realtime view, `mc admin scanner status`):
   S3's requests being served and since-start totals (requests, bytes, errors,
   cancellations, times), one document every interval. `mc admin top locks` lists no

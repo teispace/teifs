@@ -29,11 +29,11 @@ use crate::{
     access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
-    bucket_export, console_log, control,
+    bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_iam, minio_info, minio_kms, minio_metrics, minio_service,
-    minio_service_accounts, minio_trace,
+    iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_metrics,
+    minio_service, minio_service_accounts,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -162,9 +162,8 @@ enum Handler {
     TemporaryAccountInfo,
     MinioInfo(minio_info::Kind),
     MinioService,
-    MinioTrace,
-    MinioLog,
     MinioMetrics(minio_metrics::Call),
+    MinioHeal(minio_heal::Call),
     MinioKms(minio_kms::Call),
     MinioConfig(minio_config::Call),
 }
@@ -224,9 +223,8 @@ impl Handler {
             Self::TemporaryAccountInfo => "TemporaryAccountInfo",
             Self::MinioInfo(kind) => kind.name(),
             Self::MinioService => "Service",
-            Self::MinioTrace => "Trace",
-            Self::MinioLog => "ConsoleLog",
             Self::MinioMetrics(call) => call.name(),
+            Self::MinioHeal(call) => call.name(),
             Self::MinioKms(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
         }
@@ -685,7 +683,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         verb: Verb::Get,
         path: "/minio/admin/v3/trace",
         needs: Needs::Action("admin:ServerTrace", ANY),
-        handler: Handler::MinioTrace,
+        handler: Handler::MinioMetrics(minio_metrics::Call::Trace),
         about: "A live trace as `madmin.TraceInfo` documents, until the caller leaves: S3's requests as `MinIO`'s S3 type, the other APIs' as its internal type, filtered by `types` (or `s3`, `internal`, `all`), `err` and `threshold`; headers and queries with their secrets redacted: `mc admin trace`",
     },
     Endpoint {
@@ -693,7 +691,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         verb: Verb::Get,
         path: "/minio/admin/v3/log",
         needs: Needs::Action("admin:ConsoleLog", ANY),
-        handler: Handler::MinioLog,
+        handler: Handler::MinioMetrics(minio_metrics::Call::Log),
         about: "The server's log as `madmin.LogInfo` documents: the last `limit` lines (of the 10,000 kept) of the kind `logType` asks (`ERROR`, `WARNING`, `INFO`; all by default), then each as it's logged, until the caller leaves: `mc admin logs`",
     },
     Endpoint {
@@ -719,6 +717,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("admin:ForceUnlock", ANY),
         handler: Handler::MinioMetrics(minio_metrics::Call::ForceUnlock),
         about: "Releases the locks `paths` names: none is ever held past a request, so there's nothing to release: `mc admin force-unlock`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/heal/",
+        needs: Needs::Action("admin:Heal", ANY),
+        handler: Handler::MinioHeal(minio_heal::Call::Heal),
+        about: "Starts a heal of every bucket, as `madmin.HealOpts` asks, and answers its token; with `?clientToken=` the results since the last call; `?forceStart`, `?forceStop`. One drive has no other copy to heal from: a heal checks each bucket and object and reports it, changing nothing; a deep scan reads each version's bytes, as `teifs verify` does: `mc admin heal`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/heal/{path}",
+        needs: Needs::Action("admin:Heal", ANY),
+        handler: Handler::MinioHeal(minio_heal::Call::Heal),
+        about: "A heal of one bucket, or of its objects under a prefix (`{bucket}/{prefix}`): as `heal/`: `mc admin heal ALIAS/BUCKET/PREFIX`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/background-heal/status",
+        needs: Needs::Action("admin:Heal", ANY),
+        handler: Handler::MinioHeal(minio_heal::Call::BackgroundStatus),
+        about: "The background heal's status as `madmin.BgHealState`: the drive's scrub, with the versions it checked and the drive's disks: `mc admin heal` with no target",
     },
     Endpoint {
         api: Api::Minio,
@@ -959,7 +981,7 @@ fn api_of(method: &Method, uri: &Uri, headers: &HeaderMap, domains: &[String]) -
     } else if minio_admin_path(path).is_some_and(|path| {
         ENDPOINTS
             .iter()
-            .any(|e| e.api == Api::Minio && e.path == path)
+            .any(|e| e.api == Api::Minio && matches(e.path, &path))
     }) && admin::virtual_bucket(headers, domains).is_none()
     {
         Some(Api::Minio)
@@ -1006,6 +1028,8 @@ pub(crate) struct Routes {
     pub(crate) tracers: Arc<Tracers>,
     /// The requests' live figures, for `MinIO`'s realtime metrics.
     pub(crate) live: crate::metrics::Live,
+    /// `MinIO`'s heal sequences.
+    pub(crate) heals: Arc<crate::minio_heal::Heals>,
     /// Where events go: the server's notification targets and its listeners.
     pub(crate) events: Events,
     /// Where requests' access log records go, turned on when an import makes a bucket log.
@@ -1319,9 +1343,8 @@ impl Routes {
             Handler::TemporaryAccountInfo => minio_service_accounts::temporary_account_info(&req),
             Handler::MinioInfo(kind) => kind.call(self, &req).await,
             Handler::MinioService => minio_service::call(self, &req),
-            Handler::MinioTrace => minio_trace::trace(&self.tracers, req.uri.query()),
-            Handler::MinioLog => Ok(console_log::log(self, &req)),
             Handler::MinioMetrics(call) => call.call(self, &req),
+            Handler::MinioHeal(call) => call.call(self, req).await,
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),

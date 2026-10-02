@@ -31,6 +31,7 @@ mod listen;
 mod logging;
 mod metrics;
 mod minio_config;
+mod minio_heal;
 mod minio_iam;
 mod minio_info;
 mod minio_kms;
@@ -138,6 +139,20 @@ pub struct Options {
     pub access_log_interval: Option<std::time::Duration>,
 }
 
+/// How s3s reads requests.
+fn s3_config(allow_sig_v2: bool) -> S3Config {
+    let mut config = S3Config::default();
+    config.enable_sig_v2 = allow_sig_v2;
+    config.sig_v4_allowed_services = ["s3", "iam", "sts"].map(str::to_owned).into();
+    // Each route reads at most its own limit, after deciding the caller may call it.
+    config.custom_route_max_body_size = Some(admin::MAX_IMPORT_BYTES as u64);
+    // Forms are parsed with the limits TeiFS reads their fields with.
+    config.form_max_field_size = post_form::MAX_FIELDS_BYTES;
+    config.form_max_fields_size = post_form::MAX_FIELDS_BYTES;
+    config.form_max_parts = post_form::MAX_PARTS;
+    config
+}
+
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
     let notifier = options
@@ -188,16 +203,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     );
     let control = Arc::new(Control::default());
     let mut builder = S3ServiceBuilder::new(drive);
-    let mut config = S3Config::default();
-    config.enable_sig_v2 = options.allow_sig_v2;
-    config.sig_v4_allowed_services = ["s3", "iam", "sts"].map(str::to_owned).into();
-    // Each route reads at most its own limit, after deciding the caller may call it.
-    config.custom_route_max_body_size = Some(admin::MAX_IMPORT_BYTES as u64);
-    // Forms are parsed with the limits TeiFS reads their fields with.
-    config.form_max_field_size = post_form::MAX_FIELDS_BYTES;
-    config.form_max_fields_size = post_form::MAX_FIELDS_BYTES;
-    config.form_max_parts = post_form::MAX_PARTS;
-    builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(config))));
+    builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(s3_config(
+        options.allow_sig_v2,
+    )))));
     if let Some(iam) = options.iam {
         builder.set_auth(access::Auth(iam.clone()));
         builder.set_access(access::Access::new(
@@ -216,6 +224,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             root_keys: options.root_keys,
             tracers,
             live: watch.metrics.live(),
+            heals: Arc::default(),
             events,
             access_log,
             request_metrics,

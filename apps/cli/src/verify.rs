@@ -2,7 +2,7 @@
 //! was recorded when they were written; and the words for what checks find, which
 //! `teifs admin info` shows for a server's scrubs too.
 
-use teifs_store::{Damage, Unverifiable, Verdict, VerifyCursor};
+use teifs_store::{Verdict, VerifyCursor};
 use teifs_types::verify::{Checked, ScrubPass};
 
 use crate::{KeyringArgs, error, open, open_kms, plural, ui, units};
@@ -114,40 +114,16 @@ pub fn line(item: &Checked) -> String {
     };
     let what = match &item.verdict {
         Verdict::Intact => "intact".to_owned(),
-        Verdict::Damaged { damage } => damage_text(damage),
-        Verdict::Unverifiable { reason } => unverifiable_text(*reason).to_owned(),
+        Verdict::Damaged { damage } => damage.to_string(),
+        Verdict::Unverifiable { reason } => reason.to_string(),
     };
     format!("{}/{}{version}: {what}", item.bucket, item.key)
 }
 
-fn damage_text(damage: &Damage) -> String {
-    match damage {
-        Damage::Missing => "its data is missing".into(),
-        Damage::Truncated => "its data is cut short".into(),
-        Damage::Tampered => "its encrypted data doesn't authenticate".into(),
-        Damage::Etag => "its bytes don't match its ETag".into(),
-        Damage::Checksum {
-            algorithm,
-            part: None,
-        } => format!("its bytes don't match its {algorithm} checksum"),
-        Damage::Checksum {
-            algorithm,
-            part: Some(part),
-        } => format!("part {part}'s bytes don't match its {algorithm} checksum"),
-    }
-}
-
-fn unverifiable_text(reason: Unverifiable) -> &'static str {
-    match reason {
-        Unverifiable::CustomerKey => "it's encrypted with a key its client keeps (SSE-C)",
-        Unverifiable::NoKms => "it's encrypted, and the keyring isn't here (--kms-keyring)",
-        Unverifiable::NothingToCompare => "it changed outside TeiFS, so nothing records its bytes",
-        Unverifiable::ChangedMeanwhile => "it changed while it was being read",
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use teifs_store::{Damage, Unverifiable};
+
     use super::*;
 
     fn checked(version_id: &str, verdict: Verdict) -> Checked {
