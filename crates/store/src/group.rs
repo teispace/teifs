@@ -1,8 +1,9 @@
-//! Group commit: writes waiting for the commit lock are recorded together. Whoever gets
-//! the lock records every write waiting then, in one transaction, so one sync of the
-//! index covers them all; the others find theirs done when they get it. Each write is
-//! still checked on its own (its precondition sees the writes recorded before it in the
-//! group), and a write that fails leaves the others alone.
+//! Group commit: writes and deletes waiting for the commit lock are recorded together.
+//! Whoever gets the lock records every one waiting then, in one transaction, so one sync
+//! of the index covers them all; the others find theirs done when they get it. Each is
+//! still checked on its own (its precondition sees the changes recorded before it in the
+//! group), and one that fails leaves the others alone. Data files the changes free are
+//! removed only once the transaction is committed.
 
 use std::{
     io,
@@ -17,14 +18,20 @@ use teifs_types::ObjectAttrs;
 use crate::{
     Bucket, Inner, ObjectInfo, Precondition, StoreError,
     error::Result,
-    objects::{ObjectBucket, Written},
+    objects::{Deleted, ObjectBucket, Written},
     stages,
 };
 
-/// A write's answer, filled in by whoever records it.
-type Answer = Arc<Mutex<Option<Result<ObjectInfo>>>>;
+/// What a recorded change did.
+enum Done {
+    Written(Box<ObjectInfo>),
+    Deleted(Deleted),
+}
 
-/// A write waiting to be recorded.
+/// A change's answer, filled in by whoever records it.
+type Answer = Arc<Mutex<Option<Result<Done>>>>;
+
+/// A change waiting to be recorded.
 enum Job {
     /// An object bucket's data file, already in place ([`Inner::write_object`]).
     Object {
@@ -40,6 +47,15 @@ enum Job {
         etag: String,
         attrs: Box<ObjectAttrs>,
     },
+    /// A delete in an object bucket ([`Inner::delete_object`]), or of one version of a
+    /// key ([`Inner::delete_object_version`]).
+    Delete {
+        bucket: String,
+        bucket_id: String,
+        key: String,
+        version_id: Option<String>,
+        bypass: bool,
+    },
 }
 
 struct Waiting {
@@ -48,11 +64,11 @@ struct Waiting {
     answer: Answer,
 }
 
-/// What a recorded write leaves to do once the group's transaction is committed: the
-/// data files of the versions it replaced, in the store that holds them.
-type Recorded = (ObjectInfo, Vec<String>, Option<ObjectBucket>);
+/// What a recorded change leaves to do once the group's transaction is committed: the
+/// data files no version refers to any more, in the store that holds them.
+type Recorded = (Done, Vec<String>, Option<ObjectBucket>);
 
-/// The writes waiting for the commit lock.
+/// The changes waiting for the commit lock.
 #[derive(Default)]
 pub(crate) struct Group {
     waiting: Mutex<Vec<Waiting>>,
@@ -70,22 +86,41 @@ impl Group {
     fn waiting(&self) -> MutexGuard<'_, Vec<Waiting>> {
         self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// How many changes are waiting.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.waiting().len()
+    }
 }
 
-fn take(answer: &Answer) -> Option<Result<ObjectInfo>> {
+fn take(answer: &Answer) -> Option<Result<Done>> {
     answer.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
-fn give(answer: &Answer, result: Result<ObjectInfo>) {
+fn give(answer: &Answer, result: Result<Done>) {
     *answer.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
 }
 
-/// The error each write of a group gets when the group's transaction fails.
+/// The error each change of a group gets when the group's transaction fails.
 fn shared(err: &StoreError) -> StoreError {
     if err.is_storage_full() {
         StoreError::StorageFull
     } else {
         StoreError::Io(io::Error::other(err.to_string()))
+    }
+}
+
+/// A change's answer, when it was lost (never filled in, or of the wrong kind).
+fn lost() -> StoreError {
+    StoreError::Io(io::Error::other("the change was lost while being recorded"))
+}
+
+/// A write's answer.
+fn as_written(done: Done) -> Result<ObjectInfo> {
+    match done {
+        Done::Written(info) => Ok(*info),
+        Done::Deleted(_) => Err(lost()),
     }
 }
 
@@ -105,7 +140,7 @@ impl Inner {
             bucket_id: bucket_id.to_owned(),
             written: Box::new(written),
         };
-        self.grouped(job, precondition)
+        self.grouped(job, precondition).and_then(as_written)
     }
 
     /// Renames the synced file `tmp` into place as `key` in the folder bucket `bucket`
@@ -126,10 +161,34 @@ impl Inner {
             etag,
             attrs: Box::new(attrs),
         };
-        self.grouped(job, precondition)
+        self.grouped(job, precondition).and_then(as_written)
     }
 
-    fn grouped(&self, job: Job, precondition: Precondition) -> Result<ObjectInfo> {
+    /// Deletes `key` (or its version `version_id`) in the object bucket `bucket_id`,
+    /// named `bucket`, with whatever other changes are waiting.
+    pub(crate) fn delete_grouped(
+        &self,
+        bucket: &str,
+        bucket_id: &str,
+        key: &str,
+        version_id: Option<&str>,
+        precondition: Precondition,
+        bypass: bool,
+    ) -> Result<Deleted> {
+        let job = Job::Delete {
+            bucket: bucket.to_owned(),
+            bucket_id: bucket_id.to_owned(),
+            key: key.to_owned(),
+            version_id: version_id.map(str::to_owned),
+            bypass,
+        };
+        match self.grouped(job, precondition)? {
+            Done::Deleted(deleted) => Ok(deleted),
+            Done::Written(_) => Err(lost()),
+        }
+    }
+
+    fn grouped(&self, job: Job, precondition: Precondition) -> Result<Done> {
         let answer = Answer::default();
         self.group.waiting().push(Waiting {
             job,
@@ -150,11 +209,7 @@ impl Inner {
         self.record_group(&conn, group);
         stages::record(&self.stages, "write", "commit", since);
         drop(conn);
-        take(&answer).unwrap_or_else(|| {
-            Err(StoreError::Io(io::Error::other(
-                "the write was lost while being recorded",
-            )))
-        })
+        take(&answer).unwrap_or_else(|| Err(lost()))
     }
 
     /// Records a group of writes in one transaction and answers each. Holds the commit
@@ -172,7 +227,7 @@ impl Inner {
                 // if the transaction fails; a folder bucket's is in place by then.
                 let unrecorded = match &job {
                     Job::Object { written, .. } => Some(written.path().to_owned()),
-                    Job::File { .. } => None,
+                    Job::File { .. } | Job::Delete { .. } => None,
                 };
                 let result = self.record_job(conn, job, &precondition);
                 recorded.push((answer, unrecorded, result));
@@ -222,7 +277,7 @@ impl Inner {
                 };
                 let (info, replaced) =
                     conn.try_batch(|conn| self.record_row(conn, &bucket, *written, precondition))?;
-                Ok((info, replaced, Some(bucket)))
+                Ok((Done::Written(Box::new(info)), replaced, Some(bucket)))
             }
             Job::File {
                 bucket,
@@ -239,13 +294,33 @@ impl Inner {
                 let (info, replaced) = conn.try_batch(|conn| {
                     self.place_file(conn, &bucket, &key, &tmp, etag, *attrs, None, precondition)
                 })?;
-                Ok((info, replaced, bucket.versioned().cloned()))
+                Ok((
+                    Done::Written(Box::new(info)),
+                    replaced,
+                    bucket.versioned().cloned(),
+                ))
+            }
+            Job::Delete {
+                bucket,
+                bucket_id,
+                key,
+                version_id,
+                bypass,
+            } => {
+                let bucket = self.object_bucket(&bucket, &bucket_id)?;
+                let (deleted, files) = conn.try_batch(|conn| match &version_id {
+                    None => Inner::delete_object(conn, &bucket, &key, precondition),
+                    Some(id) => {
+                        Inner::delete_object_version(conn, &bucket, &key, id, precondition, bypass)
+                    }
+                })?;
+                Ok((Done::Deleted(deleted), files, Some(bucket)))
             }
         }
     }
 
     /// The object bucket `name` if it's still the one with id `id` (it may have been
-    /// deleted, and its folder with it, since the write began).
+    /// deleted, and its folder with it, since the change began).
     fn object_bucket(&self, name: &str, id: &str) -> Result<ObjectBucket> {
         match self.bucket(name) {
             Ok(Bucket::Object(bucket)) if bucket.id == id => Ok(bucket),
@@ -278,7 +353,11 @@ impl Inner {
         self.record_group(&self.lock(), group);
         answers
             .iter()
-            .map(|answer| take(answer).expect("every write is answered"))
+            .map(|answer| {
+                take(answer)
+                    .expect("every write is answered")
+                    .and_then(as_written)
+            })
             .collect()
     }
 }

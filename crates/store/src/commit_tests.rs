@@ -335,3 +335,137 @@ async fn reads_and_listings_dont_wait_for_the_commit_lock() {
         (5, true, 1)
     );
 }
+
+/// How many data files the bucket `docs` holds.
+fn data_files(store: &Store) -> usize {
+    fn count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .map(|entry| entry.unwrap().path())
+                .map(|path| if path.is_dir() { count(&path) } else { 1 })
+                .sum()
+        })
+    }
+    count(&resolved(store).dir)
+}
+
+#[tokio::test]
+async fn deletes_waiting_together_are_each_checked_on_their_own() {
+    let (_dir, store) = object_bucket().await;
+    for key in ["a", "b"] {
+        store
+            .put_bytes("docs", key, key.as_bytes(), ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    assert_eq!(data_files(&store), 2);
+    let store = std::sync::Arc::new(store);
+    let holder_store = store.clone();
+    let (locked, unlock) = (
+        std::sync::mpsc::channel::<()>(),
+        std::sync::mpsc::channel::<()>(),
+    );
+    let holder = std::thread::spawn(move || {
+        let _conn = holder_store.inner.lock();
+        locked.0.send(()).unwrap();
+        unlock.1.recv().unwrap();
+    });
+    locked.1.recv().unwrap();
+    let delete = |key: &'static str, precondition: Precondition| {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .delete_with("docs", key, None, precondition, false)
+                .await
+        })
+    };
+    let wrong_etag = Precondition {
+        if_match: Some(Match::ETag("0123".into())),
+        ..Precondition::default()
+    };
+    let deletes = [
+        delete("a", Precondition::default()),
+        delete("b", wrong_etag),
+        delete("missing", Precondition::default()),
+    ];
+    // All three wait for the lock, to be recorded as one group.
+    while store.inner.group.len() < 3 {
+        tokio::task::yield_now().await;
+    }
+    unlock.0.send(()).unwrap();
+    holder.join().unwrap();
+    let [a, b, missing] = deletes;
+    a.await.unwrap().unwrap();
+    assert!(matches!(
+        b.await.unwrap(),
+        Err(StoreError::PreconditionFailed)
+    ));
+    missing.await.unwrap().unwrap();
+    assert!(matches!(
+        store.head("docs", "a").await,
+        Err(StoreError::NoSuchKey)
+    ));
+    assert_eq!(store.head("docs", "b").await.unwrap().size, 1);
+    assert_eq!(data_files(&store), 1);
+}
+
+#[tokio::test]
+async fn concurrent_deletes_and_writes_are_all_recorded() {
+    let (_dir, store) = object_bucket().await;
+    for i in 0..32 {
+        store
+            .put_bytes("docs", &format!("old{i}"), b"old", ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    store
+        .set_bucket_versioning("docs", Versioning::Enabled)
+        .await
+        .unwrap();
+    let store = std::sync::Arc::new(store);
+    let changes: Vec<_> = (0..32)
+        .map(|i| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let deleted = store
+                    .delete_with(
+                        "docs",
+                        &format!("old{i}"),
+                        None,
+                        Precondition::default(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert!(deleted.delete_marker);
+                store
+                    .put_bytes("docs", &format!("new{i}"), b"new", ObjectAttrs::default())
+                    .await
+                    .unwrap();
+                let removed = store
+                    .delete_with(
+                        "docs",
+                        &format!("old{i}"),
+                        Some("null"),
+                        Precondition::default(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(removed.version_id.as_deref(), Some("null"));
+            })
+        })
+        .collect();
+    for change in changes {
+        change.await.unwrap();
+    }
+    for i in 0..32 {
+        assert!(store.head("docs", &format!("old{i}")).await.is_err());
+        assert_eq!(
+            store.head("docs", &format!("new{i}")).await.unwrap().size,
+            3
+        );
+    }
+    // The 32 old files went with their versions.
+    assert_eq!(data_files(&store), 32);
+}

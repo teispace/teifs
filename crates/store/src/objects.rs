@@ -642,23 +642,26 @@ impl Inner {
     /// without versioning its `null` version goes; with versioning on a delete marker
     /// becomes current; suspended, a `null` delete marker replaces the `null` version.
     /// Deleting what doesn't exist succeeds (and still adds a marker with versioning).
+    /// Also gives the data files no version refers to any more: queued as garbage, for
+    /// the caller to remove once the change is committed.
     pub(crate) fn delete_object(
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
         precondition: &Precondition,
-    ) -> Result<Deleted> {
+    ) -> Result<(Deleted, Vec<String>)> {
         let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
         let exists = precondition.check_delete(current.as_ref())?;
         if bucket.versioning == Versioning::Unversioned {
-            if exists {
-                let removed = conn.delete_null_version(&bucket.id, key, now_ms())?;
-                Inner::remove_data_files(conn, bucket, &removed);
-            }
-            return Ok(Deleted::default());
+            let removed = if exists {
+                conn.delete_null_version(&bucket.id, key, now_ms())?
+            } else {
+                Vec::new()
+            };
+            return Ok((Deleted::default(), removed));
         }
         if !exists && precondition.is_conditional() {
-            return Ok(Deleted::default());
+            return Ok((Deleted::default(), Vec::new()));
         }
         let now = now_ms();
         let marker = VersionRow {
@@ -678,15 +681,16 @@ impl Inner {
             latest: true,
         };
         let replaced = conn.put_version(&marker, now)?;
-        Inner::remove_data_files(conn, bucket, &replaced);
-        Ok(Deleted {
+        let deleted = Deleted {
             version_id: Some(marker.version_id),
             delete_marker: true,
-        })
+        };
+        Ok((deleted, replaced))
     }
 
     /// Removes one version of `key` for good, if it meets `precondition` (a delete
-    /// marker has nothing to meet). Removing one that doesn't exist succeeds.
+    /// marker has nothing to meet). Removing one that doesn't exist succeeds. Also gives
+    /// the data files to remove once the change is committed.
     pub(crate) fn delete_object_version(
         conn: &Index,
         bucket: &ObjectBucket,
@@ -694,12 +698,13 @@ impl Inner {
         version_id: &str,
         precondition: &Precondition,
         bypass: bool,
-    ) -> Result<Deleted> {
+    ) -> Result<(Deleted, Vec<String>)> {
         let Some(row) = conn.version(&bucket.id, key, version_id)? else {
-            return Ok(Deleted {
+            let deleted = Deleted {
                 version_id: bucket.named(version_id),
                 delete_marker: false,
-            });
+            };
+            return Ok((deleted, Vec::new()));
         };
         if !row.delete_marker {
             precondition.check_delete(Some(&to_info(&row)))?;
@@ -708,13 +713,13 @@ impl Inner {
         if let Some((removed, files)) =
             conn.delete_version(&bucket.id, key, version_id, now_ms())?
         {
-            Inner::remove_data_files(conn, bucket, &files);
-            return Ok(Deleted {
+            let deleted = Deleted {
                 version_id: bucket.named(&removed.version_id),
                 delete_marker: removed.delete_marker,
-            });
+            };
+            return Ok((deleted, files));
         }
-        Ok(Deleted::default())
+        Ok((Deleted::default(), Vec::new()))
     }
 
     /// Replaces the attributes of `key` in place (a copy onto itself with new metadata).

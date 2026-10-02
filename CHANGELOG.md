@@ -798,6 +798,10 @@ behaviour; the on-disk format is always upgraded automatically.
   with 4 KiB objects and 64 clients: about 2.8× the objects per second with
   `--durability strict`, 4.7× with `relaxed`. Folder buckets sync a new file before
   the lock and share the same grouped recording: about 3× at 64 clients.
+- Faster deletes in object buckets under load: deletes waiting for the commit lock are
+  recorded together with the writes waiting, and the data files they free are removed
+  once that's committed. 4 KiB objects at 64 clients in Docker: about 3× the deletes
+  per second, and about 1.7× the operations per second in a mixed load.
 - Faster downloads of encrypted objects: about 1 MiB is read and decrypted at a time,
   in place and without a copy, instead of 64 KiB at a time (10 MiB objects at 64
   clients: about 1.5× in Docker).

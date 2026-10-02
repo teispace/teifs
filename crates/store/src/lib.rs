@@ -998,18 +998,33 @@ impl Store {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| {
+            let grouped = |id: &str| {
+                inner.delete_grouped(
+                    &bucket,
+                    id,
+                    &key,
+                    version_id.as_deref(),
+                    precondition.clone(),
+                    bypass,
+                )
+            };
+            if let Bucket::Object(found) = inner.bucket(&bucket)? {
+                return grouped(&found.id);
+            }
+            // A folder bucket's deletes change files, which a group's transaction can't
+            // undo: they're made alone, under the lock (and the bucket found again there).
             let conn = inner.lock();
             match inner.bucket(&bucket)? {
                 Bucket::Folder(bucket) => {
                     let Ok(key) = ObjectKey::parse(&key) else {
                         return Ok(Deleted::default());
                     };
-                    match (version_id, bucket.versioned()) {
+                    match (version_id.as_deref(), bucket.versioned()) {
                         (Some(id), _) => inner.delete_folder_version(
                             &conn,
                             &bucket,
                             &key,
-                            &id,
+                            id,
                             &precondition,
                             bypass,
                         ),
@@ -1039,17 +1054,10 @@ impl Store {
                         }
                     }
                 }
-                Bucket::Object(bucket) => match version_id {
-                    None => Inner::delete_object(&conn, &bucket, &key, &precondition),
-                    Some(id) => Inner::delete_object_version(
-                        &conn,
-                        &bucket,
-                        &key,
-                        &id,
-                        &precondition,
-                        bypass,
-                    ),
-                },
+                Bucket::Object(found) => {
+                    drop(conn);
+                    grouped(&found.id)
+                }
             }
         })
         .await
