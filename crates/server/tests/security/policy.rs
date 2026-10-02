@@ -192,6 +192,28 @@ async fn a_named_version_needs_the_version_action() {
         .version_id("null")
         .send();
     assert_eq!(code(delete.await), "AccessDenied");
+    // Nor with the parameter's name escaped, which reads as `versionId` all the same.
+    let reader_key = key_of(&server, "reader");
+    for (method, query) in [
+        ("GET", "version%49d=null"),
+        ("DELETE", "version%49d=null"),
+        ("DELETE", "%76ersionId=null"),
+    ] {
+        let request = signed(
+            &server,
+            (&reader_key.0, &reader_key.1),
+            method,
+            &format!("/history/doc?{query}"),
+            &[],
+            Payload::Bytes(b""),
+        );
+        let answer = request.send(&[], "").await;
+        assert_eq!(
+            answer.code, "AccessDenied",
+            "{method} ?{query}: {}",
+            answer.body
+        );
+    }
     assert_eq!(
         get(&root, "history", "doc").await,
         "ok",

@@ -162,7 +162,10 @@ absent: the known pitfall is kept, not "fixed"). Policies are refused, not half-
 when anything in them is invalid, and a JSON key given twice is refused. `NotPrincipal`
 goes only with Deny, and an account named in it spares only its root user. Every S3
 operation maps to the actions AWS documents for it (`…Version` actions for a version),
-checked against AWS's own reference by a test; a rename needs read and delete on the
+checked against AWS's own reference by a test. The query parameters that decide them
+(`versionId`, and condition keys such as `s3:prefix`) are read exactly as s3s reads
+them for the operation, names decoded too, so `version%49d` names a version for both;
+a rename needs read and delete on the
 source as well as write on the target. An object's own tags (`s3:ExistingObjectTag`)
 decide the actions AWS lists for them (reads, copies from it, its ACL and tags): they
 are read when a policy that decides the request tests them, and a failure to read them

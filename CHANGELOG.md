@@ -656,6 +656,11 @@ behaviour; the on-disk format is always upgraded automatically.
 - `teifs alias set … --ca-cert FILE` (or `TEIFS_CA_CERT` for every alias) trusts a
   private or self-signed certificate authority besides the system's, for every command
   that uses the alias: S3, `teifs admin`, IAM and STS. A certificate error suggests it.
+- Security: a query parameter whose name was percent-encoded (`version%49d=…`) was
+  missed when a request was authorized but read by the operation, so a version could
+  be read or deleted for good with only `s3:GetObject` or `s3:DeleteObject`, and
+  conditions on `s3:prefix`, `s3:delimiter` and `s3:max-keys` could be sidestepped.
+  Query parameters are now read for authorization exactly as for the operation.
 - Security: conditions on an object's own tags (`s3:ExistingObjectTag/…`) are decided
   with its tags, for every action AWS evaluates them with (reads, `HEAD`, copies from
   it, its ACL and tagging). They were never present, so an Allow on a tag didn't apply

@@ -1052,15 +1052,17 @@ fn query(cx: &S3AccessContext<'_>, name: &str) -> Option<String> {
     query_param(cx.uri().query(), name)
 }
 
-/// The decoded value of the parameter `name` of `query`.
+/// The value of the parameter `name` of `query`, read as s3s reads it for the request
+/// itself (names and values decoded, `+` a space), so what's authorized is what's done:
+/// `version%49d=…` names a version. A parameter given twice has no value here; s3s
+/// refuses the request.
 fn query_param(query: Option<&str>, name: &str) -> Option<String> {
-    query?.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (key == name).then(|| {
-            crate::drive::urlencoding_decode(&value.replace('+', " "))
-                .unwrap_or_else(|_| value.to_owned())
-        })
-    })
+    // s3s reads the query with `serde_urlencoded`, which is `form_urlencoded::parse`.
+    let mut values = form_urlencoded::parse(query?.as_bytes())
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned());
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 /// Headers that are S3 condition keys as they are.
@@ -1260,6 +1262,22 @@ const fn signature_version(v4: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_parameters_read_as_s3s_reads_them() {
+        let read = |query: &str, name: &str| query_param(Some(query), name);
+        assert_eq!(
+            read("version%49d=a+b%20c", "versionId").as_deref(),
+            Some("a b c")
+        );
+        assert_eq!(read("%76ersionId=v&x=1", "versionId").as_deref(), Some("v"));
+        assert_eq!(read("versionId", "versionId").as_deref(), Some(""));
+        assert_eq!(read("prefix=%zz%2", "prefix").as_deref(), Some("%zz%2"));
+        assert_eq!(read("prefix=%ff", "prefix").as_deref(), Some("\u{fffd}"));
+        // Given twice, it's refused by s3s, and has no value to authorize.
+        assert_eq!(read("versionId=a&version%49d=b", "versionId"), None);
+        assert_eq!(read("versionid=a", "versionId"), None);
+    }
 
     #[test]
     fn only_the_drives_account_owns_its_buckets() {
