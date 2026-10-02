@@ -372,6 +372,11 @@ behaviour; the on-disk format is always upgraded automatically.
   `--errors` and `--response-threshold` applied on the server and secrets redacted.
 - `mc admin logs`: the server keeps its last 10,000 log lines (what `TEIFS_LOG` lets
   through) and sends them, then each new one, as MinIO's console log does.
+- MinIO's realtime metrics (the console's realtime view, `mc admin scanner status`):
+  S3's requests being served and since-start totals (requests, bytes, errors,
+  cancellations, times), one document every interval. `mc admin top locks` lists no
+  locks and `mc admin force-unlock` has none to release: a request holds none past its
+  answer.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

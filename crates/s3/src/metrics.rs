@@ -12,7 +12,7 @@
 use std::{
     borrow::Cow,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicI64},
+    sync::{Arc, Mutex, PoisonError, atomic::AtomicI64},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -62,6 +62,82 @@ struct ApiError {
     error: String,
 }
 
+/// The requests answered since the server started, in total: what `MinIO`'s realtime
+/// metrics report.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SinceStart {
+    pub(crate) requests: u64,
+    pub(crate) received: u64,
+    pub(crate) sent: u64,
+    pub(crate) errors_4xx: u64,
+    pub(crate) errors_5xx: u64,
+    pub(crate) canceled: u64,
+    /// Seconds, all requests together.
+    pub(crate) time: f64,
+    pub(crate) time_min: f64,
+    pub(crate) time_max: f64,
+    /// Seconds until the answer's headers were ready, all requests together.
+    pub(crate) first_byte: f64,
+    pub(crate) first_byte_min: f64,
+    pub(crate) first_byte_max: f64,
+    /// The requests whose answer's headers were ready.
+    pub(crate) first_bytes: u64,
+}
+
+impl SinceStart {
+    fn add(&mut self, answer: &Answer) {
+        let first = self.requests == 0;
+        self.requests += 1;
+        self.received += answer.received;
+        self.sent += answer.sent;
+        match answer.status.as_u16() {
+            400..=499 => self.errors_4xx += 1,
+            500..=599 => self.errors_5xx += 1,
+            _ => {}
+        }
+        if answer.canceled {
+            self.canceled += 1;
+        }
+        let took = answer.duration.as_secs_f64();
+        self.time += took;
+        self.time_min = if first { took } else { self.time_min.min(took) };
+        self.time_max = self.time_max.max(took);
+        if let Some(first_byte) = answer.first_byte.map(|d| d.as_secs_f64()) {
+            self.first_bytes += 1;
+            self.first_byte += first_byte;
+            self.first_byte_min = if self.first_bytes == 1 {
+                first_byte
+            } else {
+                self.first_byte_min.min(first_byte)
+            };
+            self.first_byte_max = self.first_byte_max.max(first_byte);
+        }
+    }
+}
+
+/// The server's live figures, for `MinIO`'s realtime metrics.
+#[derive(Debug, Clone)]
+pub(crate) struct Live {
+    since_start: Arc<Mutex<SinceStart>>,
+    inflight: Gauge<i64, AtomicI64>,
+    /// When the server started.
+    pub(crate) started: SystemTime,
+}
+
+impl Live {
+    pub(crate) fn since_start(&self) -> SinceStart {
+        *self
+            .since_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Requests being served.
+    pub(crate) fn inflight(&self) -> i64 {
+        self.inflight.get()
+    }
+}
+
 /// Seconds: 1 ms to about a minute, doubling.
 pub(crate) fn latency() -> Histogram {
     Histogram::new(exponential_buckets(0.001, 2.0, 17))
@@ -83,6 +159,7 @@ pub struct Metrics {
     access_log: crate::access_log::Counters,
     request_series: crate::request_metrics::Series,
     store: Store,
+    live: Live,
 }
 
 impl Metrics {
@@ -159,6 +236,11 @@ impl Metrics {
             started: SystemTime::now(),
         }));
         registry.register_collector(Box::new(Notifications(notifier)));
+        let live = Live {
+            since_start: Arc::default(),
+            inflight: inflight.clone(),
+            started: SystemTime::now(),
+        };
         Self {
             registry,
             requests,
@@ -173,7 +255,22 @@ impl Metrics {
             access_log,
             request_series,
             store: store.clone(),
+            live,
         }
+    }
+
+    /// Counts an S3 request in the live figures.
+    pub(crate) fn tally_s3(&self, answer: &Answer) {
+        self.live
+            .since_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add(answer);
+    }
+
+    /// The live figures, which S3's requests move.
+    pub(crate) fn live(&self) -> Live {
+        self.live.clone()
     }
 
     /// The series of buckets' request metrics, which their worker moves.
@@ -662,6 +759,38 @@ fn check(iam: &Iam, headers: &HeaderMap, client: Client) -> Result<(), S3Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_since_start_tally_adds_up_answers() {
+        use std::time::Duration;
+
+        let answer = |status: u16, millis: u64, first_byte: Option<u64>| Answer {
+            status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+            error: None,
+            first_byte: first_byte.map(Duration::from_millis),
+            duration: Duration::from_millis(millis),
+            received: 5,
+            sent: 7,
+            canceled: status == 499,
+            object_size: None,
+        };
+        let mut tally = SinceStart::default();
+        tally.add(&answer(200, 300, Some(20)));
+        tally.add(&answer(404, 100, Some(40)));
+        tally.add(&answer(503, 200, None));
+        tally.add(&answer(499, 400, Some(10)));
+        assert_eq!((tally.requests, tally.received, tally.sent), (4, 20, 28));
+        assert_eq!(
+            (tally.errors_4xx, tally.errors_5xx, tally.canceled),
+            (2, 1, 1)
+        );
+        assert!((tally.time - 1.0).abs() < 1e-9);
+        assert!((tally.time_min - 0.1).abs() < 1e-9);
+        assert!((tally.time_max - 0.4).abs() < 1e-9);
+        assert!((tally.first_byte - 0.07).abs() < 1e-9);
+        assert!((tally.first_byte_min - 0.01).abs() < 1e-9);
+        assert!((tally.first_byte_max - 0.04).abs() < 1e-9);
+    }
 
     #[test]
     fn scrub_passes_are_labeled_and_the_last_ones_end_is_a_time() {

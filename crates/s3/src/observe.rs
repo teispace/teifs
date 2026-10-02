@@ -535,6 +535,9 @@ impl Drop for Sent {
         answer.received = request.seen.received();
         let watch = &request.watch;
         watch.metrics.record(request.seen.operation(), answer);
+        if request.seen.kind() == "S3" {
+            watch.metrics.tally_s3(answer);
+        }
         watch.done(
             (request.asked.take(), request.arrival.take()),
             &request.seen,

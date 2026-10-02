@@ -32,7 +32,7 @@ use crate::{
     bucket_export, console_log, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_iam, minio_info, minio_kms, minio_service,
+    iam_api, listen, minio_config, minio_iam, minio_info, minio_kms, minio_metrics, minio_service,
     minio_service_accounts, minio_trace,
     observe::{self, Seen},
     quota,
@@ -164,6 +164,7 @@ enum Handler {
     MinioService,
     MinioTrace,
     MinioLog,
+    MinioMetrics(minio_metrics::Call),
     MinioKms(minio_kms::Call),
     MinioConfig(minio_config::Call),
 }
@@ -225,6 +226,7 @@ impl Handler {
             Self::MinioService => "Service",
             Self::MinioTrace => "Trace",
             Self::MinioLog => "ConsoleLog",
+            Self::MinioMetrics(call) => call.name(),
             Self::MinioKms(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
         }
@@ -696,6 +698,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/metrics",
+        needs: Needs::Action("admin:ServerInfo", ANY),
+        handler: Handler::MinioMetrics(minio_metrics::Call::Metrics),
+        about: "Live metrics as `madmin.RealtimeMetrics` documents, the first at once and then one every `interval` (a second at least), `n` times or until the caller leaves: S3's requests being served and those answered since the server started, `MinIO`'s API metrics: `mc admin scanner status`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/top/locks",
+        needs: Needs::Action("admin:TopLocksInfo", ANY),
+        handler: Handler::MinioMetrics(minio_metrics::Call::TopLocks),
+        about: "The oldest locks held, as `madmin.LockEntries`: always none, since a request holds no lock past its answer: `mc admin top locks`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/force-unlock",
+        needs: Needs::Action("admin:ForceUnlock", ANY),
+        handler: Handler::MinioMetrics(minio_metrics::Call::ForceUnlock),
+        about: "Releases the locks `paths` names: none is ever held past a request, so there's nothing to release: `mc admin force-unlock`",
+    },
+    Endpoint {
+        api: Api::Minio,
         verb: Verb::Post,
         path: "/minio/admin/v3/kms/status",
         needs: Needs::Action("admin:KMSKeyStatus", ANY),
@@ -978,6 +1004,8 @@ pub(crate) struct Routes {
     pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
     /// Whoever watches live traces.
     pub(crate) tracers: Arc<Tracers>,
+    /// The requests' live figures, for `MinIO`'s realtime metrics.
+    pub(crate) live: crate::metrics::Live,
     /// Where events go: the server's notification targets and its listeners.
     pub(crate) events: Events,
     /// Where requests' access log records go, turned on when an import makes a bucket log.
@@ -1293,6 +1321,7 @@ impl Routes {
             Handler::MinioService => minio_service::call(self, &req),
             Handler::MinioTrace => minio_trace::trace(&self.tracers, req.uri.query()),
             Handler::MinioLog => Ok(console_log::log(self, &req)),
+            Handler::MinioMetrics(call) => call.call(self, &req),
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),

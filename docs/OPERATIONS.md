@@ -803,6 +803,21 @@ by default; debug lines never are), and the kept lines start again when the serv
 A server is one node, so `--node` with another name shows nothing. It needs
 `admin:ConsoleLog`.
 
+## Live metrics and locks
+
+MinIO's realtime metrics (`GET /minio/admin/v3/metrics`, which the MinIO console's
+realtime view and `mc admin scanner status` read) answer one document a second (or every
+`interval`), `n` times or until the caller leaves. They hold MinIO's API metrics: the S3
+requests being served, and those answered since the server started with their bytes,
+4xx and 5xx errors, cancellations and times. A server is one node, so its figures are
+the whole. Other metric types are accepted and come back empty; the scanner, drive and
+heal figures are in `teifs admin info` and the Prometheus metrics. It needs
+`admin:ServerInfo`.
+
+`mc admin top locks` lists no locks: a request holds none past its own answer, so there
+is never one to wait on or force open, and `mc admin force-unlock` has nothing to do.
+They need `admin:TopLocksInfo` and `admin:ForceUnlock`.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the

@@ -79,6 +79,38 @@ where
     Body::from(StreamingBlob::wrap(Lines(out)))
 }
 
+/// A body of the documents `document` makes, the first at once and then one every
+/// `every`, `times` times (none: until the client leaves) or until `stopping` is
+/// cancelled. `document` is told whether it makes the last one.
+pub(crate) fn every<F>(
+    stopping: CancellationToken,
+    every: Duration,
+    times: Option<u64>,
+    mut document: F,
+) -> Body
+where
+    F: FnMut(bool) -> Bytes + Send + 'static,
+{
+    let (lines, out) = mpsc::channel(4);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        let mut made = 0_u64;
+        loop {
+            tokio::select! {
+                () = stopping.cancelled() => break,
+                () = lines.closed() => break,
+                _ = tick.tick() => {}
+            }
+            made += 1;
+            let last = times.is_some_and(|times| made >= times);
+            if lines.send(document(last)).await.is_err() || last {
+                break;
+            }
+        }
+    });
+    Body::from(StreamingBlob::wrap(Lines(out)))
+}
+
 /// The lines, as a body.
 struct Lines(mpsc::Receiver<Bytes>);
 

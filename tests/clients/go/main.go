@@ -146,6 +146,7 @@ func main() {
 	configKV(ctx, adm)
 	trace(ctx, adm, s3c, *bucket)
 	consoleLog(ctx, adm)
+	realtime(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -192,6 +193,20 @@ func consoleLog(ctx context.Context, adm *madmin.AdminClient) {
 		}
 	case <-read.Done():
 	}
+}
+
+// realtime is the console's realtime view and mc admin top locks: two metrics
+// documents, the last one final, and no locks held.
+func realtime(ctx context.Context, adm *madmin.AdminClient) {
+	step("live metrics and locks, as mc admin scanner status and top locks read them")
+	var seen []madmin.RealtimeMetrics
+	must(adm.Metrics(ctx, madmin.MetricsOptions{Type: madmin.MetricsAll, N: 2, Interval: time.Second},
+		func(m madmin.RealtimeMetrics) { seen = append(seen, m) }))
+	check(len(seen) == 2 && seen[1].Final && len(seen[0].Hosts) == 1,
+		fmt.Sprintf("the metrics: %+v", seen))
+	locks, err := adm.TopLocks(ctx)
+	must(err)
+	check(len(locks) == 0, fmt.Sprintf("the locks: %+v", locks))
 }
 
 // lists says whether a client signing with this key may list buckets.

@@ -34,6 +34,7 @@ mod minio_config;
 mod minio_iam;
 mod minio_info;
 mod minio_kms;
+mod minio_metrics;
 mod minio_service;
 mod minio_service_accounts;
 mod minio_trace;
@@ -214,6 +215,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             config: options.config.map(Arc::new),
             root_keys: options.root_keys,
             tracers,
+            live: watch.metrics.live(),
             events,
             access_log,
             request_metrics,
