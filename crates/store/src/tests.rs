@@ -186,6 +186,89 @@ async fn listing_follows_s3_byte_order() {
     assert_eq!(keys(&partial), ["a-b", "a.b", "a/b", "a/c/d", "a0"]);
 }
 
+/// Folders of every size, next to loose keys, rolled up page by page in an object bucket
+/// (whose listings read rows in batches that shrink after each folder and grow again),
+/// list exactly what the keys say, objects and versions alike.
+#[tokio::test]
+async fn folders_of_every_size_roll_up_page_by_page() {
+    let (_dir, store) = drive();
+    store.create_bucket("many", Layout::Object).await.unwrap();
+    let mut keys = Vec::new();
+    for folder in 0..12 {
+        // Empty folders aren't keys; others hold 1 to 400 keys.
+        let len = [0, 1, 2, 7, 8, 9, 31, 33, 130, 400, 3, 1][folder];
+        for i in 0..len {
+            keys.push(format!("f{folder:02}/{i:04}"));
+        }
+        keys.push(format!("loose{folder:02}"));
+    }
+    for key in &keys {
+        store
+            .put_bytes("many", key, b"", ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    let mut expected: Vec<String> = keys
+        .iter()
+        .map(|k| match k.find('/') {
+            Some(at) => k[..=at].to_owned(),
+            None => k.clone(),
+        })
+        .collect();
+    expected.sort();
+    expected.dedup();
+    for max_keys in [1, 2, 5, 9, 1000] {
+        let (mut seen, mut after) = (Vec::new(), None);
+        loop {
+            let page = store
+                .list(
+                    "many",
+                    ListQuery {
+                        delimiter: Some("/".into()),
+                        after: after.clone(),
+                        max_keys,
+                        ..ListQuery::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(page.objects.len() + page.prefixes.len() <= max_keys);
+            seen.extend(page.objects.iter().map(|o| o.key.clone()));
+            seen.extend(page.prefixes.iter().cloned());
+            if !page.truncated {
+                break;
+            }
+            after = page.next;
+        }
+        seen.sort();
+        assert_eq!(seen, expected, "max_keys {max_keys}");
+
+        let (mut seen, mut marker) = (Vec::new(), None);
+        loop {
+            let page = store
+                .list_versions(
+                    "many",
+                    VersionsQuery {
+                        delimiter: Some("/".into()),
+                        key_marker: marker.clone(),
+                        max_keys,
+                        ..VersionsQuery::default()
+                    },
+                )
+                .await
+                .unwrap();
+            seen.extend(page.versions.iter().map(|v| v.info.key.clone()));
+            seen.extend(page.prefixes.iter().cloned());
+            if !page.truncated {
+                break;
+            }
+            marker = page.next.map(|(key, _)| key);
+        }
+        seen.sort();
+        assert_eq!(seen, expected, "versions, max_keys {max_keys}");
+    }
+}
+
 #[tokio::test]
 async fn pages_resume_after_keys_and_common_prefixes() {
     let (_dir, store) = with_bucket().await;

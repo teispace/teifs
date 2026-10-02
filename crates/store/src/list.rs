@@ -415,8 +415,9 @@ fn list_index(
         Some(After::Prefix(prefix)) => Cursor::AfterAll(prefix.clone()),
     };
     let mut count = 0;
+    let mut want = Want::default();
     'pages: loop {
-        let batch = (query.max_keys - count + 1).clamp(1, 1000);
+        let batch = want.batch(query.max_keys - count + 1);
         let (rows, last) =
             conn.list_latest(&bucket.id, &query.prefix, from.as_versions_from(), batch)?;
         for row in rows {
@@ -430,11 +431,13 @@ fn list_index(
                 from = Cursor::AfterAll(prefix.clone());
                 listing.prefixes.push(prefix);
                 // Everything else under this prefix is rolled up: jump past it.
+                want.jumped();
                 continue 'pages;
             }
             listing.next = Some(After::Key(row.key.clone()));
             listing.objects.push(bucket.info(&row));
         }
+        want.grow();
         // A page can hold only delete markers: carry on after the last key scanned.
         match last {
             Some(last) => from = Cursor::AfterKey(last),
@@ -470,8 +473,9 @@ fn list_versions_index(
         },
     };
     let mut count = 0;
+    let mut want = Want::default();
     'pages: loop {
-        let batch = (query.max_keys - count + 1).clamp(1, 1000);
+        let batch = want.batch(query.max_keys - count + 1);
         let rows = conn.list_versions(&bucket.id, &query.prefix, from.as_versions_from(), batch)?;
         let full = rows.len() == batch;
         for row in rows {
@@ -484,6 +488,7 @@ fn list_versions_index(
                 listing.next = Some((prefix.clone(), None));
                 from = Cursor::AfterAll(prefix.clone());
                 listing.prefixes.push(prefix);
+                want.jumped();
                 continue 'pages;
             }
             listing.next = Some((row.key.clone(), Some(row.version_id.clone())));
@@ -500,11 +505,43 @@ fn list_versions_index(
         if !full {
             break;
         }
+        want.grow();
     }
     if !listing.truncated {
         listing.next = None;
     }
     Ok(())
+}
+
+/// How many rows a listing reads at a time. After a jump past a common prefix, the
+/// next one may be the very next row (a folder of folders), so it reads a few and
+/// reads more each time a page ends without one; reading a full page per jump read
+/// 1000 rows to use one.
+#[derive(Debug)]
+struct Want(usize);
+
+impl Default for Want {
+    fn default() -> Self {
+        Self(MAX_BATCH)
+    }
+}
+
+const MAX_BATCH: usize = 1000;
+const AFTER_JUMP: usize = 8;
+
+impl Want {
+    /// The rows to read when `left` more would fill the page.
+    fn batch(&self, left: usize) -> usize {
+        left.clamp(1, MAX_BATCH).min(self.0)
+    }
+
+    fn jumped(&mut self) {
+        self.0 = AFTER_JUMP;
+    }
+
+    fn grow(&mut self) {
+        self.0 = (self.0 * 4).min(MAX_BATCH);
+    }
 }
 
 /// An owned [`VersionsFrom`].

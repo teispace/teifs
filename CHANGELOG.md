@@ -810,6 +810,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - Completing a multipart upload, or copying into an object bucket from another bucket,
   no longer holds up other writes while the new object is synced: its data file goes in
   place before the drive's commit lock, as an upload's does.
+- Listings rolled up by a delimiter (`delimiter=/`) in object buckets read a few rows
+  after each common prefix instead of a full page: 100 folders of a 1M-object bucket
+  list in about 3 ms instead of 60–500 ms.
 - Uploads are hashed, encrypted and written in 256 KiB batches on a blocking thread
   while the next batch arrives, instead of on the request's own thread with one more
   copy of every byte: less CPU per byte for 1 MiB uploads (about 10% in Docker), and

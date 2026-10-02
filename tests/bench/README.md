@@ -53,3 +53,15 @@ median throughput over the rounds and its median and 99th percentile request tim
 Numbers depend on the machine more than on anything here. On macOS and Windows, Docker
 runs in a virtual machine, so its disks and network aren't the host's: compare servers
 within one run, not runs across machines.
+
+## Millions of objects
+
+`crates/store/examples/scale.rs` fills an object bucket with tiny objects through the
+store (no server, no network) and times what grows with it: reopening the drive,
+listings (first page, deep in, by prefix, rolled up by `/`, all of it), HEADs, deletes,
+and the index's size. A drive left by an earlier run with the same count is reused.
+
+```sh
+cargo run --release -p teifs-store --example scale -- /tmp/scale 10000000
+```
+
