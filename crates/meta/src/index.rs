@@ -251,6 +251,17 @@ fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
     })
 }
 
+// Pages of a folder bucket's rows, for the pass that indexes its files. Each bound is a
+// plain comparison so SQLite seeks to it (no key is empty, so `> ''` starts at the
+// first): an optional bound written `(?2 IS NULL OR key > ?2)` can't be used to seek,
+// and every page would read the bucket from its first key.
+const ROWS_BETWEEN: &str = "SELECT size, mtime_ns, ino, etag, attrs, parts, version_id, key
+     FROM objects WHERE bucket = ?1 AND key > ?2 AND key <= ?3 ORDER BY key";
+const KEYS_BETWEEN: &str = "SELECT key FROM objects
+     WHERE bucket = ?1 AND key > ?2 AND key <= ?3 ORDER BY key LIMIT ?4";
+const KEYS_AFTER: &str =
+    "SELECT key FROM objects WHERE bucket = ?1 AND key > ?2 ORDER BY key LIMIT ?3";
+
 impl Index {
     /// Opens the index at `path`, creating and migrating it.
     pub fn open(path: &Path) -> Result<Self> {
@@ -324,11 +335,8 @@ impl Index {
         after: Option<&str>,
         upto: &str,
     ) -> Result<Vec<(String, Row)>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT size, mtime_ns, ino, etag, attrs, parts, version_id, key FROM objects
-             WHERE bucket = ?1 AND (?2 IS NULL OR key > ?2) AND key <= ?3 ORDER BY key",
-        )?;
-        let rows = stmt.query_map(params![bucket, after, upto], |r| {
+        let mut stmt = self.conn.prepare_cached(ROWS_BETWEEN)?;
+        let rows = stmt.query_map(params![bucket, after.unwrap_or(""), upto], |r| {
             Ok((r.get(7)?, row_from(r)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -409,21 +417,21 @@ impl Index {
         upto: Option<&str>,
         limit: usize,
     ) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT key FROM objects WHERE bucket = ?1
-               AND (?2 IS NULL OR key > ?2) AND (?3 IS NULL OR key <= ?3)
-             ORDER BY key LIMIT ?4",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                bucket,
-                after,
-                upto,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
-            |r| r.get(0),
-        )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.unwrap_or("");
+        let keys = match upto {
+            Some(upto) => self
+                .conn
+                .prepare_cached(KEYS_BETWEEN)?
+                .query_map(params![bucket, after, upto, limit], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+            None => self
+                .conn
+                .prepare_cached(KEYS_AFTER)?
+                .query_map(params![bucket, after, limit], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+        };
+        Ok(keys)
     }
 
     /// Moves a folder bucket's row from one key to another (a rename keeps the file).
@@ -665,6 +673,65 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_of_a_folder_bucket_seek_to_their_first_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        for sql in [ROWS_BETWEEN, KEYS_BETWEEN, KEYS_AFTER] {
+            let mut stmt = index
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let values = vec!["k"; stmt.parameter_count()];
+            let plan: Vec<String> = stmt
+                .query_map(rusqlite::params_from_iter(values), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains("key>?")),
+                "{sql} reads from the bucket's first key: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_of_a_folder_bucket_hold_the_keys_between_their_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let row = Row {
+            stamp: Stamp {
+                size: 1,
+                mtime_ns: 1,
+                ino: 1,
+            },
+            etag: "e".into(),
+            attrs: ObjectAttrs::default(),
+            parts: None,
+            version_id: None,
+        };
+        for key in ["a", "b", "b/", "c", "d"] {
+            index.put("f", key, &row).unwrap();
+        }
+        index.put("other", "a", &row).unwrap();
+        let rows = |after, upto| -> Vec<String> {
+            index
+                .rows_between("f", after, upto)
+                .unwrap()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect()
+        };
+        assert_eq!(rows(None, "b/"), ["a", "b", "b/"]);
+        assert_eq!(rows(Some("b"), "d"), ["b/", "c", "d"]);
+        let keys = |after, upto, limit| index.keys_between("f", after, upto, limit).unwrap();
+        assert_eq!(keys(None, None, 10), ["a", "b", "b/", "c", "d"]);
+        assert_eq!(keys(None, Some("b"), 10), ["a", "b"]);
+        assert_eq!(keys(Some("b"), None, 2), ["b/", "c"]);
+        assert_eq!(keys(Some("c"), Some("d"), 10), ["d"]);
+        assert!(keys(Some("d"), None, 10).is_empty());
+    }
 
     #[test]
     fn the_sync_level_can_be_relaxed() {

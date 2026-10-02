@@ -159,10 +159,12 @@ impl IndexFolders {
                 Some(Next::Object(entry)) => entries.push(entry),
             }
         }
+        // Read without the commit lock: `apply` checks each row again before writing.
         let rows: BTreeMap<String, Row> = match entries.last() {
             Some(last) => inner
-                .lock()
-                .rows_between(bucket, self.after.as_deref(), &last.key)?
+                .read_index(|index| {
+                    Ok(index.rows_between(bucket, self.after.as_deref(), &last.key)?)
+                })?
                 .into_iter()
                 .collect(),
             None => BTreeMap::new(),
@@ -368,32 +370,40 @@ fn prune(
 ) -> Result<usize> {
     let mut from = after.map(str::to_owned);
     let mut pruned = 0;
+    let backed = |key: &str| {
+        ObjectKey::parse(key).is_ok_and(|parsed| {
+            matches!(
+                Inner::find(dir, &parsed),
+                Ok(Found::File(..) | Found::Folder(..))
+            )
+        })
+    };
     loop {
-        let conn = inner.lock();
-        let keys = conn.keys_between(bucket, from.as_deref(), upto, PRUNE_BATCH)?;
+        // Rows are read without the commit lock; the few whose file is gone are checked
+        // again under it, since a write may have just put one back.
+        let keys = inner.read_index(|index| {
+            Ok(index.keys_between(bucket, from.as_deref(), upto, PRUNE_BATCH)?)
+        })?;
         let Some(last) = keys.last().cloned() else {
             return Ok(pruned);
         };
-        pruned += conn.batch(|conn| {
-            let mut forgot = 0;
-            for key in keys {
-                // `seen` is in key order, like the rows.
-                if seen.binary_search(&key).is_ok() {
-                    continue;
+        // `seen` is in key order, like the rows.
+        let gone: Vec<String> = keys
+            .into_iter()
+            .filter(|key| seen.binary_search(key).is_err() && !backed(key))
+            .collect();
+        if !gone.is_empty() {
+            pruned += inner.lock().batch(|conn| {
+                let mut forgot = 0;
+                for key in &gone {
+                    if !backed(key) {
+                        conn.delete(bucket, key)?;
+                        forgot += 1;
+                    }
                 }
-                let backed = ObjectKey::parse(&key).is_ok_and(|parsed| {
-                    matches!(
-                        Inner::find(dir, &parsed),
-                        Ok(Found::File(..) | Found::Folder(..))
-                    )
-                });
-                if !backed {
-                    conn.delete(bucket, &key)?;
-                    forgot += 1;
-                }
-            }
-            Ok(forgot)
-        })?;
+                Ok(forgot)
+            })?;
+        }
         from = Some(last);
     }
 }

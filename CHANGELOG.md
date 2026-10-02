@@ -814,6 +814,11 @@ behaviour; the on-disk format is always upgraded automatically.
   memory and go straight into the index when the object is kept there, or to its file
   otherwise. Writing small objects takes about a quarter of the CPU it did (a sixth of
   the system time), and about 1.7× as many go in per second through the store.
+- The background pass that indexes files added to a folder bucket by other programs
+  seeks to each page of the bucket's index instead of reading it from the first key,
+  and reads it without holding up writes: a pass over 1.1M files takes about 100 s
+  instead of 270 s, and a PUT made meanwhile waits at most about 35 ms instead of
+  230 ms.
 - Listings rolled up by a delimiter (`delimiter=/`) in object buckets read a few rows
   after each common prefix instead of a full page: 100 folders of a 1M-object bucket
   list in about 3 ms instead of 60–500 ms.

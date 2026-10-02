@@ -65,3 +65,11 @@ and the index's size. A drive left by an earlier run with the same count is reus
 cargo run --release -p teifs-store --example scale -- /tmp/scale 10000000
 ```
 
+With `folder` after the count it fills a folder bucket instead, adds a tenth as many
+files by hand, and times listings and the background pass that indexes the added
+files, a pass over files already indexed, and PUTs made while a pass runs:
+
+```sh
+cargo run --release -p teifs-store --example scale -- /tmp/scale-folders 1000000 folder
+```
+
