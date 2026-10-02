@@ -345,6 +345,9 @@ behaviour; the on-disk format is always upgraded automatically.
   policies, users, groups, service accounts and the policies mapped to them, so IAM
   moves between TeiFS and MinIO. Only the root user may make or apply one, since it
   holds secrets.
+- MinIO's bucket metadata export and import (`mc admin cluster bucket export|import`):
+  its zip of each bucket's policy, notifications, lifecycle, encryption, tags, quota,
+  Object Lock and versioning (and CORS), each checked as S3's call checks it.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the

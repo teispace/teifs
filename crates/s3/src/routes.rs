@@ -32,9 +32,9 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_heal, minio_iam, minio_iam_transfer, minio_idp_config,
-    minio_info, minio_kms, minio_ldap, minio_metrics, minio_pools, minio_profile, minio_service,
-    minio_service_accounts, minio_speedtest,
+    iam_api, listen, minio_bucket_metadata, minio_config, minio_heal, minio_iam,
+    minio_iam_transfer, minio_idp_config, minio_info, minio_kms, minio_ldap, minio_metrics,
+    minio_pools, minio_profile, minio_service, minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -175,6 +175,8 @@ enum Handler {
     MinioIdpConfig(minio_idp_config::Call),
     /// `MinIO`'s IAM export and import.
     MinioIamTransfer(minio_iam_transfer::Call),
+    /// `MinIO`'s bucket metadata export and import.
+    MinioBucketMetadata(minio_bucket_metadata::Call),
 }
 
 impl Handler {
@@ -240,6 +242,7 @@ impl Handler {
             Self::MinioConfig(call) => call.name(),
             Self::MinioIdpConfig(call) => call.name(),
             Self::MinioIamTransfer(call) => call.name(),
+            Self::MinioBucketMetadata(call) => call.name(),
         }
     }
 }
@@ -1158,6 +1161,22 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioIamTransfer(minio_iam_transfer::Call::ImportV2),
         about: "Merges such a zip and answers what it added, removed, skipped and couldn't, as `madmin.ImportIAMResult`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/export-bucket-metadata",
+        needs: Needs::Action("admin:ExportBucketMetadata", ANY),
+        handler: Handler::MinioBucketMetadata(minio_bucket_metadata::Call::Export),
+        about: "A zip of every bucket's (`?bucket=NAME`: one's) settings as `MinIO`'s files: `{bucket}/policy.json`, `notification.xml`, `lifecycle.xml`, `bucket-encryption.xml`, `tagging.xml`, `quota.json`, `object-lock.xml`, `versioning.xml` and `cors.xml`: `mc admin cluster bucket export`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/import-bucket-metadata",
+        needs: Needs::Action("admin:ImportBucketMetadata", ANY),
+        handler: Handler::MinioBucketMetadata(minio_bucket_metadata::Call::Import),
+        about: "Makes the buckets of such a zip (from TeiFS or `MinIO`) that aren't there and applies their settings, checked as S3's calls check them; answers each file's outcome as `madmin.BucketMetaImportErrs`: `mc admin cluster bucket import`",
+    },
 ];
 
 /// Why a call decided on its query's bucket has one.
@@ -1625,6 +1644,7 @@ impl Routes {
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::MinioIdpConfig(call) => call.call(self, req).await,
             Handler::MinioIamTransfer(call) => call.call(self, req).await,
+            Handler::MinioBucketMetadata(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

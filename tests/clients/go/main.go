@@ -149,6 +149,7 @@ func main() {
 	configKV(ctx, adm)
 	idpConfig(ctx, adm)
 	iamTransfer(ctx, adm)
+	bucketMetadata(ctx, adm, *bucket)
 	trace(ctx, adm, s3c, *bucket)
 	consoleLog(ctx, adm)
 	realtime(ctx, adm)
@@ -530,6 +531,33 @@ func idpConfig(ctx context.Context, adm *madmin.AdminClient) {
 	check(err != nil && madmin.ToErrorResponse(err).Code == "XMinioAdminNoSuchConfigTarget",
 		fmt.Sprintf("removed: %v", err))
 	must(adm.ClearConfigHistoryKV(ctx, "all"))
+}
+
+func bucketMetadata(ctx context.Context, adm *madmin.AdminClient, bucket string) {
+	step("a bucket's settings exported and imported, as mc admin cluster bucket calls it")
+	must(adm.SetBucketQuota(ctx, bucket, &madmin.BucketQuota{Size: 4096, Quota: 4096, Type: madmin.HardQuota}))
+	exported, err := adm.ExportBucketMetadata(ctx, bucket)
+	must(err)
+	zipped, err := io.ReadAll(exported)
+	must(err)
+	exported.Close()
+	archive, err := zip.NewReader(bytes.NewReader(zipped), int64(len(zipped)))
+	must(err)
+	names := []string{}
+	for _, f := range archive.File {
+		names = append(names, f.Name)
+	}
+	check(slices.Contains(names, bucket+"/quota.json"), fmt.Sprintf("the zip: %v", names))
+
+	must(adm.SetBucketQuota(ctx, bucket, &madmin.BucketQuota{}))
+	report, err := adm.ImportBucketMetadata(ctx, bucket, io.NopCloser(bytes.NewReader(zipped)))
+	must(err)
+	status := report.Buckets[bucket]
+	check(status.Quota.IsSet && status.Quota.Err == "" && status.Err == "", fmt.Sprintf("the import: %+v", report))
+	quota, err := adm.GetBucketQuota(ctx, bucket)
+	must(err)
+	check(quota.Size == 4096, fmt.Sprintf("the quota back: %+v", quota))
+	must(adm.SetBucketQuota(ctx, bucket, &madmin.BucketQuota{}))
 }
 
 func iamTransfer(ctx context.Context, adm *madmin.AdminClient) {

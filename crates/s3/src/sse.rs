@@ -5,7 +5,100 @@ use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use s3s::{S3Result, dto, s3_error};
-use teifs_store::{BucketEncryption, CustomerKey, Encryption, SseInfo, SseMode};
+use teifs_store::{BucketEncryption, CustomerKey, DefaultEncryption, Encryption, SseInfo, SseMode};
+
+/// A bucket's default encryption as `GetBucketEncryption` answers it.
+pub(crate) fn bucket_encryption_to_dto(
+    config: &BucketEncryption,
+) -> dto::ServerSideEncryptionConfiguration {
+    let algorithm = match config.default.mode {
+        SseMode::Kms => dto::ServerSideEncryption::AWS_KMS,
+        SseMode::Dsse => dto::ServerSideEncryption::AWS_KMS_DSSE,
+        SseMode::S3 | SseMode::Customer => dto::ServerSideEncryption::AES256,
+    };
+    let blocked = if config.block_customer_keys {
+        dto::EncryptionType::SSE_C
+    } else {
+        dto::EncryptionType::NONE
+    };
+    let rule = dto::ServerSideEncryptionRule {
+        apply_server_side_encryption_by_default: Some(dto::ServerSideEncryptionByDefault {
+            sse_algorithm: dto::ServerSideEncryption::from_static(algorithm),
+            kms_master_key_id: config.default.kms_key.clone(),
+        }),
+        bucket_key_enabled: Some(config.default.bucket_key),
+        blocked_encryption_types: Some(dto::BlockedEncryptionTypes {
+            encryption_type: Some(vec![dto::EncryptionType::from_static(blocked)]),
+        }),
+    };
+    dto::ServerSideEncryptionConfiguration { rules: vec![rule] }
+}
+
+/// A bucket's default encryption from `PutBucketEncryption`'s configuration, checked as
+/// S3 checks it; what it leaves out stays as `current` has it.
+pub(crate) fn bucket_encryption_from_dto(
+    config: &dto::ServerSideEncryptionConfiguration,
+    current: &BucketEncryption,
+) -> S3Result<BucketEncryption> {
+    let [rule] = config.rules.as_slice() else {
+        return Err(s3_error!(
+            MalformedXML,
+            "a bucket encryption configuration has exactly one rule"
+        ));
+    };
+    let default = match &rule.apply_server_side_encryption_by_default {
+        None => current.default.clone(),
+        Some(by_default) => {
+            let kms_key = by_default.kms_master_key_id.as_deref().map(kms_key_name);
+            let mode = match by_default.sse_algorithm.as_str() {
+                dto::ServerSideEncryption::AES256 if kms_key.is_none() => SseMode::S3,
+                dto::ServerSideEncryption::AES256 => {
+                    return Err(s3_error!(
+                        InvalidArgument,
+                        "a KMS key can only be given with aws:kms or aws:kms:dsse"
+                    ));
+                }
+                dto::ServerSideEncryption::AWS_KMS => SseMode::Kms,
+                dto::ServerSideEncryption::AWS_KMS_DSSE => SseMode::Dsse,
+                _ => {
+                    return Err(s3_error!(
+                        InvalidArgument,
+                        "the algorithm must be AES256, aws:kms or aws:kms:dsse"
+                    ));
+                }
+            };
+            DefaultEncryption {
+                mode,
+                kms_key,
+                bucket_key: rule.bucket_key_enabled.unwrap_or(false),
+            }
+        }
+    };
+    let block_customer_keys = match rule
+        .blocked_encryption_types
+        .as_ref()
+        .and_then(|b| b.encryption_type.as_ref())
+    {
+        None => current.block_customer_keys,
+        Some(types) => {
+            let names: Vec<&str> = types.iter().map(dto::EncryptionType::as_str).collect();
+            match names.as_slice() {
+                [dto::EncryptionType::SSE_C] => true,
+                [dto::EncryptionType::NONE] | [] => false,
+                _ => {
+                    return Err(s3_error!(
+                        InvalidArgument,
+                        "BlockedEncryptionTypes is SSE-C or NONE"
+                    ));
+                }
+            }
+        }
+    };
+    Ok(BucketEncryption {
+        default,
+        block_customer_keys,
+    })
+}
 
 /// A request's SSE-C headers: none, or a valid key.
 pub(crate) fn customer_key(

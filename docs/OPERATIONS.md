@@ -1209,7 +1209,8 @@ size and ETag; `--size-only` uses size alone, for services whose ETags aren't MD
 for objects encrypted with KMS keys on AWS). Users and their policies aren't part of
 `migrate`: between TeiFS servers `teifs admin iam export` and `import` move them; from
 MinIO, `mc admin cluster iam export` and `import` move users, groups, policies and
-service accounts either way (the root user's alone, since the zip holds secrets); from
+service accounts either way (the root user's alone, since the zip holds secrets), and
+`mc admin cluster bucket export` and `import` buckets' settings; from
 another service, make them with `teifs admin user` or `aws iam`.
 
 ## Bucket notifications

@@ -97,7 +97,7 @@ pub(crate) async fn set(
 }
 
 /// The quota a body sets: `None` clears it.
-fn read(body: &Bytes) -> S3Result<Option<u64>> {
+pub(crate) fn read(body: &Bytes) -> S3Result<Option<u64>> {
     // An object only: serde would take an array as a struct's fields, `MinIO` doesn't.
     let given: BucketQuota = serde_json::from_slice(body)
         .and_then(|fields| serde_json::from_value(serde_json::Value::Object(fields)))
@@ -119,19 +119,23 @@ fn read(body: &Bytes) -> S3Result<Option<u64>> {
     Ok(Some(bytes))
 }
 
-/// `GET get-bucket-quota?bucket=NAME`: the bucket's quota, zero when it has none, as
-/// `MinIO` answers it.
-pub(crate) async fn get(store: &Store, bucket: &str) -> S3Result<S3Response<Body>> {
-    store.head_bucket(bucket).await.s3()?;
-    let quota = store.bucket_quota(bucket).await.s3()?;
+/// A quota (`None`: none) as `MinIO` answers it, zero when there's none.
+pub(crate) fn to_json(quota: Option<u64>) -> Vec<u8> {
     let answer = quota.map_or_else(BucketQuota::default, |bytes| BucketQuota {
         quota: bytes,
         size: bytes,
         kind: Some(HARD.to_owned()),
         ..BucketQuota::default()
     });
-    let bytes = serde_json::to_vec(&answer).map_err(S3Error::internal_error)?;
-    let mut response = S3Response::new(Body::from(bytes));
+    serde_json::to_vec(&answer).expect("a quota serializes")
+}
+
+/// `GET get-bucket-quota?bucket=NAME`: the bucket's quota, zero when it has none, as
+/// `MinIO` answers it.
+pub(crate) async fn get(store: &Store, bucket: &str) -> S3Result<S3Response<Body>> {
+    store.head_bucket(bucket).await.s3()?;
+    let quota = store.bucket_quota(bucket).await.s3()?;
+    let mut response = S3Response::new(Body::from(to_json(quota)));
     response.headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),

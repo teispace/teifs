@@ -92,7 +92,7 @@ pub(crate) async fn export(store: &Store, query: Option<&str>) -> S3Result<S3Res
 }
 
 /// `?bucket=NAME`, the only parameter.
-fn no_such_bucket(name: &str) -> S3Error {
+pub(crate) fn no_such_bucket(name: &str) -> S3Error {
     admin::error(
         http::StatusCode::NOT_FOUND,
         "NoSuchBucket",
@@ -128,8 +128,27 @@ pub(crate) async fn import(
             ),
         ));
     }
+    let report = apply(
+        store,
+        rules,
+        notifier,
+        (account, (access_log, request_metrics)),
+        &export.buckets,
+    )
+    .await;
+    Ok(admin::json(&report))
+}
+
+/// Creates the buckets that aren't there and applies their settings, item by item.
+pub(crate) async fn apply(
+    store: &Store,
+    rules: &Rules,
+    notifier: &Notifier,
+    (account, (access_log, request_metrics)): (&str, (&AccessLog, &RequestMetrics)),
+    buckets: &[ExportedBucket],
+) -> BucketsImportReport {
     let mut report = BucketsImportReport::default();
-    for bucket in &export.buckets {
+    for bucket in buckets {
         let mut import = Import {
             store,
             rules,
@@ -147,7 +166,7 @@ pub(crate) async fn import(
             request_metrics.turn_on();
         }
     }
-    for bucket in &export.buckets {
+    for bucket in buckets {
         let Some(value) = bucket.settings.get("logging") else {
             continue;
         };
@@ -169,7 +188,7 @@ pub(crate) async fn import(
         failed = report.items.iter().filter(|i| i.outcome == FAILED).count(),
         "buckets were imported"
     );
-    Ok(admin::json(&report))
+    report
 }
 
 const CREATED: &str = "created";
@@ -203,8 +222,14 @@ impl Import<'_> {
         });
     }
 
+    /// A bucket: one with no layout is an object bucket if it's made, and one with no
+    /// versioning keeps its own (`MinIO`'s export has no layout, and versioning only if set).
     async fn bucket(&mut self, bucket: &ExportedBucket) {
-        let Some(layout) = parse_layout(&bucket.layout) else {
+        let layout = if bucket.layout.is_empty() {
+            None
+        } else if let Some(layout) = parse_layout(&bucket.layout) {
+            Some(layout)
+        } else {
             let err = invalid(format!(
                 "the layout {:?} isn't object or folder",
                 bucket.layout
@@ -214,7 +239,7 @@ impl Import<'_> {
         let settings = &bucket.settings;
         match self.existing_layout().await {
             Ok(Some(existing)) => {
-                if existing != layout {
+                if layout.is_some_and(|layout| layout != existing) {
                     let err = invalid(format!(
                         "the bucket is a {} bucket here",
                         layout_name(existing)
@@ -223,7 +248,7 @@ impl Import<'_> {
                 }
             }
             Ok(None) => {
-                let created = self.create(layout).await;
+                let created = self.create(layout.unwrap_or(Layout::Object)).await;
                 let failed = created.is_err();
                 self.report("bucket", created.map(|()| CREATED));
                 if failed {
@@ -232,8 +257,10 @@ impl Import<'_> {
             }
             Err(err) => return self.report("bucket", Err(err)),
         }
-        let versioning = self.versioning(&bucket.versioning).await;
-        self.report("versioning", versioning.map(|()| APPLIED));
+        if !bucket.versioning.is_empty() {
+            let versioning = self.versioning(&bucket.versioning).await;
+            self.report("versioning", versioning.map(|()| APPLIED));
+        }
         self.settings(settings).await;
         for name in settings.keys() {
             if !SETTINGS.contains(&name.as_str()) {

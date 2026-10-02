@@ -30,6 +30,7 @@ mod lines;
 mod listen;
 mod logging;
 mod metrics;
+mod minio_bucket_metadata;
 mod minio_config;
 mod minio_heal;
 mod minio_iam;

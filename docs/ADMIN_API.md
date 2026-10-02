@@ -174,6 +174,8 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/export-iam` | A zip of `MinIO`'s `iam-assets/*.json` with the IAM's policies, users, groups, service accounts and the policies mapped to them, secrets included: `mc admin cluster iam export` | root user |
 | `PUT` | `/minio/admin/v3/import-iam` | Merges such a zip (from TeiFS or `MinIO`) into the IAM: `mc admin cluster iam import` | root user |
 | `PUT` | `/minio/admin/v3/import-iam-v2` | Merges such a zip and answers what it added, removed, skipped and couldn't, as `madmin.ImportIAMResult` | root user |
+| `GET` | `/minio/admin/v3/export-bucket-metadata` | A zip of every bucket's (`?bucket=NAME`: one's) settings as `MinIO`'s files: `{bucket}/policy.json`, `notification.xml`, `lifecycle.xml`, `bucket-encryption.xml`, `tagging.xml`, `quota.json`, `object-lock.xml`, `versioning.xml` and `cors.xml`: `mc admin cluster bucket export` | `admin:ExportBucketMetadata` |
+| `PUT` | `/minio/admin/v3/import-bucket-metadata` | Makes the buckets of such a zip (from TeiFS or `MinIO`) that aren't there and applies their settings, checked as S3's calls check them; answers each file's outcome as `madmin.BucketMetaImportErrs`: `mc admin cluster bucket import` | `admin:ImportBucketMetadata` |
 
 <!-- end generated -->
 
