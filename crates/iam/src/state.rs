@@ -9,8 +9,9 @@ use std::{
 
 use teifs_crypto::DataKey;
 use teifs_meta::{
-    AccessKeyRow, IamRows, InlineRow, LdapPolicyRow, LdapSessionRow, OidcProviderRow, PolicyRow,
-    PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow, ServiceAccountRow,
+    AccessKeyRow, IamRows, InlineRow, LdapParentRow, LdapPolicyRow, LdapSessionRow,
+    OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow,
+    ServiceAccountRow,
 };
 use teifs_policy::{Kind as PolicyKind, Policy};
 use zeroize::Zeroizing;
@@ -335,12 +336,46 @@ impl std::fmt::Debug for Key {
     }
 }
 
+/// Whom a service account acts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Parent {
+    /// The root user.
+    Root,
+    /// The user with this unique id.
+    User(String),
+    /// A directory user: its policies are those mapped to its DN and its groups' DNs.
+    Ldap {
+        /// Its DN, written in one form.
+        dn: String,
+        /// The name it signs in with, which the group search filter takes.
+        username: String,
+    },
+}
+
+impl Parent {
+    /// The unique id of the user it is, if it's one.
+    pub(crate) fn user(&self) -> Option<&str> {
+        match self {
+            Self::User(id) => Some(id),
+            Self::Root | Self::Ldap { .. } => None,
+        }
+    }
+
+    /// The DN of the directory user it is, if it's one.
+    pub(crate) fn ldap_dn(&self) -> Option<&str> {
+        match self {
+            Self::Ldap { dn, .. } => Some(dn),
+            Self::Root | Self::User(_) => None,
+        }
+    }
+}
+
 /// A `MinIO` service account: a key that acts as its parent, narrowed by its policy.
 #[derive(Clone)]
 pub(crate) struct ServiceAccount {
     pub(crate) id: String,
-    /// The unique id of the user it acts for; `None` for the root user.
-    pub(crate) parent: Option<String>,
+    /// Whom it acts for.
+    pub(crate) parent: Parent,
     /// The secret, sealed as stored.
     pub(crate) sealed: Vec<u8>,
     pub(crate) secret: Arc<Zeroizing<String>>,
@@ -358,7 +393,14 @@ impl ServiceAccount {
     pub(crate) fn row(&self) -> ServiceAccountRow {
         ServiceAccountRow {
             id: self.id.clone(),
-            parent: self.parent.clone().unwrap_or_default(),
+            parent: self.parent.user().unwrap_or_default().to_owned(),
+            ldap: match &self.parent {
+                Parent::Ldap { dn, username } => Some(LdapParentRow {
+                    dn: dn.clone(),
+                    username: username.clone(),
+                }),
+                Parent::Root | Parent::User(_) => None,
+            },
             secret: self.sealed.clone(),
             active: self.active,
             policy: self.policy.as_ref().map(|p| p.text.to_string()),
@@ -971,7 +1013,14 @@ fn load_service_accounts(
             .transpose()?;
         let account = ServiceAccount {
             secret: open_secret(key, &row.id, &row.secret)?,
-            parent: Some(row.parent).filter(|p| !p.is_empty()),
+            parent: match (row.ldap, row.parent) {
+                (Some(ldap), _) => Parent::Ldap {
+                    dn: ldap.dn,
+                    username: ldap.username,
+                },
+                (None, parent) if parent.is_empty() => Parent::Root,
+                (None, parent) => Parent::User(parent),
+            },
             sealed: row.secret,
             active: row.active,
             policy,

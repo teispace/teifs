@@ -244,9 +244,13 @@ pub struct IamExport {
 pub struct ExportedServiceAccount {
     /// Its access key.
     pub id: String,
-    /// The name of the user it acts for; `None` for the root user.
+    /// The name of the user it acts for, or the DN of the LDAP user; `None` for the root
+    /// user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The name the LDAP user it acts for signs in with: set only for an LDAP user's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ldap_username: Option<String>,
     /// Whether requests signed with it are accepted.
     pub active: bool,
     /// The policy that narrows it; `None` for all its parent may do.

@@ -24,7 +24,7 @@ use crate::{
 };
 
 pub(crate) use ldap::LdapSignIn;
-pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange};
+pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange, LdapUser};
 pub use minio::{
     GroupPolicies, MinioAccount, MinioError, MinioGroup, MinioPolicy, MinioUser, MinioUserChange,
     PolicyEntities, PolicyHolders, UserPolicies,
@@ -900,7 +900,7 @@ impl Iam {
                 .state
                 .service_accounts
                 .values()
-                .any(|a| a.parent.as_deref() == Some(&*user.id))
+                .any(|a| a.parent.user() == Some(&*user.id))
             {
                 Some("service accounts")
             } else if !user.inline.is_empty() {

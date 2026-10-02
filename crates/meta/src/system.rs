@@ -45,6 +45,8 @@ const MIGRATIONS: &[&str] = &[
     // 11: MinIO's service accounts: keys of a user (or the root user) narrowed by a
     //     policy, with a name, a description and an expiry.
     crate::iam::SERVICE_ACCOUNTS_MIGRATION,
+    // 12: service accounts of LDAP users.
+    crate::iam::LDAP_SERVICE_ACCOUNTS_MIGRATION,
 ];
 
 /// How a bucket stores its objects.

@@ -41,7 +41,7 @@ pub use bearer::metrics_token;
 pub use ldap::{Directory, LdapError, LdapSettings, SignedIn, SrvRecord, Transport};
 pub use ops::{
     AccessKeyInfo, AddedServiceAccount, AttachedPolicy, ConfiguredOidcProvider, Ensured, GroupInfo,
-    GroupPolicies, LdapEntity, LdapPolicies, LdapPolicyChange, MinioAccount, MinioError,
+    GroupPolicies, LdapEntity, LdapPolicies, LdapPolicyChange, LdapUser, MinioAccount, MinioError,
     MinioGroup, MinioPolicy, MinioServiceAccount, MinioUser, MinioUserChange, NewAccessKey,
     NewOidcProvider, NewRole, NewSamlProvider, NewServiceAccount, OidcProviderInfo, Owner,
     PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo, RoleInfo, SamlProviderInfo,

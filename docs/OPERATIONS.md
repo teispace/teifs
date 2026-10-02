@@ -416,6 +416,14 @@ Policies can use `${ldap:username}`, `${ldap:user}` (the DN) and `ldap:groups` i
 conditions. A policy mapped to a user or group can't be deleted until it's detached.
 The mappings move with the IAM export (`teifs admin iam export`).
 
+MinIO's client works too: `mc idp ldap policy attach|detach|entities` maps and lists
+policies, and `mc idp ldap accesskey create|ls` makes and lists directory users' service
+accounts. A user signed in with LDAP makes its own (unless its session was narrowed by a
+policy); an admin makes one for a user named as it signs in (not a DN), once a policy is
+mapped to the user or one of its groups. The account has the policies mapped to its
+user and the user's groups, follows the groups at each check, and is removed with its
+secret when the directory no longer has the user.
+
 ## Client certificate sign-in
 
 Clients that hold a certificate your own certificate authority issued can get temporary

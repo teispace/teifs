@@ -10,6 +10,7 @@
 
 use aws_sdk_s3::{config::Credentials, primitives::ByteStream};
 use teifs_client::{Client as Admin, ClientError, LdapPolicyRequest, Zeroizing};
+use teifs_crypto::madmin;
 use teifs_iam::{
     LdapSettings, Transport,
     ldap::fake::{FakeLdap, group},
@@ -18,7 +19,7 @@ use teifs_iam::{
 mod common;
 mod signing;
 
-use common::{ACCESS_KEY, SECRET_KEY, Server, client, code, start_with};
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, client_as, code, start_with};
 
 const READ_PHOTOS: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
   "Action":"s3:GetObject","Resource":"arn:aws:s3:::photos/*"}]}"#;
@@ -387,4 +388,31 @@ async fn a_real_openldap_signs_users_in() {
         .await
         .unwrap_err();
     assert_eq!(api_code(&wrong), "InvalidParameterValue");
+
+    // A service account for him, as `mc idp ldap accesskey create` makes one.
+    let body = madmin::encrypt(SECRET_KEY, br#"{"targetUser":"dillon"}"#);
+    let response = signing::signed_response(
+        &server,
+        (ACCESS_KEY, SECRET_KEY),
+        "PUT",
+        "/minio/admin/v3/idp/ldap/add-service-account",
+        &[],
+        &body,
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let made = madmin::decrypt(SECRET_KEY, &response.bytes().await.unwrap()).unwrap();
+    let made: serde_json::Value = serde_json::from_slice(&made).unwrap();
+    let credentials = &made["credentials"];
+    client_as(
+        &server,
+        credentials["accessKey"].as_str().unwrap(),
+        credentials["secretKey"].as_str().unwrap(),
+    )
+    .get_object()
+    .bucket("photos")
+    .key("cat.jpg")
+    .send()
+    .await
+    .unwrap();
 }

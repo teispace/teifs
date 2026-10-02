@@ -329,6 +329,15 @@ behaviour; the on-disk format is always upgraded automatically.
   denies it; another user's need MinIO's admin actions. Service accounts get no
   temporary credentials from STS, and IAM exports and imports carry them. Unlike MinIO,
   an update that leaves out the policy keeps it rather than dropping it.
+- MinIO's LDAP admin calls (`mc idp ldap policy attach|detach|entities`,
+  `mc idp ldap accesskey create|ls`): `idp/ldap/policy/attach|detach`,
+  `idp/ldap/policy-entities`, `idp/ldap/add-service-account`,
+  `idp/ldap/list-access-keys` and `list-access-keys-bulk`, and
+  `idp/openid/list-access-keys-bulk`. Directory users own service accounts: signed in
+  with LDAP, a user makes its own; an admin makes one for a user named as it signs in,
+  once a policy is mapped to it or its groups. Such an account has its user's mapped
+  policies, follows its groups as the directory has them, and goes when the directory
+  no longer has its user.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the

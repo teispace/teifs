@@ -118,7 +118,12 @@ impl Directory {
         let mut ldap = self.lookup_session().await?;
         let found = self.find_user(&mut ldap, username).await;
         let (actual_dn, attributes) = match found {
-            Ok(found) => found,
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                close(ldap).await;
+                tracing::info!(username, "LDAP sign-in refused: no such user");
+                return Err(LdapError::Refused);
+            }
             Err(e) => {
                 close(ldap).await;
                 return Err(e);
@@ -148,6 +153,38 @@ impl Directory {
             groups: groups?,
             attributes,
         })
+    }
+
+    /// The user who signs in as `username`, as the directory has it now, found without
+    /// its password: none when the user search filter finds none.
+    ///
+    /// # Errors
+    ///
+    /// [`LdapError::Ambiguous`] when the filter finds more than one; otherwise the
+    /// directory's failure.
+    pub async fn user(&self, username: &str) -> Result<Option<SignedIn>, LdapError> {
+        if username.is_empty() {
+            return Ok(None);
+        }
+        let mut ldap = self.lookup_session().await?;
+        let found = match self.find_user(&mut ldap, username).await {
+            Ok(Some((actual_dn, attributes))) => self
+                .groups(&mut ldap, username, &actual_dn)
+                .await
+                .and_then(|groups| {
+                    Ok(Some(SignedIn {
+                        dn: dn::normalize(&actual_dn).map_err(LdapError::Failed)?,
+                        actual_dn,
+                        username: username.to_owned(),
+                        groups,
+                        attributes,
+                    }))
+                }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        };
+        close(ldap).await;
+        found
     }
 
     /// The user `dn` (signed in as `username`) as the directory has it now: its groups,
@@ -259,12 +296,12 @@ impl Directory {
     }
 
     /// The DN and attributes of the one user the user search filter finds for
-    /// `username`.
+    /// `username`, if it finds one.
     async fn find_user(
         &self,
         ldap: &mut Ldap,
         username: &str,
-    ) -> Result<(String, BTreeMap<String, Vec<String>>), LdapError> {
+    ) -> Result<Option<(String, BTreeMap<String, Vec<String>>)>, LdapError> {
         let settings = self.settings();
         let filter = fill(&settings.user_filter, username, "");
         let attributes: Vec<&str> = if settings.user_attributes.is_empty() {
@@ -284,14 +321,8 @@ impl Directory {
             }
         }
         match found.len() {
-            0 => {
-                tracing::info!(username, "LDAP sign-in refused: no such user");
-                Err(LdapError::Refused)
-            }
-            1 => {
-                let (dn, attrs) = found.remove(0);
-                Ok((dn, attrs))
-            }
+            0 => Ok(None),
+            1 => Ok(Some(found.remove(0))),
             _ => Err(LdapError::Ambiguous(username.to_owned())),
         }
     }

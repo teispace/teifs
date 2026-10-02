@@ -14,8 +14,9 @@ use teifs_policy::{
 use zeroize::Zeroizing;
 
 use crate::{
+    LdapUser,
     sessions::{Claims, SamlClaims, WebClaims, Who},
-    state::{LdapSeen, ServiceAccount, State},
+    state::{LdapSeen, Parent, ServiceAccount, State},
 };
 
 /// Who signed a request, and the policies that decide what they may do.
@@ -124,6 +125,23 @@ impl Session {
     #[must_use]
     pub fn transitive_tags(&self) -> &[(String, String)] {
         &self.transitive
+    }
+
+    /// Whether session policies narrow it below what it acts as may do.
+    #[must_use]
+    pub const fn is_narrowed(&self) -> bool {
+        self.policies.is_some()
+    }
+
+    /// The directory user it acts for: an LDAP sign-in's, or an LDAP user's service
+    /// account's.
+    #[must_use]
+    pub fn ldap_user(&self) -> Option<LdapUser<'_>> {
+        self.ldap.as_deref().map(|ldap| LdapUser {
+            dn: &ldap.dn,
+            username: &ldap.username,
+            groups: &ldap.groups,
+        })
     }
 
     /// Whether it may call the IAM API (and TeiFS's admin API): not without MFA, which
@@ -424,7 +442,7 @@ pub(crate) struct Snapshot {
     /// Every OpenID Connect provider's unique id.
     providers: std::collections::HashSet<Box<str>>,
     /// The policies mapped to each LDAP DN.
-    ldap_policies: HashMap<Box<str>, Box<[Arc<Policy>]>>,
+    ldap_policies: LdapPolicyMap,
     /// Directory users with live sessions, by DN.
     ldap_users: HashMap<Box<str>, Arc<LdapSeen>>,
     root: Arc<Identity>,
@@ -435,8 +453,11 @@ pub(crate) struct Snapshot {
     sessions: RwLock<HashMap<Box<str>, Cached>>,
 }
 
+/// The policies mapped to LDAP DNs, by DN.
+type LdapPolicyMap = HashMap<Box<str>, Box<[Arc<Policy>]>>;
+
 /// The policies mapped to each LDAP DN.
-fn ldap_policies(state: &State) -> HashMap<Box<str>, Box<[Arc<Policy>]>> {
+fn ldap_policies(state: &State) -> LdapPolicyMap {
     state
         .ldap_policies
         .values()
@@ -453,28 +474,52 @@ fn ldap_policies(state: &State) -> HashMap<Box<str>, Box<[Arc<Policy>]>> {
 }
 
 /// A service account's credential: its parent's identity (none if the parent is a
-/// disabled or missing user, or the root user of a server without a root key) with a
-/// [`SessionKind::Service`] session that narrows it to its policy and ends at its expiry.
+/// disabled or missing user, a directory user found gone, or the root user of a server
+/// without a root key) with a [`SessionKind::Service`] session that narrows it to its
+/// policy and ends at its expiry.
 fn service_credential(
     state: &State,
-    users: &HashMap<Box<str>, Arc<Identity>>,
+    (users, ldap_policies): (&HashMap<Box<str>, Arc<Identity>>, &LdapPolicyMap),
     root: Option<&RootKey>,
     account: &ServiceAccount,
 ) -> Option<Credential> {
-    let base = if let Some(user) = &account.parent {
-        Identity::clone(users.get(user.as_str())?)
-    } else {
-        let root = root?;
-        Identity {
-            // The root user's, but not root: all it may do is narrowed by its policy
-            // (an account principal would skip the narrowing).
-            principal: Principal::user(&state.account, "/", &root.access_key, &root.access_key),
-            root: false,
-            tags: Box::default(),
-            policies: Box::from([Arc::clone(&ALLOW_ALL)]),
-            boundary: None,
-            entity: None,
-            session: None,
+    let mut ldap = None;
+    let base = match &account.parent {
+        Parent::User(user) => Identity::clone(users.get(user.as_str())?),
+        Parent::Ldap { dn, username } => {
+            let seen = state.ldap_sessions.get(dn).filter(|s| !s.gone)?;
+            ldap = Some(Box::new(LdapClaims {
+                dn: dn.clone(),
+                username: username.clone(),
+                groups: seen.groups.clone(),
+            }));
+            Identity {
+                principal: Principal::federated(&state.account, username),
+                root: false,
+                tags: Box::default(),
+                policies: std::iter::once(dn)
+                    .chain(&seen.groups)
+                    .filter_map(|dn| ldap_policies.get(dn.as_str()))
+                    .flat_map(|p| p.iter().cloned())
+                    .collect(),
+                boundary: None,
+                entity: None,
+                session: None,
+            }
+        }
+        Parent::Root => {
+            let root = root?;
+            Identity {
+                // The root user's, but not root: all it may do is narrowed by its policy
+                // (an account principal would skip the narrowing).
+                principal: Principal::user(&state.account, "/", &root.access_key, &root.access_key),
+                root: false,
+                tags: Box::default(),
+                policies: Box::from([Arc::clone(&ALLOW_ALL)]),
+                boundary: None,
+                entity: None,
+                session: None,
+            }
         }
     };
     let session = Session {
@@ -491,7 +536,7 @@ fn service_credential(
         transitive: Box::default(),
         web: None,
         saml: None,
-        ldap: None,
+        ldap,
     };
     Some(Credential {
         secret: account.secret.clone(),
@@ -556,10 +601,15 @@ impl Snapshot {
                 );
             }
         }
+        let ldap_policies = ldap_policies(state);
         for account in state.service_accounts.values().filter(|a| a.active) {
             if !keys.contains_key(account.id.as_str())
-                && let Some(credential) =
-                    service_credential(state, &users, root.filter(|_| !root_refused), account)
+                && let Some(credential) = service_credential(
+                    state,
+                    (&users, &ldap_policies),
+                    root.filter(|_| !root_refused),
+                    account,
+                )
             {
                 keys.insert(account.id.as_str().into(), credential);
             }
@@ -590,7 +640,6 @@ impl Snapshot {
             .keys()
             .map(|id| id.as_str().into())
             .collect();
-        let ldap_policies = ldap_policies(state);
         let ldap_users = state
             .ldap_sessions
             .values()

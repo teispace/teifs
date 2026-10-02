@@ -11,8 +11,10 @@ use zeroize::Zeroizing;
 
 use super::minio::{MinioError, documents, merged, user_named};
 use crate::{
-    Draft, Iam, IamError, Identity, SessionKind, builtin, ids, rules,
-    state::{Document, ServiceAccount, State},
+    Draft, Iam, IamError, Identity, SessionKind, builtin, ids,
+    ops::ldap::LdapUser,
+    rules,
+    state::{Document, Parent, ServiceAccount, State},
 };
 
 type Result<T> = std::result::Result<T, MinioError>;
@@ -158,19 +160,37 @@ fn taken(state: &State, root: Option<&str>, id: &str) -> bool {
         || root == Some(id)
 }
 
-/// The parent's name: a user's, or the root user's access key.
+/// The parent's name: a user's, the root user's access key, or a directory user's DN.
 fn parent_name(state: &State, root: Option<&str>, account: &ServiceAccount) -> String {
     match &account.parent {
-        Some(id) => state.users.get(id).map(|u| u.name.clone()),
-        None => root.map(str::to_owned),
+        Parent::User(id) => state.users.get(id).map(|u| u.name.clone()),
+        Parent::Root => root.map(str::to_owned),
+        Parent::Ldap { dn, .. } => Some(dn.clone()),
     }
     .unwrap_or_default()
+}
+
+/// The managed policies mapped to a directory user's DN and its groups' DNs, as the
+/// directory last said.
+fn ldap_documents<'a>(state: &'a State, dn: &'a str) -> impl Iterator<Item = &'a str> {
+    let groups = state
+        .ldap_sessions
+        .get(dn)
+        .map(|seen| seen.groups.as_slice())
+        .unwrap_or_default();
+    std::iter::once(dn)
+        .chain(groups.iter().map(String::as_str))
+        .filter_map(|dn| state.ldap_policies.get(dn))
+        .flat_map(|m| m.policies.iter())
+        .filter_map(|id| state.policies.get(id))
+        .map(|p| &*p.default_document().text)
 }
 
 fn describe(state: &State, root: Option<&str>, account: &ServiceAccount) -> MinioServiceAccount {
     let policy = match (&account.policy, &account.parent) {
         (Some(policy), _) => policy.text.to_string(),
-        (None, Some(id)) => state.users.get(id).map_or_else(
+        (None, Parent::Ldap { dn, .. }) => merged(ldap_documents(state, dn)),
+        (None, Parent::User(id)) => state.users.get(id).map_or_else(
             || merged([]),
             |user| {
                 let groups = state.groups_of(&user.id).filter(|g| !g.disabled);
@@ -180,7 +200,7 @@ fn describe(state: &State, root: Option<&str>, account: &ServiceAccount) -> Mini
                 )
             },
         ),
-        (None, None) => merged(
+        (None, Parent::Root) => merged(
             builtin::BUILTINS
                 .iter()
                 .filter(|b| b.name == "consoleAdmin")
@@ -201,12 +221,12 @@ fn describe(state: &State, root: Option<&str>, account: &ServiceAccount) -> Mini
 }
 
 impl Draft<'_> {
-    /// The unique id of the user named `parent`, or `None` for the root user's key.
-    fn parent(&self, parent: &str) -> Result<Option<String>> {
+    /// The user named `parent`, or the root user for the root user's key.
+    fn parent(&self, parent: &str) -> Result<Parent> {
         if self.root == Some(parent) {
-            return Ok(None);
+            return Ok(Parent::Root);
         }
-        Ok(Some(user_named(&self.state, parent)?.id.clone()))
+        Ok(Parent::User(user_named(&self.state, parent)?.id.clone()))
     }
 
     fn save_service_account(&mut self, account: ServiceAccount) {
@@ -216,16 +236,18 @@ impl Draft<'_> {
             .insert(account.id.clone(), Arc::new(account));
     }
 
+    /// Makes a service account for `parent`, whose name (a user's, the root user's key,
+    /// a directory user's) its access key may not be.
     fn add_service_account(
         &mut self,
-        parent: &str,
+        parent: Parent,
+        parent_name: &str,
         new: NewServiceAccount<'_>,
     ) -> Result<AddedServiceAccount> {
         check_name(new.name)?;
         check_description(new.description)?;
         let expires_ms = check_expiry(new.expires_ms, self.now)?;
         let policy = new.policy.map(parse_policy).transpose()?;
-        let parent_id = self.parent(parent)?;
         let (id, secret) = match (new.access_key, new.secret) {
             (Some(id), Some(secret)) => {
                 rules::access_key_id(id).map_err(MinioError::InvalidAccessKey)?;
@@ -233,7 +255,7 @@ impl Draft<'_> {
                 if self.root == Some(id) {
                     return Err(MinioError::RootCredentials);
                 }
-                if id.eq_ignore_ascii_case(parent) {
+                if id.eq_ignore_ascii_case(parent_name) {
                     return Err(MinioError::ActionNotAllowed(
                         "A service account's access key can't be its parent's name.".into(),
                     ));
@@ -262,7 +284,7 @@ impl Draft<'_> {
             sealed: self.key.seal_secret(id.as_bytes(), secret.as_bytes()),
             secret: Arc::clone(&secret),
             id: id.clone(),
-            parent: parent_id,
+            parent,
             active: true,
             policy,
             name: new.name.to_owned(),
@@ -336,9 +358,17 @@ impl Draft<'_> {
             Err(MinioError::Iam(e)) => return Err(e),
             Err(e) => return Err(invalid(e.to_string())),
         };
-        let parent = match &account.parent {
-            Some(name) => Some(self.user(name)?.id.clone()),
-            None => None,
+        let parent = match (&account.parent, &account.ldap_username) {
+            (Some(dn), Some(username)) => {
+                let dn = crate::ldap::normalize(dn).map_err(invalid)?;
+                self.see_ldap_user(&dn, username, None, 0);
+                Parent::Ldap {
+                    dn,
+                    username: username.clone(),
+                }
+            }
+            (Some(name), None) => Parent::User(self.user(name)?.id.clone()),
+            (None, _) => Parent::Root,
         };
         let secret = Zeroizing::new(secret.to_owned());
         self.save_service_account(ServiceAccount {
@@ -356,13 +386,28 @@ impl Draft<'_> {
         Ok(())
     }
 
+    /// Deletes the service accounts of the directory user `dn`.
+    pub(crate) fn remove_ldap_service_accounts_of(&mut self, dn: &str) {
+        let ids: Vec<String> = self
+            .state
+            .service_accounts
+            .values()
+            .filter(|a| a.parent.ldap_dn() == Some(dn))
+            .map(|a| a.id.clone())
+            .collect();
+        for id in ids {
+            self.state.service_accounts.remove(&id);
+            self.write(IamWrite::DeleteServiceAccount(id));
+        }
+    }
+
     /// Deletes the service accounts of the user with unique id `user`.
     pub(crate) fn remove_service_accounts_of(&mut self, user: &str) {
         let ids: Vec<String> = self
             .state
             .service_accounts
             .values()
-            .filter(|a| a.parent.as_deref() == Some(user))
+            .filter(|a| a.parent.user() == Some(user))
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
@@ -381,7 +426,32 @@ impl Iam {
         parent: &str,
         new: NewServiceAccount<'_>,
     ) -> Result<AddedServiceAccount> {
-        self.change(|d| d.add_service_account(parent, new))
+        self.change(|d| {
+            let id = d.parent(parent)?;
+            d.add_service_account(id, parent, new)
+        })
+    }
+
+    /// Makes a service account for a directory user the caller found in the directory
+    /// (`idp/ldap/add-service-account`): it has the policies mapped to the user's DN and
+    /// its groups', which the directory is asked about every few minutes, and it's
+    /// removed when the directory no longer has the user.
+    pub fn minio_add_ldap_service_account(
+        &self,
+        user: &LdapUser<'_>,
+        new: NewServiceAccount<'_>,
+    ) -> Result<AddedServiceAccount> {
+        self.change(|d| {
+            d.see_ldap_user(user.dn, user.username, Some(user.groups), 0);
+            d.add_service_account(
+                Parent::Ldap {
+                    dn: user.dn.to_owned(),
+                    username: user.username.to_owned(),
+                },
+                user.username,
+                new,
+            )
+        })
     }
 
     /// Changes a service account (`update-service-account`).
@@ -405,23 +475,23 @@ impl Iam {
         })
     }
 
-    /// The service accounts of `parent`, a user's name or the root user's access key,
-    /// oldest first; none for a name that's neither (`list-service-accounts`).
+    /// The service accounts of `parent`, a user's name, the root user's access key or a
+    /// directory user's DN written in one form, oldest first; none for a name that's none
+    /// of them (`list-service-accounts`).
     #[must_use]
     pub fn minio_service_accounts(&self, parent: &str) -> Vec<MinioServiceAccount> {
         let root = self.root_access_key();
         self.view(|s| {
-            let parent = if root.as_deref() == Some(parent) {
-                None
-            } else if let Ok(user) = s.user_named(parent) {
-                Some(user.id.as_str())
-            } else {
-                return Vec::new();
+            let user = s.user_named(parent).ok().map(|u| u.id.as_str());
+            let is_parent = |a: &ServiceAccount| match &a.parent {
+                Parent::Root => root.as_deref() == Some(parent),
+                Parent::User(id) => user == Some(id.as_str()),
+                Parent::Ldap { dn, .. } => dn.eq_ignore_ascii_case(parent),
             };
             let mut accounts: Vec<MinioServiceAccount> = s
                 .service_accounts
                 .values()
-                .filter(|a| a.parent.as_deref() == parent)
+                .filter(|a| is_parent(a))
                 .map(|a| describe(s, root.as_deref(), a))
                 .collect();
             accounts
@@ -443,13 +513,17 @@ impl Iam {
 
     /// The `MinIO` user a caller acts as, whose service accounts it may manage itself: a
     /// user's name (for its keys, its service accounts and `MinIO`'s `AssumeRole`
-    /// sessions) or the root user's access key (for the root user and its service
-    /// accounts). `None` for other sessions.
+    /// sessions), the root user's access key (for the root user and its service
+    /// accounts), or a directory user's DN (for its LDAP sessions and service accounts).
+    /// `None` for other sessions.
     #[must_use]
     pub fn minio_parent(&self, identity: &Identity) -> Option<String> {
         let root = self.root_access_key();
         if identity.is_root() {
             return root;
+        }
+        if let Some(user) = identity.session().and_then(crate::Session::ldap_user) {
+            return Some(user.dn.to_owned());
         }
         let kind = identity.session().map(crate::Session::kind);
         if !matches!(kind, None | Some(SessionKind::User | SessionKind::Service)) {

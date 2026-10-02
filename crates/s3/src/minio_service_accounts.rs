@@ -13,7 +13,8 @@ use http::StatusCode;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
 use teifs_iam::{
-    Iam, Identity, MinioError, MinioServiceAccount, NewServiceAccount, ServiceAccountChange,
+    Iam, Identity, LdapUser, MinioError, MinioServiceAccount, NewServiceAccount,
+    ServiceAccountChange, Session, SessionKind,
 };
 use teifs_policy::{Context, Decision};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -31,12 +32,12 @@ const NEVER_MS: i64 = 0;
 /// `madmin.AddServiceAccountReq`.
 #[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
-struct AddRequest {
+pub(crate) struct AddRequest {
     #[serde(default)]
     #[zeroize(skip)]
     policy: Option<serde_json::Value>,
     #[serde(default)]
-    target_user: String,
+    pub(crate) target_user: String,
     #[serde(default)]
     access_key: String,
     #[serde(default)]
@@ -126,7 +127,7 @@ struct AccessKeyInfo {
 /// `madmin.ServiceAccountInfo`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Listed {
+pub(crate) struct Listed {
     parent_user: String,
     account_status: &'static str,
     implied_policy: bool,
@@ -158,12 +159,55 @@ struct List {
     accounts: Vec<Listed>,
 }
 
-/// `madmin.ListAccessKeysResp`.
+/// `madmin.ListAccessKeysResp` (and `madmin.ListAccessKeysLDAPResp`).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AccessKeys {
-    service_accounts: Vec<Listed>,
-    sts_keys: Vec<Listed>,
+pub(crate) struct AccessKeys {
+    pub(crate) service_accounts: Vec<Listed>,
+    pub(crate) sts_keys: Vec<Listed>,
+}
+
+impl AccessKeys {
+    /// The service accounts of `parent` (a user's name, the root user's key, a directory
+    /// user's DN), if they're asked for; no temporary keys, which aren't kept.
+    pub(crate) fn of(iam: &Iam, parent: &str, service_accounts: bool) -> Self {
+        Self {
+            service_accounts: if service_accounts {
+                iam.minio_service_accounts(parent)
+                    .into_iter()
+                    .map(Listed::from)
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            sts_keys: Vec::new(),
+        }
+    }
+}
+
+/// What a bulk listing's `listType` asks for: (temporary keys, service accounts).
+pub(crate) fn list_type(params: &[(String, String)]) -> S3Result<(bool, bool)> {
+    match params
+        .iter()
+        .find(|(n, _)| n == "listType")
+        .map_or("", |(_, v)| v.as_str())
+    {
+        "users-only" => Ok((false, false)),
+        "sts-only" => Ok((true, false)),
+        "svcacc-only" => Ok((false, true)),
+        "all" => Ok((true, true)),
+        _ => Err(invalid_request(
+            "listType is users-only, sts-only, svcacc-only or all.",
+        )),
+    }
+}
+
+/// Whom a service account is made for.
+pub(crate) enum Owner<'a> {
+    /// A user's name or the root user's access key.
+    Named(&'a str),
+    /// A directory user, as the directory said just now (or the caller's session says).
+    Ldap(LdapUser<'a>),
 }
 
 /// A policy as `madmin` sends it: an empty document (no `Version`, no `Statement`) is
@@ -201,7 +245,7 @@ fn own(iam: &Iam, identity: &Identity, req: &S3Request<Body>) -> String {
 
 /// Whether `user` is the `MinIO` user the caller acts as. A caller that acts as none (a
 /// role's session, a federated user) owns no service accounts.
-fn is_own(iam: &Iam, identity: &Identity, user: &str) -> bool {
+pub(crate) fn is_own(iam: &Iam, identity: &Identity, user: &str) -> bool {
     iam.minio_parent(identity).as_deref() == Some(user)
 }
 
@@ -214,12 +258,15 @@ fn no_content() -> S3Response<Body> {
 
 /// Whether the caller signs with session credentials (a service account's or temporary
 /// ones): those make or remove service accounts only with the action, or a narrowed
-/// session could mint keys with all of its parent's rights.
-fn narrowed(identity: &Identity) -> bool {
-    identity.session().is_some()
+/// session could mint keys with all of its parent's rights. A directory user's session
+/// that no session policy narrows is the user, who can't sign any other way.
+pub(crate) fn narrowed(identity: &Identity) -> bool {
+    identity
+        .session()
+        .is_some_and(|s| s.kind() != SessionKind::Ldap || s.is_narrowed())
 }
 
-fn denied() -> S3Error {
+pub(crate) fn denied() -> S3Error {
     s3s::s3_error!(AccessDenied, "Access Denied")
 }
 
@@ -236,6 +283,9 @@ pub(crate) async fn add(
     if !privileged && (!mine || narrowed(identity)) {
         return Err(denied());
     }
+    if mine && let Some(user) = identity.session().and_then(Session::ldap_user) {
+        return create(iam, &req, &request, Owner::Ldap(user)).await;
+    }
     let parent = if mine {
         iam.minio_parent(identity).ok_or_else(|| {
             invalid("Service accounts are made for users: this caller acts as none.")
@@ -243,6 +293,17 @@ pub(crate) async fn add(
     } else {
         request.target_user.clone()
     };
+    create(iam, &req, &request, Owner::Named(&parent)).await
+}
+
+/// Makes the service account a request asks for, for `owner`; answers its
+/// credentials, encrypted.
+pub(crate) async fn create(
+    iam: &Iam,
+    req: &S3Request<Body>,
+    request: &AddRequest,
+    owner: Owner<'_>,
+) -> S3Result<S3Response<Body>> {
     let policy = policy_text(request.policy.as_ref());
     let expires_ms = request
         .expiration
@@ -250,26 +311,30 @@ pub(crate) async fn add(
         .map(expiry)
         .transpose()?
         .flatten();
-    let added = iam
-        .minio_add_service_account(
-            &parent,
-            NewServiceAccount {
-                access_key: Some(request.access_key.as_str()).filter(|k| !k.is_empty()),
-                secret: Some(request.secret_key.as_str()).filter(|s| !s.is_empty()),
-                policy: policy.as_deref(),
-                name: &request.name,
-                description: &request.description,
-                expires_ms,
-            },
-        )
-        .map_err(|err| match err {
-            MinioError::NoSuchUser => admin::error(
-                StatusCode::from_u16(err.status()).unwrap_or(StatusCode::NOT_FOUND),
-                err.code(),
-                format!("Specified target user {parent} does not exist"),
-            ),
-            err => minio_error(err),
-        })?;
+    let new = NewServiceAccount {
+        access_key: Some(request.access_key.as_str()).filter(|k| !k.is_empty()),
+        secret: Some(request.secret_key.as_str()).filter(|s| !s.is_empty()),
+        policy: policy.as_deref(),
+        name: &request.name,
+        description: &request.description,
+        expires_ms,
+    };
+    let added = match owner {
+        Owner::Named(parent) => {
+            iam.minio_add_service_account(parent, new)
+                .map_err(|err| match err {
+                    MinioError::NoSuchUser => admin::error(
+                        StatusCode::from_u16(err.status()).unwrap_or(StatusCode::NOT_FOUND),
+                        err.code(),
+                        format!("Specified target user {parent} does not exist"),
+                    ),
+                    err => minio_error(err),
+                })
+        }
+        Owner::Ldap(user) => iam
+            .minio_add_ldap_service_account(&user, new)
+            .map_err(minio_error),
+    }?;
     let answer = Added {
         credentials: Credentials {
             access_key: added.access_key.clone(),
@@ -277,7 +342,7 @@ pub(crate) async fn add(
             expiration: time(added.expires_ms.unwrap_or(NEVER_MS)),
         },
     };
-    encrypted(&req, &answer).await
+    encrypted(req, &answer).await
 }
 
 /// A status as `MinIO` takes it for a service account: `on`, `off`, `enabled`,
@@ -420,7 +485,7 @@ pub(crate) fn temporary_account_info(req: &S3Request<Body>) -> S3Result<S3Respon
     Err(minio_error(MinioError::NoSuchAccessKey))
 }
 
-fn invalid_request(message: &str) -> S3Error {
+pub(crate) fn invalid_request(message: &str) -> S3Error {
     admin::error(StatusCode::BAD_REQUEST, "InvalidRequest", message)
 }
 
@@ -450,21 +515,7 @@ pub(crate) async fn list_bulk(
     if !mine && !privileged {
         return Err(denied());
     }
-    let (sts, service_accounts) = match params
-        .iter()
-        .find(|(n, _)| n == "listType")
-        .map_or("", |(_, v)| v.as_str())
-    {
-        "users-only" => (false, false),
-        "sts-only" => (true, false),
-        "svcacc-only" => (false, true),
-        "all" => (true, true),
-        _ => {
-            return Err(invalid_request(
-                "listType is users-only, sts-only, svcacc-only or all.",
-            ));
-        }
-    };
+    let (sts, service_accounts) = list_type(&params)?;
     let root = iam.root_access_key();
     if all {
         users = iam.minio_users().into_iter().map(|u| u.name).collect();
@@ -478,25 +529,14 @@ pub(crate) async fn list_bulk(
         if !known {
             continue;
         }
-        let accounts: Vec<Listed> = if service_accounts {
-            iam.minio_service_accounts(&user)
-                .into_iter()
-                .map(Listed::from)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let keys = AccessKeys::of(iam, &user, service_accounts);
         // Only one kind asked for: users with none of it are left out.
-        if (sts && !service_accounts) || (service_accounts && !sts && accounts.is_empty()) {
+        if (sts && !service_accounts)
+            || (service_accounts && !sts && keys.service_accounts.is_empty())
+        {
             continue;
         }
-        answer.insert(
-            user,
-            AccessKeys {
-                service_accounts: accounts,
-                sts_keys: Vec::new(),
-            },
-        );
+        answer.insert(user, keys);
     }
     encrypted(req, &answer).await
 }

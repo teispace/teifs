@@ -21,9 +21,9 @@ mod versions;
 
 pub use db::{backup, intact};
 pub use iam::{
-    AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, LdapPolicyRow, LdapSessionRow,
-    OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow, SamlKeyRow, SamlProviderRow,
-    ServiceAccountRow, UserRow,
+    AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, LdapParentRow, LdapPolicyRow,
+    LdapSessionRow, OidcProviderRow, PolicyRow, PolicyVersionRow, RoleRow, SamlKeyRow,
+    SamlProviderRow, ServiceAccountRow, UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use system::{BucketRecord, Layout, System, Versioning};

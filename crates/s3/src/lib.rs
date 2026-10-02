@@ -35,6 +35,7 @@ mod minio_heal;
 mod minio_iam;
 mod minio_info;
 mod minio_kms;
+mod minio_ldap;
 mod minio_metrics;
 mod minio_pools;
 mod minio_profile;

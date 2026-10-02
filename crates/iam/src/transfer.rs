@@ -17,7 +17,7 @@ use crate::{
     ACCOUNT, Draft, Iam, IamError, LdapEntity, NewOidcProvider, NewRole, NewSamlProvider, Owner,
     Result, SamlProviderUpdate, ldap,
     rules::{self, MAX_KEYS_PER_USER},
-    state::{Key, State},
+    state::{Key, Parent, State},
 };
 
 /// What a built-in policy's ARN starts with, as an export names it.
@@ -226,13 +226,15 @@ fn export_service_accounts(state: &State, secrets: bool) -> Vec<ExportedServiceA
         .service_accounts
         .values()
         .filter_map(|a| {
-            let parent = match &a.parent {
-                Some(id) => Some(state.users.get(id)?.name.clone()),
-                None => None,
+            let (parent, ldap_username) = match &a.parent {
+                Parent::User(id) => (Some(state.users.get(id)?.name.clone()), None),
+                Parent::Root => (None, None),
+                Parent::Ldap { dn, username } => (Some(dn.clone()), Some(username.clone())),
             };
             Some(ExportedServiceAccount {
                 id: a.id.clone(),
                 parent,
+                ldap_username,
                 active: a.active,
                 policy: a.policy.as_ref().map(|p| p.text.to_string()),
                 name: a.name.clone(),

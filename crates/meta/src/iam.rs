@@ -185,6 +185,13 @@ pub(crate) const SERVICE_ACCOUNTS_MIGRATION: &str = "
     ) WITHOUT ROWID;
     CREATE INDEX iam_service_accounts_parent ON iam_service_accounts (parent);";
 
+/// Service accounts of LDAP users: migration 12. Their parent is empty, as the root
+/// user's is, and the directory user they act for is named by DN and the name it signs
+/// in with.
+pub(crate) const LDAP_SERVICE_ACCOUNTS_MIGRATION: &str = "
+    ALTER TABLE iam_service_accounts ADD COLUMN ldap_dn TEXT;
+    ALTER TABLE iam_service_accounts ADD COLUMN ldap_username TEXT;";
+
 /// A user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -407,8 +414,11 @@ impl std::fmt::Debug for AccessKeyRow {
 pub struct ServiceAccountRow {
     /// The access key id.
     pub id: String,
-    /// The unique id of the user it acts for; empty for the root user.
+    /// The unique id of the user it acts for; empty for the root user or a directory
+    /// user.
     pub parent: String,
+    /// The directory user it acts for, when it's an LDAP user's.
+    pub ldap: Option<LdapParentRow>,
     /// The sealed secret key.
     pub secret: Vec<u8>,
     /// Whether requests signed with it are accepted.
@@ -425,11 +435,21 @@ pub struct ServiceAccountRow {
     pub created_ms: i64,
 }
 
+/// The LDAP user a service account acts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LdapParentRow {
+    /// The user's DN, written in one form.
+    pub dn: String,
+    /// The name it signs in with.
+    pub username: String,
+}
+
 impl std::fmt::Debug for ServiceAccountRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAccountRow")
             .field("id", &self.id)
             .field("parent", &self.parent)
+            .field("ldap", &self.ldap)
             .field("active", &self.active)
             .field("name", &self.name)
             .field("expires_ms", &self.expires_ms)
@@ -694,7 +714,7 @@ impl System {
             .collect::<rusqlite::Result<_>>()?,
             service_accounts: all(
                 "SELECT id, parent, secret, active, policy, name, description, expires_ms,
-                        created_ms
+                        created_ms, ldap_dn, ldap_username
                  FROM iam_service_accounts ORDER BY id",
             )?
             .query_map([], |r| {
@@ -708,6 +728,10 @@ impl System {
                     description: r.get(6)?,
                     expires_ms: r.get(7)?,
                     created_ms: r.get(8)?,
+                    ldap: match (r.get(9)?, r.get(10)?) {
+                        (Some(dn), Some(username)) => Some(LdapParentRow { dn, username }),
+                        _ => None,
+                    },
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -1034,8 +1058,9 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::DeleteKey(id) => run("DELETE FROM iam_access_keys WHERE id = ?1", params![id]),
         IamWrite::PutServiceAccount(a) => run(
             "INSERT INTO iam_service_accounts
-                 (id, parent, secret, active, policy, name, description, expires_ms, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 (id, parent, secret, active, policy, name, description, expires_ms, created_ms,
+                  ldap_dn, ldap_username)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT (id) DO UPDATE SET secret = excluded.secret,
                  active = excluded.active, policy = excluded.policy, name = excluded.name,
                  description = excluded.description, expires_ms = excluded.expires_ms",
@@ -1048,7 +1073,9 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
                 a.name,
                 a.description,
                 a.expires_ms,
-                a.created_ms
+                a.created_ms,
+                a.ldap.as_ref().map(|l| &l.dn),
+                a.ldap.as_ref().map(|l| &l.username)
             ],
         ),
         IamWrite::DeleteServiceAccount(id) => run(
@@ -1181,6 +1208,10 @@ mod tests {
         let account = ServiceAccountRow {
             id: "SVC1".into(),
             parent: String::new(),
+            ldap: Some(LdapParentRow {
+                dn: "uid=ann,ou=people,dc=example,dc=com".into(),
+                username: "ann".into(),
+            }),
             secret: vec![1, 2, 3],
             active: true,
             policy: Some("{}".into()),

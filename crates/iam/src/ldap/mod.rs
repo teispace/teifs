@@ -27,6 +27,12 @@ pub use client::{Directory, LdapError, SignedIn};
 use dn::Dn;
 pub use dn::normalize;
 
+/// Whether a name is written as a DN (`uid=ann,ou=people,…`) rather than a user name.
+#[must_use]
+pub fn is_dn(name: &str) -> bool {
+    name.contains('=') && normalize(name).is_ok()
+}
+
 /// How long to wait to connect to the directory, and for each operation (MinIO waits
 /// 30 seconds for each).
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

@@ -32,8 +32,9 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_metrics,
-    minio_pools, minio_profile, minio_service, minio_service_accounts, minio_speedtest,
+    iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_ldap,
+    minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
+    minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -61,9 +62,9 @@ pub enum Api {
 pub(crate) enum Needs {
     /// This action on this resource, decided with the caller's policies.
     Action(&'static str, &'static str),
-    /// Either of these actions on any resource, decided with the caller's policies (as
+    /// Any of these actions on any resource, decided with the caller's policies (as
     /// `MinIO` decides an admin call that several actions allow).
-    EitherAction(&'static str, &'static str),
+    AnyAction(&'static [&'static str]),
     /// This action on the bucket the path names, decided with the caller's policies and
     /// the bucket's own, and its tags while they decide access.
     OnBucket(&'static str),
@@ -169,6 +170,7 @@ enum Handler {
     MinioHeal(minio_heal::Call),
     MinioKms(minio_kms::Call),
     MinioSpeedtest(minio_speedtest::Call),
+    MinioLdap(minio_ldap::Call),
     MinioConfig(minio_config::Call),
 }
 
@@ -231,6 +233,7 @@ impl Handler {
             Self::MinioHeal(call) => call.name(),
             Self::MinioKms(call) => call.name(),
             Self::MinioSpeedtest(call) => call.name(),
+            Self::MinioLdap(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
         }
     }
@@ -645,6 +648,66 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/idp/ldap/policy/attach",
+        needs: Needs::Action("admin:UpdatePolicyAssociation", ANY),
+        handler: Handler::MinioLdap(minio_ldap::Call::Attach),
+        about: "Maps policies to an LDAP user (by name or DN) or group (by DN), from an encrypted `PolicyAssociationReq`, answering what changed, encrypted: `mc idp ldap policy attach`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/idp/ldap/policy/detach",
+        needs: Needs::Action("admin:UpdatePolicyAssociation", ANY),
+        handler: Handler::MinioLdap(minio_ldap::Call::Detach),
+        about: "Unmaps policies from an LDAP user or group, as `attach`: `mc idp ldap policy detach`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp/ldap/policy-entities",
+        needs: Needs::AnyAction(&[
+            "admin:ListUserPolicies",
+            "admin:ListUsers",
+            "admin:ListGroups",
+        ]),
+        handler: Handler::MinioLdap(minio_ldap::Call::Entities),
+        about: "Which LDAP users and groups have which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc idp ldap policy entities`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/idp/ldap/add-service-account",
+        needs: Needs::OrOwnAccount("admin:CreateServiceAccount"),
+        handler: Handler::MinioLdap(minio_ldap::Call::AddServiceAccount),
+        about: "Makes a service account for the encrypted request's `targetUser`, an LDAP user's name (the caller's own LDAP user by default), and answers its credentials, encrypted: `mc idp ldap accesskey create`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp/ldap/list-access-keys",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::MinioLdap(minio_ldap::Call::ListAccessKeys),
+        about: "LDAP user `?userDN=`'s service accounts (the caller's own by default), encrypted",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp/ldap/list-access-keys-bulk",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::MinioLdap(minio_ldap::Call::ListAccessKeysBulk),
+        about: "LDAP users' service accounts by DN (`?userDNs=`, repeated; the caller's own by default; `&all=true` with `admin:ListUsers`), encrypted: `mc idp ldap accesskey ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp/openid/list-access-keys-bulk",
+        needs: Needs::OrOwnAccount("admin:ListServiceAccounts"),
+        handler: Handler::MinioLdap(minio_ldap::Call::OpenIdListAccessKeysBulk),
+        about: "OpenID Connect users' access keys by configuration, of which none are kept, encrypted: `mc idp openid accesskey ls`",
+    },
+    Endpoint {
+        api: Api::Minio,
         verb: Verb::Get,
         path: "/minio/admin/v3/temporary-account-info",
         needs: Needs::Action("admin:ListTemporaryAccounts", ANY),
@@ -743,7 +806,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         api: Api::Minio,
         verb: Verb::Get,
         path: "/minio/admin/v3/pools/list",
-        needs: Needs::EitherAction("admin:ServerInfo", "admin:Decommission"),
+        needs: Needs::AnyAction(&["admin:ServerInfo", "admin:Decommission"]),
         handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::List)),
         about: "The server's pools as `madmin.PoolStatus`: the drive, its only pool, named by its path: `mc admin decommission status`",
     },
@@ -751,7 +814,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         api: Api::Minio,
         verb: Verb::Get,
         path: "/minio/admin/v3/pools/status",
-        needs: Needs::EitherAction("admin:ServerInfo", "admin:Decommission"),
+        needs: Needs::AnyAction(&["admin:ServerInfo", "admin:Decommission"]),
         handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::Status)),
         about: "The `pool` named (its path, or `0` with `by-id=true`) as `madmin.PoolStatus`",
     },
@@ -1058,8 +1121,8 @@ pub struct EndpointInfo {
     /// The action it needs; none when each call names its own (IAM and STS) or only the
     /// root user may call it.
     pub action: Option<&'static str>,
-    /// Another action that allows it too.
-    pub or_action: Option<&'static str>,
+    /// Other actions that allow it too.
+    pub or_actions: &'static [&'static str],
     /// Whether only the root user may call it.
     pub root_only: bool,
     /// Whether a caller may call it on its own access key without the action, unless a
@@ -1082,8 +1145,8 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         },
         path: e.path,
         action: match e.needs {
+            Needs::AnyAction(actions) => actions.first().copied(),
             Needs::Action(action, _)
-            | Needs::EitherAction(action, _)
             | Needs::OnBucket(action)
             | Needs::OnQueryBucket(action)
             | Needs::OrOwnKey(action)
@@ -1092,9 +1155,9 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OnKmsKey(action) => Some(action),
             Needs::PerCall | Needs::Root | Needs::Signed | Needs::ServiceAction => None,
         },
-        or_action: match e.needs {
-            Needs::EitherAction(_, or) => Some(or),
-            _ => None,
+        or_actions: match e.needs {
+            Needs::AnyAction(actions) => actions.get(1..).unwrap_or_default(),
+            _ => &[],
         },
         root_only: e.needs == Needs::Root,
         own_key: matches!(
@@ -1292,7 +1355,7 @@ impl Routes {
             Needs::Action(action, resource) => identity
                 .decide(&context(), action, resource, None)
                 .is_allowed(),
-            Needs::EitherAction(one, other) => [one, other]
+            Needs::AnyAction(actions) => actions
                 .iter()
                 .any(|action| identity.decide(&context(), action, ANY, None).is_allowed()),
             Needs::OnBucket(action) => {
@@ -1454,15 +1517,7 @@ impl Routes {
             Handler::AttachPolicy => minio_iam::associate(&self.iam, req, true).await,
             Handler::DetachPolicy => minio_iam::associate(&self.iam, req, false).await,
             Handler::PolicyEntities => minio_iam::policy_entities(&self.iam, &req).await,
-            Handler::AccountInfo => {
-                minio_iam::account_info(
-                    (&self.iam, &self.store, &self.rules),
-                    identity,
-                    context,
-                    &req,
-                )
-                .await
-            }
+            Handler::AccountInfo => minio_iam::account_info(self, identity, context, &req).await,
             Handler::AddServiceAccount => {
                 minio_service_accounts::add(&self.iam, identity, privileged, req).await
             }
@@ -1490,6 +1545,7 @@ impl Routes {
             Handler::MinioHeal(call) => call.call(self, req).await,
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioSpeedtest(call) => call.call(self, &req, (identity, context)).await,
+            Handler::MinioLdap(call) => call.call(self, req, (identity, context), privileged).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
@@ -1736,9 +1792,16 @@ mod tests {
                     (Some(action), _) if e.own_key => {
                         format!("`{action}`, or anyone on their own key unless denied")
                     }
-                    (Some(action), _) => match e.or_action {
-                        Some(or) => format!("`{action}` or `{or}`"),
-                        None => format!("`{action}`"),
+                    (Some(action), _) => match e.or_actions {
+                        [] => format!("`{action}`"),
+                        [or] => format!("`{action}` or `{or}`"),
+                        [between @ .., last] => {
+                            let mut listed = format!("`{action}`");
+                            for other in between {
+                                let _ = write!(listed, ", `{other}`");
+                            }
+                            format!("{listed} or `{last}`")
+                        }
                     },
                     (None, false) if e.own_key => "anyone who signs, about themselves".to_owned(),
                     (None, true) => "root user".to_owned(),
@@ -1796,12 +1859,10 @@ mod tests {
                     };
                     assert!(action.starts_with(service), "{e:?}");
                 }
-                Needs::EitherAction(one, other) => {
+                Needs::AnyAction(actions) => {
                     assert_eq!(e.api, Api::Minio);
-                    assert!(
-                        one.starts_with("admin:") && other.starts_with("admin:"),
-                        "{e:?}"
-                    );
+                    assert!(actions.len() >= 2, "{e:?}");
+                    assert!(actions.iter().all(|a| a.starts_with("admin:")), "{e:?}");
                 }
                 Needs::OnBucket(action) => {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");

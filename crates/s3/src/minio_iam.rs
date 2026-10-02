@@ -14,6 +14,7 @@ use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
 use teifs_iam::{
     GroupPolicies, Iam, Identity, MinioError, MinioGroup, MinioUser, MinioUserChange, Owner,
+    PolicyEntities,
 };
 use teifs_policy::Context;
 use teifs_store::{RetentionPeriod, Store, Versioning};
@@ -23,9 +24,8 @@ use zeroize::Zeroizing;
 use crate::{
     access::allows,
     admin,
-    bucket_access::Rules,
     errors::StoreResultExt,
-    routes::{s3_refusal, signed_body},
+    routes::{Routes, s3_refusal, signed_body},
 };
 
 /// The largest body read: a policy document, or an encrypted request.
@@ -430,21 +430,21 @@ pub(crate) fn remove_canned_policy(iam: &Iam, req: &S3Request<Body>) -> S3Result
 
 /// `madmin.PolicyAssociationReq`.
 #[derive(Deserialize)]
-struct Association {
+pub(crate) struct Association {
     #[serde(default)]
-    policies: Vec<String>,
+    pub(crate) policies: Vec<String>,
     #[serde(default)]
-    user: String,
+    pub(crate) user: String,
     #[serde(default)]
-    group: String,
+    pub(crate) group: String,
     #[serde(default, rename = "configName")]
-    config_name: String,
+    pub(crate) config_name: String,
 }
 
 /// `madmin.PolicyAssociationResp`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AssociationResult {
+pub(crate) struct AssociationResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     policies_attached: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -472,27 +472,33 @@ pub(crate) async fn associate(
     let changed = iam
         .minio_associate(owner, &request.policies, attach)
         .map_err(minio_error)?;
-    let now = time(admin::millis(std::time::SystemTime::now()));
-    let result = if attach {
-        AssociationResult {
-            policies_attached: changed,
-            policies_detached: Vec::new(),
-            updated_at: now,
+    encrypted(&req, &AssociationResult::new(changed, attach)).await
+}
+
+impl AssociationResult {
+    /// What attaching (or detaching) changed, now.
+    pub(crate) fn new(changed: Vec<String>, attach: bool) -> Self {
+        let now = time(admin::millis(std::time::SystemTime::now()));
+        if attach {
+            Self {
+                policies_attached: changed,
+                policies_detached: Vec::new(),
+                updated_at: now,
+            }
+        } else {
+            Self {
+                policies_attached: Vec::new(),
+                policies_detached: changed,
+                updated_at: now,
+            }
         }
-    } else {
-        AssociationResult {
-            policies_attached: Vec::new(),
-            policies_detached: changed,
-            updated_at: now,
-        }
-    };
-    encrypted(&req, &result).await
+    }
 }
 
 /// `madmin.PolicyEntitiesResult`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EntitiesResult {
+pub(crate) struct EntitiesResult {
     timestamp: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     user_mappings: Vec<UserMapping>,
@@ -549,33 +555,38 @@ pub(crate) async fn policy_entities(
         }
     }
     let entities = iam.minio_policy_entities(&users, &groups, &policies);
-    let result = EntitiesResult {
-        timestamp: time(admin::millis(std::time::SystemTime::now())),
-        user_mappings: entities
-            .users
-            .into_iter()
-            .map(|u| UserMapping {
-                user: u.user,
-                policies: u.policies,
-                member_of_mappings: u.groups.into_iter().map(GroupMapping::from).collect(),
-            })
-            .collect(),
-        group_mappings: entities
-            .groups
-            .into_iter()
-            .map(GroupMapping::from)
-            .collect(),
-        policy_mappings: entities
-            .policies
-            .into_iter()
-            .map(|p| PolicyMapping {
-                policy: p.policy,
-                users: p.users,
-                groups: p.groups,
-            })
-            .collect(),
-    };
-    encrypted(req, &result).await
+    encrypted(req, &EntitiesResult::from(entities)).await
+}
+
+impl From<PolicyEntities> for EntitiesResult {
+    fn from(entities: PolicyEntities) -> Self {
+        Self {
+            timestamp: time(admin::millis(std::time::SystemTime::now())),
+            user_mappings: entities
+                .users
+                .into_iter()
+                .map(|u| UserMapping {
+                    user: u.user,
+                    policies: u.policies,
+                    member_of_mappings: u.groups.into_iter().map(GroupMapping::from).collect(),
+                })
+                .collect(),
+            group_mappings: entities
+                .groups
+                .into_iter()
+                .map(GroupMapping::from)
+                .collect(),
+            policy_mappings: entities
+                .policies
+                .into_iter()
+                .map(|p| PolicyMapping {
+                    policy: p.policy,
+                    users: p.users,
+                    groups: p.groups,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// `madmin.AccountInfo`: Go's field names, as madmin reads them.
@@ -641,11 +652,12 @@ struct Access {
 /// `GET accountinfo`: the caller's name and policy, and the buckets it may read or
 /// write (`s3:ListBucket`, `s3:PutObject`), with what each holds.
 pub(crate) async fn account_info(
-    (iam, store, rules): (&Iam, &Store, &Rules),
+    routes: &Routes,
     identity: &Identity,
     context: &Context,
     req: &S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
+    let (iam, store, rules) = (&routes.iam, &routes.store, &routes.rules);
     let account = iam.minio_account(identity, caller_key(req).unwrap_or_default());
     let usage = store.usage().await.s3()?;
     let mut buckets = Vec::new();

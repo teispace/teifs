@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use teifs_meta::{IamWrite, LdapSessionRow};
 
 use crate::{
-    Draft, Iam, IamError, Result,
+    Draft, GroupPolicies, Iam, IamError, PolicyEntities, PolicyHolders, Result, UserPolicies,
     ldap::{
         LdapError,
         client::{Found, Kind},
@@ -69,6 +69,18 @@ pub struct LdapPolicyChange {
     pub policies: Vec<String>,
 }
 
+/// A directory user, as the directory said just now: whom an LDAP user's service account
+/// is made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LdapUser<'a> {
+    /// Its DN, written in one form.
+    pub dn: &'a str,
+    /// The name it signs in with.
+    pub username: &'a str,
+    /// Its groups' DNs, written in one form.
+    pub groups: &'a [String],
+}
+
 /// A user the directory signed in, as a session's record keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LdapSignIn<'a> {
@@ -95,6 +107,106 @@ fn policy_id(state: &State, name: &str) -> Result<String> {
         .policy_named(name)
         .map(|p| p.row.id.clone())
         .ok_or_else(|| IamError::NoSuchEntity(format!("Policy {name} does not exist.")))
+}
+
+/// The mappings of these users (DN and groups' DNs), groups and policies, or every
+/// mapping when none are asked for.
+fn ldap_entities(
+    state: &State,
+    users: &[(String, Vec<String>)],
+    groups: &[String],
+    policies: &[String],
+) -> PolicyEntities {
+    let all = users.is_empty() && groups.is_empty() && policies.is_empty();
+    let mapped = |dn: &str, entity: LdapEntity| {
+        state
+            .ldap_policies
+            .values()
+            .find(|m| m.entity == entity && m.dn.eq_ignore_ascii_case(dn))
+            .map(|m| names(state, &m.policies))
+            .unwrap_or_default()
+    };
+    let group_policies = |dn: &str| {
+        let policies = mapped(dn, LdapEntity::Group);
+        (!policies.is_empty()).then(|| GroupPolicies {
+            group: dn.to_owned(),
+            policies,
+        })
+    };
+    let mut entities = PolicyEntities::default();
+    let by_entity = |entity| {
+        state
+            .ldap_policies
+            .values()
+            .filter(move |m| m.entity == entity)
+            .map(|m| m.dn.clone())
+    };
+    let asked_users: Vec<(String, Vec<String>)> = if all {
+        by_entity(LdapEntity::User)
+            .map(|dn| (dn, Vec::new()))
+            .collect()
+    } else {
+        users.to_vec()
+    };
+    for (dn, member_of) in asked_users {
+        let user = UserPolicies {
+            policies: mapped(&dn, LdapEntity::User),
+            groups: member_of.iter().filter_map(|g| group_policies(g)).collect(),
+            user: dn,
+        };
+        if !user.policies.is_empty() || !user.groups.is_empty() {
+            entities.users.push(user);
+        }
+    }
+    let asked_groups: Vec<String> = if all {
+        by_entity(LdapEntity::Group).collect()
+    } else {
+        groups.to_vec()
+    };
+    entities.groups = asked_groups
+        .iter()
+        .filter_map(|g| group_policies(g))
+        .collect();
+    let asked_policies: Vec<&Arc<crate::state::Managed>> = if all {
+        let mapped: BTreeSet<&String> = state
+            .ldap_policies
+            .values()
+            .flat_map(|m| m.policies.iter())
+            .collect();
+        mapped
+            .into_iter()
+            .filter_map(|id| state.policies.get(id))
+            .collect()
+    } else {
+        policies
+            .iter()
+            .filter_map(|n| state.policy_named(n))
+            .collect()
+    };
+    for policy in asked_policies {
+        let holders = |entity| {
+            state
+                .ldap_policies
+                .values()
+                .filter(|m| m.entity == entity && m.policies.contains(&policy.row.id))
+                .map(|m| m.dn.clone())
+                .collect::<Vec<_>>()
+        };
+        let holders = PolicyHolders {
+            policy: policy.row.name.clone(),
+            users: holders(LdapEntity::User),
+            groups: holders(LdapEntity::Group),
+        };
+        if !holders.users.is_empty() || !holders.groups.is_empty() {
+            entities.policies.push(holders);
+        }
+    }
+    entities.users.sort_by(|a, b| a.user.cmp(&b.user));
+    entities.groups.sort_by(|a, b| a.group.cmp(&b.group));
+    entities
+        .policies
+        .sort_by_cached_key(|p| p.policy.to_ascii_lowercase());
+    entities
 }
 
 impl Draft<'_> {
@@ -153,6 +265,41 @@ impl Draft<'_> {
                 .insert(dn.to_owned(), Arc::new(mapping));
         }
         Ok(change)
+    }
+
+    /// Records what the directory said of a user: its groups (`None` keeps those last
+    /// said), and sessions until `expires_ms` at least. A user found gone before is back.
+    /// Answers the generation its sessions take.
+    pub(crate) fn see_ldap_user(
+        &mut self,
+        dn: &str,
+        username: &str,
+        groups: Option<&[String]>,
+        expires_ms: i64,
+    ) -> u32 {
+        let before = self.state.ldap_sessions.get(dn).cloned();
+        let seen = LdapSeen {
+            dn: dn.to_owned(),
+            username: username.to_owned(),
+            groups: groups.map_or_else(
+                || {
+                    before
+                        .as_ref()
+                        .map(|b| b.groups.clone())
+                        .unwrap_or_default()
+                },
+                <[String]>::to_vec,
+            ),
+            checked_ms: self.now,
+            expires_ms: before
+                .as_ref()
+                .map_or(expires_ms, |b| b.expires_ms.max(expires_ms)),
+            generation: before.as_ref().map_or(0, |b| b.generation),
+            gone: false,
+        };
+        let generation = seen.generation;
+        self.save_ldap_session(seen);
+        generation
     }
 
     fn save_ldap_session(&mut self, seen: LdapSeen) {
@@ -236,6 +383,113 @@ impl Iam {
         self.map_ldap_policies(&dn, entity, policies, attach)
     }
 
+    /// A directory user named by its DN, in any spelling, or by the name it signs in
+    /// with, as `MinIO` checks one: its DN written in one form, or none when the
+    /// directory doesn't have it under the user base DNs.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when there's no directory; `Directory` when it can't be asked.
+    pub async fn find_ldap_user(&self, name: &str) -> Result<Option<String>> {
+        let directory = self
+            .ldap()
+            .ok_or_else(|| IamError::InvalidInput(format!("{}.", LdapError::NotSetUp)))?;
+        let directory_error = |e: LdapError| IamError::Directory(e.to_string());
+        if crate::ldap::is_dn(name) {
+            let found = directory
+                .find(name, Kind::User)
+                .await
+                .map_err(directory_error)?;
+            return Ok(found.filter(|f| f.under_base).map(|f| f.dn));
+        }
+        Ok(directory
+            .user(name)
+            .await
+            .map_err(directory_error)?
+            .map(|user| user.dn))
+    }
+
+    /// Who has which policies mapped (`idp/ldap/policy-entities`): of the users (by DN
+    /// or name, with their groups as the directory says now), groups (by DN) and
+    /// policies named, or of every mapping when none are. Names the directory doesn't
+    /// have are taken as DNs, so mappings of DNs it no longer has still show.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when there's no directory; `Directory` when it can't be asked.
+    pub async fn ldap_policy_entities(
+        &self,
+        users: &[String],
+        groups: &[String],
+        policies: &[String],
+    ) -> Result<PolicyEntities> {
+        let directory = self
+            .ldap()
+            .ok_or_else(|| IamError::InvalidInput(format!("{}.", LdapError::NotSetUp)))?;
+        let directory_error = |e: LdapError| IamError::Directory(e.to_string());
+        let mut asked_users = Vec::new();
+        for name in users {
+            let found = if crate::ldap::is_dn(name) {
+                match directory
+                    .find(name, Kind::User)
+                    .await
+                    .map_err(directory_error)?
+                {
+                    Some(Found {
+                        dn,
+                        under_base: true,
+                    }) => {
+                        let username = self.read(|s| {
+                            Ok(s.ldap_sessions
+                                .get(&dn)
+                                .map(|seen| seen.username.clone())
+                                .unwrap_or_default())
+                        })?;
+                        let groups = directory
+                            .refresh(&dn, &username)
+                            .await
+                            .map_err(directory_error)?;
+                        groups.map(|groups| (dn, groups))
+                    }
+                    _ => None,
+                }
+            } else {
+                directory
+                    .user(name)
+                    .await
+                    .map_err(directory_error)?
+                    .map(|user| (user.dn, user.groups))
+            };
+            match found {
+                Some(user) => asked_users.push(user),
+                None => {
+                    if let Ok(dn) = dn::normalize(name) {
+                        asked_users.push((dn, Vec::new()));
+                    }
+                }
+            }
+        }
+        let mut asked_groups = Vec::new();
+        for name in groups {
+            match directory
+                .find(name, Kind::Group)
+                .await
+                .map_err(directory_error)?
+            {
+                Some(Found {
+                    dn,
+                    under_base: true,
+                }) => asked_groups.push(dn),
+                _ => {
+                    if let Ok(dn) = dn::normalize(name) {
+                        asked_groups.push(dn);
+                    }
+                }
+            }
+        }
+        self.read(|s| Ok(ldap_entities(s, &asked_users, &asked_groups, policies)))
+    }
+
     /// Asks the directory about each user with live sessions: a user it no longer has
     /// loses its sessions, and the others' sessions get their groups as they are now.
     /// The server runs it every few minutes. A user the directory couldn't be asked
@@ -274,39 +528,57 @@ impl Iam {
         })
     }
 
+    /// The directory users TeiFS keeps something of: policies mapped to them, a record
+    /// of their sessions, or service accounts; by DN, in order.
+    pub fn ldap_users(&self) -> Result<Vec<String>> {
+        self.read(|s| {
+            let users: BTreeSet<String> = s
+                .ldap_policies
+                .values()
+                .filter(|m| m.entity == LdapEntity::User)
+                .map(|m| m.dn.clone())
+                .chain(s.ldap_sessions.keys().cloned())
+                .chain(
+                    s.service_accounts
+                        .values()
+                        .filter_map(|a| a.parent.ldap_dn().map(str::to_owned)),
+                )
+                .collect();
+            Ok(users.into_iter().collect())
+        })
+    }
+
     /// Records a sign-in: the user's groups as the directory just said, and how long
     /// its sessions last at least. Answers the generation its new session takes: its
     /// sessions from before it was found gone stay revoked.
     pub(crate) fn record_ldap_sign_in(&self, signed_in: &LdapSignIn<'_>) -> Result<u32> {
         self.change(|d| {
-            let before = d.state.ldap_sessions.get(signed_in.dn).cloned();
-            let seen = LdapSeen {
-                dn: signed_in.dn.to_owned(),
-                username: signed_in.username.to_owned(),
-                groups: signed_in.groups.to_vec(),
-                checked_ms: d.now,
-                expires_ms: before.as_ref().map_or(signed_in.expires_ms, |b| {
-                    b.expires_ms.max(signed_in.expires_ms)
-                }),
-                generation: before.as_ref().map_or(0, |b| b.generation),
-                gone: false,
-            };
-            let generation = seen.generation;
-            d.save_ldap_session(seen);
-            Ok(generation)
+            Ok(d.see_ldap_user(
+                signed_in.dn,
+                signed_in.username,
+                Some(signed_in.groups),
+                signed_in.expires_ms,
+            ))
         })
     }
 
-    /// The users with live sessions, to check against the directory: (DN, the name it
-    /// signed in with). Records whose sessions have all expired are dropped first.
+    /// The users with live sessions or service accounts, to check against the directory:
+    /// (DN, the name it signed in with). Records of users with neither any more are
+    /// dropped first.
     pub(crate) fn ldap_users_to_check(&self) -> Result<Vec<(String, String)>> {
         self.change(|d| {
             let now = d.now;
+            let owners: BTreeSet<&str> = d
+                .state
+                .service_accounts
+                .values()
+                .filter_map(|a| a.parent.ldap_dn())
+                .collect();
             let expired: Vec<String> = d
                 .state
                 .ldap_sessions
                 .values()
-                .filter(|s| s.expires_ms <= now)
+                .filter(|s| s.expires_ms <= now && !owners.contains(s.dn.as_str()))
                 .map(|s| s.dn.clone())
                 .collect();
             for dn in expired {
@@ -342,10 +614,12 @@ impl Iam {
                 None => {
                     tracing::info!(
                         dn,
-                        "an LDAP user is gone from the directory: its sessions are revoked"
+                        "an LDAP user is gone from the directory: its sessions and service \
+                         accounts are revoked"
                     );
                     seen.generation = before.generation.saturating_add(1);
                     seen.gone = true;
+                    d.remove_ldap_service_accounts_of(dn);
                 }
             }
             seen.checked_ms = d.now;

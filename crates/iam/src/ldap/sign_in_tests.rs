@@ -690,3 +690,167 @@ async fn the_record_of_signed_in_users_is_kept_right() {
 
     drop(fake);
 }
+
+#[tokio::test]
+async fn directory_users_are_found_by_name_or_dn() {
+    let Setup {
+        iam,
+        fake: _fake,
+        dir: _dir,
+    } = setup().await;
+    for name in [
+        "liza",
+        LIZA,
+        "UID=Liza, OU=People,DC=min,DC=io",
+        "uid=liza,ou=people,dc=min,dc=io",
+    ] {
+        assert_eq!(
+            iam.find_ldap_user(name).await.unwrap().as_deref(),
+            Some(LIZA),
+            "{name}"
+        );
+    }
+    for name in [
+        "nobody",
+        "uid=nobody,ou=people,dc=min,dc=io",
+        "outsider",
+        "uid=outsider,ou=others,dc=min,dc=io",
+        "",
+    ] {
+        assert_eq!(iam.find_ldap_user(name).await.unwrap(), None, "{name}");
+    }
+    let liza = iam.ldap().unwrap().user("liza").await.unwrap().unwrap();
+    assert_eq!(liza.dn, LIZA);
+    assert_eq!(liza.groups, [PROJECT_B]);
+}
+
+#[tokio::test]
+async fn directory_users_own_service_accounts_while_the_directory_has_them() {
+    let Setup { iam, fake, dir } = setup().await;
+    iam.map_ldap_policies(PROJECT_B, LdapEntity::Group, &["read-photos".into()], true)
+        .unwrap();
+    let liza = iam.ldap().unwrap().user("liza").await.unwrap().unwrap();
+    let added = iam
+        .minio_add_ldap_service_account(
+            &crate::LdapUser {
+                dn: &liza.dn,
+                username: &liza.username,
+                groups: &liza.groups,
+            },
+            crate::NewServiceAccount {
+                name: "backup",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let allows_key = |iam: &Iam| {
+        iam.credential(&added.access_key).is_some_and(|c| {
+            c.identity.allows(
+                &c.identity.context(Date::now()),
+                "s3:GetObject",
+                "arn:aws:s3:::photos/a",
+            )
+        })
+    };
+    assert!(allows_key(&iam));
+    let credential = iam.credential(&added.access_key).unwrap();
+    let session = credential.identity.session().unwrap();
+    assert_eq!(session.ldap_user().unwrap().dn, LIZA);
+    assert_eq!(
+        iam.minio_parent(&credential.identity).as_deref(),
+        Some(LIZA)
+    );
+    // It's listed as hers, with her policies.
+    let accounts = iam.minio_service_accounts(LIZA);
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].parent, LIZA);
+    assert!(accounts[0].implied && accounts[0].policy.contains("photos"));
+    assert!(iam.minio_service_accounts("liza").is_empty());
+    // Its access key may not be her name.
+    let taken = iam.minio_add_ldap_service_account(
+        &crate::LdapUser {
+            dn: &liza.dn,
+            username: &liza.username,
+            groups: &liza.groups,
+        },
+        crate::NewServiceAccount {
+            access_key: Some("liza"),
+            secret: Some("a-secret-key-long-enough"),
+            ..Default::default()
+        },
+    );
+    assert!(taken.is_err());
+
+    // The directory is asked about her though she has no session, also after a restart.
+    drop(iam);
+    let iam = open(dir.path(), &fake).await;
+    assert!(allows_key(&iam));
+    assert_eq!(
+        iam.ldap_users_to_check().unwrap(),
+        [(LIZA.to_owned(), "liza".to_owned())]
+    );
+    // She leaves the group: her key loses its policies.
+    fake.remove(PROJECT_B);
+    fake.add(group("projectb", &["dillon"]));
+    iam.check_ldap_users().await.unwrap();
+    assert!(!allows_key(&iam));
+    assert!(iam.credential(&added.access_key).is_some());
+    // She's removed from the directory: her service accounts are deleted.
+    fake.remove(LIZA);
+    iam.check_ldap_users().await.unwrap();
+    assert!(iam.credential(&added.access_key).is_none());
+    assert!(iam.minio_service_accounts(LIZA).is_empty());
+}
+
+#[tokio::test]
+async fn policy_entities_list_mappings_by_user_group_and_policy() {
+    let Setup {
+        iam,
+        fake: _fake,
+        dir: _dir,
+    } = setup().await;
+    iam.map_ldap_policies(PROJECT_B, LdapEntity::Group, &["read-photos".into()], true)
+        .unwrap();
+    iam.map_ldap_policies(DILLON, LdapEntity::User, &["home".into()], true)
+        .unwrap();
+    let all = iam.ldap_policy_entities(&[], &[], &[]).await.unwrap();
+    assert_eq!(all.users.len(), 1);
+    assert_eq!(all.users[0].user, DILLON);
+    assert_eq!(all.users[0].policies, ["home"]);
+    assert!(all.users[0].groups.is_empty());
+    assert_eq!(all.groups.len(), 1);
+    assert_eq!(all.groups[0].group, PROJECT_B);
+    assert_eq!(
+        all.policies
+            .iter()
+            .map(|p| (p.policy.as_str(), p.users.clone(), p.groups.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("home", vec![DILLON.to_owned()], vec![]),
+            ("read-photos", vec![], vec![PROJECT_B.to_owned()]),
+        ]
+    );
+    // A user named by name or DN shows the policies of its groups too.
+    for name in ["liza", LIZA] {
+        let liza = iam
+            .ldap_policy_entities(&[name.to_owned()], &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(liza.users.len(), 1, "{name}");
+        assert_eq!(liza.users[0].user, LIZA);
+        assert!(liza.users[0].policies.is_empty());
+        assert_eq!(liza.users[0].groups[0].group, PROJECT_B);
+        assert!(liza.groups.is_empty() && liza.policies.is_empty());
+    }
+    let by_group = iam
+        .ldap_policy_entities(&[], &["CN=ProjectB,OU=Groups,DC=min,DC=io".into()], &[])
+        .await
+        .unwrap();
+    assert_eq!(by_group.groups[0].group, PROJECT_B);
+    let by_policy = iam
+        .ldap_policy_entities(&[], &[], &["home".into(), "missing".into()])
+        .await
+        .unwrap();
+    assert_eq!(by_policy.policies.len(), 1);
+    assert!(by_policy.users.is_empty());
+}
