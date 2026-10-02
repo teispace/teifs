@@ -147,7 +147,16 @@ async fn sse_s3_round_trips_and_never_stores_plaintext() {
 async fn ranges_decrypt_across_package_and_part_boundaries() {
     let drive = drive().await;
     let package = teifs_crypto::PACKAGE_SIZE as u64;
-    for len in [0, 1, package, package + 1, 3 * package + 5] {
+    // Reads decrypt 16 packages at a time: objects and ranges across those batches too.
+    for len in [
+        0,
+        1,
+        package,
+        package + 1,
+        3 * package + 5,
+        16 * package,
+        40 * package + 7,
+    ] {
         let data = pattern(usize::try_from(len).unwrap());
         put(&drive.store, "r", &data, &Encryption::S3).await;
         for (start, want) in [
@@ -157,6 +166,8 @@ async fn ranges_decrypt_across_package_and_part_boundaries() {
             (package.saturating_sub(3).min(len), 7),
             (package.min(len), package),
             (len / 2, len),
+            ((15 * package + 3).min(len), 2 * package),
+            ((16 * package).min(len), 17 * package + 1),
         ] {
             let got = get_range(&drive.store, "r", start, want).await;
             let from = usize::try_from(start.min(len)).unwrap();

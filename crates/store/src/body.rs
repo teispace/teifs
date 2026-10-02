@@ -1,10 +1,11 @@
 //! An object's bytes, as a reader of exactly those bytes (never an object bucket's
-//! footer), whole or a range. Encrypted objects are decrypted package by package; a
-//! range reads and decrypts only the packages that hold it.
+//! footer), whole or a range. Encrypted objects are read and decrypted up to 16
+//! packages at a time on the blocking pool, in place in one buffer handed on without
+//! copying; a range reads and decrypts only the packages that hold it.
 
-use std::io::{self, SeekFrom};
+use std::io::{self, Read, SeekFrom};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use teifs_crypto::{
     DataKey, PACKAGE_SIZE, PartCipher, PartId, TAG_LEN, ciphertext_len, packages_for,
 };
@@ -34,7 +35,8 @@ pub(crate) struct Decrypt {
 pub type BodyReader = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
 
 /// On-disk size of a full package.
-const SEALED_PACKAGE: u64 = (PACKAGE_SIZE + TAG_LEN) as u64;
+const SEALED_PACKAGE_LEN: usize = PACKAGE_SIZE + TAG_LEN;
+const SEALED_PACKAGE: u64 = SEALED_PACKAGE_LEN as u64;
 
 impl ObjectBody {
     pub(crate) fn new(file: std::fs::File, size: u64, decrypt: Option<Decrypt>) -> Self {
@@ -71,9 +73,13 @@ impl ObjectBody {
     }
 }
 
+/// Packages read and decrypted at a time (about 1 MiB): one trip to the blocking pool
+/// and one buffer for all of them.
+const BATCH: u64 = 16;
+
 /// Where a decrypting read is: which part and package, and how much is still wanted.
 struct Position {
-    file: tokio::fs::File,
+    file: std::fs::File,
     decrypt: Decrypt,
     part: usize,
     package: u64,
@@ -81,7 +87,6 @@ struct Position {
     /// Bytes to drop from the start of the next package.
     skip: usize,
     remaining: u64,
-    buf: Vec<u8>,
 }
 
 async fn decrypting(
@@ -103,49 +108,71 @@ async fn decrypting(
         .await?;
     let position = Position {
         cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), decrypt.parts[part].1),
-        file,
+        file: file.into_std().await,
         decrypt,
         part,
         package,
         skip: usize::try_from(offset % PACKAGE_SIZE as u64).unwrap_or(0),
         remaining: len,
-        buf: vec![0; PACKAGE_SIZE + TAG_LEN],
     };
     let stream = Box::pin(futures::stream::try_unfold(position, next_chunk));
     Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
 }
 
-/// Reads, decrypts and trims the next package.
-async fn next_chunk(mut at: Position) -> io::Result<Option<(Bytes, Position)>> {
+/// Reads, decrypts and trims the next packages, on the blocking pool.
+async fn next_chunk(at: Position) -> io::Result<Option<(Bytes, Position)>> {
     if at.remaining == 0 {
         return Ok(None);
     }
-    let part_size = at.decrypt.parts[at.part].0;
-    let last = at.package + 1 == packages_for(part_size);
-    let sealed_len = if last {
-        ciphertext_len(part_size) - at.package * SEALED_PACKAGE
-    } else {
-        SEALED_PACKAGE
-    };
-    let buf = &mut at.buf[..usize::try_from(sealed_len).map_err(io::Error::other)?];
-    at.file.read_exact(buf).await?;
-    let plain = at
-        .cipher
-        .open(at.package, last, buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let from = at.skip.min(plain.len());
-    let take = usize::try_from(at.remaining)
-        .unwrap_or(usize::MAX)
-        .min(plain.len() - from);
-    let chunk = Bytes::copy_from_slice(&plain[from..from + take]);
-    at.remaining -= take as u64;
-    at.skip = 0;
-    at.package += 1;
-    if last && at.part + 1 < at.decrypt.parts.len() {
-        at.part += 1;
-        at.package = 0;
-        let id = at.decrypt.parts[at.part].1;
-        at.cipher = PartCipher::layered(&at.decrypt.key, at.decrypt.outer.as_ref(), id);
+    tokio::task::spawn_blocking(move || at.next_batch().map(Some))
+        .await
+        .map_err(io::Error::other)?
+}
+
+impl Position {
+    /// Up to [`BATCH`] packages of the current part, decrypted in place, their
+    /// plaintexts moved together, and trimmed to what's wanted.
+    fn next_batch(mut self) -> io::Result<(Bytes, Self)> {
+        let part_size = self.decrypt.parts[self.part].0;
+        let packages = packages_for(part_size);
+        let wanted = (self.skip as u64 + self.remaining).div_ceil(PACKAGE_SIZE as u64);
+        let count = BATCH.min(packages - self.package).min(wanted.max(1));
+        let first = self.package;
+        let reaches_end = first + count == packages;
+        let sealed_len = if reaches_end {
+            ciphertext_len(part_size) - first * SEALED_PACKAGE
+        } else {
+            count * SEALED_PACKAGE
+        };
+        let mut buf = BytesMut::zeroed(usize::try_from(sealed_len).map_err(io::Error::other)?);
+        self.file.read_exact(&mut buf)?;
+        let mut plain_len = 0;
+        for (i, at) in (0..buf.len()).step_by(SEALED_PACKAGE_LEN).enumerate() {
+            let index = first + i as u64;
+            let end = buf.len().min(at + SEALED_PACKAGE_LEN);
+            let opened = self
+                .cipher
+                .open(index, index + 1 == packages, &mut buf[at..end])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .len();
+            buf.copy_within(at..at + opened, plain_len);
+            plain_len += opened;
+        }
+        let from = self.skip.min(plain_len);
+        let take = usize::try_from(self.remaining)
+            .unwrap_or(usize::MAX)
+            .min(plain_len - from);
+        buf.truncate(from + take);
+        let chunk = buf.freeze().slice(from..);
+        self.remaining -= take as u64;
+        self.skip = 0;
+        self.package += count;
+        if reaches_end && self.part + 1 < self.decrypt.parts.len() {
+            self.part += 1;
+            self.package = 0;
+            let id = self.decrypt.parts[self.part].1;
+            self.cipher = PartCipher::layered(&self.decrypt.key, self.decrypt.outer.as_ref(), id);
+        }
+        Ok((chunk, self))
     }
-    Ok(Some((chunk, at)))
 }
