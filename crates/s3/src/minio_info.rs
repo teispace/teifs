@@ -372,6 +372,8 @@ pub(crate) enum Kind {
     Storage,
     /// `GET datausageinfo`.
     DataUsage,
+    /// The server's pools (`mc admin decommission`, `mc admin rebalance`).
+    Pools(crate::minio_pools::Call),
 }
 
 impl Kind {
@@ -381,6 +383,7 @@ impl Kind {
             Self::Server => "ServerInfo",
             Self::Storage => "StorageInfo",
             Self::DataUsage => "DataUsageInfo",
+            Self::Pools(call) => call.name(),
         }
     }
 
@@ -393,6 +396,7 @@ impl Kind {
             Self::Server => info(routes, req).await,
             Self::Storage => storage_info(routes).await,
             Self::DataUsage => data_usage_info(routes, req).await,
+            Self::Pools(call) => call.call(routes, req),
         }
     }
 }

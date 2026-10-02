@@ -124,6 +124,13 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/minio/admin/v3/force-unlock` | Releases the locks `paths` names: none is ever held past a request, so there's nothing to release: `mc admin force-unlock` | `admin:ForceUnlock` |
 | `POST` | `/minio/admin/v3/heal/` | Starts a heal of every bucket, as `madmin.HealOpts` asks, and answers its token; with `?clientToken=` the results since the last call; `?forceStart`, `?forceStop`. One drive has no other copy to heal from: a heal checks each bucket and object and reports it, changing nothing; a deep scan reads each version's bytes, as `teifs verify` does: `mc admin heal` | `admin:Heal` |
 | `POST` | `/minio/admin/v3/heal/{path}` | A heal of one bucket, or of its objects under a prefix (`{bucket}/{prefix}`): as `heal/`: `mc admin heal ALIAS/BUCKET/PREFIX` | `admin:Heal` |
+| `GET` | `/minio/admin/v3/pools/list` | The server's pools as `madmin.PoolStatus`: the drive, its only pool, named by its path: `mc admin decommission status` | `admin:ServerInfo` or `admin:Decommission` |
+| `GET` | `/minio/admin/v3/pools/status` | The `pool` named (its path, or `0` with `by-id=true`) as `madmin.PoolStatus` | `admin:ServerInfo` or `admin:Decommission` |
+| `POST` | `/minio/admin/v3/pools/decommission` | 501 NotImplemented: the drive is the only pool, with no other to move its objects to: `mc admin decommission start` | `admin:Decommission` |
+| `POST` | `/minio/admin/v3/pools/cancel` | 501 NotImplemented, as no decommission can run: `mc admin decommission cancel` | `admin:Decommission` |
+| `POST` | `/minio/admin/v3/rebalance/start` | 501 NotImplemented: one pool has nothing to balance with: `mc admin rebalance start` | `admin:Rebalance` |
+| `GET` | `/minio/admin/v3/rebalance/status` | 404 XMinioAdminRebalanceNotStarted, as MinIO answers when none runs: `mc admin rebalance status` | `admin:Rebalance` |
+| `POST` | `/minio/admin/v3/rebalance/stop` | 501 NotImplemented, as no rebalance can run: `mc admin rebalance stop` | `admin:Rebalance` |
 | `POST` | `/minio/admin/v3/profile` | Takes the `profilerType` profiles (`cpu`) for `duration` (a minute unless told, an hour at most) and answers them in a zip with `cluster.info`, as MinIO does: `mc admin profile`, `mc support profile` | `admin:Profiling` |
 | `POST` | `/minio/admin/v3/profiling/start` | Starts the `profilerType` profiles, answering a `madmin.StartProfilingResult` for each: MinIO's older profiling calls | `admin:Profiling` |
 | `GET` | `/minio/admin/v3/profiling/download` | Stops the profiles started and answers them in a zip, as `POST profile` does | `admin:Profiling` |

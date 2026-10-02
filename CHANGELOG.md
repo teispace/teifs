@@ -385,6 +385,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - `mc admin profile` (and `mc support profile`): CPU profiles of the server in pprof's
   format, which `go tool pprof` reads, answered in a zip as MinIO answers them, on
   Linux and macOS. Go's other profiles (heap, goroutines, blocking) are refused.
+- `mc admin decommission` and `mc admin rebalance`: the drive is listed as the server's
+  only pool, with its status; starting a decommission or a rebalance is refused, as MinIO
+  refuses it on one pool, there being no other pool to move objects to.
 - MinIO's realtime metrics (the console's realtime view, `mc admin scanner status`):
   S3's requests being served and since-start totals (requests, bytes, errors,
   cancellations, times), one document every interval. `mc admin top locks` lists no

@@ -33,7 +33,7 @@ use crate::{
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_metrics,
-    minio_profile, minio_service, minio_service_accounts, minio_speedtest,
+    minio_pools, minio_profile, minio_service, minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -61,6 +61,9 @@ pub enum Api {
 pub(crate) enum Needs {
     /// This action on this resource, decided with the caller's policies.
     Action(&'static str, &'static str),
+    /// Either of these actions on any resource, decided with the caller's policies (as
+    /// `MinIO` decides an admin call that several actions allow).
+    EitherAction(&'static str, &'static str),
     /// This action on the bucket the path names, decided with the caller's policies and
     /// the bucket's own, and its tags while they decide access.
     OnBucket(&'static str),
@@ -738,6 +741,62 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/pools/list",
+        needs: Needs::EitherAction("admin:ServerInfo", "admin:Decommission"),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::List)),
+        about: "The server's pools as `madmin.PoolStatus`: the drive, its only pool, named by its path: `mc admin decommission status`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/pools/status",
+        needs: Needs::EitherAction("admin:ServerInfo", "admin:Decommission"),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::Status)),
+        about: "The `pool` named (its path, or `0` with `by-id=true`) as `madmin.PoolStatus`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/pools/decommission",
+        needs: Needs::Action("admin:Decommission", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::Decommission)),
+        about: "501 NotImplemented: the drive is the only pool, with no other to move its objects to: `mc admin decommission start`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/pools/cancel",
+        needs: Needs::Action("admin:Decommission", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::Cancel)),
+        about: "501 NotImplemented, as no decommission can run: `mc admin decommission cancel`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/rebalance/start",
+        needs: Needs::Action("admin:Rebalance", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::RebalanceStart)),
+        about: "501 NotImplemented: one pool has nothing to balance with: `mc admin rebalance start`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/rebalance/status",
+        needs: Needs::Action("admin:Rebalance", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::RebalanceStatus)),
+        about: "404 XMinioAdminRebalanceNotStarted, as MinIO answers when none runs: `mc admin rebalance status`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/rebalance/stop",
+        needs: Needs::Action("admin:Rebalance", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Pools(minio_pools::Call::RebalanceStop)),
+        about: "501 NotImplemented, as no rebalance can run: `mc admin rebalance stop`",
+    },
+    Endpoint {
+        api: Api::Minio,
         verb: Verb::Post,
         path: "/minio/admin/v3/profile",
         needs: Needs::Action("admin:Profiling", ANY),
@@ -999,6 +1058,8 @@ pub struct EndpointInfo {
     /// The action it needs; none when each call names its own (IAM and STS) or only the
     /// root user may call it.
     pub action: Option<&'static str>,
+    /// Another action that allows it too.
+    pub or_action: Option<&'static str>,
     /// Whether only the root user may call it.
     pub root_only: bool,
     /// Whether a caller may call it on its own access key without the action, unless a
@@ -1022,6 +1083,7 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
         path: e.path,
         action: match e.needs {
             Needs::Action(action, _)
+            | Needs::EitherAction(action, _)
             | Needs::OnBucket(action)
             | Needs::OnQueryBucket(action)
             | Needs::OrOwnKey(action)
@@ -1029,6 +1091,10 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OrOwnAccount(action)
             | Needs::OnKmsKey(action) => Some(action),
             Needs::PerCall | Needs::Root | Needs::Signed | Needs::ServiceAction => None,
+        },
+        or_action: match e.needs {
+            Needs::EitherAction(_, or) => Some(or),
+            _ => None,
         },
         root_only: e.needs == Needs::Root,
         own_key: matches!(
@@ -1226,6 +1292,9 @@ impl Routes {
             Needs::Action(action, resource) => identity
                 .decide(&context(), action, resource, None)
                 .is_allowed(),
+            Needs::EitherAction(one, other) => [one, other]
+                .iter()
+                .any(|action| identity.decide(&context(), action, ANY, None).is_allowed()),
             Needs::OnBucket(action) => {
                 let Handler::Tags(kind) = endpoint.handler else {
                     unreachable!("only calls on tags are on a bucket")
@@ -1667,7 +1736,10 @@ mod tests {
                     (Some(action), _) if e.own_key => {
                         format!("`{action}`, or anyone on their own key unless denied")
                     }
-                    (Some(action), _) => format!("`{action}`"),
+                    (Some(action), _) => match e.or_action {
+                        Some(or) => format!("`{action}` or `{or}`"),
+                        None => format!("`{action}`"),
+                    },
                     (None, false) if e.own_key => "anyone who signs, about themselves".to_owned(),
                     (None, true) => "root user".to_owned(),
                     (None, false) => "the action each call names".to_owned(),
@@ -1723,6 +1795,13 @@ mod tests {
                         Api::Query | Api::Control => "s3:",
                     };
                     assert!(action.starts_with(service), "{e:?}");
+                }
+                Needs::EitherAction(one, other) => {
+                    assert_eq!(e.api, Api::Minio);
+                    assert!(
+                        one.starts_with("admin:") && other.starts_with("admin:"),
+                        "{e:?}"
+                    );
                 }
                 Needs::OnBucket(action) => {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");

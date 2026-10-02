@@ -856,6 +856,14 @@ can be faster than the disk. The files go where the drive stages its writes:
 node, so `mc support perf net` and `site` have no network to measure. Both tests need
 `admin:OBDInfo`.
 
+## Pools
+
+`mc admin decommission status ALIAS` lists the drive as the server's only pool, named by
+its path. A drive keeps everything in one place, so there is no other pool to move its
+objects to: `mc admin decommission start` and `mc admin rebalance start` are refused, as
+MinIO refuses them on one pool. To move a drive's buckets to another server, use
+[`teifs migrate`](#migrating-from-minio-or-another-s3-service).
+
 ## Profiling
 
 `mc admin profile ALIAS --type cpu --duration 30s` takes a CPU profile of the server for

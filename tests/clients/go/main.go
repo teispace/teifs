@@ -152,6 +152,7 @@ func main() {
 	heal(ctx, adm, *bucket)
 	speedtest(ctx, adm)
 	cpuProfile(ctx, adm)
+	pools(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -286,6 +287,20 @@ func cpuProfile(ctx context.Context, adm *madmin.AdminClient) {
 	parsed, err := profile.Parse(opened)
 	must(err)
 	check(len(parsed.SampleType) > 0 && parsed.Period > 0, fmt.Sprintf("the profile: %v", parsed))
+}
+
+func pools(ctx context.Context, adm *madmin.AdminClient) {
+	step("the drive as the only pool, as mc admin decommission and rebalance see it")
+	all, err := adm.ListPoolsStatus(ctx)
+	must(err)
+	check(len(all) == 1 && all[0].ID == 0 && !all[0].LastUpdate.IsZero(), fmt.Sprintf("the pools: %+v", all))
+	one, err := adm.StatusPool(ctx, all[0].CmdLine)
+	must(err)
+	check(one.CmdLine == all[0].CmdLine, fmt.Sprintf("the pool: %+v", one))
+	err = adm.DecommissionPool(ctx, all[0].CmdLine)
+	check(madmin.ToErrorResponse(err).Code == "NotImplemented", fmt.Sprintf("decommissioning: %v", err))
+	_, err = adm.RebalanceStatus(ctx)
+	check(madmin.ToErrorResponse(err).Code == "XMinioAdminRebalanceNotStarted", fmt.Sprintf("rebalance status: %v", err))
 }
 
 // lists says whether a client signing with this key may list buckets.

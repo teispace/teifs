@@ -36,6 +36,7 @@ mod minio_iam;
 mod minio_info;
 mod minio_kms;
 mod minio_metrics;
+mod minio_pools;
 mod minio_profile;
 mod minio_service;
 mod minio_service_accounts;
