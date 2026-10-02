@@ -140,3 +140,49 @@ async fn targets_minio_names_are_served() {
         "{got}"
     );
 }
+
+#[test]
+fn minio_s_root_access_off_refuses_the_root_key() {
+    let home = tempfile::tempdir().unwrap();
+    let serve = |root_access: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_teifs"));
+        command
+            .args(["--json", "serve", "--listen", "127.0.0.1:0"])
+            .arg(home.path().join("drive"))
+            .env_clear()
+            .env("MINIO_ROOT_USER", USER)
+            .env("MINIO_ROOT_PASSWORD", PASSWORD)
+            .env("MINIO_API_ROOT_ACCESS", root_access)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", root);
+        }
+        command
+    };
+
+    // A value MinIO wouldn't take stops the server before it starts.
+    let refused = serve("maybe").output().unwrap();
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("api root_access"),
+        "{}",
+        text(&refused.stderr)
+    );
+
+    let mut serving = Serving(serve("off").spawn().unwrap());
+    let mut line = String::new();
+    BufReader::new(serving.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let announced: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let endpoint = announced["endpoint"].as_str().unwrap();
+    let listed = teifs(home.path(), endpoint, &["ls", "s"]);
+    assert!(!listed.status.success());
+    assert!(
+        text(&listed.stderr).contains("InvalidAccessKeyId"),
+        "{}",
+        text(&listed.stderr)
+    );
+}

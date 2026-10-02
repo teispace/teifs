@@ -578,9 +578,19 @@ async fn minio_settings_from_the_command_line() {
     let out = cli.ok(&["admin", "config", "t"]).await;
     assert!(out.contains("given by environment"), "{out}");
     let err = cli
-        .fails(&["admin", "config", "set", "t", "api", "requests_max=1"], 1)
+        .fails(
+            &[
+                "admin",
+                "config",
+                "set",
+                "t",
+                "storage_class",
+                "standard=EC:2",
+            ],
+            1,
+        )
         .await;
-    assert!(err.contains("api"), "{err}");
+    assert!(err.contains("storage_class"), "{err}");
 
     let keys = records(
         &cli.ok(&["--json", "admin", "config", "keys", "t", "identity_ldap"])

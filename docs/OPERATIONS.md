@@ -334,8 +334,8 @@ teifs admin service restart ALIAS              # takes effect when it starts aga
 
 `identity_openid[:NAME]`, `identity_ldap`, `identity_plugin`, `identity_tls`, the
 notification targets (`notify_webhook[:NAME]`, `notify_kafka[:NAME]`…, see
-[Bucket notifications](#from-minios-settings)) and `audit_webhook[:NAME]` are kept;
-another sub-system is refused. Each value stands for MinIO's variable
+[Bucket notifications](#from-minios-settings)), `audit_webhook[:NAME]` and `api` are
+kept; another sub-system is refused. Each value stands for MinIO's variable
 (`MINIO_IDENTITY_LDAP_SERVER_ADDR`…) and counts only when nothing else sets it: flags,
 `TEIFS_*` variables, the settings file and MinIO's variables all come first. A change
 `teifs serve` wouldn't start with is refused, and nothing is kept. `reset` puts keys
@@ -344,6 +344,16 @@ never their values), `restore ALIAS ID` sets one again and `clear-history ALIAS 
 forgets them; `export ALIAS -o FILE` writes everything, secrets included, to a file
 only you can read, and `import ALIAS FILE` replaces everything with one. Each needs
 `admin:ConfigUpdate`.
+
+Of `api`'s keys, TeiFS uses two and keeps the rest unused:
+
+- `root_access=off` (or `MINIO_API_ROOT_ACCESS=off`, or `teifs serve --no-root-access`)
+  refuses the root key, the service accounts it made and the sessions it started, as
+  MinIO does: only IAM's users sign in. Give one `admin:*` before turning it off, or set
+  it back on in the environment to get in again.
+- `stale_uploads_expiry` (Go's durations: `24h`, `1h30m`) aborts unfinished multipart
+  uploads after that long when `--upload-expiry` isn't set by a flag, a variable or the
+  settings file. Set to MinIO's own default, 24 hours, it leaves TeiFS's 7 days.
 
 ## LDAP sign-in
 

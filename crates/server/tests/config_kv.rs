@@ -139,7 +139,7 @@ async fn refusals_are_minio_s() {
         (
             "PUT",
             "set-config-kv",
-            Some("api requests_max=10"),
+            Some("storage_class standard=EC:2"),
             400,
             "XMinioConfigError",
         ),
@@ -166,7 +166,7 @@ async fn refusals_are_minio_s() {
         ),
         (
             "GET",
-            "get-config-kv?key=api",
+            "get-config-kv?key=storage_class",
             None,
             400,
             "XMinioConfigError",
@@ -315,6 +315,7 @@ async fn help_needs_no_decryption() {
             "identity_ldap",
             "identity_plugin",
             "identity_tls",
+            "api",
             "notify_webhook",
             "notify_amqp",
             "notify_kafka",
@@ -338,7 +339,13 @@ async fn help_needs_no_decryption() {
     let one: Value = serde_json::from_str(&one.text).unwrap();
     assert_eq!(one["subSys"], "identity_ldap");
     assert_eq!(one["keysHelp"][0]["key"], "MINIO_IDENTITY_LDAP_SERVER_ADDR");
-    let unknown = call(&server, "GET", "help-config-kv?subSys=api&key=", None).await;
+    let unknown = call(
+        &server,
+        "GET",
+        "help-config-kv?subSys=storage_class&key=",
+        None,
+    )
+    .await;
     assert_eq!(unknown.status, 400);
 }
 

@@ -69,6 +69,16 @@ pub(crate) struct Sources {
     matches: Option<ArgMatches>,
 }
 
+impl Sources {
+    /// Whether `serve`'s setting `id` has its default: no flag, variable or settings file
+    /// set it.
+    pub(crate) fn defaulted(&self, id: &str) -> bool {
+        self.matches.as_ref().is_none_or(|m| {
+            m.value_source(id) == Some(ValueSource::DefaultValue) && !self.from_file.contains(id)
+        })
+    }
+}
+
 /// Parses the command line, with the settings file's values under the flags and
 /// environment variables. Help, version and usage errors exit, as clap does.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<(Cli, Sources), String> {
@@ -514,6 +524,25 @@ mod tests {
         let err = read_file(&file).unwrap_err();
         let expected = dir.path().join("certs/ca.pem").display().to_string();
         assert!(err.contains(&expected), "{err}");
+    }
+
+    #[test]
+    fn a_setting_nothing_set_is_defaulted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("teifs.toml");
+        fs::write(&file, "upload-expiry = \"2d\"\n").unwrap();
+        let drive = dir.path().join("drive").display().to_string();
+        let defaulted = |args: &[&str]| {
+            let args = ["teifs", "serve"].iter().chain(args).map(OsString::from);
+            parse(args).unwrap().1.defaulted("upload_expiry")
+        };
+        assert!(defaulted(&[&drive]));
+        assert!(!defaulted(&["--upload-expiry", "1d", &drive]));
+        assert!(!defaulted(&[
+            "--config",
+            &file.display().to_string(),
+            &drive
+        ]));
     }
 
     #[test]

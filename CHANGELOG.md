@@ -363,6 +363,10 @@ behaviour; the on-disk format is always upgraded automatically.
   `mc admin config`, start the same targets as the `--notify-*` and `--audit-webhook`
   flags, so a MinIO deployment's notifications carry over. `identity_tls` can be set the
   same way.
+- MinIO's `api` settings: `root_access=off` (and `teifs serve --no-root-access`) refuses
+  the root key, its service accounts and its sessions so only IAM's users sign in, and
+  `stale_uploads_expiry` sets how long unfinished uploads are kept when
+  `--upload-expiry` isn't set. The other `api` keys are kept, not used.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

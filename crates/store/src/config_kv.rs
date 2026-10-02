@@ -203,7 +203,7 @@ mod tests {
             let mode = fs::metadata(files.path()).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        fs::write(files.path(), "api requests_max=1").unwrap();
+        fs::write(files.path(), "storage_class standard=EC:2").unwrap();
         let err = files.load().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("config.kv"), "{err}");

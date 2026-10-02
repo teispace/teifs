@@ -518,3 +518,29 @@ async fn service_accounts_export_and_import() {
     assert_eq!(refused.code(), "InvalidInput");
     assert!(refused.to_string().contains("impossible time"), "{refused}");
 }
+
+#[tokio::test]
+async fn without_root_access_only_iam_s_users_sign() {
+    let dir = tempfile::tempdir().unwrap();
+    let (theirs, roots) = {
+        let iam = open(dir.path()).await;
+        add_writer(&iam, "alice");
+        let theirs = iam
+            .minio_add_service_account("alice", NewServiceAccount::default())
+            .unwrap();
+        let roots = iam
+            .minio_add_service_account(ROOT, NewServiceAccount::default())
+            .unwrap();
+        (theirs.access_key, roots.access_key)
+    };
+    let iam = open(dir.path()).await.without_root_access();
+    // The root key and the service accounts it made don't sign; IAM's users do.
+    assert!(iam.credential(ROOT).is_none());
+    assert!(iam.credential(&roots).is_none());
+    assert!(may(&iam, "alice", "s3:PutObject"));
+    assert!(may(&iam, &theirs, "s3:PutObject"));
+    // Nor after IAM changes.
+    add_writer(&iam, "bob");
+    assert!(iam.credential(ROOT).is_none() && iam.credential(&roots).is_none());
+    assert!(iam.credential("bob").is_some());
+}

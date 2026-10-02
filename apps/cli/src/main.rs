@@ -246,6 +246,10 @@ pub(crate) struct ServeArgs {
     /// AWS blocks it by default since April 2026.
     #[arg(long, env = "TEIFS_ALLOW_SSE_C")]
     allow_sse_c: bool,
+    /// Refuse the root key, the service accounts it made and the sessions it started, as
+    /// `MinIO`'s `root_access=off`: only IAM's users sign in. Make an admin user first.
+    #[arg(long, env = "TEIFS_NO_ROOT_ACCESS")]
+    no_root_access: bool,
     /// Accept Signature Version 2 (HMAC-SHA1) requests and links, for old clients and
     /// boto3's default presigned links. AWS deprecated it and refuses it for newer
     /// buckets; prefer configuring clients for Signature Version 4.
@@ -760,7 +764,7 @@ async fn run(command: Command, sources: &config::Sources) -> Result<(), error::E
             ui::raw(&String::from_utf8_lossy(&script));
             Ok(())
         }
-        Command::Serve(args) => Ok(Box::pin(serve(args)).await?),
+        Command::Serve(args) => Ok(Box::pin(serve(args, sources)).await?),
         Command::Config {
             action: ConfigAction::Show(args),
         } => Ok(config::show(&args, sources)?),
@@ -1659,15 +1663,21 @@ fn serve_targets(
     Ok((audit, notify))
 }
 
-async fn serve(mut args: ServeArgs) -> Result<(), String> {
+async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), String> {
     let keys = config::keys(&args, config::env)?;
     let tls = tls_source(&args)?;
     let config_kv::Started {
         identity,
         targets: minio,
         variables,
+        api,
         check: config_check,
     } = config_kv::started(&args)?;
+    // MinIO's stale_uploads_expiry, under --upload-expiry and its settings.
+    let upload_expiry = match api.stale_uploads_expiry {
+        Some(expiry) if sources.defaulted("upload_expiry") => Some(expiry),
+        _ => args.upload_expiry.0,
+    };
     let client_certificates = client_certificates(
         (
             args.identity_tls,
@@ -1695,6 +1705,7 @@ async fn serve(mut args: ServeArgs) -> Result<(), String> {
         kms_default_key: args.kms.default_key(args.kms_keyring.as_deref()),
         kms_keyring: args.kms_keyring,
         allow_sse_c: args.allow_sse_c,
+        root_access: !args.no_root_access && api.root_access,
         allow_sig_v2: args.allow_sigv2,
         legacy_bucket_defaults: args.legacy_bucket_defaults,
         public_metrics: args.public_metrics,
@@ -1705,7 +1716,7 @@ async fn serve(mut args: ServeArgs) -> Result<(), String> {
         tls,
         trusted_proxies: TrustedProxies::new(&args.trusted_proxies, args.proxy_header)?,
         jobs: JobOptions {
-            upload_expiry: args.upload_expiry.0,
+            upload_expiry,
             scrub_every: args.scrub_every.0,
             snapshots: args.snapshots,
             ..JobOptions::default()

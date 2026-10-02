@@ -428,6 +428,9 @@ pub(crate) struct Snapshot {
     /// Directory users with live sessions, by DN.
     ldap_users: HashMap<Box<str>, Arc<LdapSeen>>,
     root: Arc<Identity>,
+    /// Whether the root user's key, its service accounts and its sessions are refused
+    /// (`MinIO`'s `root_access=off`).
+    root_refused: bool,
     /// Sessions' identities by access key id, until IAM next changes (a new snapshot).
     sessions: RwLock<HashMap<Box<str>, Cached>>,
 }
@@ -512,7 +515,7 @@ static ALLOW_ALL: LazyLock<Arc<Policy>> = LazyLock::new(|| {
 });
 
 impl Snapshot {
-    pub(crate) fn build(state: &State, root: Option<&RootKey>) -> Self {
+    pub(crate) fn build(state: &State, root: Option<&RootKey>, root_refused: bool) -> Self {
         let root_identity = Arc::new(Identity {
             principal: Principal::root(&state.account),
             root: true,
@@ -530,7 +533,7 @@ impl Snapshot {
             .map(|u| (u.id.as_str().into(), Arc::new(identity(state, &u.id))))
             .collect();
         let mut keys = HashMap::with_capacity(state.keys.len() + 1);
-        if let Some(root) = root {
+        if let Some(root) = root.filter(|_| !root_refused) {
             keys.insert(
                 root.access_key.as_str().into(),
                 Credential {
@@ -555,7 +558,8 @@ impl Snapshot {
         }
         for account in state.service_accounts.values().filter(|a| a.active) {
             if !keys.contains_key(account.id.as_str())
-                && let Some(credential) = service_credential(state, &users, root, account)
+                && let Some(credential) =
+                    service_credential(state, &users, root.filter(|_| !root_refused), account)
             {
                 keys.insert(account.id.as_str().into(), credential);
             }
@@ -602,6 +606,7 @@ impl Snapshot {
             ldap_policies,
             ldap_users,
             root: root_identity,
+            root_refused,
             sessions: RwLock::default(),
         }
     }
@@ -705,6 +710,7 @@ impl Snapshot {
             Who::SessionToken { user } => {
                 let base = match user {
                     Some(user) => self.users.get(user.as_str())?,
+                    None if self.root_refused => return None,
                     None => &self.root,
                 };
                 Identity {
@@ -762,6 +768,7 @@ impl Snapshot {
                 let base = self.users.get(user)?;
                 (base.policies.clone(), base.boundary.clone(), &*base.tags)
             }
+            None if self.root_refused => return None,
             None => (Box::from([Arc::clone(&ALLOW_ALL)]), None, &[][..]),
         };
         Some(Identity {

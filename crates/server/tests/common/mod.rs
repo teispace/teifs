@@ -69,6 +69,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         identity_plugin: None,
         openid: Vec::new(),
         config_check: teifs_server::ConfigCheck::default(),
+        root_access: true,
     }
 }
 
@@ -78,6 +79,27 @@ pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     let keys = tempfile::tempdir().unwrap();
     let mut config = config(dir.path(), keys.path());
     adjust(&mut config);
+    serve(dir, keys, config).await
+}
+
+/// Stops `server` and starts it again on the same drive, with its configuration changed
+/// by `adjust`.
+pub async fn restart(server: Server, adjust: impl FnOnce(&mut Config)) -> Server {
+    let Server {
+        dir,
+        _keys: keys,
+        _stop: stop,
+        running,
+        ..
+    } = server;
+    drop(stop);
+    let _ = running.await;
+    let mut config = config(dir.path(), keys.path());
+    adjust(&mut config);
+    serve(dir, keys, config).await
+}
+
+async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
     // Boxed: a server's start is a large future, and so would every test's be.
     let server = Box::pin(TeiFS::bind(config)).await.unwrap();
     let endpoint = format!("{}://{}", server.scheme(), server.local_addr().unwrap());

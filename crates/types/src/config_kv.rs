@@ -541,6 +541,38 @@ const IDENTITY_TLS_KEYS: &[Key] = &[Key::new(
 )
 .default("off")];
 
+/// `MinIO`'s `api` keys: TeiFS uses `root_access` and `stale_uploads_expiry`.
+const API_KEYS: &[Key] = &[
+    Key::new("requests_max", "number", UNUSED).default("0"),
+    Key::new("cluster_deadline", "duration", UNUSED).default("10s"),
+    Key::new("cors_allow_origin", "csv", UNUSED).default("*"),
+    Key::new("remote_transport_deadline", "duration", UNUSED).default("2h"),
+    Key::new("list_quorum", "string", UNUSED).default("strict"),
+    Key::new("replication_priority", "string", UNUSED).default("auto"),
+    Key::new("replication_max_workers", "number", UNUSED).default("500"),
+    Key::new("replication_max_lrg_workers", "number", UNUSED).default("10"),
+    Key::new("transition_workers", "number", UNUSED).default("100"),
+    Key::new("stale_uploads_cleanup_interval", "duration", UNUSED).default("6h"),
+    Key::new(
+        "stale_uploads_expiry",
+        "duration",
+        "abort multipart uploads left unfinished this long (when --upload-expiry isn't set)",
+    )
+    .default("24h"),
+    Key::new("delete_cleanup_interval", "duration", UNUSED).default("5m"),
+    Key::new("disable_odirect", "on|off", UNUSED).hidden_if_empty(),
+    Key::new("odirect", "on|off", UNUSED).default("on"),
+    Key::new("gzip_objects", "on|off", UNUSED).default("off"),
+    Key::new(
+        "root_access",
+        "on|off",
+        "off refuses the root key, its service accounts and its sessions; IAM's users still sign in",
+    )
+    .default("on"),
+    Key::new("sync_events", "on|off", UNUSED).default("off"),
+    Key::new("object_max_versions", "number", UNUSED).default("9223372036854775807"),
+];
+
 /// A notification sub-system: several targets, each with an `enable`.
 const fn notify(name: &'static str, description: &'static str, keys: &'static [Key]) -> Subsystem {
     Subsystem {
@@ -581,6 +613,13 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         multiple_targets: false,
         enable: false,
         keys: IDENTITY_TLS_KEYS,
+    },
+    Subsystem {
+        name: "api",
+        description: "how the S3 API serves",
+        multiple_targets: false,
+        enable: false,
+        keys: API_KEYS,
     },
     notify(
         "notify_webhook",
@@ -1378,7 +1417,7 @@ mod tests {
     fn what_minio_refuses_is_refused() {
         let mut config = ConfigKv::default();
         for (text, says) in [
-            ("api requests_max=10", "no sub-system api"),
+            ("storage_class standard=EC:2", "no sub-system storage_class"),
             ("identity_ldap:x server_addr=a:1", "one target"),
             (
                 "identity_openid:a-b config_url=x client_id=y",
@@ -1485,7 +1524,7 @@ mod tests {
         assert_eq!(json["subSys"], "identity_ldap");
         assert_eq!(json["keysHelp"][0]["type"], "address");
         assert!(help("identity_ldap", "nope", false).is_err());
-        assert!(help("api", "", false).is_err());
+        assert!(help("storage_class", "", false).is_err());
     }
 
     #[test]

@@ -129,6 +129,9 @@ pub struct Config {
     /// How a change `mc admin config` makes to the drive's `.teifs/config.kv` is checked
     /// before it's kept.
     pub config_check: ConfigCheck,
+    /// Whether the root key, the service accounts it made and the sessions it started
+    /// sign in (MinIO's `root_access`); off, only IAM's users and roles do.
+    pub root_access: bool,
 }
 
 /// Checks a change to the drive's key-value configuration as the next start would read
@@ -443,6 +446,7 @@ struct SignIns {
     shown_certificates: Option<CertificateConfig>,
     plugin: Option<IdentityPlugin>,
     openid: Vec<ConfiguredOidcProvider>,
+    root_access: bool,
 }
 
 impl SignIns {
@@ -468,6 +472,7 @@ impl SignIns {
             shown_certificates,
             plugin,
             openid: config.openid.clone(),
+            root_access: config.root_access,
         })
     }
 
@@ -513,8 +518,12 @@ async fn open_iam(
         certificates,
         plugin,
         openid,
+        root_access,
         ..
     } = sign_ins;
+    if !root_access {
+        iam = iam.without_root_access();
+    }
     for (arn, done) in iam
         .ensure_oidc_providers(&openid)
         .map_err(ServerError::OpenId)?

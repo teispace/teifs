@@ -134,7 +134,9 @@ no key may take the root's id), only into an empty IAM, in one transaction. The 
 user can replace a root key the drive generated (`POST root-key`): the new key is saved
 to the owner-only credentials file first (written beside it and renamed over it), and
 only then does the old key stop working, so a failure leaves the old key in use. A key
-given through the environment, flags or a file is never rewritten by the server. A `MinIO` service account never
+given through the environment, flags or a file is never rewritten by the server. With
+`MinIO`'s `root_access=off` (`--no-root-access`) the root key, its service accounts and
+the sessions it started don't sign at all; only IAM's users do. A `MinIO` service account never
 has more than its parent: its policy is a session policy on the parent's identity, a
 root user's service account isn't the root user, STS gives service accounts no
 temporary credentials, and a caller signing with a service account's or temporary keys

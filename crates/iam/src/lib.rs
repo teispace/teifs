@@ -174,6 +174,8 @@ struct Inner {
     key: DataKey,
     /// The root user's access key, if requests are signed at all.
     root: Option<RootKey>,
+    /// Whether the root key, its service accounts and its sessions are refused.
+    root_refused: bool,
 }
 
 impl std::fmt::Debug for Iam {
@@ -227,7 +229,7 @@ impl Iam {
             db.iam_apply(&writes)?;
         }
         let state = State::load(&account, rows, &key)?;
-        let snapshot = Snapshot::build(&state, root.as_ref());
+        let snapshot = Snapshot::build(&state, root.as_ref(), false);
         Ok(Self {
             tokens: key.clone(),
             inner: Mutex::new(Inner {
@@ -235,6 +237,7 @@ impl Iam {
                 state,
                 key,
                 root,
+                root_refused: false,
             }),
             snapshot: RwLock::new(Arc::new(snapshot)),
             web_keys: oidc::KeyCache::default(),
@@ -248,6 +251,19 @@ impl Iam {
     #[must_use]
     pub fn with_ldap(mut self, directory: ldap::Directory) -> Self {
         self.ldap = Some(Arc::new(directory));
+        self
+    }
+
+    /// Refuses the root user's key, its service accounts and the sessions it started, as
+    /// `MinIO` does with `root_access=off`: only IAM's users and roles sign in.
+    #[must_use]
+    pub fn without_root_access(self) -> Self {
+        {
+            let mut inner = self.inner();
+            inner.root_refused = true;
+            let Inner { state, root, .. } = &*inner;
+            self.publish(state, root.as_ref(), true);
+        }
         self
     }
 
@@ -341,6 +357,7 @@ impl Iam {
             state,
             key,
             root,
+            root_refused,
         } = &mut *inner;
         let mut draft = Draft {
             state: state.clone(),
@@ -353,14 +370,14 @@ impl Iam {
         if !draft.writes.is_empty() {
             db.iam_apply(&draft.writes).map_err(IamError::from)?;
             *state = draft.state;
-            self.publish(state, root.as_ref());
+            self.publish(state, root.as_ref(), *root_refused);
         }
         Ok(out)
     }
 
     /// Makes `state` and `root` what authentication sees.
-    fn publish(&self, state: &State, root: Option<&RootKey>) {
-        let snapshot = Arc::new(Snapshot::build(state, root));
+    fn publish(&self, state: &State, root: Option<&RootKey>, root_refused: bool) {
+        let snapshot = Arc::new(Snapshot::build(state, root, root_refused));
         *self
             .snapshot
             .write()
@@ -394,9 +411,14 @@ impl Iam {
             )));
         }
         persist(&new).map_err(IamError::Persist)?;
-        let Inner { state, root, .. } = &mut *inner;
+        let Inner {
+            state,
+            root,
+            root_refused,
+            ..
+        } = &mut *inner;
         *root = Some(new);
-        self.publish(state, root.as_ref());
+        self.publish(state, root.as_ref(), *root_refused);
         Ok(())
     }
 }

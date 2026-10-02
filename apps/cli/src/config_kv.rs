@@ -5,11 +5,11 @@
 //! names the setting. So it's the last word on nothing, as `MinIO`'s environment wins over
 //! its stored configuration.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use teifs_server::{ConfiguredOidcProvider, LdapSettings, PluginSettings};
 use teifs_store::ConfigFiles;
-use teifs_types::config_kv::{ConfigKv, VARIABLE_PREFIX};
+use teifs_types::config_kv::{ConfigKv, VARIABLE_PREFIX, switch};
 
 use crate::{
     ServeArgs,
@@ -85,6 +85,7 @@ impl IdentityArgs {
             self.settings_with(&config.variables(), &env)
                 .map_err(|err| err.to_string())
                 .and_then(|_| targets(config, &env).map(|_| ()))
+                .and_then(|()| api(&over(config.variables(), env.clone())).map(|_| ()))
                 .map_err(|err| format!("TeiFS wouldn't start with it: {err}"))
         }))
     }
@@ -105,6 +106,87 @@ fn targets(config: &ConfigKv, env: &BTreeMap<String, String>) -> Result<MinioTar
         targets.secret(env.get(name).cloned(), name)
     })?;
     Ok(targets)
+}
+
+/// `MinIO`'s variables in `env` over `stored`, without the blank ones.
+fn over(
+    stored: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut variables = stored;
+    variables.extend(
+        env.into_iter()
+            .filter(|(name, _)| name.starts_with(VARIABLE_PREFIX)),
+    );
+    variables.retain(|_, value| !value.trim().is_empty());
+    variables
+}
+
+/// What `MinIO`'s `api` settings change in `serve`.
+pub(crate) struct Api {
+    /// Whether the root key signs in (`root_access`).
+    pub(crate) root_access: bool,
+    /// How long unfinished uploads are kept, if `stale_uploads_expiry` is set.
+    pub(crate) stale_uploads_expiry: Option<Duration>,
+}
+
+/// The `api` settings `variables` (`MinIO`'s, the environment's over the stored) give.
+fn api(variables: &BTreeMap<String, String>) -> Result<Api, String> {
+    let root_access = match variables.get("MINIO_API_ROOT_ACCESS") {
+        None => true,
+        Some(value) => switch(value).ok_or_else(|| {
+            format!("api root_access in MinIO's settings is on or off, not `{value}`")
+        })?,
+    };
+    let stale_uploads_expiry = variables
+        .get("MINIO_API_STALE_UPLOADS_EXPIRY")
+        .map(|value| {
+            go_duration(value)
+                .map_err(|err| format!("api stale_uploads_expiry in MinIO's settings: {err}"))
+        })
+        .transpose()?;
+    Ok(Api {
+        root_access,
+        stale_uploads_expiry,
+    })
+}
+
+/// A duration as Go writes it and `MinIO` reads it: `24h`, `1h30m`, `90s`, `500ms`.
+fn go_duration(text: &str) -> Result<Duration, String> {
+    let wrong = || format!("`{text}` isn't a duration like 24h, 1h30m or 90s");
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return Err(wrong());
+    }
+    let mut total = Duration::ZERO;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or_else(wrong)?;
+        let number: f64 = rest[..digits].parse().map_err(|_| wrong())?;
+        rest = &rest[digits..];
+        let unit = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let seconds = match &rest[..unit] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            "s" => 1.0,
+            "ms" => 1e-3,
+            "us" | "\u{b5}s" | "\u{3bc}s" => 1e-6,
+            "ns" => 1e-9,
+            _ => return Err(wrong()),
+        };
+        rest = &rest[unit..];
+        total = Duration::try_from_secs_f64(number * seconds)
+            .ok()
+            .and_then(|part| total.checked_add(part))
+            .ok_or_else(wrong)?;
+    }
+    if total.is_zero() {
+        return Err(format!("`{text}` must be longer than zero"));
+    }
+    Ok(total)
 }
 
 /// The variables the drive's configuration stands for.
@@ -129,6 +211,8 @@ pub(crate) struct Started {
     pub(crate) targets: MinioTargets,
     /// `MinIO`'s variables: the environment's, else the configuration's.
     pub(crate) variables: BTreeMap<String, String>,
+    /// What its `api` settings change.
+    pub(crate) api: Api,
     /// The check the configuration's changes get.
     pub(crate) check: teifs_server::ConfigCheck,
 }
@@ -145,14 +229,11 @@ pub(crate) fn started(args: &ServeArgs) -> Result<Started, String> {
         .settings_with(&stored, &env)
         .map_err(|err| err.to_string())?;
     let targets = minio_targets(&config, &env)?;
-    let mut variables = stored;
-    variables.extend(
-        env.into_iter()
-            .filter(|(name, value)| name.starts_with(VARIABLE_PREFIX) && !value.trim().is_empty()),
-    );
+    let variables = over(stored, env);
     Ok(Started {
         identity,
         targets,
+        api: api(&variables)?,
         variables,
         check: identity_args.check(),
     })
@@ -213,6 +294,30 @@ mod tests {
             .settings_with(&BTreeMap::new(), &BTreeMap::new())
             .unwrap();
         assert!(none.ldap.is_none() && none.plugin.is_none() && none.openid.is_empty());
+    }
+
+    #[test]
+    fn api_settings_are_minio_s() {
+        let fresh = api(&BTreeMap::new()).unwrap();
+        assert!(fresh.root_access && fresh.stale_uploads_expiry.is_none());
+        let set = api(&map(&[
+            ("MINIO_API_ROOT_ACCESS", "off"),
+            ("MINIO_API_STALE_UPLOADS_EXPIRY", "1h30m"),
+        ]))
+        .unwrap();
+        assert!(!set.root_access);
+        assert_eq!(set.stale_uploads_expiry, Some(Duration::from_mins(90)));
+        for (name, value, error) in [
+            ("MINIO_API_ROOT_ACCESS", "maybe", "on or off"),
+            ("MINIO_API_STALE_UPLOADS_EXPIRY", "1d", "like 24h"),
+            ("MINIO_API_STALE_UPLOADS_EXPIRY", "0s", "longer than zero"),
+        ] {
+            let err = api(&map(&[(name, value)])).err().unwrap();
+            assert!(err.contains(error), "{err}");
+        }
+        assert_eq!(go_duration("500ms"), Ok(Duration::from_millis(500)));
+        assert_eq!(go_duration("1.5h"), Ok(Duration::from_mins(90)));
+        assert!(go_duration("h").is_err() && go_duration("10").is_err());
     }
 
     #[test]
