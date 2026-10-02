@@ -143,6 +143,58 @@ async fn sse_s3_round_trips_and_never_stores_plaintext() {
     assert_eq!(head.size, secret.len() as u64);
 }
 
+/// A body arriving in small pieces, written batch by batch while more arrives, comes
+/// back whole in every mode, with the MD5 of all of it.
+#[tokio::test]
+async fn bytes_arriving_in_pieces_across_many_batches_round_trip() {
+    let drive = drive().await;
+    let bytes = pattern(1_300_000);
+    let key = customer(9);
+    for (name, encryption, customer) in [
+        ("plain", Encryption::None, None),
+        ("s3", Encryption::S3, None),
+        ("c", Encryption::Customer(key.clone()), Some(&key)),
+        (
+            "dsse",
+            Encryption::Dsse {
+                key: None,
+                context: BTreeMap::new(),
+            },
+            None,
+        ),
+    ] {
+        let mut staged = drive.store.stage_for("vault", &encryption).await.unwrap();
+        for piece in bytes.chunks(7_919) {
+            staged.write(piece).await.unwrap();
+        }
+        staged.finish().await.unwrap();
+        assert_eq!(
+            staged.md5(),
+            <[u8; 16]>::from(Md5::digest(&bytes)),
+            "{name}"
+        );
+        // Finishing again changes nothing.
+        staged.finish().await.unwrap();
+        assert_eq!(staged.size(), bytes.len() as u64);
+        drive
+            .store
+            .commit(
+                "vault",
+                name,
+                staged,
+                ObjectAttrs::default(),
+                Precondition::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&drive.store, name, customer).await.unwrap(),
+            bytes,
+            "{name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn ranges_decrypt_across_package_and_part_boundaries() {
     let drive = drive().await;

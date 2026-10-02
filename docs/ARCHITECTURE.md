@@ -579,7 +579,10 @@ key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's de
 
 1. **Stage.** The body streams into a new file in `.teifs/tmp/`, hashed as it goes (MD5
    for the ETag, plus any checksums the client sent or asked for). s3s has already
-   checked the signature, and checks each chunk's signature as it streams.
+   checked the signature, and checks each chunk's signature as it streams. Bytes are
+   gathered into 256 KiB batches; each is hashed, encrypted and written on a blocking
+   thread while the next one arrives (one batch in flight per upload, and no thread
+   held while the client is slow).
 2. **Verify.** Checksums the client sent must match what arrived, or the request fails
    with `BadDigest` and the staged file is deleted.
 3. **Commit.** Under the drive's commit lock, the store checks preconditions against the

@@ -810,6 +810,10 @@ behaviour; the on-disk format is always upgraded automatically.
 - Completing a multipart upload, or copying into an object bucket from another bucket,
   no longer holds up other writes while the new object is synced: its data file goes in
   place before the drive's commit lock, as an upload's does.
+- Uploads are hashed, encrypted and written in 256 KiB batches on a blocking thread
+  while the next batch arrives, instead of on the request's own thread with one more
+  copy of every byte: less CPU per byte for 1 MiB uploads (about 10% in Docker), and
+  the server's request threads stay free for other work.
 - Faster downloads of encrypted objects: about 1 MiB is read and decrypted at a time,
   in place and without a copy, instead of 64 KiB at a time (10 MiB objects at 64
   clients: about 1.5× in Docker).

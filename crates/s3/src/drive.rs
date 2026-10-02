@@ -1451,7 +1451,7 @@ impl S3 for Drive {
             .stage_for(&input.bucket, &encryption)
             .await
             .s3()?;
-        let staged = self.stage(staged, body, &mut hasher, limit).await?;
+        let mut staged = self.stage(staged, body, &mut hasher, limit).await?;
         checksums::add_trailers(&mut sent, req.trailing_headers)?;
         let computed = hasher.finish();
         checksums::verify(&sent, &computed)?;
@@ -1460,6 +1460,7 @@ impl S3 for Drive {
             let expected = base64::engine::general_purpose::STANDARD
                 .decode(content_md5)
                 .map_err(|_| s3_error!(InvalidDigest))?;
+            staged.finish().await.s3()?;
             if expected != staged.md5() {
                 return Err(s3_error!(BadDigest, "Content-MD5 doesn't match the data"));
             }

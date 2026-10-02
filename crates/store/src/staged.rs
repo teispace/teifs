@@ -1,20 +1,27 @@
 //! Bytes on their way into the drive: written to `.teifs/tmp`, hashed as they arrive,
 //! flushed to disk, and only then renamed into place, so a crash or a failed upload never
 //! leaves a half-written file where an object should be.
+//!
+//! Bytes are gathered into batches; each batch is hashed, encrypted and written on a
+//! blocking thread while the next one arrives, so the network, the hashing and the disk
+//! overlap. At most one batch is in flight per upload, and none holds a thread while it
+//! waits for the client.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
 use md5::{Digest, Md5};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::task::JoinHandle;
 
 use teifs_crypto::{PartCipher, PartEncryptor, PartId};
 
 use crate::{error::Result, sse::Keyed};
 
-const BUFFER: usize = 256 * 1024;
+/// How many bytes are gathered before they're written.
+const BATCH: usize = 256 * 1024;
 
 /// An upload being written. Dropped without being committed, its file is removed. When
 /// it's encrypted, what reaches the file is ciphertext; the MD5 and size are of the
@@ -22,14 +29,17 @@ const BUFFER: usize = 256 * 1024;
 #[derive(Debug)]
 pub struct Staged {
     path: PathBuf,
-    file: Option<BufWriter<tokio::fs::File>>,
-    md5: Md5,
+    state: State,
+    /// The bytes not yet sent to be written.
+    batch: Vec<u8>,
+    /// The last batch's buffer, back from being written, for the next one.
+    spare: Vec<u8>,
     size: u64,
     kept: bool,
     sealing: Option<Sealing>,
 }
 
-/// An encrypted upload's key and encryptor.
+/// An encrypted upload's key.
 #[derive(Debug)]
 pub(crate) struct Sealing {
     pub keyed: Keyed,
@@ -37,22 +47,63 @@ pub(crate) struct Sealing {
     pub bucket_id: String,
     /// The part the bytes are encrypted as (1 for a single-part object).
     pub part: PartId,
+}
+
+/// What batches are written with; it goes to the blocking thread with each batch.
+#[derive(Debug)]
+struct Sink {
+    file: fs::File,
+    md5: Md5,
     encryptor: Option<PartEncryptor>,
     scratch: Vec<u8>,
 }
 
+impl Sink {
+    fn write(&mut self, batch: &[u8]) -> io::Result<()> {
+        self.md5.update(batch);
+        match self.encryptor.as_mut() {
+            Some(encryptor) => {
+                self.scratch.clear();
+                encryptor.update(batch, &mut self.scratch);
+                self.file.write_all(&self.scratch)
+            }
+            None => self.file.write_all(batch),
+        }
+    }
+
+    /// Writes the last of the ciphertext; the plaintext's MD5.
+    fn finish(mut self: Box<Self>) -> io::Result<[u8; 16]> {
+        if let Some(encryptor) = self.encryptor.take() {
+            self.scratch.clear();
+            encryptor.finish(&mut self.scratch);
+            self.file.write_all(&self.scratch)?;
+        }
+        Ok(self.md5.finalize().into())
+    }
+}
+
+/// A batch being written: the sink and the batch's buffer come back with the outcome.
+type Writing = JoinHandle<(Box<Sink>, Vec<u8>, io::Result<()>)>;
+
+#[derive(Debug)]
+enum State {
+    /// Nothing in flight.
+    Idle(Box<Sink>),
+    /// A batch is being written.
+    Writing(Writing),
+    /// Every byte is written; the plaintext's MD5.
+    Finished([u8; 16]),
+    /// A write failed or was cancelled part way.
+    Broken,
+}
+
+fn broken() -> io::Error {
+    io::Error::other("the upload's file was left part written")
+}
+
 impl Staged {
     pub(crate) async fn create(dir: &Path) -> Result<Self> {
-        let path = dir.join(uuid::Uuid::new_v4().to_string());
-        let file = tokio::fs::File::create(&path).await?;
-        Ok(Self {
-            path,
-            file: Some(BufWriter::with_capacity(BUFFER, file)),
-            md5: Md5::new(),
-            size: 0,
-            kept: false,
-            sealing: None,
-        })
+        Self::open(dir, None, None).await
     }
 
     /// A staged upload encrypted with `keyed`'s data key as part `part`.
@@ -62,37 +113,77 @@ impl Staged {
         bucket_id: String,
         part: PartId,
     ) -> Result<Self> {
-        let mut staged = Self::create(dir).await?;
         let encryptor =
             PartCipher::layered(&keyed.data_key, keyed.outer.as_ref(), part).encryptor();
-        staged.sealing = Some(Sealing {
+        let sealing = Sealing {
             keyed,
             bucket_id,
             part,
-            encryptor: Some(encryptor),
-            scratch: Vec::with_capacity(BUFFER + BUFFER / 4),
-        });
-        Ok(staged)
+        };
+        Self::open(dir, Some(encryptor), Some(sealing)).await
+    }
+
+    async fn open(
+        dir: &Path,
+        encryptor: Option<PartEncryptor>,
+        sealing: Option<Sealing>,
+    ) -> Result<Self> {
+        let path = dir.join(uuid::Uuid::new_v4().to_string());
+        let file = tokio::fs::File::create(&path).await?.into_std().await;
+        let scratch = if encryptor.is_some() {
+            Vec::with_capacity(BATCH + BATCH / 4)
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            path,
+            state: State::Idle(Box::new(Sink {
+                file,
+                md5: Md5::new(),
+                encryptor,
+                scratch,
+            })),
+            batch: Vec::with_capacity(BATCH),
+            spare: Vec::new(),
+            size: 0,
+            kept: false,
+            sealing,
+        })
     }
 
     /// Appends bytes.
     pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.md5.update(bytes);
+        if matches!(self.state, State::Finished(_)) {
+            return Err(io::Error::other("the upload was written after it was finished").into());
+        }
         self.size += bytes.len() as u64;
-        let file = self.file.as_mut().expect("written after finishing");
-        match self.sealing.as_mut() {
-            Some(sealing) => {
-                sealing.scratch.clear();
-                sealing
-                    .encryptor
-                    .as_mut()
-                    .expect("written after finishing")
-                    .update(bytes, &mut sealing.scratch);
-                file.write_all(&sealing.scratch).await?;
-            }
-            None => file.write_all(bytes).await?,
+        self.batch.extend_from_slice(bytes);
+        if self.batch.len() >= BATCH {
+            let mut sink = self.sink().await?;
+            let mut batch = std::mem::take(&mut self.spare);
+            batch.clear();
+            std::mem::swap(&mut batch, &mut self.batch);
+            self.state = State::Writing(tokio::task::spawn_blocking(move || {
+                let result = sink.write(&batch);
+                (sink, batch, result)
+            }));
         }
         Ok(())
+    }
+
+    /// The sink, once the batch in flight (if any) is written. Until it's put back, the
+    /// upload counts as broken: a write cancelled here leaves it so.
+    async fn sink(&mut self) -> Result<Box<Sink>> {
+        match std::mem::replace(&mut self.state, State::Broken) {
+            State::Idle(sink) => Ok(sink),
+            State::Writing(writing) => {
+                let (sink, batch, result) = writing.await.map_err(io::Error::other)?;
+                result?;
+                self.spare = batch;
+                Ok(sink)
+            }
+            State::Finished(_) | State::Broken => Err(broken().into()),
+        }
     }
 
     /// The encryption this upload carries, if any.
@@ -107,28 +198,39 @@ impl Staged {
     }
 
     /// How many bytes were written.
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
 
-    /// The MD5 of what was written.
+    /// The MD5 of what was written, once [`Staged::finish`]ed.
+    ///
+    /// # Panics
+    /// Before it's finished.
+    #[must_use]
     pub fn md5(&self) -> [u8; 16] {
-        self.md5.clone().finalize().into()
+        match self.state {
+            State::Finished(md5) => md5,
+            _ => panic!("the MD5 of an upload is read before it's finished"),
+        }
     }
 
-    /// Flushes the file; nothing more can be written. The commit syncs it (once, after
-    /// anything it appends).
-    pub(crate) async fn finish(&mut self) -> Result<()> {
-        if let Some(mut file) = self.file.take() {
-            if let Some(sealing) = self.sealing.as_mut()
-                && let Some(encryptor) = sealing.encryptor.take()
-            {
-                sealing.scratch.clear();
-                encryptor.finish(&mut sealing.scratch);
-                file.write_all(&sealing.scratch).await?;
-            }
-            file.flush().await?;
+    /// Writes what's left; nothing more can be written. The commit syncs the file (once,
+    /// after anything it appends). Finishing again does nothing.
+    pub async fn finish(&mut self) -> Result<()> {
+        if matches!(self.state, State::Finished(_)) {
+            return Ok(());
         }
+        let mut sink = self.sink().await?;
+        let batch = std::mem::take(&mut self.batch);
+        let md5 = tokio::task::spawn_blocking(move || {
+            sink.write(&batch)?;
+            sink.finish()
+        })
+        .await
+        .map_err(io::Error::other)??;
+        self.state = State::Finished(md5);
+        self.spare = Vec::new();
         Ok(())
     }
 
@@ -268,6 +370,29 @@ impl Drop for TmpFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn batches_reach_the_file_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut staged = Staged::create(dir.path()).await.unwrap();
+        let mut sent = Vec::new();
+        // Pieces smaller and bigger than a batch.
+        for (i, len) in [1, BATCH - 1, 3, 2 * BATCH + 5, 0, 77]
+            .into_iter()
+            .enumerate()
+        {
+            let piece = vec![u8::try_from(i).unwrap(); len];
+            staged.write(&piece).await.unwrap();
+            sent.extend_from_slice(&piece);
+        }
+        staged.finish().await.unwrap();
+        assert_eq!(fs::read(staged.path()).unwrap(), sent);
+        assert_eq!(staged.md5(), <[u8; 16]>::from(Md5::digest(&sent)));
+        assert!(staged.write(b"late").await.is_err());
+        let path = staged.path().to_owned();
+        drop(staged);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn create_new_never_overwrites() {
