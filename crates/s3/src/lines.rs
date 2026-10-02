@@ -25,6 +25,21 @@ pub(crate) const HEARTBEAT: Duration = Duration::from_secs(10);
 /// `heartbeat` every `every` in between, until the client leaves or `stopping` is
 /// cancelled.
 pub(crate) fn follow<T, F>(
+    happenings: broadcast::Receiver<T>,
+    stopping: CancellationToken,
+    heartbeat: (Duration, &'static [u8]),
+    line: F,
+) -> Body
+where
+    T: Clone + Send + 'static,
+    F: FnMut(T) -> Option<Bytes> + Send + 'static,
+{
+    follow_after(Vec::new(), happenings, stopping, heartbeat, line)
+}
+
+/// [`follow`], sending `first` before anything that happens.
+pub(crate) fn follow_after<T, F>(
+    first: Vec<Bytes>,
     mut happenings: broadcast::Receiver<T>,
     stopping: CancellationToken,
     (every, heartbeat): (Duration, &'static [u8]),
@@ -36,6 +51,11 @@ where
 {
     let (lines, out) = mpsc::channel(64);
     tokio::spawn(async move {
+        for next in first {
+            if lines.send(next).await.is_err() {
+                return;
+            }
+        }
         let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         loop {
             let next = tokio::select! {

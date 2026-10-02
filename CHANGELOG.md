@@ -370,6 +370,8 @@ behaviour; the on-disk format is always upgraded automatically.
 - `mc admin trace`: MinIO's live trace answers each request as the trace document MinIO
   would send, S3's calls as its `s3` type and the other APIs' as `internal`, with
   `--errors` and `--response-threshold` applied on the server and secrets redacted.
+- `mc admin logs`: the server keeps its last 10,000 log lines (what `TEIFS_LOG` lets
+  through) and sends them, then each new one, as MinIO's console log does.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.

@@ -666,8 +666,10 @@ impl From<LayoutArg> for Layout {
 }
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    tracing_subscriber::registry()
+        .with(
             // s3s logs every refused request (a missing key, a bad signature) as an
             // error; server errors are still logged by s3s and by TeiFS. The AWS SDK
             // warns that it can't check a multipart object's composite checksum on
@@ -680,7 +682,9 @@ fn main() -> ExitCode {
                     .into()
             }),
         )
-        .with_writer(std::io::stderr)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        // What's logged is kept for `mc admin logs` too.
+        .with(teifs_server::ConsoleLayer)
         .init();
     let (cli, sources) = match config::parse(std::env::args_os()) {
         Ok(parsed) => parsed,

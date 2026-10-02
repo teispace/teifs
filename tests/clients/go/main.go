@@ -1,6 +1,6 @@
 // The AWS SDK for Go v2 against TeiFS: what applications do with it; and madmin-go, the
 // library `mc` calls MinIO's admin API with, for bucket quotas, users, groups, policies,
-// the KMS, settings and traces.
+// the KMS, settings, traces and logs.
 package main
 
 import (
@@ -145,6 +145,7 @@ func main() {
 	kms(ctx, adm)
 	configKV(ctx, adm)
 	trace(ctx, adm, s3c, *bucket)
+	consoleLog(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -175,6 +176,22 @@ func trace(ctx context.Context, adm *madmin.AdminClient, s3c *s3.Client, bucket 
 	check(got.FuncName == "s3.GetObject" && got.TraceType == madmin.TraceS3 && got.HTTP != nil &&
 		got.HTTP.RespInfo.StatusCode == 404 && got.HTTP.ReqInfo.Method == "GET",
 		fmt.Sprintf("only the failed call traced: %+v", got))
+}
+
+// consoleLog is mc admin logs: the server's last lines (there may be none), each a
+// madmin.LogInfo.
+func consoleLog(ctx context.Context, adm *madmin.AdminClient) {
+	step("the server's log, as mc admin logs reads it")
+	read, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	select {
+	case info, ok := <-adm.GetLogs(read, "", 10, "all"):
+		if ok {
+			must(info.Err)
+			check(info.LogKind != "" && info.Time != "", fmt.Sprintf("a log line: %+v", info))
+		}
+	case <-read.Done():
+	}
 }
 
 // lists says whether a client signing with this key may list buckets.

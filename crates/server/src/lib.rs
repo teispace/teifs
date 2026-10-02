@@ -45,7 +45,9 @@ pub use teifs_notify::{
     KafkaSasl, Lambda, Mqtt, Mysql, Nats, Nsq, Postgres, Redis, SaslMechanism, ServerKey, Sns, Sqs,
     TargetConfig, TargetKind, UserKey, Webhook, tls_config,
 };
-pub use teifs_s3::{Control, HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, Stop, TrustedProxies};
+pub use teifs_s3::{
+    ConsoleLayer, Control, HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, Stop, TrustedProxies,
+};
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource, read_authorities};
 

@@ -29,7 +29,7 @@ use crate::{
     access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
-    bucket_export, control,
+    bucket_export, console_log, control,
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_config, minio_iam, minio_info, minio_kms, minio_service,
@@ -163,6 +163,7 @@ enum Handler {
     MinioInfo(minio_info::Kind),
     MinioService,
     MinioTrace,
+    MinioLog,
     MinioKms(minio_kms::Call),
     MinioConfig(minio_config::Call),
 }
@@ -223,6 +224,7 @@ impl Handler {
             Self::MinioInfo(kind) => kind.name(),
             Self::MinioService => "Service",
             Self::MinioTrace => "Trace",
+            Self::MinioLog => "ConsoleLog",
             Self::MinioKms(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
         }
@@ -683,6 +685,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("admin:ServerTrace", ANY),
         handler: Handler::MinioTrace,
         about: "A live trace as `madmin.TraceInfo` documents, until the caller leaves: S3's requests as `MinIO`'s S3 type, the other APIs' as its internal type, filtered by `types` (or `s3`, `internal`, `all`), `err` and `threshold`; headers and queries with their secrets redacted: `mc admin trace`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/log",
+        needs: Needs::Action("admin:ConsoleLog", ANY),
+        handler: Handler::MinioLog,
+        about: "The server's log as `madmin.LogInfo` documents: the last `limit` lines (of the 10,000 kept) of the kind `logType` asks (`ERROR`, `WARNING`, `INFO`; all by default), then each as it's logged, until the caller leaves: `mc admin logs`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1282,6 +1292,7 @@ impl Routes {
             Handler::MinioInfo(kind) => kind.call(self, &req).await,
             Handler::MinioService => minio_service::call(self, &req),
             Handler::MinioTrace => minio_trace::trace(&self.tracers, req.uri.query()),
+            Handler::MinioLog => Ok(console_log::log(self, &req)),
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),

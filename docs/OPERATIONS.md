@@ -792,6 +792,17 @@ are its `internal` type (`admin.ServerInfo`), which `mc admin trace --all` shows
 no counterpart for (`storage`, `os`, `scanner`, `healing`…) are accepted and show nothing.
 It needs `admin:ServerTrace`.
 
+## Server log
+
+`mc admin logs` reads what the server logged (`GET /minio/admin/v3/log`): the last lines
+first (`--last N`, 10 by default, of the 10,000 kept), then each line as it's logged,
+until Ctrl-C. `--type error|warning|info` picks one kind. Errors and warnings come as
+MinIO's do, with where they were logged and their fields; information as a message with
+its fields after it. Only what `TEIFS_LOG` lets through is kept (information and above
+by default; debug lines never are), and the kept lines start again when the server does.
+A server is one node, so `--node` with another name shows nothing. It needs
+`admin:ConsoleLog`.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the
