@@ -43,6 +43,7 @@ crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
 apps/cli        the `teifs` command
 tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
+tests/bench     benchmarks: TeiFS and other S3 servers in Docker, driven by warp
 xtask           project tasks (`cargo xtask verify`)
 docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRYPTION_FORMAT,
                 COMPATIBILITY, ADMIN_API (its endpoint tables generated from the route table)
@@ -58,6 +59,9 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRY
 - `cargo xtask docs`: only the docs checks (paths exist, no planning ids).
 - `tests/s3-tests/run.sh [--update]`: the S3 conformance suite against a fresh server
   (needs Python 3); `S3TESTS_K='<pattern>'` runs a subset. Nightly CI runs it in full.
+- `tests/bench/run.sh [server…]`: benchmarks against RustFS, MinIO, Garage, Versity and
+  SeaweedFS, all in Docker with the same limits (needs Docker and Python 3); measure a
+  performance change with it before and after.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
   `teifs-crypto`, `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
 - `cargo run -p teifs -- serve <dir>`: run a server; drive it with the AWS CLI

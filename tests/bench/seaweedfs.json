@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "bench",
+      "credentials": [{ "accessKey": "@ACCESS@", "secretKey": "@SECRET@" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
