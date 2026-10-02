@@ -111,6 +111,11 @@ where
     Body::from(StreamingBlob::wrap(Lines(out)))
 }
 
+/// What `lines` receives, as a body.
+pub(crate) fn body(lines: mpsc::Receiver<Bytes>) -> Body {
+    Body::from(StreamingBlob::wrap(Lines(lines)))
+}
+
 /// The lines, as a body.
 struct Lines(mpsc::Receiver<Bytes>);
 

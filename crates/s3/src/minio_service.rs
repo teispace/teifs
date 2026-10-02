@@ -37,11 +37,11 @@ impl Default for Control {
 }
 
 impl Control {
-    fn freeze(&self) {
+    pub(crate) fn freeze(&self) {
         self.frozen.send_modify(|n| *n = n.saturating_add(1));
     }
 
-    fn unfreeze(&self) {
+    pub(crate) fn unfreeze(&self) {
         self.frozen.send_modify(|n| *n = n.saturating_sub(1));
     }
 

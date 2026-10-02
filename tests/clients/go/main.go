@@ -148,6 +148,7 @@ func main() {
 	consoleLog(ctx, adm)
 	realtime(ctx, adm)
 	heal(ctx, adm, *bucket)
+	speedtest(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -238,6 +239,27 @@ func heal(ctx context.Context, adm *madmin.AdminClient, bucket string) {
 	state, err := adm.BackgroundHealStatus(ctx)
 	must(err)
 	check(len(state.Sets) == 1, fmt.Sprintf("the background heal: %+v", state))
+}
+
+func speedtest(ctx context.Context, adm *madmin.AdminClient) {
+	step("the object and drive speed tests, as mc admin speedtest and mc support perf drive run them")
+	results, err := adm.Speedtest(ctx, madmin.SpeedtestOpts{Size: 64 << 10, Concurrency: 2, Duration: 2 * time.Second})
+	must(err)
+	var last madmin.SpeedTestResult
+	for result := range results {
+		last = result
+	}
+	check(last.Servers == 1 && last.PUTStats.ThroughputPerSec > 0 && last.GETStats.ThroughputPerSec > 0,
+		fmt.Sprintf("the object speed test: %+v", last))
+	check(last.GETStats.Servers[0].Err == "", fmt.Sprintf("the object speed test failed: %+v", last))
+	drives, err := adm.DriveSpeedtest(ctx, madmin.DriveSpeedTestOpts{BlockSize: 64 << 10, FileSize: 1 << 20})
+	must(err)
+	var disks []madmin.DrivePerf
+	for result := range drives {
+		disks = append(disks, result.DrivePerf...)
+	}
+	check(len(disks) > 0 && disks[0].Error == "" && disks[0].WriteThroughput > 0 && disks[0].ReadThroughput > 0,
+		fmt.Sprintf("the drive speed test: %+v", disks))
 }
 
 // lists says whether a client signing with this key may list buckets.

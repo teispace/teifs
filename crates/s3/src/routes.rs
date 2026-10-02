@@ -33,7 +33,7 @@ use crate::{
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_metrics,
-    minio_service, minio_service_accounts,
+    minio_service, minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -165,6 +165,7 @@ enum Handler {
     MinioMetrics(minio_metrics::Call),
     MinioHeal(minio_heal::Call),
     MinioKms(minio_kms::Call),
+    MinioSpeedtest(minio_speedtest::Call),
     MinioConfig(minio_config::Call),
 }
 
@@ -226,6 +227,7 @@ impl Handler {
             Self::MinioMetrics(call) => call.name(),
             Self::MinioHeal(call) => call.name(),
             Self::MinioKms(call) => call.name(),
+            Self::MinioSpeedtest(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
         }
     }
@@ -733,6 +735,46 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("admin:Heal", ANY),
         handler: Handler::MinioHeal(minio_heal::Call::Heal),
         about: "A heal of one bucket, or of its objects under a prefix (`{bucket}/{prefix}`): as `heal/`: `mc admin heal ALIAS/BUCKET/PREFIX`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/speedtest",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Object),
+        about: "Measures the store: writes objects of `size` with `concurrent` writers for `duration`, reads them back as long, and streams `madmin.SpeedTestResult`; `autotune` adds writers while reads get faster. S3's requests wait meanwhile: `mc admin speedtest`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/speedtest/object",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Object),
+        about: "Measures the store: writes objects of `size` with `concurrent` writers for `duration`, reads them back as long, and streams `madmin.SpeedTestResult`; `autotune` adds writers while reads get faster. S3's requests wait meanwhile: `mc admin speedtest`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/speedtest/drive",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Drive),
+        about: "Writes a file of `filesize` to each disk in blocks of `blocksize`, syncs it and reads it back: `madmin.DriveSpeedTestResult`, `mc support perf drive`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/speedtest/net",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Network),
+        about: "501 NotImplemented: a server is one node, with no network between nodes to measure",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/speedtest/site",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Network),
+        about: "501 NotImplemented: there are no other sites to measure the network to",
     },
     Endpoint {
         api: Api::Minio,
@@ -1346,6 +1388,7 @@ impl Routes {
             Handler::MinioMetrics(call) => call.call(self, &req),
             Handler::MinioHeal(call) => call.call(self, req).await,
             Handler::MinioKms(call) => call.call(self, &req, (identity, context)).await,
+            Handler::MinioSpeedtest(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }

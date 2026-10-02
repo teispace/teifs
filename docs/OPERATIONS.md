@@ -836,6 +836,26 @@ it ends. The background heal (`mc admin heal` without a target, its status) is t
 drive's [scrub](#metrics): it reports the versions the scrub checked. Both need
 `admin:Heal`.
 
+## Speed tests
+
+`mc admin speedtest ALIAS` measures what the drive and the store can do: it writes
+objects (64 MiB, 32 writers, 10 seconds unless `--size`, `--concurrent` and
+`--duration` say otherwise) and then reads them back for as long, and reports the
+throughput, objects a second and response times of each. `--autotune` keeps adding
+writers while reads get faster. The test runs inside the server, so it measures the
+drive and not the network; S3's requests wait until it ends, as with
+`mc admin service freeze`. It writes to `minio-perf-test-tmp-bucket`, which it makes and
+removes, or to `--bucket`'s `speedtest/` prefix, and removes what it wrote unless asked
+not to (`--noclear`). It needs room for one object per writer.
+
+`mc support perf drive ALIAS` writes a file (1 GiB in 4 MiB blocks unless
+`--filesize` and `--blocksize` say otherwise) to each disk the drive uses, syncs it,
+reads it back and removes it. The read may come from the operating system's cache, so it
+can be faster than the disk. The files go where the drive stages its writes:
+`.teifs/tmp/` on the drive's disk, `.teifs-tmp` on a bucket's other disk. A server is one
+node, so `mc support perf net` and `site` have no network to measure. Both tests need
+`admin:OBDInfo`.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the

@@ -376,6 +376,12 @@ behaviour; the on-disk format is always upgraded automatically.
   and object (a deep scan compares their bytes, as `teifs verify` does) and reports what
   it found as MinIO's heal results, changing nothing. The background heal's status is the
   scrub's.
+- `mc admin speedtest` and `mc support perf drive`: the object test writes and reads
+  objects of a given size with as many writers as asked for a set time (or more writers
+  while reads get faster, with `--autotune`) and reports throughput and response times
+  as MinIO does, holding S3's requests meanwhile and removing what it wrote; the drive
+  test writes, syncs and reads a file on each of the drive's disks. A server is one node,
+  so there's no network between nodes or sites to measure.
 - MinIO's realtime metrics (the console's realtime view, `mc admin scanner status`):
   S3's requests being served and since-start totals (requests, bytes, errors,
   cancellations, times), one document every interval. `mc admin top locks` lists no
