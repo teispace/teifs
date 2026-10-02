@@ -38,8 +38,9 @@ BENCH_OPS=put BENCH_SIZES=4KiB BENCH_CONCURRENCY=16 tests/bench/run.sh teifs tei
 | `BENCH_ROUNDS` | `1` | `3` |
 
 Also: `BENCH_OPS` (`put get`), `BENCH_CPUS` (`4`) and `BENCH_MEMORY` (`4g`) per server,
-`BENCH_GET_BYTES` (how much a GET cell uploads first, 2 GiB at most) and `BENCH_WORK`
-(where results go).
+`BENCH_GET_BYTES` (how much a GET cell uploads first, 2 GiB at most), `BENCH_WORK`
+(where results go) and `BENCH_TEIFS_IMAGE` (a TeiFS image to run instead of building
+this checkout: tag a build, change the code, and compare the two).
 
 ## Results
 

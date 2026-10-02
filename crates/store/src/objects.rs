@@ -239,6 +239,40 @@ impl<'a> Finished<'a> {
     }
 }
 
+/// A data file in place but not yet recorded ([`Inner::write_object`]): its footer
+/// says what [`Inner::record_object`] is expected to record.
+pub(crate) struct Written {
+    key: String,
+    object_id: String,
+    path: PathBuf,
+    size: u64,
+    stored_len: u64,
+    etag: String,
+    /// The attributes the write asked for.
+    asked: ObjectAttrs,
+    /// Those with the bucket's default retention settled.
+    attrs: ObjectAttrs,
+    crypt: Option<Crypt>,
+    parts: Option<PartsRecord>,
+    /// The bucket's versioning and Object Lock the footer was written for.
+    versioning: Versioning,
+    object_lock: Option<crate::lock::ObjectLock>,
+    version_id: String,
+    created_ms: i64,
+}
+
+impl Written {
+    /// Its data file.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Removes the data file of a write that won't be recorded.
+    pub(crate) fn discard(&self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl ObjectBucket {
     /// Where the data file `object_id` lives. The fan-out folders come from the id's
     /// random tail (a UUIDv7 starts with the time).
@@ -410,58 +444,120 @@ impl Inner {
         finished: Finished<'_>,
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
-        teifs_types::check_object_key(key)?;
+        // Fail before writing anything when the precondition already can't hold.
         let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
         precondition.check(current.as_ref())?;
-        let version_id = bucket.new_version_id();
+        let written = self.write_object(bucket, key, finished)?;
+        self.record_object(conn, bucket, written, precondition)
+    }
 
+    /// Puts the finished bytes in place as a new data file, with the footer the version
+    /// is expected to get, without the commit lock: nothing refers to the file until
+    /// [`Inner::record_object`] records it.
+    pub(crate) fn write_object(
+        &self,
+        bucket: &ObjectBucket,
+        key: &str,
+        finished: Finished<'_>,
+    ) -> Result<Written> {
+        teifs_types::check_object_key(key)?;
         let Finished {
             tmp,
             size,
             stored_len,
             etag,
-            mut attrs,
+            attrs,
             sealed,
             parts,
         } = finished;
-        self.lock_new_version(Some(bucket), &mut attrs)?;
         let (object_id, crypt) = match sealed {
             Some((object_id, crypt)) => (object_id, Some(crypt)),
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
         };
-        let created_ms = now_ms();
+        let mut written = Written {
+            key: key.to_owned(),
+            path: bucket.data_path(&object_id),
+            object_id,
+            size,
+            stored_len,
+            etag,
+            asked: attrs.clone(),
+            attrs,
+            crypt,
+            parts,
+            versioning: bucket.versioning,
+            object_lock: self.object_lock(Some(bucket))?,
+            version_id: bucket.new_version_id(),
+            created_ms: now_ms(),
+        };
+        self.lock_new_version(Some(bucket), &mut written.attrs)?;
         // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()
             .write(true)
             .open(tmp)?
             .set_len(stored_len)?;
-        stages::time(&self.stages, "write", "sync", || {
-            append_footer(
-                tmp,
-                &Footer {
-                    bucket: &bucket.id,
-                    key,
-                    object: &object_id,
-                    size,
-                    etag: &etag,
-                    created_ms,
-                    attrs: &attrs,
-                    crypt: crypt.as_ref(),
-                    parts: parts.as_ref(),
-                    version: (version_id != NULL_VERSION).then_some(version_id.as_str()),
-                },
-                self.durability != Durability::None,
-            )
-        })?;
-        let path = bucket.data_path(&object_id);
-        let parent = path.parent().unwrap_or(&bucket.dir);
+        self.append_footer(bucket, &written, tmp)?;
+        let parent = written.path.parent().unwrap_or(&bucket.dir);
         fs::create_dir_all(parent)?;
-        publish(tmp, &path, &bucket.dir, Publish::Replace)?;
-        self.sync_folder(parent)?;
+        publish(tmp, &written.path, &bucket.dir, Publish::Replace)?;
+        if let Err(err) = self.sync_folder(parent) {
+            written.discard();
+            return Err(err.into());
+        }
+        Ok(written)
+    }
 
+    /// Records a data file [`Inner::write_object`] put in place as the current version
+    /// of its key, if `precondition` holds now; else removes it. When the bucket's
+    /// versioning or Object Lock changed in between, the footer is rewritten first.
+    /// Holds the commit lock (`conn`).
+    pub(crate) fn record_object(
+        &self,
+        conn: &Index,
+        bucket: &ObjectBucket,
+        written: Written,
+        precondition: &Precondition,
+    ) -> Result<ObjectInfo> {
+        let (info, replaced) = self.record_row(conn, bucket, written, precondition)?;
+        Inner::remove_data_files(conn, bucket, &replaced);
+        Ok(info)
+    }
+
+    /// Records `written` as [`Inner::record_object`] does, but leaves the data files of
+    /// the versions it replaced (queued as garbage) for the caller to remove: their ids.
+    /// Removes the written file when it isn't recorded.
+    pub(crate) fn record_row(
+        &self,
+        conn: &Index,
+        bucket: &ObjectBucket,
+        mut written: Written,
+        precondition: &Precondition,
+    ) -> Result<(ObjectInfo, Vec<String>)> {
+        let current = Inner::object_row(conn, bucket, &written.key)?.map(|row| to_info(&row));
+        if let Err(err) = precondition.check(current.as_ref()) {
+            written.discard();
+            return Err(err);
+        }
+        if let Err(err) = self.settle(bucket, &mut written) {
+            written.discard();
+            return Err(err);
+        }
+        let path = written.path.clone();
+        let Written {
+            key,
+            object_id,
+            size,
+            etag,
+            attrs,
+            crypt,
+            parts,
+            version_id,
+            created_ms,
+            ..
+        } = written;
         let row = VersionRow {
             bucket_id: bucket.id.clone(),
-            key: key.to_owned(),
+            key,
             version_id,
             delete_marker: false,
             object_id: Some(object_id),
@@ -475,9 +571,53 @@ impl Inner {
             seq: 0,
             latest: true,
         };
-        let replaced = conn.put_version(&row, created_ms)?;
-        Inner::remove_data_files(conn, bucket, &replaced);
-        Ok(bucket.info(&row))
+        match conn.put_version(&row, created_ms) {
+            Ok(replaced) => Ok((bucket.info(&row), replaced)),
+            Err(err) => {
+                let _ = fs::remove_file(path);
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Rewrites a written file's footer when the bucket's versioning or Object Lock
+    /// changed since it was written, so the version gets what the bucket says now.
+    fn settle(&self, bucket: &ObjectBucket, written: &mut Written) -> Result<()> {
+        let object_lock = self.object_lock(Some(bucket))?;
+        if written.versioning == bucket.versioning && written.object_lock == object_lock {
+            return Ok(());
+        }
+        written.versioning = bucket.versioning;
+        written.object_lock = object_lock;
+        written.version_id = bucket.new_version_id();
+        written.created_ms = now_ms();
+        written.attrs = written.asked.clone();
+        self.lock_new_version(Some(bucket), &mut written.attrs)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&written.path)?
+            .set_len(written.stored_len)?;
+        self.append_footer(bucket, written, &written.path)
+    }
+
+    /// Appends `written`'s footer to `path`, synced unless durability is off.
+    fn append_footer(&self, bucket: &ObjectBucket, written: &Written, path: &Path) -> Result<()> {
+        let footer = Footer {
+            bucket: &bucket.id,
+            key: &written.key,
+            object: &written.object_id,
+            size: written.size,
+            etag: &written.etag,
+            created_ms: written.created_ms,
+            attrs: &written.attrs,
+            crypt: written.crypt.as_ref(),
+            parts: written.parts.as_ref(),
+            version: (written.version_id != NULL_VERSION).then_some(written.version_id.as_str()),
+        };
+        stages::time(&self.stages, "write", "sync", || {
+            append_footer(path, &footer, self.durability != Durability::None)
+        })?;
+        Ok(())
     }
 
     /// Opens a version of `key` (`None`: the current one): its description and data

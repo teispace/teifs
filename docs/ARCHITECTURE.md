@@ -586,7 +586,14 @@ key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's de
    current object, creates the parent folders (refusing to go through a file, a link or
    a name that differs only in case), renames the staged file into place, syncs the
    folder, and records the object's row in the index. The rename is atomic, so readers
-   see either the old object or the new one.
+   see either the old object or the new one. In an object bucket the data file has a
+   new id that nothing refers to yet, so it is synced and renamed into place before the
+   lock; under the lock the store checks the preconditions, rewrites the footer if the
+   bucket's versioning or Object Lock changed meanwhile, and records the row (or removes
+   the file when a precondition fails). Writes waiting for the lock are recorded as a
+   group (`crates/store/src/group.rs`): whoever gets it records all of them in one
+   transaction, each in its own savepoint, so one sync of the index covers the group
+   and a write that fails leaves the others alone.
 
 A read opens the file first and then describes it from the index, so the bytes and the
 metadata returned belong together even if the object is replaced during the read.
@@ -665,7 +672,8 @@ steps, items and last error are kept for `teifs status`.
 
 - Blocking file and database work runs on Tokio's blocking pool (`Store::blocking`).
 - One mutex around the index serves as the commit lock: whoever changes a file holds it
-  until the file and its row agree again. The system database has its own lock, always
+  until the file and its row agree again. A new object bucket data file isn't a change
+  until its row is recorded, so it's written and synced without the lock. The system database has its own lock, always
   taken after the index lock when both are needed.
 - Reads don't take the commit lock while streaming.
 

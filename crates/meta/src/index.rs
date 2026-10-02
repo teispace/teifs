@@ -7,7 +7,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use teifs_types::{ObjectAttrs, Stamp};
 
-use crate::{Result, db};
+use crate::{MetaError, Result, db};
 
 /// An open transaction or savepoint ([`Index::begin`]).
 pub(crate) struct Tx<'a> {
@@ -272,6 +272,15 @@ impl Index {
     /// or not at all. Many small writes cost one sync instead of one each.
     /// Batches nest: one inside another is part of the outer one.
     pub fn batch<T>(&self, change: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.try_batch(change)
+    }
+
+    /// [`Index::batch`] for a change with errors of its own (any a [`MetaError`]
+    /// converts to): one that fails is undone.
+    pub fn try_batch<T, E: From<MetaError>>(
+        &self,
+        change: impl FnOnce(&Self) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
         let tx = self.begin()?;
         let out = change(self)?;
         tx.commit()?;

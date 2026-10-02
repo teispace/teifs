@@ -42,6 +42,8 @@ MEMORY="${BENCH_MEMORY:-4g}"
 GET_BYTES="${BENCH_GET_BYTES:-$((2 * 1024 * 1024 * 1024))}"
 WORK="${BENCH_WORK:-$ROOT/target/bench/$(date -u +%Y%m%dT%H%M%SZ)}"
 NET=teifs-bench
+# TeiFS's image: built from this checkout unless one is named (to compare builds).
+TEIFS_IMAGE="${BENCH_TEIFS_IMAGE:-teifs-bench:local}"
 BUCKET=warp-benchmark-bucket
 
 # Benchmark-only keys, in the form every server takes (Garage's is the strictest).
@@ -85,7 +87,7 @@ start() {
       [ "$1" = teifs-folder ] && layout=folder
       "${run[@]}" -e TEIFS_ACCESS_KEY="$ACCESS" -e TEIFS_SECRET_KEY="$SECRET" \
         -e TEIFS_DURABILITY="$durability" -e TEIFS_DEFAULT_LAYOUT="$layout" \
-        teifs-bench:local > /dev/null
+        "$TEIFS_IMAGE" > /dev/null
       echo "$name:9000" ;;
     rustfs)
       "${run[@]}" -e RUSTFS_ACCESS_KEY="$ACCESS" -e RUSTFS_SECRET_KEY="$SECRET" \
@@ -152,8 +154,9 @@ warp() {
 
 case " ${servers[*]} " in
   *" teifs"*)
-    docker build --quiet -f "$HERE/teifs.Dockerfile" -t teifs-bench:local "$ROOT" > /dev/null
-    echo "image: teifs-bench:local $(docker image inspect --format '{{.Id}}' teifs-bench:local)" \
+    [ "$TEIFS_IMAGE" = teifs-bench:local ] &&
+      docker build --quiet -f "$HERE/teifs.Dockerfile" -t teifs-bench:local "$ROOT" > /dev/null
+    echo "image: $TEIFS_IMAGE $(docker image inspect --format '{{.Id}}' "$TEIFS_IMAGE")" \
       | tee -a "$WORK/environment.txt" ;;
 esac
 

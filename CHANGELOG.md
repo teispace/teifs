@@ -792,6 +792,11 @@ behaviour; the on-disk format is always upgraded automatically.
   healthy).
 - mimalloc as the memory allocator: about 4% faster uploads and up to 25% faster
   downloads measured on macOS, and far faster than musl's allocator on Linux.
+- Faster uploads to object buckets under load: a new object's data file is synced and
+  put in place before the drive's commit lock, and writes waiting for the lock are
+  recorded together, with one sync of the index for all of them. Measured in Docker
+  with 4 KiB objects and 64 clients: about 2.8× the objects per second with
+  `--durability strict`, 4.7× with `relaxed`.
 - `teifs init` sets up a drive: its folder, keys, keyring (kept off the drive), settings
   and an alias, asking on a terminal or taking flags, then says what to run next.
   `teifs serve DIR` reads the drive's `.teifs/settings.toml` unless `--config` names

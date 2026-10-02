@@ -5,9 +5,10 @@
 //! - **object buckets** ([`objects`]): every key S3 allows, stored by id under `.teifs`.
 //!
 //! What S3 needs beyond the bytes lives in `.teifs/index.db` and `.teifs/system.db` (the
-//! `teifs-meta` crate). Writes are staged in `.teifs/tmp`, synced and put in place under
-//! one commit lock, so every object is either its old or its new version, and its
-//! recorded ETag always belongs to its bytes.
+//! `teifs-meta` crate). Writes are staged in `.teifs/tmp`, synced, put in place and
+//! recorded under one commit lock (an object bucket's new data file goes in place before
+//! it, as nothing refers to it until it's recorded), so every object is either its old
+//! or its new version, and its recorded ETag always belongs to its bytes.
 
 mod body;
 mod cache;
@@ -20,6 +21,7 @@ mod folder;
 mod folder_versions;
 mod folders;
 mod format;
+mod group;
 mod inspect;
 mod jobs;
 mod lifecycle;
@@ -284,6 +286,8 @@ struct Inner {
     /// Held while a snapshot is written or old ones are removed, so a prune never
     /// takes a snapshot being written for one in progress.
     snapshots: Mutex<()>,
+    /// Object bucket writes waiting for the commit lock, recorded together.
+    group: group::Group,
     /// Buckets' lifecycle configurations, read once.
     lifecycles: cache::SettingCache<lifecycle::Lifecycle>,
     /// Buckets' notification rules, read once.
@@ -401,6 +405,7 @@ impl Store {
             expirations: std::sync::OnceLock::new(),
             jobs: jobs::StatusMap::default(),
             snapshots: Mutex::new(()),
+            group: group::Group::default(),
             lifecycles: cache::SettingCache::default(),
             notifications: cache::SettingCache::default(),
             logging: cache::SettingCache::default(),
@@ -690,11 +695,8 @@ impl Store {
         staged.finish().await?;
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         self.blocking(move |inner| {
-            let waited = std::time::Instant::now();
-            let conn = inner.lock();
-            stages::record(&inner.stages, "write", "lock", waited);
-            let since = std::time::Instant::now();
-            let bucket = inner.bucket(&bucket)?;
+            let name = bucket;
+            let bucket = inner.bucket(&name)?;
             let md5 = staged.md5();
             let (etag, sealed, stored_len) = match staged.sealing() {
                 None => (teifs_types::hex(&md5), None, staged.size()),
@@ -730,6 +732,17 @@ impl Store {
                 sealed,
                 parts: None,
             };
+            if let Bucket::Object(object_bucket) = &bucket {
+                // The data file goes in place (and is synced) before the commit lock;
+                // only recording it needs the lock.
+                let written = inner.write_object(object_bucket, &key, finished)?;
+                staged.keep();
+                return inner.record_grouped(&name, &object_bucket.id, written, precondition);
+            }
+            let waited = std::time::Instant::now();
+            let conn = inner.lock();
+            stages::record(&inner.stages, "write", "lock", waited);
+            let since = std::time::Instant::now();
             let info = inner.commit_to(&conn, &bucket, &key, finished, &precondition)?;
             stages::record(&inner.stages, "write", "commit", since);
             staged.keep();
@@ -1520,6 +1533,8 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+#[cfg(test)]
+mod commit_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
