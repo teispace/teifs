@@ -541,6 +541,10 @@ pub(crate) struct ServeArgs {
     /// For testing lifecycle rules: how long a "day" is (`10s`). Never on real data.
     #[arg(long, hide = true, value_parser = parse_duration, env = "TEIFS_LIFECYCLE_DAY")]
     lifecycle_day: Option<std::time::Duration>,
+    /// For measuring: the largest object (bytes, as stored) kept in the index instead of
+    /// a file of its own; 0 keeps every object in a file.
+    #[arg(long, hide = true, env = "TEIFS_INLINE_MAX")]
+    inline_max: Option<u64>,
     /// How long a client has to send a request's headers; idle connections close
     /// after it too.
     #[arg(long, default_value = "30s", value_parser = parse_duration, env = "TEIFS_HEADER_TIMEOUT")]
@@ -1728,6 +1732,7 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
         durability: args.durability.into(),
         key_rules: args.key_names.into(),
         lifecycle_day: args.lifecycle_day,
+        inline_max: args.inline_max,
         limits: Limits {
             header_timeout: args.header_timeout,
             body_timeout: args.body_timeout,

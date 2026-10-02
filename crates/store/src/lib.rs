@@ -97,8 +97,8 @@ pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 
 use error::not_found_as;
 use folder::{FolderBucket, Found};
-pub use objects::Deleted;
 use objects::{BUCKETS_DIR, Finished, ObjectBucket};
+pub use objects::{Deleted, INLINE_MAX};
 use staged::{TmpFile, sync_dir};
 
 /// The folder in a drive's root that holds TeiFS's own data.
@@ -108,7 +108,7 @@ pub const SYSTEM_DIR: &str = ".teifs";
 /// encrypted one how, its bucket's id and its parts (sizes and keys).
 type Located = (
     ObjectInfo,
-    Option<fs::File>,
+    Option<body::Data>,
     Option<(sse::Crypt, String, Vec<(u64, teifs_crypto::PartId)>)>,
 );
 
@@ -262,6 +262,8 @@ struct Inner {
     tmp: PathBuf,
     /// How hard writes are made to survive a power cut.
     durability: Durability,
+    /// The largest object an object bucket keeps in its row ([`objects::INLINE_MAX`]).
+    inline_max: u64,
     /// Which names folder buckets may create.
     key_rules: KeyRules,
     /// The drive's lock: one process at a time.
@@ -353,6 +355,9 @@ pub struct StoreOptions {
     /// How long a day is for lifecycle rules; `None` is a real day. Shorter days are
     /// for testing rules without waiting.
     pub lifecycle_day: Option<std::time::Duration>,
+    /// The largest object (as stored) an object bucket keeps in the index instead of a
+    /// file of its own; `None` is [`INLINE_MAX`], `Some(0)` keeps every object in a file.
+    pub inline_max: Option<u64>,
 }
 
 impl Store {
@@ -398,6 +403,7 @@ impl Store {
             system_dir,
             tmp,
             durability: options.durability,
+            inline_max: options.inline_max.unwrap_or(objects::INLINE_MAX),
             key_rules: options.key_rules,
             _lock: lock,
             folders: folders::FolderCache::default(),
@@ -1500,9 +1506,10 @@ impl Inner {
                 // Under the commit lock, so the file can't be replaced and removed mid-copy.
                 let conn = self.lock();
                 let row = Inner::version_row(&conn, bucket, src_key, src_version)?;
-                match &row.object_id {
-                    Some(id) => fs::copy(bucket.data_path(id), &tmp.path).map(drop)?,
-                    None => fs::File::create(&tmp.path).map(drop)?,
+                match (&row.object_id, &row.inline) {
+                    (Some(id), _) => fs::copy(bucket.data_path(id), &tmp.path).map(drop)?,
+                    (None, Some(bytes)) => fs::write(&tmp.path, bytes)?,
+                    (None, None) => fs::File::create(&tmp.path).map(drop)?,
                 }
                 bucket.info(&row)
             }
@@ -1584,6 +1591,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod commit_tests;
+#[cfg(test)]
+mod inline_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]

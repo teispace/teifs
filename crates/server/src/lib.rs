@@ -98,6 +98,9 @@ pub struct Config {
     /// How long a day is for lifecycle rules; `None` is a real day. Only for testing
     /// rules without waiting days.
     pub lifecycle_day: Option<std::time::Duration>,
+    /// The largest object (as stored) an object bucket keeps in the index; `None` is
+    /// the store's default. For measuring.
+    pub inline_max: Option<u64>,
     /// Bounds on what clients can make the server hold.
     pub limits: Limits,
     /// Accept Signature Version 2 (deprecated; off by default, as on AWS).
@@ -319,6 +322,7 @@ async fn open_drive(
             durability: config.durability,
             key_rules: config.key_rules,
             lifecycle_day: config.lifecycle_day,
+            inline_max: config.inline_max,
         },
     )
     .map_err(|source| ServerError::Open {

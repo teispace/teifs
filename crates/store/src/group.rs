@@ -226,7 +226,7 @@ impl Inner {
                 // An object bucket's file isn't anyone's until it's recorded, so it goes
                 // if the transaction fails; a folder bucket's is in place by then.
                 let unrecorded = match &job {
-                    Job::Object { written, .. } => Some(written.path().to_owned()),
+                    Job::Object { written, .. } => written.path().map(std::path::Path::to_owned),
                     Job::File { .. } | Job::Delete { .. } => None,
                 };
                 let result = self.record_job(conn, job, &precondition);

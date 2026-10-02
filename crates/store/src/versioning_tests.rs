@@ -20,7 +20,7 @@ in_both_layouts!(
 
 async fn versioned(layout: Layout, versioning: Versioning) -> (TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open_files(dir.path()).unwrap();
     store.create_bucket("docs", layout).await.unwrap();
     if versioning != Versioning::Unversioned {
         store

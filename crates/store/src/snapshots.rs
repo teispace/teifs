@@ -295,7 +295,7 @@ mod tests {
     async fn a_backup_is_restored_and_what_it_replaced_is_kept() {
         let drive = tempfile::tempdir().unwrap();
         let backups = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store
             .put_bytes("obj", "a", b"one", ObjectAttrs::default())
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(restored.snapshot, Snapshot { bytes: 0, ..backup });
         assert!(restored.previous.join(SYSTEM_DB).is_file());
         assert!(restored.previous.join(INDEX_DB).is_file());
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         assert!(store.head("obj", "a").await.is_ok());
         assert!(matches!(
             store.head("obj", "b").await,
@@ -341,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn a_drive_that_went_away_is_never_snapshotted() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         let system = drive.path().join(crate::SYSTEM_DIR);
         fs::rename(&system, drive.path().join("moved")).unwrap();
         assert!(store.take_snapshot().await.is_err());
@@ -354,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn a_prune_waits_for_a_snapshot_being_written() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         // As a snapshot does while it writes its hidden folder.
         let writing = store.inner.snapshot_lock();
         let inner = std::sync::Arc::clone(&store.inner);
@@ -373,10 +373,10 @@ mod tests {
     async fn only_an_intact_snapshot_of_the_same_drive_is_restored() {
         let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let backups = tempfile::tempdir().unwrap();
-        let other = Store::open(two.path()).unwrap();
+        let other = Store::open_files(two.path()).unwrap();
         let theirs = other.back_up_to(backups.path()).await.unwrap();
         drop(other);
-        let store = Store::open(one.path()).unwrap();
+        let store = Store::open_files(one.path()).unwrap();
         let ours = store.back_up_to(backups.path()).await.unwrap();
         drop(store);
         let bad = |from: &Path| match restore(one.path(), from) {
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(bad(&ours), "its index.db is missing or damaged");
         // Nothing was touched.
         assert!(!one.path().join(".teifs/backups").exists());
-        assert!(Store::open(one.path()).is_ok());
+        assert!(Store::open_files(one.path()).is_ok());
     }
 
     #[test]

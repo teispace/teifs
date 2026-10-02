@@ -1,5 +1,6 @@
 //! An object's bytes, as a reader of exactly those bytes (never an object bucket's
-//! footer), whole or a range. Encrypted objects are read and decrypted up to 16
+//! footer), whole or a range, from its file or, for a small object kept in the index,
+//! from memory. Encrypted objects are read and decrypted up to 16
 //! packages at a time on the blocking pool, in place in one buffer handed on without
 //! copying; a range reads and decrypts only the packages that hold it.
 
@@ -17,9 +18,33 @@ use crate::error::Result;
 /// was read with, even if the object is replaced meanwhile.
 #[derive(Debug)]
 pub struct ObjectBody {
-    file: tokio::fs::File,
+    data: Data,
     size: u64,
     decrypt: Option<Decrypt>,
+}
+
+/// Where an object's stored bytes are.
+#[derive(Debug)]
+pub(crate) enum Data {
+    /// Its file, open.
+    File(std::fs::File),
+    /// The bytes, kept in the index with its row.
+    Inline(Bytes),
+}
+
+/// A blocking reader of stored bytes, for decrypting on the blocking pool.
+enum Source {
+    File(std::fs::File),
+    Inline(io::Cursor<Bytes>),
+}
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buf),
+            Self::Inline(bytes) => Read::read(bytes, buf),
+        }
+    }
 }
 
 /// How to decrypt an encrypted object: its data key (and DSSE-KMS's second one) and its
@@ -39,9 +64,9 @@ const SEALED_PACKAGE_LEN: usize = PACKAGE_SIZE + TAG_LEN;
 const SEALED_PACKAGE: u64 = SEALED_PACKAGE_LEN as u64;
 
 impl ObjectBody {
-    pub(crate) fn new(file: std::fs::File, size: u64, decrypt: Option<Decrypt>) -> Self {
+    pub(crate) fn new(data: Data, size: u64, decrypt: Option<Decrypt>) -> Self {
         Self {
-            file: tokio::fs::File::from_std(file),
+            data,
             size,
             decrypt,
         }
@@ -54,15 +79,20 @@ impl ObjectBody {
     }
 
     /// A reader of `len` bytes from `start` (clamped to the object).
-    pub async fn range(mut self, start: u64, len: u64) -> Result<BodyReader> {
+    pub async fn range(self, start: u64, len: u64) -> Result<BodyReader> {
         let start = start.min(self.size);
         let len = len.min(self.size - start);
-        match self.decrypt.take() {
-            None => {
-                self.file.seek(SeekFrom::Start(start)).await?;
-                Ok(Box::new(self.file.take(len)))
+        match (self.data, self.decrypt) {
+            (Data::File(file), None) => {
+                let mut file = tokio::fs::File::from_std(file);
+                file.seek(SeekFrom::Start(start)).await?;
+                Ok(Box::new(file.take(len)))
             }
-            Some(decrypt) => decrypting(self.file, decrypt, start, len).await,
+            (Data::Inline(bytes), None) => {
+                let bytes = slice(&bytes, start, len)?;
+                Ok(Box::new(io::Cursor::new(bytes)))
+            }
+            (data, Some(decrypt)) => decrypting(data, decrypt, start, len).await,
         }
     }
 
@@ -77,9 +107,23 @@ impl ObjectBody {
 /// and one buffer for all of them.
 const BATCH: u64 = 16;
 
+/// `len` bytes of `bytes` from `start`; an object kept in the index that's shorter than
+/// its row says is damaged.
+fn slice(bytes: &Bytes, start: u64, len: u64) -> io::Result<Bytes> {
+    let start = usize::try_from(start).map_err(io::Error::other)?;
+    let end = start + usize::try_from(len).map_err(io::Error::other)?;
+    if end > bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "an object kept in the index is shorter than its description",
+        ));
+    }
+    Ok(bytes.slice(start..end))
+}
+
 /// Where a decrypting read is: which part and package, and how much is still wanted.
 struct Position {
-    file: std::fs::File,
+    file: Source,
     decrypt: Decrypt,
     part: usize,
     package: u64,
@@ -89,12 +133,7 @@ struct Position {
     remaining: u64,
 }
 
-async fn decrypting(
-    mut file: tokio::fs::File,
-    decrypt: Decrypt,
-    start: u64,
-    len: u64,
-) -> Result<BodyReader> {
+async fn decrypting(data: Data, decrypt: Decrypt, start: u64, len: u64) -> Result<BodyReader> {
     // The part, then the package, holding `start`, and where its ciphertext begins.
     let (mut plain_before, mut cipher_before, mut part) = (0, 0, 0);
     while part + 1 < decrypt.parts.len() && start >= plain_before + decrypt.parts[part].0 {
@@ -104,11 +143,22 @@ async fn decrypting(
     }
     let offset = start - plain_before;
     let package = offset / PACKAGE_SIZE as u64;
-    file.seek(SeekFrom::Start(cipher_before + package * SEALED_PACKAGE))
-        .await?;
+    let at = cipher_before + package * SEALED_PACKAGE;
+    let file = match data {
+        Data::File(file) => {
+            let mut file = tokio::fs::File::from_std(file);
+            file.seek(SeekFrom::Start(at)).await?;
+            Source::File(file.into_std().await)
+        }
+        Data::Inline(bytes) => {
+            let mut cursor = io::Cursor::new(bytes);
+            cursor.set_position(at);
+            Source::Inline(cursor)
+        }
+    };
     let position = Position {
         cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), decrypt.parts[part].1),
-        file: file.into_std().await,
+        file,
         decrypt,
         part,
         package,

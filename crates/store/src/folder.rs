@@ -14,6 +14,7 @@ use teifs_types::{Stamp, empty_etag, provisional_etag};
 
 use crate::{
     Inner, KeyRules, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, StoreError,
+    body::Data,
     error::{Result, not_found_as},
     md5_file,
     objects::{ObjectBucket, PartsRecord},
@@ -72,14 +73,14 @@ impl Inner {
         bucket: &FolderBucket,
         key: &ObjectKey,
         version_id: Option<&str>,
-    ) -> Result<(ObjectInfo, Option<fs::File>)> {
+    ) -> Result<(ObjectInfo, Option<Data>)> {
         let conn = self.lock();
         let (file, meta) = match Inner::find(&bucket.dir, key)? {
             Found::File(path, _) => {
                 let file =
                     fs::File::open(&path).map_err(|e| not_found_as(e, StoreError::NoSuchKey))?;
                 let meta = file.metadata()?;
-                (Some(file), meta)
+                (Some(Data::File(file)), meta)
             }
             Found::Folder(_, meta) => (None, meta),
             Found::Missing | Found::Other => {

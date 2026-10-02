@@ -24,6 +24,8 @@ async fn drive() -> Drive {
         dir.path(),
         StoreOptions {
             kms: Some(kms),
+            // Every object in a file, for the tests that damage files.
+            inline_max: Some(0),
             ..StoreOptions::default()
         },
     )

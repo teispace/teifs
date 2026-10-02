@@ -590,7 +590,10 @@ key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's de
    new id that nothing refers to yet, so it is synced and renamed into place before the
    lock; under the lock the store checks the preconditions, rewrites the footer if the
    bucket's versioning or Object Lock changed meanwhile, and records the row (or removes
-   the file when a precondition fails). A completed multipart upload and a copy into an
+   the file when a precondition fails). An object of up to 32 KiB as stored
+   (`objects::INLINE_MAX`) gets no file: `Inner::write_object` reads its stored bytes
+   and they're recorded in its row, so it costs only the group's index sync; reads get
+   them from the row (`body::Data::Inline`), and listings leave them out. A completed multipart upload and a copy into an
    object bucket are put in place the same way, before the lock. A folder bucket's file
    is synced before the lock too, and renamed into place under it. Writes waiting for the lock are recorded as a
    group (`crates/store/src/group.rs`): whoever gets it records all of them in one

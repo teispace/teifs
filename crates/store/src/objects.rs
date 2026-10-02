@@ -5,12 +5,14 @@
 //!
 //! A write puts the data file in place, then replaces the row in one transaction, then
 //! removes the replaced file; a crash in between leaves at most a file nobody refers to,
-//! which the sweeper removes.
+//! which the sweeper removes. A small object (up to [`INLINE_MAX`] bytes as stored, unless
+//! the drive says otherwise) has no file: its bytes are kept in its row, so writing it
+//! costs no more than recording it.
 
 use std::{
     collections::BTreeMap,
     fs, io,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -21,6 +23,7 @@ use teifs_meta::{Index, NULL_VERSION, VersionRow, Versioning};
 
 use crate::{
     Durability, Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
+    body::Data,
     error::Result,
     now_ms,
     sse::Crypt,
@@ -30,6 +33,12 @@ use crate::{
 
 /// Where object buckets keep their data, inside `.teifs`.
 pub(crate) const BUCKETS_DIR: &str = "buckets";
+
+/// The largest object (as stored: encrypted, when it is) kept in the index with its row
+/// instead of a file of its own. Measured with 16 clients: 16 KiB objects are written
+/// about 1.3× faster in the index, 32 KiB ones no faster, 64 KiB ones about 40% slower
+/// (their bytes go through the index's log under the commit lock, then into the index).
+pub const INLINE_MAX: u64 = 32 * 1024;
 /// Marks the end of a data file.
 const MAGIC: &[u8; 4] = b"TFSO";
 /// The data file footer format.
@@ -240,11 +249,13 @@ impl<'a> Finished<'a> {
 }
 
 /// A data file in place but not yet recorded ([`Inner::write_object`]): its footer
-/// says what [`Inner::record_object`] is expected to record.
+/// says what [`Inner::record_object`] is expected to record. A small object's bytes are
+/// held instead, to be kept in its row.
 pub(crate) struct Written {
     key: String,
     object_id: String,
     path: PathBuf,
+    inline: Option<Vec<u8>>,
     size: u64,
     stored_len: u64,
     etag: String,
@@ -262,14 +273,16 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    /// Its data file.
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
+    /// Its data file (`None` when it's kept in its row).
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.inline.is_none().then_some(self.path.as_path())
     }
 
     /// Removes the data file of a write that won't be recorded.
     pub(crate) fn discard(&self) {
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = self.path() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -488,6 +501,7 @@ impl Inner {
         let mut written = Written {
             key: key.to_owned(),
             path: bucket.data_path(&object_id),
+            inline: None,
             object_id,
             size,
             stored_len,
@@ -502,6 +516,21 @@ impl Inner {
             created_ms: now_ms(),
         };
         self.lock_new_version(Some(bucket), &mut written.attrs)?;
+        // Small enough to keep in the row: read (only the stored bytes, never a copied
+        // file's old footer), and the staged file goes.
+        if written.parts.is_none() && self.inline_max > 0 && stored_len <= self.inline_max {
+            let len = usize::try_from(stored_len).map_err(io::Error::other)?;
+            let mut bytes = Vec::with_capacity(len);
+            fs::File::open(tmp)?
+                .take(stored_len)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() != len {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            let _ = fs::remove_file(tmp);
+            written.inline = Some(bytes);
+            return Ok(written);
+        }
         // Anything after the stored bytes (a copied file's old footer) goes first.
         fs::OpenOptions::new()
             .write(true)
@@ -553,10 +582,11 @@ impl Inner {
             written.discard();
             return Err(err);
         }
-        let path = written.path.clone();
+        let path = written.path().map(Path::to_owned);
         let Written {
             key,
             object_id,
+            inline,
             size,
             etag,
             attrs,
@@ -571,21 +601,23 @@ impl Inner {
             key,
             version_id,
             delete_marker: false,
-            object_id: Some(object_id),
+            object_id: inline.is_none().then_some(object_id),
             size,
             etag,
             modified_ms: created_ms,
             attrs,
             crypt: crypt.map(|c| serde_json::to_string(&c).expect("crypt serializes")),
             parts: parts.map(|p| p.to_json()),
-            inline: None,
+            inline,
             seq: 0,
             latest: true,
         };
         match conn.put_version(&row, created_ms) {
             Ok(replaced) => Ok((bucket.info(&row), replaced)),
             Err(err) => {
-                let _ = fs::remove_file(path);
+                if let Some(path) = path {
+                    let _ = fs::remove_file(path);
+                }
                 Err(err.into())
             }
         }
@@ -604,6 +636,9 @@ impl Inner {
         written.created_ms = now_ms();
         written.attrs = written.asked.clone();
         self.lock_new_version(Some(bucket), &mut written.attrs)?;
+        if written.inline.is_some() {
+            return Ok(());
+        }
         fs::OpenOptions::new()
             .write(true)
             .open(&written.path)?
@@ -632,21 +667,22 @@ impl Inner {
     }
 
     /// Opens a version of `key` (`None`: the current one): its description and data
-    /// file. Under the commit lock the file can't be replaced and removed between reading
-    /// the row and opening it; on a snapshot ([`Inner::read_index`]) it can, and opening
-    /// it fails with `NotFound`.
+    /// file, or the bytes kept in its row. Under the commit lock the file can't be
+    /// replaced and removed between reading the row and opening it; on a snapshot
+    /// ([`Inner::read_index`]) it can, and opening it fails with `NotFound`.
     pub(crate) fn open_object(
         conn: &Index,
         bucket: &ObjectBucket,
         key: &str,
         version_id: Option<&str>,
-    ) -> Result<(VersionRow, Option<fs::File>)> {
-        let row = Inner::version_row(conn, bucket, key, version_id)?;
-        let file = match &row.object_id {
-            Some(id) => Some(fs::File::open(bucket.data_path(id))?),
-            None => None,
+    ) -> Result<(VersionRow, Option<Data>)> {
+        let mut row = Inner::version_row(conn, bucket, key, version_id)?;
+        let data = match (&row.object_id, row.inline.take()) {
+            (Some(id), _) => Some(Data::File(fs::File::open(bucket.data_path(id))?)),
+            (None, Some(bytes)) => Some(Data::Inline(bytes.into())),
+            (None, None) => None,
         };
-        Ok((row, file))
+        Ok((row, data))
     }
 
     /// Deletes `key` if it meets `precondition`, as S3 does for the bucket's versioning:

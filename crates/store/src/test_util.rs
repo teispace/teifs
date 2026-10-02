@@ -44,3 +44,15 @@ fn folder_handle(path: &Path) -> fs::File {
 fn folder_handle(path: &Path) -> fs::File {
     fs::File::open(path).unwrap()
 }
+
+impl crate::Store {
+    /// Opens the drive at `root` keeping every object in a file of its own, never in the
+    /// index: for tests that look at, damage or lose the files.
+    pub(crate) fn open_files(root: impl AsRef<Path>) -> crate::Result<Self> {
+        let options = crate::StoreOptions {
+            inline_max: Some(0),
+            ..crate::StoreOptions::default()
+        };
+        Self::open_with(root, options)
+    }
+}

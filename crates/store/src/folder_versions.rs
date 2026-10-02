@@ -17,6 +17,7 @@ use teifs_types::Stamp;
 
 use crate::{
     Deleted, Inner, ObjectAttrs, ObjectInfo, ObjectKey, Precondition, Store, StoreError,
+    body::Data,
     error::Result,
     folder::{FolderBucket, Found},
     list::{After, Cursor, ListQuery, ObjectVersion, VersionListing, VersionsQuery, common_prefix},
@@ -392,7 +393,7 @@ impl Inner {
         bucket: &FolderBucket,
         key: &str,
         version_id: Option<&str>,
-    ) -> Result<(ObjectInfo, Option<fs::File>)> {
+    ) -> Result<(ObjectInfo, Option<Data>)> {
         let Some(versions) = &bucket.versions else {
             return Err(if version_id.is_some() {
                 StoreError::NoSuchVersion

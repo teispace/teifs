@@ -59,6 +59,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         durability: teifs_server::Durability::Strict,
         key_rules: teifs_server::KeyRules::Portable,
         lifecycle_day: None,
+        inline_max: None,
         allow_sig_v2: false,
         legacy_bucket_defaults: false,
         public_metrics: false,

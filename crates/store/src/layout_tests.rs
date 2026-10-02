@@ -14,7 +14,7 @@ const LAYOUTS: [Layout; 2] = [Layout::Folder, Layout::Object];
 
 async fn bucket(layout: Layout) -> (TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open_files(dir.path()).unwrap();
     store.create_bucket("bkt", layout).await.unwrap();
     (dir, store)
 }
@@ -176,7 +176,7 @@ async fn listings_page_and_roll_up_the_same_way() {
 #[tokio::test]
 async fn copies_work_within_and_across_layouts() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open_files(dir.path()).unwrap();
     store.create_bucket("folder", Layout::Folder).await.unwrap();
     store
         .create_bucket("objects", Layout::Object)
@@ -311,14 +311,14 @@ async fn replaced_and_deleted_objects_free_their_files() {
 async fn object_buckets_survive_reopening() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open_files(dir.path()).unwrap();
         store.create_bucket("keep", Layout::Object).await.unwrap();
         store
             .put_bytes("keep", "x/y", b"kept", attrs("text/plain"))
             .await
             .unwrap();
     }
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open_files(dir.path()).unwrap();
     assert_eq!(store.head_bucket("keep").await.unwrap(), Layout::Object);
     let info = store.head("keep", "x/y").await.unwrap();
     assert_eq!(
@@ -330,7 +330,7 @@ async fn object_buckets_survive_reopening() {
 #[tokio::test]
 async fn buckets_of_both_layouts_list_together_and_names_stay_unique() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open_files(dir.path()).unwrap();
     store.create_bucket("alpha", Layout::Object).await.unwrap();
     store.create_bucket("beta", Layout::Folder).await.unwrap();
     // A folder with an object bucket's name isn't another bucket.
@@ -483,7 +483,7 @@ async fn completed_uploads_remember_their_parts() {
         assert_eq!(copied.parts, expected, "{layout:?}");
         // The parts survive closing and reopening the drive.
         drop(store);
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open_files(dir.path()).unwrap();
         assert_eq!(store.head("bkt", "f.bin").await.unwrap().parts, expected);
         let plain = store
             .put_bytes("bkt", "f.bin", b"one piece", ObjectAttrs::default())
@@ -501,12 +501,12 @@ async fn a_drive_is_opened_by_one_store_at_a_time() {
     let staged = store.inner.tmp.join("in-flight");
     fs::write(&staged, b"half an upload").unwrap();
     assert!(matches!(
-        Store::open(dir.path()),
+        Store::open_files(dir.path()),
         Err(StoreError::DriveInUse)
     ));
     assert!(staged.exists());
     drop(store);
-    assert!(Store::open(dir.path()).is_ok());
+    assert!(Store::open_files(dir.path()).is_ok());
 }
 
 #[tokio::test]
@@ -568,7 +568,7 @@ async fn orphan_files_from_a_crash_are_swept() {
     let dir = tempfile::tempdir().unwrap();
     let data_file;
     {
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open_files(dir.path()).unwrap();
         store.create_bucket("bkt", Layout::Object).await.unwrap();
         store
             .put_bytes("bkt", "k", b"x", ObjectAttrs::default())
@@ -585,7 +585,7 @@ async fn orphan_files_from_a_crash_are_swept() {
         assert_eq!(removed.len(), 1);
     }
     assert!(data_file.exists());
-    let _store = Store::open(dir.path()).unwrap();
+    let _store = Store::open_files(dir.path()).unwrap();
     assert!(!data_file.exists());
 }
 

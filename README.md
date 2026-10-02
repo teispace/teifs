@@ -251,7 +251,7 @@ requests live. See
 | `teifs key list\|create NAME\|rotate NAME\|rewrap NAME` | Manage the KMS keys that encrypt objects; `rewrap` seals objects' keys again under a key's newest version (`--dry-run` counts) |
 | `teifs backup [DIR] --to FOLDER` | Copy a drive's metadata (buckets, settings, IAM, object index) into a folder, while no server uses it; objects' bytes stay on the drive |
 | `teifs restore [DIR] --from FOLDER\|SNAPSHOT` | Put a backup or one of the drive's daily snapshots back (asks first; what it replaces is kept) |
-| `teifs repair [DIR] [--apply] [--forget-missing]` | Find where a drive's metadata and files disagree (after restoring an older snapshot, say) and, with `--apply`, set right what's safe to: objects written since get their versions back; lost ones are forgotten only with `--forget-missing` |
+| `teifs repair [DIR] [--apply] [--forget-missing]` | Find where a drive's metadata and files disagree (after restoring an older snapshot, say) and, with `--apply`, set right what's safe to: objects written since get their versions back (but small ones, kept only in the index); lost ones are forgotten only with `--forget-missing` |
 | `teifs verify [--bucket B] [--dir DRIVE] [--kms-keyring PATH]` | Read every stored version back and check it against its checksums and ETag (encrypted ones as they decrypt); exit code 1 when something is damaged |
 | `teifs admin info\|config ALIAS` | A server's version, drive, account, uptime, disks (free, size, kept free), jobs and what its scrubs found; how it was started |
 | `teifs admin snapshot ls\|take ALIAS` | A server's daily snapshots of its drive's metadata (buckets, settings, IAM, object index), or one taken now |

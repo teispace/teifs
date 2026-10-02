@@ -1,5 +1,6 @@
 //! `teifs repair`, through the real binary against a drive made here: after restoring
-//! an older backup, objects written since are reported and, with `--apply`, given back.
+//! an older backup, objects written since are reported and, with `--apply`, given back
+//! (those with data files: small objects live only in the index).
 
 #![allow(
     clippy::unwrap_used,
@@ -11,7 +12,7 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use teifs_store::{Layout, ObjectAttrs, Store, StoreError};
+use teifs_store::{INLINE_MAX, Layout, ObjectAttrs, Store, StoreError};
 
 fn teifs(args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_teifs"));
@@ -35,8 +36,10 @@ async fn put(drive: &Path, key: &str) {
     if store.head_bucket("obj").await.is_err() {
         store.create_bucket("obj", Layout::Object).await.unwrap();
     }
+    // Too big to be kept in the index: it gets a data file.
+    let bytes = vec![b'x'; usize::try_from(INLINE_MAX).unwrap() + 1];
     store
-        .put_bytes("obj", key, b"x", ObjectAttrs::default())
+        .put_bytes("obj", key, &bytes, ObjectAttrs::default())
         .await
         .unwrap();
 }

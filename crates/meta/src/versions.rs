@@ -66,6 +66,10 @@ const COLUMNS: &str = "bucket_id, key, version_id, delete_marker, object_id, siz
 /// The columns [`from_row`] reads.
 const READ: &str = "bucket_id, key, version_id, delete_marker, object_id, size, etag, \
                     modified_ms, attrs, crypt, parts, data, seq, latest";
+/// The same, without an inline object's bytes: for listings, which describe objects and
+/// would otherwise read every listed object's bytes.
+const LISTED: &str = "bucket_id, key, version_id, delete_marker, object_id, size, etag, \
+                      modified_ms, attrs, crypt, parts, NULL, seq, latest";
 
 fn from_row(r: &SqlRow<'_>) -> rusqlite::Result<VersionRow> {
     let key: Vec<u8> = r.get(1)?;
@@ -381,7 +385,7 @@ impl Index {
     ) -> Result<Vec<VersionRow>> {
         let (bucket_id, key, seq) = after.unwrap_or(("", "", i64::MIN));
         let sql = format!(
-            "SELECT {READ} FROM object_versions
+            "SELECT {LISTED} FROM object_versions
              WHERE crypt IS NOT NULL
                AND ((json_extract(crypt, '$.sealed.kmsKey') = ?1
                      AND json_extract(crypt, '$.sealed.kmsVersion') < ?2)
@@ -449,7 +453,7 @@ impl Index {
         let end = prefix_end(prefix);
         // Plain range bounds, so SQLite walks the partial index in order.
         let sql = format!(
-            "SELECT {READ} FROM object_versions
+            "SELECT {LISTED} FROM object_versions
              WHERE bucket_id = ?1 AND latest = 1 AND key {} ?2 {}
              ORDER BY key LIMIT ?4",
             if inclusive { ">=" } else { ">" },
@@ -500,7 +504,7 @@ impl Index {
             _ => None,
         };
         let sql = format!(
-            "SELECT {READ} FROM object_versions
+            "SELECT {LISTED} FROM object_versions
              WHERE bucket_id = ?1 AND key {} ?2 {} {}
              ORDER BY key, seq DESC LIMIT ?5",
             if inclusive { ">=" } else { ">" },
@@ -781,6 +785,29 @@ mod tests {
         rows.iter()
             .map(|r| format!("{}{}", r.version_id, if r.latest { "*" } else { "" }))
             .collect()
+    }
+
+    #[test]
+    fn listings_leave_out_inline_bytes_and_lookups_keep_them() {
+        let (_dir, index) = index();
+        let inline = VersionRow {
+            object_id: None,
+            inline: Some(b"abc".to_vec()),
+            ..row("k", "unused")
+        };
+        index.put_version(&inline, 1).unwrap();
+        let (listed, _) = index
+            .list_latest("b1", "", VersionsFrom::Start, 10)
+            .unwrap();
+        assert_eq!(listed[0].inline, None);
+        let versions = index
+            .list_versions("b1", "", VersionsFrom::Start, 10)
+            .unwrap();
+        assert_eq!(versions[0].inline, None);
+        let found = index.latest_version("b1", "k").unwrap().unwrap();
+        assert_eq!(found.inline.as_deref(), Some(&b"abc"[..]));
+        let found = index.version("b1", "k", NULL_VERSION).unwrap().unwrap();
+        assert_eq!(found.inline.as_deref(), Some(&b"abc"[..]));
     }
 
     #[test]

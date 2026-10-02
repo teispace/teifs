@@ -493,13 +493,13 @@ mod tests {
         later(&store).await;
         drop(store);
         restore(root, &backups.path().join(&backup.name)).unwrap();
-        Store::open(root).unwrap()
+        Store::open_files(root).unwrap()
     }
 
     #[tokio::test]
     async fn a_restore_to_an_older_snapshot_gets_newer_objects_back() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         put(&store, "obj", "a", b"one").await;
         let store = restored_after(drive.path(), store, async |store| {
@@ -560,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn given_back_versions_take_their_place_by_when_they_were_written() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store
             .set_bucket_versioning("obj", Versioning::Enabled)
@@ -591,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_file_is_forgotten_only_when_asked() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         put(&store, "obj", "a", b"one").await;
         put(&store, "obj", "b", b"two").await;
@@ -628,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn a_null_version_replaced_since_is_removed() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         put(&store, "obj", "a", b"one").await;
         let old = files(drive.path()).remove(0);
@@ -650,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn what_cant_be_told_apart_is_left_alone() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store.create_bucket("other", Layout::Object).await.unwrap();
         put(&store, "obj", "a", b"one").await;
@@ -705,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn a_version_id_taken_by_another_file_is_left_alone() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store
             .set_bucket_versioning("obj", Versioning::Enabled)
@@ -741,7 +741,7 @@ mod tests {
     #[tokio::test]
     async fn a_lost_index_is_rebuilt_from_the_files() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store
             .set_bucket_versioning("obj", Versioning::Enabled)
@@ -756,7 +756,7 @@ mod tests {
             let _ = fs::remove_file(system.join(format!("{INDEX_DB}{suffix}")));
         }
 
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         let report = store.repair(APPLY).await.unwrap();
         assert_eq!(found(&report), [("unlisted", true); 3]);
         assert_eq!(
@@ -769,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn a_damaged_database_is_not_repaired_from() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         for i in 0..200 {
             put(&store, "obj", &format!("key-{i:04}"), b"x").await;
@@ -788,7 +788,7 @@ mod tests {
         bytes[2 * 4096..3 * 4096].fill(0xA5);
         fs::write(&index, bytes).unwrap();
 
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         assert!(matches!(
             store.repair(APPLY).await,
             Err(StoreError::DamagedDatabase(INDEX_DB))
@@ -798,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn a_file_waiting_to_be_removed_is_left_to_the_sweeper() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         put(&store, "obj", "a", b"one").await;
         {
@@ -819,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn upload_folders_of_no_upload_are_removed() {
         let drive = tempfile::tempdir().unwrap();
-        let store = Store::open(drive.path()).unwrap();
+        let store = Store::open_files(drive.path()).unwrap();
         store.create_bucket("obj", Layout::Object).await.unwrap();
         let upload = store
             .create_upload(

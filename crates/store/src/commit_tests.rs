@@ -99,9 +99,14 @@ async fn concurrent_versioned_writes_each_make_a_version(layout: Layout) {
     assert_eq!(listing.versions.iter().filter(|v| v.latest).count(), 3);
 }
 
+/// An object bucket that keeps every object in a file, so tests can watch the files.
 async fn object_bucket() -> (TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let options = StoreOptions {
+        inline_max: Some(0),
+        ..StoreOptions::default()
+    };
+    let store = Store::open_with(dir.path(), options).unwrap();
     store.create_bucket("docs", Layout::Object).await.unwrap();
     (dir, store)
 }
@@ -125,7 +130,7 @@ async fn write(store: &Store, key: &str, bytes: &[u8]) -> (Written, PathBuf) {
         .write_object(&resolved(store), key, finished)
         .unwrap();
     staged.keep();
-    let path = written.path().to_owned();
+    let path = written.path().expect("kept in a file").to_owned();
     assert!(path.is_file());
     (written, path)
 }

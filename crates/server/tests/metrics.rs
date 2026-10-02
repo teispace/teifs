@@ -335,10 +335,11 @@ async fn reads_and_writes_are_timed_by_stage() {
     .await;
     let s3 = client(&server, SECRET_KEY);
     s3.create_bucket().bucket("timed").send().await.unwrap();
+    // Big enough for a data file of its own (and its sync).
     s3.put_object()
         .bucket("timed")
         .key("a")
-        .body(ByteStream::from_static(b"hello"))
+        .body(ByteStream::from(vec![b'x'; 200 * 1024]))
         .send()
         .await
         .unwrap();

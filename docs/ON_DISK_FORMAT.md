@@ -55,9 +55,9 @@ complete.
 | | Folder bucket | Object bucket |
 |---|---|---|
 | Where | A folder at the drive's root | `.teifs/buckets/<bucket id>/`, recorded in `system.db` |
-| Objects | Plain files at their keys' paths | Data files named by object id |
+| Objects | Plain files at their keys' paths | Data files named by object id; small objects in their rows |
 | Keys | Those a file system can hold (below) | Any key S3 allows: 1 to 1024 bytes |
-| Source of truth | The files; the index is rebuildable | The index; data files carry a footer to rebuild it |
+| Source of truth | The files; the index is rebuildable | The index; data files carry a footer to rebuild it, but small objects live only in the index |
 
 A folder at the drive's root that has an object bucket's name isn't a bucket; it
 becomes one if the object bucket is deleted.
@@ -113,12 +113,19 @@ size before encryption), then a footer:
 | Footer version (1) | 1 |
 | Magic `TFSO` | 4 |
 
+An object of at most 32 KiB as stored (encrypted, when it is), uploaded in one piece,
+has no data file: its stored bytes, exactly what a data file would hold before its
+footer, are in its row's `data` column, and its `object_id` is `NULL`. Writing it costs
+only the index's own sync, shared with the writes recorded alongside it. Such objects
+can't be rebuilt from files, so they are only as safe as `index.db` and its snapshots.
+Objects uploaded in parts always get a data file.
+
 The footer records the object as it was written. Later changes (tags, retention, legal
 hold, an encryption update) are in the index only; an older sealed key in a footer still
 opens its data, because KMS key versions are never deleted.
 
-Each version has a data file of its own; a delete marker is a row without one, so
-markers are the one thing the files can't rebuild. Version ids are `null` or 32 hex
+Each version but a small one has a data file of its own; a delete marker is a row
+without one, so markers and small objects are what the files can't rebuild. Version ids are `null` or 32 hex
 digits (a UUIDv7); a key's versions are ordered by `seq`, not by id, and exactly one
 of them is `latest` while the key has any.
 
