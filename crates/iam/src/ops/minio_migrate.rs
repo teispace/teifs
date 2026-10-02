@@ -266,7 +266,7 @@ fn is_builtin(name: &str, document: &str) -> bool {
 
 impl Draft<'_> {
     /// Maps exactly `policies` (by name) to an LDAP user or group.
-    fn replace_ldap_policies(
+    pub(super) fn replace_ldap_policies(
         &mut self,
         dn: &str,
         entity: LdapEntity,

@@ -177,6 +177,8 @@ enum Handler {
     MinioIamTransfer(minio_iam_transfer::Call),
     /// `MinIO`'s bucket metadata export and import.
     MinioBucketMetadata(minio_bucket_metadata::Call),
+    /// `MinIO`'s older `set-user-or-group-policy`.
+    MinioSetPolicy,
 }
 
 impl Handler {
@@ -243,6 +245,7 @@ impl Handler {
             Self::MinioIdpConfig(call) => call.name(),
             Self::MinioIamTransfer(call) => call.name(),
             Self::MinioBucketMetadata(call) => call.name(),
+            Self::MinioSetPolicy => "SetPolicyForUserOrGroup",
         }
     }
 }
@@ -573,6 +576,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("admin:DeletePolicy", ANY),
         handler: Handler::RemoveCannedPolicy,
         about: "Deletes policy `?name=`, which nothing may use: `mc admin policy rm`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/set-user-or-group-policy",
+        needs: Needs::Action("admin:AttachUserOrGroupPolicy", ANY),
+        handler: Handler::MinioSetPolicy,
+        about: "Maps exactly `?policyName=` (comma-separated; empty: none) to `?userOrGroup=` (`?isGroup=true|false`), a built-in user or group or else the LDAP directory's: `MinIO`'s older `mc admin policy set`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1645,6 +1656,7 @@ impl Routes {
             Handler::MinioIdpConfig(call) => call.call(self, req).await,
             Handler::MinioIamTransfer(call) => call.call(self, req).await,
             Handler::MinioBucketMetadata(call) => call.call(self, req).await,
+            Handler::MinioSetPolicy => minio_iam::set_user_or_group_policy(&self.iam, &req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

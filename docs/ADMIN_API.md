@@ -102,6 +102,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/info-canned-policy` | Policy `?name=`'s document, or with `&v=2` its `PolicyInfo`: `mc admin policy info` | `admin:GetPolicy` |
 | `GET` | `/minio/admin/v3/list-canned-policies` | Every policy's document by name, built-in ones included: `mc admin policy ls` | `admin:ListUserPolicies` |
 | `DELETE` | `/minio/admin/v3/remove-canned-policy` | Deletes policy `?name=`, which nothing may use: `mc admin policy rm` | `admin:DeletePolicy` |
+| `PUT` | `/minio/admin/v3/set-user-or-group-policy` | Maps exactly `?policyName=` (comma-separated; empty: none) to `?userOrGroup=` (`?isGroup=true|false`), a built-in user or group or else the LDAP directory's: `MinIO`'s older `mc admin policy set` | `admin:AttachUserOrGroupPolicy` |
 | `POST` | `/minio/admin/v3/idp/builtin/policy/attach` | Attaches policies to a user or group (an encrypted `PolicyAssociationReq`), answering what changed, encrypted: `mc admin policy attach` | `admin:UpdatePolicyAssociation` |
 | `POST` | `/minio/admin/v3/idp/builtin/policy/detach` | Detaches policies from a user or group, as `attach`: `mc admin policy detach` | `admin:UpdatePolicyAssociation` |
 | `GET` | `/minio/admin/v3/idp/builtin/policy-entities` | Who has which policies (`?user=`, `?group=`, `?policy=`, each repeated, or all), encrypted: `mc admin policy entities` | `admin:ListUserPolicies` |

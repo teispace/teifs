@@ -13,8 +13,8 @@ use http::StatusCode;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
 use teifs_iam::{
-    GroupPolicies, Iam, Identity, MinioError, MinioGroup, MinioUser, MinioUserChange, Owner,
-    PolicyEntities,
+    GroupPolicies, Iam, Identity, LdapEntity, MinioError, MinioGroup, MinioUser, MinioUserChange,
+    Owner, PolicyEntities,
 };
 use teifs_policy::Context;
 use teifs_store::{RetentionPeriod, Store, Versioning};
@@ -439,6 +439,82 @@ pub(crate) struct Association {
     pub(crate) group: String,
     #[serde(default, rename = "configName")]
     pub(crate) config_name: String,
+}
+
+/// `PUT set-user-or-group-policy?policyName=…&userOrGroup=…&isGroup=true|false`:
+/// `MinIO`'s older call, which maps exactly the policies named (comma-separated; none:
+/// no policy) to a user or group of the built-in provider's, or else of the LDAP
+/// directory's.
+pub(crate) async fn set_user_or_group_policy(
+    iam: &Iam,
+    req: &S3Request<Body>,
+) -> S3Result<S3Response<Body>> {
+    let entity = required(req, "userOrGroup")?;
+    let params = query(req);
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let is_group = match param("isGroup") {
+        Some("true") => true,
+        Some("false") => false,
+        _ => return Err(invalid("The query needs isGroup=true or isGroup=false")),
+    };
+    let policies: Vec<String> = param("policyName")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let (owner, entity_kind, missing) = if is_group {
+        (
+            Owner::Group(&entity),
+            LdapEntity::Group,
+            MinioError::NoSuchGroup,
+        )
+    } else {
+        if iam.root_access_key().as_deref() == Some(entity.as_str()) {
+            return Err(minio_error(MinioError::ActionNotAllowed(
+                "The root user has every permission already.".into(),
+            )));
+        }
+        (
+            Owner::User(&entity),
+            LdapEntity::User,
+            MinioError::NoSuchUser,
+        )
+    };
+    let built_in = if is_group {
+        iam.minio_group(&entity).is_ok()
+    } else {
+        iam.minio_user(&entity).is_ok()
+    };
+    if built_in {
+        iam.minio_set_policies(owner, &policies)
+            .map_err(minio_error)?;
+    } else if iam.ldap().is_some() {
+        let dn = if is_group {
+            entity.clone()
+        } else {
+            match iam.find_ldap_user(&entity).await {
+                Ok(Some(dn)) => dn,
+                Ok(None) => return Err(minio_error(missing)),
+                Err(err) => return Err(minio_error(err.into())),
+            }
+        };
+        iam.set_ldap_policies(&dn, entity_kind, &policies)
+            .await
+            .map_err(|err| match err {
+                MinioError::Iam(teifs_iam::IamError::NoSuchEntity(_)) => minio_error(missing),
+                err => minio_error(err),
+            })?;
+    } else {
+        return Err(minio_error(missing));
+    }
+    Ok(S3Response::new(Body::empty()))
 }
 
 /// `madmin.PolicyAssociationResp`.

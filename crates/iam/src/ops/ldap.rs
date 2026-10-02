@@ -346,6 +346,30 @@ impl Iam {
         policies: &[String],
         attach: bool,
     ) -> Result<LdapPolicyChange> {
+        let dn = self.directory_dn(dn, entity, attach).await?;
+        self.map_ldap_policies(&dn, entity, policies, attach)
+    }
+
+    /// Maps exactly `policies` (none: no mapping) to a DN in any spelling the directory
+    /// has as a user (or a group) under the base DNs (`MinIO`'s
+    /// `set-user-or-group-policy`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Iam::change_ldap_policies`], and `NoSuchPolicy` for a policy that isn't there.
+    pub async fn set_ldap_policies(
+        &self,
+        dn: &str,
+        entity: LdapEntity,
+        policies: &[String],
+    ) -> std::result::Result<(), super::MinioError> {
+        let dn = self.directory_dn(dn, entity, true).await?;
+        self.change(|d| d.replace_ldap_policies(&dn, entity, policies))
+    }
+
+    /// A DN as the directory spells it, which must have it under the base DNs unless
+    /// `!attach` (a DN it no longer has can still lose its policies).
+    async fn directory_dn(&self, dn: &str, entity: LdapEntity, attach: bool) -> Result<String> {
         let directory = self
             .ldap()
             .ok_or_else(|| IamError::InvalidInput(format!("{}.", LdapError::NotSetUp)))?;
@@ -380,7 +404,7 @@ impl Iam {
                 )));
             }
         };
-        self.map_ldap_policies(&dn, entity, policies, attach)
+        Ok(dn)
     }
 
     /// A directory user named by its DN, in any spelling, or by the name it signs in

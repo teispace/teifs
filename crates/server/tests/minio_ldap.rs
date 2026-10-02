@@ -460,3 +460,46 @@ async fn root_makes_one_for_liza(server: &Server) -> (String, String) {
     assert_eq!(err["Code"], "XMinioAdminNoSuchUser");
     made(&answer)
 }
+
+#[tokio::test]
+async fn set_user_or_group_policy_maps_ldap_users_and_groups() {
+    let fake = FakeLdap::start().await;
+    let server = ldap_server(&fake).await;
+    let set = |query: String| {
+        let server = &server;
+        async move {
+            let path = format!("{ADMIN}set-user-or-group-policy?{query}");
+            let response =
+                signed_response(server, (ROOT.id, ROOT.secret), "PUT", &path, &[], &[]).await;
+            response.status().as_u16()
+        }
+    };
+    let mapped = |dn: &str| {
+        server
+            .iam
+            .ldap_policies(Some(dn))
+            .unwrap()
+            .first()
+            .map(|m| m.policies.clone())
+            .unwrap_or_default()
+    };
+    // A directory user by the name it signs in with, a group by DN in another spelling.
+    let query = "policyName=read-photos,readonly&userOrGroup=liza&isGroup=false";
+    assert_eq!(set(query.to_owned()).await, 200);
+    assert_eq!(mapped(LIZA), ["read-photos", "readonly"]);
+    assert_eq!(
+        set("policyName=readonly&userOrGroup=liza&isGroup=false".to_owned()).await,
+        200
+    );
+    assert_eq!(mapped(LIZA), ["readonly"]);
+    let group = "CN=ProjectA,OU=Groups,DC=min,DC=io";
+    let query = format!("policyName=read-photos&userOrGroup={group}&isGroup=true");
+    assert_eq!(set(query).await, 200);
+    assert_eq!(mapped(PROJECT_A), ["read-photos"]);
+    assert_eq!(
+        set("policyName=readonly&userOrGroup=nobody&isGroup=false".to_owned()).await,
+        404
+    );
+    let query = "policyName=readonly&userOrGroup=cn=nobody,ou=groups,dc=min,dc=io&isGroup=true";
+    assert_eq!(set(query.to_owned()).await, 404);
+}

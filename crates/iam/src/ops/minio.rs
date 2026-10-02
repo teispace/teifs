@@ -729,6 +729,12 @@ impl Iam {
         self.change(|d| d.minio_remove_policy(name))
     }
 
+    /// Attaches exactly `policies` (by name; none: no policy) to a user or group
+    /// (`set-user-or-group-policy`).
+    pub fn minio_set_policies(&self, owner: Owner<'_>, policies: &[String]) -> Result<()> {
+        self.change(|d| d.replace_policies(owner, policies))
+    }
+
     /// Attaches (or detaches) policies by name to a user or group; the names of those
     /// that changed (`idp/builtin/policy/attach`, `detach`).
     pub fn minio_associate(

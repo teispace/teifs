@@ -587,6 +587,11 @@ func iamTransfer(ctx context.Context, adm *madmin.AdminClient) {
 	user, err := adm.GetUserInfo(ctx, "go-mover")
 	must(err)
 	check(user.PolicyName == "go-mover" && user.Status == madmin.AccountEnabled, fmt.Sprintf("moved back: %+v", user))
+	// The older call mc admin policy set makes: exactly these policies.
+	must(adm.SetPolicy(ctx, "readonly,go-mover", "go-mover", false))
+	user, err = adm.GetUserInfo(ctx, "go-mover")
+	must(err)
+	check(user.PolicyName == "go-mover,readonly" || user.PolicyName == "readonly,go-mover", fmt.Sprintf("set: %+v", user))
 	must(adm.ImportIAM(ctx, io.NopCloser(bytes.NewReader(zipped))))
 	must(adm.RemoveUser(ctx, "go-mover"))
 	must(adm.RemoveCannedPolicy(ctx, "go-mover"))

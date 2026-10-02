@@ -1094,3 +1094,80 @@ async fn access_keys_are_listed_and_described_as_mc_admin_accesskey_does() {
     let path = "list-access-keys-bulk?listType=some";
     assert_eq!(secret_call(&server, bob, "GET", path, None).await.0, 400);
 }
+
+/// `set-user-or-group-policy`, as `MinIO`'s older `mc admin policy set` calls it.
+async fn set_policy(server: &Server, query: &str) -> (u16, Value) {
+    call(
+        server,
+        ROOT,
+        "PUT",
+        &format!("set-user-or-group-policy?{query}"),
+        b"",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn set_user_or_group_policy_maps_exactly_the_policies_named() {
+    let server = start().await;
+    assert_eq!(add_user(&server, ROOT, "bob", "bob-secret").await.0, 200);
+    let lister = "add-canned-policy?name=lister";
+    assert_eq!(
+        call(&server, ROOT, "PUT", lister, LISTER.as_bytes())
+            .await
+            .0,
+        200
+    );
+    let policies = |server: &Server| server.iam.minio_user("bob").unwrap().policies;
+
+    let (status, answer) = set_policy(
+        &server,
+        "policyName=lister,readonly&userOrGroup=bob&isGroup=false",
+    )
+    .await;
+    assert_eq!((status, &answer), (200, &json!("")));
+    assert_eq!(policies(&server), ["lister", "readonly"]);
+    assert_eq!(lists(&server, ("bob", "bob-secret")).await, "ok");
+    set_policy(&server, "policyName=readonly&userOrGroup=bob&isGroup=false").await;
+    assert_eq!(policies(&server), ["readonly"]);
+    set_policy(&server, "policyName=&userOrGroup=bob&isGroup=false").await;
+    assert!(policies(&server).is_empty());
+
+    assert_eq!(members(&server, &["bob"], false).await.0, 200);
+    let (status, _) = set_policy(&server, "policyName=lister&userOrGroup=devs&isGroup=true").await;
+    assert_eq!(status, 200);
+    assert_eq!(server.iam.minio_group("devs").unwrap().policies, ["lister"]);
+
+    for (query, status, code) in [
+        (
+            "policyName=lister&userOrGroup=nobody&isGroup=false",
+            404,
+            "XMinioAdminNoSuchUser",
+        ),
+        (
+            "policyName=lister&userOrGroup=nobody&isGroup=true",
+            404,
+            "XMinioAdminNoSuchGroup",
+        ),
+        (
+            "policyName=missing&userOrGroup=bob&isGroup=false",
+            404,
+            "XMinioAdminNoSuchPolicy",
+        ),
+        (
+            &format!("policyName=lister&userOrGroup={ACCESS_KEY}&isGroup=false"),
+            403,
+            "XMinioIAMActionNotAllowed",
+        ),
+        (
+            "policyName=lister&userOrGroup=bob",
+            400,
+            "XMinioAdminInvalidArgument",
+        ),
+    ] {
+        let (got, answer) = set_policy(&server, query).await;
+        assert_eq!((got, &answer["Code"]), (status, &json!(code)), "{query}");
+    }
+    // A failed change changes nothing.
+    assert!(policies(&server).is_empty());
+}
