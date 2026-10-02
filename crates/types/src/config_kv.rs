@@ -1199,6 +1199,167 @@ impl ConfigKv {
             .cloned()
             .collect()
     }
+
+    /// The sub-system `name`'s targets as `MinIO`'s `GetAvailableTargets` finds them:
+    /// [`DEFAULT_TARGET`] first, then those set and those `variables` name (a key's
+    /// variable with a target's suffix), sorted. A target named both ways is listed once,
+    /// as it was set.
+    ///
+    /// # Errors
+    ///
+    /// When TeiFS has no sub-system `name`.
+    pub fn available_targets<'a>(
+        &self,
+        name: &str,
+        variables: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<String>, ConfigError> {
+        let subsystem = known(name)?;
+        let mut targets: Vec<String> = self
+            .target_names(name)
+            .into_iter()
+            .filter(|t| t != DEFAULT_TARGET)
+            .collect();
+        if subsystem.multiple_targets {
+            let own: Vec<String> = subsystem
+                .names()
+                .chain([COMMENT])
+                .map(|key| variable(name, DEFAULT_TARGET, key))
+                .collect();
+            let prefixes: Vec<String> = own.iter().map(|own| format!("{own}_")).collect();
+            // A default target's variable isn't another's: `REDIRECT_URI_DYNAMIC` is a key
+            // of its own, not `REDIRECT_URI` for a target `DYNAMIC` (as `MinIO` takes it).
+            for variable in variables
+                .into_iter()
+                .filter(|v| !own.iter().any(|o| o == v))
+            {
+                let target = prefixes
+                    .iter()
+                    .filter(|prefix| variable.starts_with(prefix.as_str()))
+                    .max_by_key(|prefix| prefix.len())
+                    .and_then(|prefix| variable.get(prefix.len()..))
+                    .filter(|target| !target.is_empty());
+                if let Some(target) = target
+                    && !targets.iter().any(|t| t.eq_ignore_ascii_case(target))
+                {
+                    targets.push(target.to_owned());
+                }
+            }
+        }
+        targets.sort();
+        targets.insert(0, DEFAULT_TARGET.to_owned());
+        Ok(targets)
+    }
+
+    /// A target's values as `MinIO` resolves them (`GetResolvedConfigParams`): each key's
+    /// variable when `env` has it, else the value set for the target. Keys at neither are
+    /// left out, and secrets always are.
+    ///
+    /// # Errors
+    ///
+    /// When TeiFS has no sub-system `name`.
+    pub fn resolved(
+        &self,
+        name: &str,
+        target: &str,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Vec<Resolved>, ConfigError> {
+        let subsystem = known(name)?;
+        Ok(self
+            .resolve(subsystem, target, env)
+            .into_iter()
+            .filter(|(key, _, source)| {
+                *source != Source::Default && subsystem.key(key).is_none_or(|k| !k.secret)
+            })
+            .map(|(key, value, source)| Resolved {
+                key,
+                value,
+                from_env: source == Source::Env,
+            })
+            .collect())
+    }
+
+    /// Whether a target is on with its values resolved as [`Self::resolved`] does, and
+    /// the value of each of its keys.
+    ///
+    /// # Errors
+    ///
+    /// When TeiFS has no sub-system `name`.
+    pub fn resolved_on(
+        &self,
+        name: &str,
+        target: &str,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(bool, BTreeMap<String, String>), ConfigError> {
+        let subsystem = known(name)?;
+        let kvs: Kvs = self
+            .resolve(subsystem, target, env)
+            .into_iter()
+            .map(|(key, value, _)| (key, value))
+            .collect();
+        // A target nothing set isn't on, though its `enable` defaults to it.
+        let given = kvs
+            .iter()
+            .any(|(key, value)| key != ENABLE && subsystem.default_of(key) != Some(value.as_str()));
+        let on = given && {
+            let mut kvs = kvs.clone();
+            if get(&kvs, ENABLE).is_some_and(str::is_empty) {
+                set(&mut kvs, ENABLE, "on".to_owned());
+            }
+            subsystem.is_on(&kvs)
+        };
+        Ok((on, kvs.into_iter().collect()))
+    }
+
+    /// Every key of a target with its value and where it comes from.
+    fn resolve(
+        &self,
+        subsystem: &'static Subsystem,
+        target: &str,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(String, String, Source)> {
+        let kvs = self
+            .subsystems
+            .get(subsystem.name)
+            .and_then(|targets| targets.get(target));
+        subsystem
+            .names()
+            .chain([COMMENT])
+            .filter_map(|key| {
+                if let Some(value) =
+                    env(&variable(subsystem.name, target, key)).filter(|v| !v.is_empty())
+                {
+                    return Some((key.to_owned(), value, Source::Env));
+                }
+                if let Some(value) = kvs.and_then(|kvs| get(kvs, key)) {
+                    if key == COMMENT && value.is_empty() {
+                        return None;
+                    }
+                    return Some((key.to_owned(), value.to_owned(), Source::Config));
+                }
+                let default = subsystem.default_of(key)?;
+                Some((key.to_owned(), default.to_owned(), Source::Default))
+            })
+            .collect()
+    }
+}
+
+/// Where a resolved value comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Default,
+    Config,
+    Env,
+}
+
+/// A target's value, resolved: see [`ConfigKv::resolved`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// Its key.
+    pub key: String,
+    /// Its value.
+    pub value: String,
+    /// Whether a variable set it.
+    pub from_env: bool,
 }
 
 impl Written<'_> {
@@ -1401,6 +1562,90 @@ mod tests {
         assert_eq!(variables["MINIO_IDENTITY_LDAP_ENABLE"], "on");
         // Defaults aren't variables.
         assert!(!variables.contains_key("MINIO_IDENTITY_LDAP_TLS_SKIP_VERIFY"));
+    }
+
+    #[test]
+    fn targets_are_found_where_they_were_set_and_in_variables() {
+        let config = ConfigKv::parse(
+            "identity_openid:keycloak config_url=https://k.example.com client_id=k",
+        )
+        .unwrap();
+        let variables = [
+            "MINIO_IDENTITY_OPENID_CONFIG_URL_DEX",
+            "MINIO_IDENTITY_OPENID_CLIENT_ID_KEYCLOAK",
+            "MINIO_IDENTITY_OPENID_REDIRECT_URI_DYNAMIC",
+            "MINIO_IDENTITY_OPENID_CONFIG_URL",
+            "MINIO_IDENTITY_LDAP_SERVER_ADDR",
+        ];
+        assert_eq!(
+            config
+                .available_targets("identity_openid", variables)
+                .unwrap(),
+            ["_", "DEX", "keycloak"]
+        );
+        // LDAP has one target.
+        assert_eq!(
+            config
+                .available_targets("identity_ldap", ["MINIO_IDENTITY_LDAP_SERVER_ADDR_X"])
+                .unwrap(),
+            ["_"]
+        );
+        assert!(config.available_targets("identity_x", []).is_err());
+    }
+
+    #[test]
+    fn values_resolve_from_variables_then_the_configuration() {
+        let config = ConfigKv::parse(
+            "identity_ldap server_addr=ldap.example.com:636 lookup_bind_dn=cn=admin \
+             lookup_bind_password=s3cr3t user_dn_search_base_dn=dc=example \
+             user_dn_search_filter=(uid=%s)",
+        )
+        .unwrap();
+        let env = |name: &str| {
+            (name == "MINIO_IDENTITY_LDAP_SERVER_ADDR").then(|| "other.example.com".to_owned())
+        };
+        let resolved = config
+            .resolved("identity_ldap", DEFAULT_TARGET, &env)
+            .unwrap();
+        let find = |key: &str| resolved.iter().find(|r| r.key == key);
+        let server = find("server_addr").unwrap();
+        assert_eq!(
+            (server.value.as_str(), server.from_env),
+            ("other.example.com", true)
+        );
+        let dn = find("lookup_bind_dn").unwrap();
+        assert_eq!((dn.value.as_str(), dn.from_env), ("cn=admin", false));
+        assert!(find("lookup_bind_password").is_none(), "secrets stay out");
+        assert!(find("comment").is_none());
+        let (on, values) = config
+            .resolved_on("identity_ldap", DEFAULT_TARGET, &env)
+            .unwrap();
+        assert!(on);
+        assert_eq!(values["server_addr"], "other.example.com");
+
+        // A target nothing set: only what variables give, and off.
+        let empty = ConfigKv::default();
+        let resolved = empty.resolved("identity_openid", "dex", &none).unwrap();
+        assert!(resolved.is_empty());
+        assert!(
+            !empty
+                .resolved_on("identity_openid", "dex", &none)
+                .unwrap()
+                .0
+        );
+        let env = |name: &str| match name {
+            "MINIO_IDENTITY_OPENID_CONFIG_URL_DEX" => Some("https://dex".to_owned()),
+            "MINIO_IDENTITY_OPENID_CLIENT_ID_DEX" => Some("app".to_owned()),
+            _ => None,
+        };
+        let resolved = empty.resolved("identity_openid", "dex", &env).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().all(|r| r.from_env));
+        assert!(empty.resolved_on("identity_openid", "dex", &env).unwrap().0);
+        let off =
+            ConfigKv::parse("identity_openid:dex config_url=https://dex client_id=app enable=off")
+                .unwrap();
+        assert!(!off.resolved_on("identity_openid", "dex", &none).unwrap().0);
     }
 
     #[test]

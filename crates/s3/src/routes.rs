@@ -32,8 +32,8 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_ldap,
-    minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
+    iam_api, listen, minio_config, minio_heal, minio_iam, minio_idp_config, minio_info, minio_kms,
+    minio_ldap, minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
     minio_speedtest,
     observe::{self, Seen},
     quota,
@@ -172,6 +172,7 @@ enum Handler {
     MinioSpeedtest(minio_speedtest::Call),
     MinioLdap(minio_ldap::Call),
     MinioConfig(minio_config::Call),
+    MinioIdpConfig(minio_idp_config::Call),
 }
 
 impl Handler {
@@ -235,6 +236,7 @@ impl Handler {
             Self::MinioSpeedtest(call) => call.name(),
             Self::MinioLdap(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
+            Self::MinioIdpConfig(call) => call.name(),
         }
     }
 }
@@ -1088,6 +1090,46 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioConfig(minio_config::Call::Import),
         about: "Replaces the whole configuration with the encrypted body's: `mc admin config import`",
     },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/idp-config/{type}/{name}",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioIdpConfig(minio_idp_config::Call::Add),
+        about: "Adds identity provider configuration `{name}` (`_` for the default; LDAP has only that) of `{type}` `ldap` or `openid`, from the encrypted body's `key=value` pairs; it takes effect when the server starts again: `mc admin idp ldap|openid add`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/idp-config/{type}/{name}",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioIdpConfig(minio_idp_config::Call::Update),
+        about: "Changes identity provider configuration `{name}` with the encrypted body's `key=value` pairs: `mc admin idp ldap|openid update`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp-config/{type}/{name}",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioIdpConfig(minio_idp_config::Call::Get),
+        about: "Identity provider configuration `{name}`'s values (from the drive's configuration or `MinIO`'s variables, without secrets) and role ARN, as `madmin.IDPConfig` encrypted with the caller's secret key: `mc admin idp ldap|openid info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/idp-config/{type}",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioIdpConfig(minio_idp_config::Call::List),
+        about: "The identity provider configurations of `{type}`, whether each is on and its role ARN, as `madmin.IDPListItem` encrypted with the caller's secret key: `mc admin idp ldap|openid list`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: "/minio/admin/v3/idp-config/{type}/{name}",
+        needs: Needs::Action("admin:ConfigUpdate", ANY),
+        handler: Handler::MinioIdpConfig(minio_idp_config::Call::Delete),
+        about: "Removes identity provider configuration `{name}` (not one `MinIO`'s variables set): `mc admin idp ldap|openid remove`",
+    },
 ];
 
 /// Why a call decided on its query's bucket has one.
@@ -1203,13 +1245,19 @@ fn endpoint(api: Api, method: &Method, path: &str) -> Option<&'static Endpoint> 
         .find(|e| e.api == api && e.verb == verb && matches(e.path, &path))
 }
 
-/// Whether `path` is an endpoint's: the same, or, for a path ending in a `{label}`, one
-/// with something in its place.
+/// Whether `path` is an endpoint's: the same, or, for a path ending in `{label}`s, one
+/// with a segment in each label's place (the last one taking the rest of the path).
 fn matches(pattern: &str, path: &str) -> bool {
-    match pattern.strip_suffix('}').and_then(|p| p.rsplit_once('{')) {
-        Some((prefix, _)) => path.len() > prefix.len() && path.starts_with(prefix),
-        None => pattern == path,
-    }
+    let Some(start) = pattern.find('{') else {
+        return pattern == path;
+    };
+    let (prefix, labels) = pattern.split_at(start);
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    let labels = labels.split('/').count();
+    let segments: Vec<&str> = rest.splitn(labels, '/').collect();
+    segments.len() == labels && segments.iter().all(|s| !s.is_empty())
 }
 
 /// The route s3s hands everything but S3's operations to.
@@ -1547,6 +1595,7 @@ impl Routes {
             Handler::MinioSpeedtest(call) => call.call(self, &req, (identity, context)).await,
             Handler::MinioLdap(call) => call.call(self, req, (identity, context), privileged).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
+            Handler::MinioIdpConfig(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }
@@ -1706,6 +1755,33 @@ pub(crate) fn s3_refusal((status, code, message): Refusal) -> S3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_take_a_segment_and_the_last_the_rest() {
+        let named = "/minio/admin/v3/idp-config/{type}/{name}";
+        let kind = "/minio/admin/v3/idp-config/{type}";
+        assert!(matches(named, "/minio/admin/v3/idp-config/openid/dex"));
+        assert!(!matches(named, "/minio/admin/v3/idp-config/openid"));
+        assert!(!matches(named, "/minio/admin/v3/idp-config/openid/"));
+        assert!(!matches(named, "/minio/admin/v3/idp-config//dex"));
+        assert!(matches(kind, "/minio/admin/v3/idp-config/openid"));
+        assert!(!matches(kind, "/minio/admin/v3/idp-config/"));
+        let heal = "/minio/admin/v3/heal/{path}";
+        assert!(matches(heal, "/minio/admin/v3/heal/photos/2024/"));
+        assert!(!matches(heal, "/minio/admin/v3/heal/"));
+        assert!(matches("/minio/admin/v3/info", "/minio/admin/v3/info"));
+        assert!(!matches("/minio/admin/v3/info", "/minio/admin/v3/info/x"));
+        // The named form is listed first, so a name goes to it.
+        let get = endpoint(
+            Api::Minio,
+            &Method::GET,
+            "/minio/admin/v3/idp-config/ldap/_",
+        )
+        .unwrap();
+        assert_eq!(get.handler.name(), "GetIdentityProviderCfg");
+        let list = endpoint(Api::Minio, &Method::GET, "/minio/admin/v3/idp-config/ldap").unwrap();
+        assert_eq!(list.handler.name(), "ListIdentityProviderCfg");
+    }
 
     #[test]
     fn unlogged_bodies_show_their_size_only() {

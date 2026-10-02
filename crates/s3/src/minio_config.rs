@@ -49,8 +49,9 @@ impl std::fmt::Debug for ConfigSettings {
 /// The configuration settings with the lock that keeps changes one at a time.
 #[derive(Debug)]
 pub(crate) struct Configs {
-    settings: ConfigSettings,
-    changing: tokio::sync::Mutex<()>,
+    pub(crate) settings: ConfigSettings,
+    /// Held while a change is made.
+    pub(crate) changing: tokio::sync::Mutex<()>,
 }
 
 impl Configs {
@@ -116,13 +117,7 @@ impl Call {
             .map_err(config_error)?;
             return Ok(admin::json(&help));
         }
-        let configs = routes.configs.as_deref().ok_or_else(|| {
-            admin::error(
-                StatusCode::NOT_IMPLEMENTED,
-                "NotImplemented",
-                "This server's settings aren't kept on its drive.",
-            )
-        })?;
+        let configs = configs(routes)?;
         let files = &configs.settings.files;
         match self {
             Self::Get => {
@@ -200,8 +195,19 @@ impl Call {
     }
 }
 
+/// The drive's configuration, if the server keeps its settings there.
+pub(crate) fn configs(routes: &Routes) -> S3Result<&Configs> {
+    routes.configs.as_deref().ok_or_else(|| {
+        admin::error(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "This server's settings aren't kept on its drive.",
+        )
+    })
+}
+
 /// Checks `config` as the next start would read it, then keeps it.
-fn keep(configs: &Configs, config: &ConfigKv) -> S3Result<()> {
+pub(crate) fn keep(configs: &Configs, config: &ConfigKv) -> S3Result<()> {
     (configs.settings.check)(config).map_err(|message| {
         admin::error(StatusCode::BAD_REQUEST, "XMinioAdminConfigBadJSON", message)
     })?;
@@ -242,12 +248,12 @@ fn no_change(id: &str) -> S3Error {
 
 /// The value of a `MinIO` variable this server was started with, which `get` and
 /// `export` list as comments.
-fn variable(name: &str) -> Option<String> {
+pub(crate) fn variable(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 /// `MinIO`'s answer to a configuration TeiFS can't take.
-fn config_error(err: ConfigError) -> S3Error {
+pub(crate) fn config_error(err: ConfigError) -> S3Error {
     match err {
         ConfigError::NotFound(message) => {
             admin::error(StatusCode::NOT_FOUND, "XMinioConfigNotFoundError", message)
@@ -259,7 +265,7 @@ fn config_error(err: ConfigError) -> S3Error {
 }
 
 /// The request's configuration text, decrypted with the caller's secret key.
-async fn decrypted(req: &mut S3Request<Body>) -> S3Result<Zeroizing<String>> {
+pub(crate) async fn decrypted(req: &mut S3Request<Body>) -> S3Result<Zeroizing<String>> {
     let too_large = || {
         admin::error(
             StatusCode::BAD_REQUEST,

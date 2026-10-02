@@ -166,6 +166,11 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `PUT` | `/minio/admin/v3/restore-config-history-kv` | Sets change `?restoreId=`'s lines again, then forgets it: `mc admin config restore` | `admin:ConfigUpdate` |
 | `GET` | `/minio/admin/v3/config` | The whole configuration, secrets included, encrypted with the caller's secret key: `mc admin config export` | `admin:ConfigUpdate` |
 | `PUT` | `/minio/admin/v3/config` | Replaces the whole configuration with the encrypted body's: `mc admin config import` | `admin:ConfigUpdate` |
+| `PUT` | `/minio/admin/v3/idp-config/{type}/{name}` | Adds identity provider configuration `{name}` (`_` for the default; LDAP has only that) of `{type}` `ldap` or `openid`, from the encrypted body's `key=value` pairs; it takes effect when the server starts again: `mc admin idp ldap|openid add` | `admin:ConfigUpdate` |
+| `POST` | `/minio/admin/v3/idp-config/{type}/{name}` | Changes identity provider configuration `{name}` with the encrypted body's `key=value` pairs: `mc admin idp ldap|openid update` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/idp-config/{type}/{name}` | Identity provider configuration `{name}`'s values (from the drive's configuration or `MinIO`'s variables, without secrets) and role ARN, as `madmin.IDPConfig` encrypted with the caller's secret key: `mc admin idp ldap|openid info` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/idp-config/{type}` | The identity provider configurations of `{type}`, whether each is on and its role ARN, as `madmin.IDPListItem` encrypted with the caller's secret key: `mc admin idp ldap|openid list` | `admin:ConfigUpdate` |
+| `DELETE` | `/minio/admin/v3/idp-config/{type}/{name}` | Removes identity provider configuration `{name}` (not one `MinIO`'s variables set): `mc admin idp ldap|openid remove` | `admin:ConfigUpdate` |
 
 <!-- end generated -->
 

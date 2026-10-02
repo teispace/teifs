@@ -338,6 +338,9 @@ behaviour; the on-disk format is always upgraded automatically.
   once a policy is mapped to it or its groups. Such an account has its user's mapped
   policies, follows its groups as the directory has them, and goes when the directory
   no longer has its user.
+- MinIO's identity provider configurations (`mc admin idp ldap|openid add|update|
+  remove|info|list`), kept as the `identity_ldap` and `identity_openid` settings
+  `mc admin config` sets, and used when the server starts again.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the

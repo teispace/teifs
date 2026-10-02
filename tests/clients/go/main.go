@@ -146,6 +146,7 @@ func main() {
 	service(ctx, adm)
 	kms(ctx, adm)
 	configKV(ctx, adm)
+	idpConfig(ctx, adm)
 	trace(ctx, adm, s3c, *bucket)
 	consoleLog(ctx, adm)
 	realtime(ctx, adm)
@@ -490,6 +491,43 @@ func kms(ctx context.Context, adm *madmin.AdminClient) {
 	must(err)
 	check(keyStatus.KeyID == name && keyStatus.EncryptionErr == "" && keyStatus.DecryptionErr == "",
 		fmt.Sprintf("the new key's status: %+v", keyStatus))
+}
+
+func idpConfig(ctx context.Context, adm *madmin.AdminClient) {
+	step("identity provider configurations added, listed, read, changed and removed, as mc admin idp calls them")
+	dex := "config_url=https://dex.example.com/.well-known/openid-configuration client_id=go-client client_secret=go-client-secret role_policy=readonly"
+	restart, err := adm.AddOrUpdateIDPConfig(ctx, madmin.OpenidIDPCfg, "dex", dex, false)
+	must(err)
+	check(restart, "a restart is needed")
+	_, err = adm.AddOrUpdateIDPConfig(ctx, madmin.OpenidIDPCfg, "dex", dex, false)
+	check(err != nil && madmin.ToErrorResponse(err).Code == "XMinioAdminConfigIDPCfgNameAlreadyExists",
+		fmt.Sprintf("a second add is refused: %v", err))
+	list, err := adm.ListIDPConfig(ctx, madmin.OpenidIDPCfg)
+	must(err)
+	check(len(list) == 2 && list[1].Name == "dex" && list[1].Enabled && strings.HasPrefix(list[1].RoleARN, "arn:minio:iam:::role/"),
+		fmt.Sprintf("the list: %+v", list))
+	info, err := adm.GetIDPConfig(ctx, madmin.OpenidIDPCfg, "dex")
+	must(err)
+	values := map[string]string{}
+	for _, i := range info.Info {
+		values[i.Key] = i.Value
+	}
+	check(info.Name == "dex" && values["client_id"] == "go-client" && values["roleARN"] == list[1].RoleARN && values["client_secret"] == "",
+		fmt.Sprintf("the configuration without its secret: %+v", info))
+	_, err = adm.AddOrUpdateIDPConfig(ctx, madmin.OpenidIDPCfg, "dex", "enable=off", true)
+	must(err)
+	list, err = adm.ListIDPConfig(ctx, madmin.OpenidIDPCfg)
+	must(err)
+	check(!list[1].Enabled && list[1].RoleARN == "", fmt.Sprintf("turned off: %+v", list))
+	_, err = adm.AddOrUpdateIDPConfig(ctx, madmin.LDAPIDPCfg, "corp", "server_addr=ldap.example.com:636", false)
+	check(err != nil && madmin.ToErrorResponse(err).Code == "XMinioAdminConfigLDAPNonDefaultConfigName",
+		fmt.Sprintf("LDAP has one configuration: %v", err))
+	_, err = adm.DeleteIDPConfig(ctx, madmin.OpenidIDPCfg, "dex")
+	must(err)
+	_, err = adm.GetIDPConfig(ctx, madmin.OpenidIDPCfg, "dex")
+	check(err != nil && madmin.ToErrorResponse(err).Code == "XMinioAdminNoSuchConfigTarget",
+		fmt.Sprintf("removed: %v", err))
+	must(adm.ClearConfigHistoryKV(ctx, "all"))
 }
 
 func configKV(ctx context.Context, adm *madmin.AdminClient) {

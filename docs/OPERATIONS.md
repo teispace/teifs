@@ -345,6 +345,12 @@ forgets them; `export ALIAS -o FILE` writes everything, secrets included, to a f
 only you can read, and `import ALIAS FILE` replaces everything with one. Each needs
 `admin:ConfigUpdate`.
 
+MinIO's client manages the identity providers the same way, one at a time:
+`mc admin idp ldap|openid add|update|remove|info|list` sets, shows and removes the
+`identity_ldap` target and the `identity_openid` targets (by name). `info` lists each
+value with where it comes from, never a secret; a configuration MinIO's variables set
+can't be removed with it.
+
 Of `api`'s keys, TeiFS uses two and keeps the rest unused:
 
 - `root_access=off` (or `MINIO_API_ROOT_ACCESS=off`, or `teifs serve --no-root-access`)
