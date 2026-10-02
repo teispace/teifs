@@ -20,9 +20,9 @@ use teifs_iam::{Iam, Identity};
 use teifs_policy::{Context, Decision};
 use teifs_store::Store;
 use teifs_types::admin::{
-    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
-    ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_PREFIX, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
-    ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA, ServerConfig,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_INVENTORY,
+    ADMIN_LDAP_ATTACH, ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_PREFIX, ADMIN_ROOT_KEY,
+    ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA, ServerConfig,
 };
 
 use crate::{
@@ -134,6 +134,7 @@ enum Handler {
     DetachLdapPolicies,
     Snapshots,
     TakeSnapshot,
+    RunInventory,
     ExportBuckets,
     ImportBuckets,
     Trace,
@@ -209,6 +210,7 @@ impl Handler {
             Self::DetachLdapPolicies => "DetachLDAPPolicy",
             Self::Snapshots => "ListSnapshots",
             Self::TakeSnapshot => "TakeSnapshot",
+            Self::RunInventory => "RunInventoryReport",
             Self::ExportBuckets => "ExportBucketMetadata",
             Self::ImportBuckets => "ImportBucketMetadata",
             Self::Trace => "ServerTrace",
@@ -449,6 +451,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("teifs:DetachLDAPPolicy", ANY),
         handler: Handler::DetachLdapPolicies,
         about: "Removes managed policies from an LDAP user's or group's DN (`LdapPolicyRequest`): `LdapPolicyChanged`",
+    },
+    Endpoint {
+        api: Api::Admin,
+        verb: Verb::Post,
+        path: ADMIN_INVENTORY,
+        needs: Needs::Action("teifs:RunInventoryReport", ANY),
+        handler: Handler::RunInventory,
+        about: "Makes the report of `?bucket=NAME`'s inventory configuration `&id=ID` now, enabled or not, without moving its schedule: `InventoryRun`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1406,6 +1416,8 @@ pub(crate) struct Routes {
     pub(crate) request_metrics: Arc<crate::request_metrics::RequestMetrics>,
     /// The server's freezes, and whether it was asked to stop.
     pub(crate) control: Arc<crate::minio_service::Control>,
+    /// Makes inventory reports on request.
+    pub(crate) inventory: Arc<crate::inventory::Worker>,
     /// Where `mc admin config` keeps what it sets, if the drive keeps it.
     pub(crate) configs: Option<Arc<minio_config::Configs>>,
 }
@@ -1667,6 +1679,7 @@ impl Routes {
             Handler::ImportBuckets => self.import_buckets(req).await,
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::SetBucketQuota => quota::set(&self.store, &query_bucket.expect(ON), req).await,
+            Handler::RunInventory => admin::run_inventory(&self.inventory, &req).await,
             Handler::GetBucketQuota => quota::get(&self.store, &query_bucket.expect(ON)).await,
             Handler::AddUser => minio_iam::add_user(&self.iam, req).await,
             Handler::ChangeMyPassword => minio_iam::change_my_password(&self.iam, req).await,

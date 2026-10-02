@@ -436,6 +436,48 @@ pub(crate) async fn take_snapshot(store: &Store) -> S3Result<S3Response<Body>> {
     Ok(json(&snapshot))
 }
 
+/// `POST inventory?bucket=…&id=…`: the report is made in a task of its own, so a caller
+/// that leaves doesn't stop it halfway.
+pub(crate) async fn run_inventory(
+    worker: &Arc<crate::inventory::Worker>,
+    req: &S3Request<Body>,
+) -> S3Result<S3Response<Body>> {
+    let (mut bucket, mut id) = (None, None);
+    for (name, value) in form_urlencoded::parse(req.uri.query().unwrap_or_default().as_bytes()) {
+        let slot = match &*name {
+            "bucket" => &mut bucket,
+            "id" => &mut id,
+            _ => return Err(inventory_query()),
+        };
+        if slot.is_some() || value.is_empty() {
+            return Err(inventory_query());
+        }
+        *slot = Some(value.into_owned());
+    }
+    let (Some(bucket), Some(id)) = (bucket, id) else {
+        return Err(inventory_query());
+    };
+    let worker = Arc::clone(worker);
+    let run = tokio::spawn(async move { worker.report_now(&bucket, &id).await })
+        .await
+        .map_err(|_| s3s::s3_error!(InternalError, "The report stopped."))??;
+    tracing::info!(
+        bucket = run.bucket,
+        id = run.id,
+        manifest = run.manifest,
+        "an inventory report was made on request"
+    );
+    Ok(json(&run))
+}
+
+fn inventory_query() -> S3Error {
+    error(
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "Name the inventory configuration, and nothing else: bucket=NAME&id=ID.",
+    )
+}
+
 /// `POST root-key`: never cached, since the answer holds the new secret.
 pub(crate) async fn rotate_root_key(
     iam: &Arc<Iam>,

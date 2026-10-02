@@ -1950,6 +1950,32 @@ async fn inventories_are_added_listed_delivered_and_removed() {
             .unwrap();
     }
     assert_eq!(ls().await.len(), 101);
+    // A report now, whatever the schedule.
+    let text = cli.ok(&["inventory", "run", "t/app", "docs"]).await;
+    assert!(
+        text.contains("Inventory docs of t/app: 1 file to t/reports/inv/app/docs/"),
+        "{text}"
+    );
+    let run = records(
+        &cli.ok(&["--json", "inventory", "run", "t/app", "docs"])
+            .await,
+    );
+    let manifest = run[0]["manifest"].as_str().unwrap();
+    assert!(manifest.ends_with("/manifest.json"), "{manifest}");
+    let key = manifest.strip_prefix("t/reports/").unwrap();
+    s3.head_object()
+        .bucket("reports")
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    let err = cli
+        .fails(&["inventory", "run", "t/app", "nothing"], 5)
+        .await;
+    assert!(
+        err.contains("can't make the inventory nothing of t/app"),
+        "{err}"
+    );
     let text = cli.ok(&["inventory", "rm", "t/app", "docs"]).await;
     assert!(text.contains("Inventory docs of t/app: removed"), "{text}");
     assert_eq!(ls().await.len(), 100);

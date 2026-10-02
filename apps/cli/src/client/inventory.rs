@@ -78,6 +78,14 @@ pub enum InventoryAction {
         /// The configuration's id.
         id: String,
     },
+    /// Make one of a bucket's inventory reports now, whatever its schedule (even when
+    /// disabled), and say where it went. The schedule doesn't move.
+    Run {
+        /// `ALIAS/BUCKET`.
+        bucket: String,
+        /// The configuration's id.
+        id: String,
+    },
     /// Remove one of a bucket's inventory configurations.
     Rm {
         /// `ALIAS/BUCKET`.
@@ -146,6 +154,7 @@ pub(super) async fn inventory(action: InventoryAction, aliases: &Aliases) -> Res
         }
         InventoryAction::Ls { bucket } => ls(&remote(&bucket)?).await,
         InventoryAction::Info { bucket, id } => info(&remote(&bucket)?, &id).await,
+        InventoryAction::Run { bucket, id } => run(&remote(&bucket)?, &id).await,
         InventoryAction::Rm { bucket, id } => rm(&remote(&bucket)?, &id).await,
     }
 }
@@ -380,6 +389,39 @@ async fn info(remote: &Remote, id: &str) -> Result<(), Error> {
     ];
     ui::details(&fields, || record(&name, config));
     Ok(())
+}
+
+async fn run(remote: &Remote, id: &str) -> Result<(), Error> {
+    let bucket = remote.bucket()?;
+    let name = remote.display("");
+    let made = crate::admin::client_for(&remote.alias)?
+        .run_inventory(bucket, id)
+        .await
+        .map_err(|e| Error::admin(format!("can't make the inventory {id} of {name}"), &e))?;
+    let manifest = format!(
+        "{}/{}/{}",
+        remote.alias_name, made.destination, made.manifest
+    );
+    ui::done(
+        format!(
+            "Inventory {id} of {name}: {} to {manifest}",
+            files(made.data_files)
+        ),
+        || {
+            json!({"type": "inventory", "bucket": name, "id": id,
+                "manifest": manifest, "dataFiles": made.data_files})
+        },
+    );
+    Ok(())
+}
+
+/// `1 file`, `3 files`.
+fn files(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{count} files")
+    }
 }
 
 async fn rm(remote: &Remote, id: &str) -> Result<(), Error> {

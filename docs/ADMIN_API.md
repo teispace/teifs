@@ -63,6 +63,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/.teifs/admin/v1/ldap/policies` | The managed policies mapped to LDAP users' and groups' DNs (`?dn=DN`: one): `LdapPolicyMapping`s | `teifs:ListLDAPPolicies` |
 | `POST` | `/.teifs/admin/v1/ldap/attach` | Maps managed policies to an LDAP user's or group's DN, which the directory must have (`LdapPolicyRequest`): `LdapPolicyChanged` | `teifs:AttachLDAPPolicy` |
 | `POST` | `/.teifs/admin/v1/ldap/detach` | Removes managed policies from an LDAP user's or group's DN (`LdapPolicyRequest`): `LdapPolicyChanged` | `teifs:DetachLDAPPolicy` |
+| `POST` | `/.teifs/admin/v1/inventory` | Makes the report of `?bucket=NAME`'s inventory configuration `&id=ID` now, enabled or not, without moving its schedule: `InventoryRun` | `teifs:RunInventoryReport` |
 
 ### S3 Control
 

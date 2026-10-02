@@ -16,9 +16,13 @@ use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 use bytes::Bytes;
 use md5::{Digest, Md5};
+use s3s::{S3Result, s3_error};
 use serde::Serialize;
 use teifs_store::{After, ListQuery, ObjectVersion, Store, VersionsQuery};
-use teifs_types::configs::{Frequency, InventoryConfig, ReportEncryption};
+use teifs_types::{
+    admin::InventoryRun,
+    configs::{Frequency, InventoryConfig, ReportEncryption},
+};
 use tokio_util::sync::CancellationToken;
 
 use self::{
@@ -39,6 +43,13 @@ const DATA_FILE_BYTES: usize = 32 << 20;
 const PAGE: usize = 1000;
 /// The drive's note of when each configuration last had its report.
 const NOTE: &str = "inventory";
+
+/// A report delivered: its manifest's key and how many data files it has.
+#[derive(Debug)]
+struct Made {
+    manifest: String,
+    data_files: usize,
+}
 
 /// When each bucket's configurations last had their reports: the period (day or week)
 /// of each, by bucket and id.
@@ -137,7 +148,7 @@ impl Worker {
         stopping: &CancellationToken,
     ) -> Option<i64> {
         match self.report(bucket, id, config, stopping).await {
-            Ok(()) => Some(period),
+            Ok(_) => Some(period),
             Err(Undelivered::Refused(why)) => {
                 tracing::warn!(bucket, id, why, "an inventory report wasn't delivered");
                 Some(period)
@@ -172,6 +183,43 @@ impl Worker {
         }
     }
 
+    /// Makes and delivers the report of `bucket`'s configuration `id` now, on request
+    /// (`teifs inventory run`): whether or not it's enabled, and without changing when
+    /// the next is due.
+    ///
+    /// # Errors
+    ///
+    /// No such bucket or configuration; the destination refused the report
+    /// (`AccessDenied`, with why) or couldn't take it yet (`ServiceUnavailable`).
+    pub(crate) async fn report_now(&self, bucket: &str, id: &str) -> S3Result<InventoryRun> {
+        let configurations = self
+            .store
+            .bucket_configurations(bucket)
+            .await
+            .map_err(from_store)?;
+        let Some(config) = configurations.inventory.get(id) else {
+            return Err(crate::configs::no_such_configuration());
+        };
+        let made = self
+            .report(bucket, id, config, &CancellationToken::new())
+            .await
+            .map_err(|err| match err {
+                Undelivered::Refused(why) => {
+                    s3_error!(AccessDenied, "The report wasn't delivered: {why}")
+                }
+                Undelivered::Failed(why) => {
+                    s3_error!(ServiceUnavailable, "The report wasn't delivered yet: {why}")
+                }
+            })?;
+        Ok(InventoryRun {
+            bucket: bucket.to_owned(),
+            id: id.to_owned(),
+            destination: config.destination.bucket.clone(),
+            manifest: made.manifest,
+            data_files: made.data_files,
+        })
+    }
+
     /// Makes and delivers one report of `bucket` now.
     async fn report(
         &self,
@@ -179,7 +227,7 @@ impl Worker {
         id: &str,
         config: &InventoryConfig,
         stopping: &CancellationToken,
-    ) -> Result<(), Undelivered> {
+    ) -> Result<Made, Undelivered> {
         let destination = &config.destination;
         let format = destination.format;
         let created_ms = now_ms();
@@ -216,6 +264,7 @@ impl Worker {
             let _ = writeln!(out, "s3://{}/{}", destination.bucket, file.key);
             out
         });
+        let manifest_files = files.len();
         let manifest = Manifest {
             source_bucket: bucket,
             destination_bucket: format!("arn:aws:s3:::{}", destination.bucket),
@@ -228,6 +277,10 @@ impl Worker {
         let manifest = serde_json::to_vec(&manifest).unwrap_or_default();
         let checksum = hex(&Md5::digest(&manifest));
         let (folder, hive) = folders(created_ms);
+        let made = Made {
+            manifest: format!("{base}/{folder}/manifest.json"),
+            data_files: manifest_files,
+        };
         for (key, content_type, data) in [
             (
                 format!("{base}/hive/dt={hive}/symlink.txt"),
@@ -249,7 +302,7 @@ impl Worker {
                 .deliver(&delivery(content_type), &key, Bytes::from(data))
                 .await?;
         }
-        Ok(())
+        Ok(made)
     }
 
     /// Lists what the report covers into data files, delivering each with `deliver` as

@@ -41,6 +41,10 @@ pub const ADMIN_SNAPSHOTS: &str = "/.teifs/admin/v1/snapshots";
 /// `PUT`: imports one, creating missing buckets, answering a [`BucketsImportReport`].
 pub const ADMIN_BUCKETS: &str = "/.teifs/admin/v1/buckets";
 
+/// `POST`: makes the report of a bucket's inventory configuration now
+/// (`?bucket=NAME&id=ID`), whatever its schedule, answering an [`InventoryRun`].
+pub const ADMIN_INVENTORY: &str = "/.teifs/admin/v1/inventory";
+
 /// A live trace of the requests the server answers: an audit entry per request, as a
 /// JSON line, for as long as the caller reads (`teifs:ServerTrace`). The query is a
 /// [`crate::audit::TraceFilter`].
@@ -165,6 +169,22 @@ pub struct BucketImportItem {
     /// Why it failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// An inventory report made on request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryRun {
+    /// The bucket reported.
+    pub bucket: String,
+    /// The inventory configuration's id.
+    pub id: String,
+    /// The bucket the report went to.
+    pub destination: String,
+    /// The key of its `manifest.json`.
+    pub manifest: String,
+    /// How many data files it has.
+    pub data_files: usize,
 }
 
 /// A snapshot of the drive's metadata.

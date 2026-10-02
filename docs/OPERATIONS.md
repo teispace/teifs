@@ -1022,6 +1022,7 @@ teifs inventory add local/app daily local/reports --fields size,etag,lastmodifie
 teifs inventory add local/app weekly local/reports/inv --all-versions --weekly --fields all --format parquet
 teifs inventory ls local/app
 teifs inventory info local/app daily
+teifs inventory run local/app daily
 teifs inventory rm local/app daily
 ```
 
@@ -1046,6 +1047,12 @@ under `PREFIX/BUCKET/ID/` in the destination:
 - `YYYY-MM-DDTHH-MMZ/manifest.json`, then `manifest.checksum` (its MD5): the source and
   destination, the schema, and each data file's key, size and MD5. A report is complete
   once its checksum is there.
+
+`teifs inventory run` makes a report now, whatever the schedule and even when the
+configuration is disabled, and says where its manifest is; the next scheduled report
+comes when it would have (admin API `POST inventory?bucket=NAME&id=ID`, which needs
+`teifs:RunInventoryReport`). It fails as the delivery did: `AccessDenied` when the
+destination doesn't let S3 Inventory in.
 
 Every object is `STANDARD`, there's no replication yet, and Object Lock has no event
 holds, so those fields are empty or `STANDARD`; `ObjectOwner` is `teifs`. A destination

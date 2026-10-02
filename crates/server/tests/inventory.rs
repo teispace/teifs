@@ -22,8 +22,10 @@ use aws_sdk_s3::{
 use md5::{Digest, Md5};
 
 mod common;
+mod signing;
 
-use common::{SECRET_KEY, Server, client, start_with};
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, start_with, user};
+use signing::signed_response;
 
 /// A policy on `target` letting S3 Inventory write reports of `source`, as AWS's
 /// documentation writes it.
@@ -447,4 +449,113 @@ async fn orc_and_parquet_reports_hold_s3s_columns() {
         let size = batch.column_by_name("size").unwrap();
         assert_eq!(size.null_count(), 1, "the delete marker has no size");
     }
+}
+
+fn admin_client(server: &Server, access_key: &str, secret_key: &str) -> teifs_client::Client {
+    teifs_client::Client::new(
+        &server.endpoint,
+        access_key,
+        teifs_client::Zeroizing::new(secret_key.into()),
+    )
+    .unwrap()
+}
+
+/// What a refused request's code and status were.
+fn refused(err: teifs_client::ClientError) -> (u16, String) {
+    match err {
+        teifs_client::ClientError::Api { status, code, .. } => (status, code),
+        other => panic!("{other}"),
+    }
+}
+
+#[tokio::test]
+async fn a_report_is_made_on_request_even_when_disabled() {
+    // A day of an hour: nothing on schedule while the test runs.
+    let (server, root) = setup(Duration::from_secs(3600)).await;
+    let mut off = config(
+        "off",
+        "reports",
+        InventoryIncludedObjectVersions::Current,
+        InventoryFrequency::Daily,
+    );
+    off.is_enabled = false;
+    configure(&root, off).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        keys(&root, "reports", "inventory/data/off/")
+            .await
+            .is_empty()
+    );
+
+    let admin = admin_client(&server, ACCESS_KEY, SECRET_KEY);
+    let run = admin.run_inventory("data", "off").await.unwrap();
+    assert_eq!(
+        (
+            run.bucket.as_str(),
+            run.id.as_str(),
+            run.destination.as_str()
+        ),
+        ("data", "off", "reports")
+    );
+    assert_eq!(run.data_files, 1);
+    assert!(
+        run.manifest.starts_with("inventory/data/off/") && run.manifest.ends_with("/manifest.json"),
+        "{}",
+        run.manifest
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&read(&root, "reports", &run.manifest).await).unwrap();
+    assert_eq!(manifest["sourceBucket"], "data");
+    let checksum = run.manifest.replace("manifest.json", "manifest.checksum");
+    assert_eq!(read(&root, "reports", &checksum).await.len(), 32);
+
+    // No such configuration, or bucket.
+    let err = admin.run_inventory("data", "missing").await.unwrap_err();
+    assert_eq!(refused(err), (404, "NoSuchConfiguration".to_owned()));
+    let err = admin.run_inventory("nothing", "off").await.unwrap_err();
+    assert_eq!(refused(err).0, 404);
+
+    // A destination that doesn't let S3 Inventory in.
+    configure(
+        &root,
+        config(
+            "closed",
+            "closed",
+            InventoryIncludedObjectVersions::Current,
+            InventoryFrequency::Daily,
+        ),
+    )
+    .await;
+    let err = admin.run_inventory("data", "closed").await.unwrap_err();
+    assert_eq!(refused(err), (403, "AccessDenied".to_owned()));
+    assert!(keys(&root, "closed", "").await.is_empty());
+
+    // A query that doesn't name one configuration.
+    for query in [
+        "bucket=data",
+        "id=off",
+        "bucket=data&id=off&id=on",
+        "bucket=data&id=off&x=1",
+    ] {
+        let response = signed_response(
+            &server,
+            (ACCESS_KEY, SECRET_KEY),
+            "POST",
+            &format!("/.teifs/admin/v1/inventory?{query}"),
+            &[],
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), 400, "{query}");
+    }
+
+    // Only callers allowed `teifs:RunInventoryReport`: configuring the inventory isn't
+    // enough.
+    let reader = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+        "Action":"s3:PutInventoryConfiguration","Resource":"arn:aws:s3:::data"}]}"#;
+    user(&server, "alice", Some(reader));
+    let key = server.iam.create_access_key("alice").unwrap();
+    let alice = admin_client(&server, &key.info.id, &key.secret);
+    let err = alice.run_inventory("data", "off").await.unwrap_err();
+    assert_eq!(refused(err).0, 403);
 }

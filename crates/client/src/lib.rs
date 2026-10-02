@@ -35,17 +35,17 @@ use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
 
 use teifs_types::admin::{
-    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_LDAP_ATTACH,
-    ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS, ADMIN_TRACE,
-    MINIO_CLEAR_CONFIG_HISTORY_KV, MINIO_CONFIG, MINIO_DEL_CONFIG_KV, MINIO_GET_BUCKET_QUOTA,
-    MINIO_GET_CONFIG_KV, MINIO_HELP_CONFIG_KV, MINIO_KMS_CREATE_KEY, MINIO_KMS_KEY_STATUS,
-    MINIO_KMS_LIST_KEYS, MINIO_KMS_STATUS, MINIO_LIST_CONFIG_HISTORY_KV,
+    ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_INVENTORY,
+    ADMIN_LDAP_ATTACH, ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,
+    ADMIN_TRACE, MINIO_CLEAR_CONFIG_HISTORY_KV, MINIO_CONFIG, MINIO_DEL_CONFIG_KV,
+    MINIO_GET_BUCKET_QUOTA, MINIO_GET_CONFIG_KV, MINIO_HELP_CONFIG_KV, MINIO_KMS_CREATE_KEY,
+    MINIO_KMS_KEY_STATUS, MINIO_KMS_LIST_KEYS, MINIO_KMS_STATUS, MINIO_LIST_CONFIG_HISTORY_KV,
     MINIO_RESTORE_CONFIG_HISTORY_KV, MINIO_SERVICE, MINIO_SET_BUCKET_QUOTA, MINIO_SET_CONFIG_KV,
 };
 pub use teifs_types::admin::{
     AdminError, BucketImportItem, BucketsExport, BucketsImportReport, CertificateConfig,
     ExportedBucket, ExportedGroup, ExportedKey, ExportedPolicy, ExportedUser, ExportedVersion,
-    IamExport, IdentityPluginConfig, ImportReport, JobInfo, KmsConfig, LdapConfig,
+    IamExport, IdentityPluginConfig, ImportReport, InventoryRun, JobInfo, KmsConfig, LdapConfig,
     LdapPolicyChanged, LdapPolicyMapping, LdapPolicyRequest, OpenIdConfig, RootKeyRotated,
     ServerConfig, ServerInfo, Snapshot, Tag,
 };
@@ -445,6 +445,17 @@ impl Client {
     /// Snapshots the drive's metadata now (`teifs:TakeSnapshot`).
     pub async fn take_snapshot(&self) -> Result<Snapshot, ClientError> {
         self.call(Method::POST, ADMIN_SNAPSHOTS, None, Vec::new())
+            .await
+    }
+
+    /// Makes the report of `bucket`'s inventory configuration `id` now, whatever its
+    /// schedule, and says where it went (`s3:PutInventoryConfiguration`).
+    pub async fn run_inventory(&self, bucket: &str, id: &str) -> Result<InventoryRun, ClientError> {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("bucket", bucket)
+            .append_pair("id", id)
+            .finish();
+        self.call(Method::POST, ADMIN_INVENTORY, Some(&query), Vec::new())
             .await
     }
 

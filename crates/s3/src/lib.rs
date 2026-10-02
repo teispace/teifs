@@ -193,6 +193,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         (records, Arc::clone(&access_log), interval),
         (answered, Arc::clone(&request_metrics)),
     );
+    let inventory = Arc::new(inventory::Worker::new(drive.clone(), store.clone()));
     let events = drive.events();
     // A store serves one service: a second is told nothing new.
     let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
@@ -244,6 +245,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             access_log,
             request_metrics,
             control: Arc::clone(&control),
+            inventory,
             configs: options
                 .config_settings
                 .map(|settings| Arc::new(minio_config::Configs::new(settings))),

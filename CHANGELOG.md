@@ -226,7 +226,8 @@ behaviour; the on-disk format is always upgraded automatically.
   `symlink.txt`, and a `manifest.json` with its `manifest.checksum`, written by
   `s3.amazonaws.com` into a destination whose bucket policy lets it in, encrypted as the
   configuration asks. `teifs inventory add|ls|info|rm` manages them and lets S3
-  Inventory into the destination.
+  Inventory into the destination, and `teifs inventory run` makes one now (admin API
+  `POST inventory`, `teifs:RunInventoryReport`).
 - Request metrics, as S3's in CloudWatch: each metrics configuration counts the
   requests it matches (every request to its bucket, or those on objects with its prefix
   and tags) as `teifs_request_metrics_…` Prometheus metrics labeled by bucket and
