@@ -113,7 +113,9 @@ fn runner() -> (tokio::runtime::Runtime, TestRunner) {
         .enable_all()
         .build()
         .unwrap();
-    (runtime, TestRunner::new(Config::with_cases(512)))
+    // `PROPTEST_CASES` asks for more, as for every other property test.
+    let cases = std::env::var("PROPTEST_CASES").map_or(512, |n| n.parse().unwrap());
+    (runtime, TestRunner::new(Config::with_cases(cases)))
 }
 
 #[test]

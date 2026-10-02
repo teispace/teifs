@@ -72,6 +72,9 @@ edit a released migration.
   `/`, the names of what lies beside it), checked to catch a broken guard before it's
   kept. Examples: `crates/store/src/property_tests.rs`, `crates/types/src/names.rs`.
   A failing case proptest saves under `proptest-regressions/` is committed with its fix.
+- A change to how a write reaches the disk keeps `crates/store/tests/crash.rs` passing:
+  a child process writes until it's killed, and every acknowledged write must be there
+  after. The nightly run kills it 200 times (`TEIFS_CRASH_ROUNDS`).
 
 ## Commits and pull requests
 

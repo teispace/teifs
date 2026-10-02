@@ -132,7 +132,11 @@ of them is `latest` while the key has any.
 A write puts the data file in place (staged, synced, renamed, folder synced), then
 adds the row (or replaces the `null` version's) in one transaction that also queues the replaced file in `garbage`,
 then removes that file. A crash leaves at most a data file no row refers to; queued
-garbage is removed at the next start.
+garbage is removed at the next start. In a folder bucket the file itself goes in place
+before its row, so a crash between the two leaves the new file with the old row: it's
+read as a file changed outside TeiFS (a provisional ETag) until the index pass hashes
+it. `crates/store/tests/crash.rs` kills a writing process at many moments and checks
+all of this.
 
 ### `index.db`
 
