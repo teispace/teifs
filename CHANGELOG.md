@@ -376,7 +376,9 @@ behaviour; the on-disk format is always upgraded automatically.
   systemd sees it reload); a stop exits. A freeze holds S3's requests (not the admin
   API's, nor health checks) until as many unfreezes have come, or the server stops.
   Each needs MinIO's admin action (`admin:ServiceRestart`, `admin:ServiceStop`,
-  `admin:ServiceFreeze`), and a dry run only checks it.
+  `admin:ServiceFreeze`), and a dry run only checks it. `mc admin update` is refused
+  with `405 MethodNotAllowed`, as MinIO refuses it with in-place updates off: TeiFS is
+  updated the way it was installed. It needs `admin:ServerUpdate`.
 - MinIO's KMS API (`mc admin kms`: `/minio/kms/v1/` `status`, `metrics`, `apis`,
   `version`, `key/create`, `key/list`, `key/status`) and the KMS calls of its admin API
   (`kms/status`, `kms/key/create`, `kms/key/status`), on the server's KMS, and

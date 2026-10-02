@@ -1,6 +1,7 @@
 //! `MinIO`'s service calls (`mc admin service restart|stop|freeze|unfreeze`): the server
 //! is asked to restart or stop once it has answered, and freezes hold S3's requests
-//! (not the admin API's, nor health checks) until as many unfreezes have come.
+//! (not the admin API's, nor health checks) until as many unfreezes have come. Its
+//! update (`mc admin update`) is refused: TeiFS doesn't replace itself.
 
 use http::StatusCode;
 use s3s::{Body, S3Request, S3Response, S3Result};
@@ -165,6 +166,18 @@ pub(crate) fn call(routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Respons
         dry_run,
         results,
     }))
+}
+
+/// `POST update`, either form: refused as `MinIO` refuses it with in-place updates off,
+/// since TeiFS is updated the way it was installed.
+pub(crate) fn update() -> S3Result<S3Response<Body>> {
+    Err(admin::error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "MethodNotAllowed",
+        "TeiFS doesn't update itself: update it the way it was installed (the release \
+         download, the .deb or .rpm package, the container image or the Helm chart), then \
+         restart it.",
+    ))
 }
 
 #[cfg(test)]

@@ -182,6 +182,8 @@ enum Handler {
     MinioSetPolicy,
     /// `MinIO`'s `inspect-data`.
     MinioInspect,
+    /// `MinIO`'s `update`, refused.
+    MinioUpdate,
     RevokeTokens,
 }
 
@@ -251,6 +253,7 @@ impl Handler {
             Self::MinioBucketMetadata(call) => call.name(),
             Self::MinioSetPolicy => "SetPolicyForUserOrGroup",
             Self::MinioInspect => "InspectData",
+            Self::MinioUpdate => "ServerUpdate",
             Self::RevokeTokens => "RevokeTokens",
         }
     }
@@ -810,6 +813,14 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::ServiceAction,
         handler: Handler::MinioService,
         about: "Restarts or stops the server once it has answered, or freezes S3's requests until as many unfreezes have come, as `?action=` (`restart`, `stop`, `freeze`, `unfreeze`) asks; with `?dry-run=true` it only answers. Restarting needs `admin:ServiceRestart`, stopping `admin:ServiceStop`, freezing and unfreezing `admin:ServiceFreeze`: `mc admin service`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/update",
+        needs: Needs::Action("admin:ServerUpdate", ANY),
+        handler: Handler::MinioUpdate,
+        about: "Refused with `405 MethodNotAllowed`, as `MinIO` refuses it with in-place updates off: TeiFS is updated the way it was installed, then restarted. Either form (`updateURL`, and `type=2` with `dry-run`): `mc admin update`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1712,6 +1723,7 @@ impl Routes {
             Handler::MinioBucketMetadata(call) => call.call(self, req).await,
             Handler::MinioSetPolicy => minio_iam::set_user_or_group_policy(&self.iam, &req).await,
             Handler::MinioInspect => minio_inspect::inspect(self, req).await,
+            Handler::MinioUpdate => minio_service::update(),
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

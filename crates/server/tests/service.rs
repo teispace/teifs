@@ -175,3 +175,25 @@ async fn each_call_needs_its_own_action() {
     }
     assert!(!server.running.is_finished());
 }
+
+#[tokio::test]
+async fn update_is_refused_as_minio_refuses_it_with_updates_off() {
+    let server = start().await;
+    for query in [
+        "updateURL=",
+        "updateURL=https%3A%2F%2Fexample.com%2Fminio&type=2&dry-run=true",
+    ] {
+        let path = format!("/minio/admin/v3/update?{query}");
+        let (status, answer) = signed(&server, ROOT, "POST", &path, &[], b"").await;
+        assert_eq!(status, 405, "{query}: {answer}");
+        assert!(answer.contains("MethodNotAllowed"), "{answer}");
+        assert!(answer.contains("the way it was installed"), "{answer}");
+    }
+    // Still only for those who may update the server.
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:ServiceRestart"}]}"#;
+    user(&server, "ops", Some(policy));
+    let key = server.iam.create_access_key("ops").unwrap();
+    let ops = (key.info.id.as_str(), key.secret.as_str());
+    let path = "/minio/admin/v3/update?updateURL=";
+    assert_eq!(signed(&server, ops, "POST", path, &[], b"").await.0, 403);
+}

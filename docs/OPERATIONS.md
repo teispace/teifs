@@ -150,6 +150,10 @@ teifs admin service restart prod
 teifs admin service freeze prod && teifs admin service unfreeze prod
 ```
 
+`mc admin update` is refused (`405 MethodNotAllowed`): TeiFS doesn't replace its own
+binary. Update it the way it was installed (the release download, the `.deb` or `.rpm`,
+the container image or the Helm chart), then restart it as above.
+
 ### Doctor
 
 `teifs doctor [DIR]` looks at a drive on the machine it's on, with the settings

@@ -551,7 +551,7 @@ func inspected(data []byte, bucket, format string) {
 // The service calls a server answers before it acts: restart and stop only as dry runs
 // (the server is everyone's), and a freeze undone at once.
 func service(ctx context.Context, adm *madmin.AdminClient) {
-	step("service restart and stop (dry runs), freeze and unfreeze, as mc admin service calls them")
+	step("service restart and stop (dry runs), freeze and unfreeze, and update (refused), as mc admin service and update call them")
 	for _, action := range []madmin.ServiceAction{madmin.ServiceActionRestart, madmin.ServiceActionStop} {
 		result, err := adm.ServiceAction(ctx, madmin.ServiceActionOpts{Action: action, DryRun: true})
 		must(err)
@@ -565,6 +565,9 @@ func service(ctx context.Context, adm *madmin.AdminClient) {
 		check(result.Action == action && !result.DryRun && len(result.Results) == 0,
 			fmt.Sprintf("a %s: %+v", action, result))
 	}
+	// mc admin update: refused, TeiFS is updated the way it was installed.
+	_, err := adm.ServerUpdateV2(ctx, madmin.ServerUpdateOpts{DryRun: true})
+	check(err != nil && madmin.ToErrorResponse(err).Code == "MethodNotAllowed", fmt.Sprintf("an update: %v", err))
 }
 
 func kms(ctx context.Context, adm *madmin.AdminClient) {
