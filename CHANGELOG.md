@@ -821,6 +821,10 @@ behaviour; the on-disk format is always upgraded automatically.
   object's ETag.
 - A drive on a file system that reports no size (some FUSE and network file systems)
   takes writes again: it was always called full, refusing every write with `507`.
+- A configuration value that starts or ends with a quote (`mc admin config set`) is
+  kept as given: it read back without its quotes, or empty, once the server restarted.
+  A value holding another of its sub-system's keys followed by `=`, which would read
+  back as that key, is refused instead of kept.
 - The background pass that indexes files added to a folder bucket by other programs
   seeks to each page of the bucket's index instead of reading it from the first key,
   and reads it without holding up writes: a pass over 1.1M files takes about 100 s

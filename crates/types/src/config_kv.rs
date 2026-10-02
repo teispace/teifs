@@ -820,12 +820,15 @@ fn sanitize(value: &str) -> String {
     value.strip_suffix('\'').unwrap_or(value).to_owned()
 }
 
-/// `key=value`, quoted when the value has a space.
+/// `key=value`, quoted so that [`sanitize`] gives the value back: when it has a space,
+/// and in both kinds of quote when it starts or ends with one.
 fn pair(key: &str, value: &str) -> String {
-    if value.chars().any(char::is_whitespace) {
+    if sanitize(value) == value && !value.chars().any(char::is_whitespace) {
+        format!("{key}={value}")
+    } else if sanitize(&format!("\"{value}\"")) == value {
         format!("{key}=\"{value}\"")
     } else {
-        format!("{key}={value}")
+        format!("{key}=\"'{value}'\"")
     }
 }
 
@@ -937,8 +940,12 @@ impl ConfigKv {
     /// A configuration from its text: each line a change, as `set` takes them. Blank lines
     /// and lines starting with `#` are skipped.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
+        Self::parse_lines(text)
+    }
+
+    fn parse_lines(text: &str) -> Result<Self, ConfigError> {
         let mut config = Self::default();
-        config.set(text)?;
+        config.set_lines(text)?;
         Ok(config)
     }
 
@@ -952,10 +959,41 @@ impl ConfigKv {
     /// target starts from its defaults, a target with an `enable` key is turned on unless
     /// the line says otherwise, and a target that's on needs every key it can't do without.
     /// Nothing changes unless every line can.
+    /// A value that would read back differently once kept (one holding another of its
+    /// keys followed by `=`) is refused.
     pub fn set(&mut self, text: &str) -> Result<(), ConfigError> {
         let mut changed = self.clone();
         changed.set_lines(text)?;
+        changed.reads_back(self)?;
         *self = changed;
+        Ok(())
+    }
+
+    /// Fails unless each value changed since `before` reads back as it is once kept.
+    fn reads_back(&self, before: &Self) -> Result<(), ConfigError> {
+        let read = Self::parse_lines(&self.to_text())?;
+        let value = |config: &Self, name: &str, target: &str, key: &str| {
+            config
+                .subsystems
+                .get(name)
+                .and_then(|targets| targets.get(target))
+                .and_then(|kvs| get(kvs, key))
+                .map(str::to_owned)
+        };
+        for (name, targets) in &self.subsystems {
+            for (target, kvs) in targets {
+                if let Some((key, value)) = kvs.iter().find(|(key, kept)| {
+                    let now = Some(kept.clone());
+                    value(before, name, target, key) != now
+                        && value(&read, name, target, key) != now
+                }) {
+                    return Err(invalid(format!(
+                        "{name}'s {key} can't be `{value}`: a value can't hold another of \
+                         {name}'s keys followed by =."
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1910,5 +1948,115 @@ mod tests {
         assert!(ConfigKv::parse("identity_tls:x skip_verify=on").is_err());
         assert_eq!(switch(" On "), Some(true));
         assert_eq!(switch("maybe"), None);
+    }
+
+    #[test]
+    fn values_with_quotes_at_their_ends_are_kept_as_they_are() {
+        for value in ["\"", "'", "a'", "'a", "\"a\"", " 'a b' ", "it's"] {
+            let mut config = ConfigKv::default();
+            config
+                .set(&format!("notify_webhook enable=off endpoint=\"'{value}'\""))
+                .unwrap();
+            let kept = ConfigKv::parse(&config.to_text()).unwrap();
+            assert_eq!(kept, config, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_value_holding_another_key_is_refused_when_it_would_read_back_differently() {
+        let mut config = ConfigKv::default();
+        let err = config
+            .set("identity_openid client_id=q display_name=x client_id=y enable=off")
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "identity_openid's display_name can't be `x client_id=y`: a value can't hold \
+             another of identity_openid's keys followed by =."
+        );
+        assert!(config.is_empty());
+        // Written after the key it names, it reads back the same, so it's kept.
+        config
+            .set("identity_openid enable=off client_id=q comment=see display_name=x")
+            .unwrap();
+        // One kept before this check doesn't stop other changes.
+        let mut config =
+            ConfigKv::parse("identity_openid client_id=q display_name=x client_id=y enable=off")
+                .unwrap();
+        config.set("notify_webhook enable=off").unwrap();
+    }
+
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// A value made of what a line's reader cares about: spaces, quotes, `=`, other
+        /// keys' names and on or off.
+        fn value() -> impl Strategy<Value = String> {
+            let piece = prop::sample::select(vec![
+                "a",
+                "b1",
+                " ",
+                "  ",
+                "\t",
+                "\"",
+                "'",
+                "=",
+                "x=y",
+                "on",
+                "off",
+                "é",
+                "#",
+                "enable=",
+                "comment=",
+                "client_id=",
+                ":",
+            ]);
+            prop::collection::vec(piece, 0..6).prop_map(|pieces| pieces.concat())
+        }
+
+        /// A `set` line for any sub-system: its keys (or one it doesn't have) with any
+        /// values, now and then turned off so required keys may be missing.
+        fn line() -> impl Strategy<Value = String> {
+            (
+                0..SUBSYSTEMS.len(),
+                prop::option::of(prop::sample::select(vec!["t1", "a_b"])),
+                prop::collection::vec((any::<prop::sample::Index>(), value()), 1..5),
+                any::<bool>(),
+            )
+                .prop_map(|(at, target, pairs, off)| {
+                    let subsystem = &SUBSYSTEMS[at];
+                    let names: Vec<&str> = subsystem.names().chain([COMMENT, "nope"]).collect();
+                    let mut line = subsystem.name.to_owned();
+                    if let Some(target) = target.filter(|_| subsystem.multiple_targets) {
+                        line.push(':');
+                        line.push_str(target);
+                    }
+                    for (key, value) in pairs {
+                        line.extend([" ", key.get(&names), "=", &value]);
+                    }
+                    if off && subsystem.enable {
+                        line.push_str(" enable=off");
+                    }
+                    line
+                })
+        }
+
+        proptest! {
+            /// What's kept on disk reads back as the same configuration, so a restart
+            /// changes nothing.
+            #[test]
+            fn a_configuration_reads_back_as_it_was_written(
+                lines in prop::collection::vec(line(), 1..4),
+            ) {
+                let mut config = ConfigKv::default();
+                for line in &lines {
+                    let _ = config.set(line);
+                }
+                let text = config.to_text();
+                let read = ConfigKv::parse(&text);
+                prop_assert_eq!(read.as_ref(), Ok(&config), "kept as:\n{}", text);
+            }
+        }
     }
 }
