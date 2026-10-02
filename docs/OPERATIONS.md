@@ -1208,8 +1208,9 @@ reported, left alone, and the command exits with code 1. Objects are told apart 
 size and ETag; `--size-only` uses size alone, for services whose ETags aren't MD5s (as
 for objects encrypted with KMS keys on AWS). Users and their policies aren't part of
 `migrate`: between TeiFS servers `teifs admin iam export` and `import` move them; from
-another service, make them with `teifs admin user` or `aws iam` (TeiFS doesn't read
-`mc admin cluster iam export`'s files yet).
+MinIO, `mc admin cluster iam export` and `import` move users, groups, policies and
+service accounts either way (the root user's alone, since the zip holds secrets); from
+another service, make them with `teifs admin user` or `aws iam`.
 
 ## Bucket notifications
 

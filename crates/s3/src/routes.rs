@@ -32,9 +32,9 @@ use crate::{
     bucket_export, control,
     errors::StoreResultExt,
     events::Events,
-    iam_api, listen, minio_config, minio_heal, minio_iam, minio_idp_config, minio_info, minio_kms,
-    minio_ldap, minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
-    minio_speedtest,
+    iam_api, listen, minio_config, minio_heal, minio_iam, minio_iam_transfer, minio_idp_config,
+    minio_info, minio_kms, minio_ldap, minio_metrics, minio_pools, minio_profile, minio_service,
+    minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -173,6 +173,8 @@ enum Handler {
     MinioLdap(minio_ldap::Call),
     MinioConfig(minio_config::Call),
     MinioIdpConfig(minio_idp_config::Call),
+    /// `MinIO`'s IAM export and import.
+    MinioIamTransfer(minio_iam_transfer::Call),
 }
 
 impl Handler {
@@ -237,6 +239,7 @@ impl Handler {
             Self::MinioLdap(call) => call.name(),
             Self::MinioConfig(call) => call.name(),
             Self::MinioIdpConfig(call) => call.name(),
+            Self::MinioIamTransfer(call) => call.name(),
         }
     }
 }
@@ -1130,6 +1133,31 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         handler: Handler::MinioIdpConfig(minio_idp_config::Call::Delete),
         about: "Removes identity provider configuration `{name}` (not one `MinIO`'s variables set): `mc admin idp ldap|openid remove`",
     },
+    // `MinIO`'s IAM with its secrets: the root user's alone, as TeiFS's own export is.
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/export-iam",
+        needs: Needs::Root,
+        handler: Handler::MinioIamTransfer(minio_iam_transfer::Call::Export),
+        about: "A zip of `MinIO`'s `iam-assets/*.json` with the IAM's policies, users, groups, service accounts and the policies mapped to them, secrets included: `mc admin cluster iam export`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/import-iam",
+        needs: Needs::Root,
+        handler: Handler::MinioIamTransfer(minio_iam_transfer::Call::Import),
+        about: "Merges such a zip (from TeiFS or `MinIO`) into the IAM: `mc admin cluster iam import`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: "/minio/admin/v3/import-iam-v2",
+        needs: Needs::Root,
+        handler: Handler::MinioIamTransfer(minio_iam_transfer::Call::ImportV2),
+        about: "Merges such a zip and answers what it added, removed, skipped and couldn't, as `madmin.ImportIAMResult`",
+    },
 ];
 
 /// Why a call decided on its query's bucket has one.
@@ -1596,6 +1624,7 @@ impl Routes {
             Handler::MinioLdap(call) => call.call(self, req, (identity, context), privileged).await,
             Handler::MinioConfig(call) => call.call(self, req).await,
             Handler::MinioIdpConfig(call) => call.call(self, req).await,
+            Handler::MinioIamTransfer(call) => call.call(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

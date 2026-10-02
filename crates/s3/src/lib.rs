@@ -33,6 +33,7 @@ mod metrics;
 mod minio_config;
 mod minio_heal;
 mod minio_iam;
+mod minio_iam_transfer;
 mod minio_idp_config;
 mod minio_info;
 mod minio_kms;

@@ -2,6 +2,7 @@
 
 mod ldap;
 mod minio;
+mod minio_migrate;
 mod oidc;
 mod roles;
 mod saml;
@@ -28,6 +29,10 @@ pub use ldap::{LdapEntity, LdapPolicies, LdapPolicyChange, LdapUser};
 pub use minio::{
     GroupPolicies, MinioAccount, MinioError, MinioGroup, MinioPolicy, MinioUser, MinioUserChange,
     PolicyEntities, PolicyHolders, UserPolicies,
+};
+pub use minio_migrate::{
+    MinioIamEntities, MinioIamImport, MinioImportFailures, MinioImportGroup, MinioImportResult,
+    MinioImportUser,
 };
 pub use oidc::{ConfiguredOidcProvider, Ensured, NewOidcProvider, OidcProviderInfo};
 pub use roles::{NewRole, RoleInfo};

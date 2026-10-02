@@ -363,7 +363,9 @@ async fn zipped(
 }
 
 /// A zip of `files`, compressed, readable only by their owner once unpacked.
-fn archive(files: impl Iterator<Item = (String, Vec<u8>)>) -> zip::result::ZipResult<Vec<u8>> {
+pub(crate) fn archive(
+    files: impl Iterator<Item = (String, Vec<u8>)>,
+) -> zip::result::ZipResult<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)

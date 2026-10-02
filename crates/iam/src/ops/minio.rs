@@ -413,7 +413,7 @@ impl Draft<'_> {
     }
 
     /// Attaches exactly `policies` (by name) to a user or group.
-    fn replace_policies(&mut self, owner: Owner<'_>, policies: &[String]) -> Result<()> {
+    pub(super) fn replace_policies(&mut self, owner: Owner<'_>, policies: &[String]) -> Result<()> {
         let wanted = policies
             .iter()
             .map(|name| policy_named(&self.state, name).map(|p| p.row.id.clone()))
@@ -465,7 +465,7 @@ impl Draft<'_> {
     }
 
     /// [`Iam::minio_update_group`], as part of a change.
-    fn minio_update_group(
+    pub(super) fn minio_update_group(
         &mut self,
         name: &str,
         members: &[String],
@@ -517,7 +517,12 @@ impl Draft<'_> {
     }
 
     /// [`Iam::minio_put_policy`], as part of a change.
-    fn minio_put_policy(&mut self, name: &str, document: &str, over_builtin: bool) -> Result<()> {
+    pub(super) fn minio_put_policy(
+        &mut self,
+        name: &str,
+        document: &str,
+        over_builtin: bool,
+    ) -> Result<()> {
         if let Some(own) = own_policy(&self.state, name).cloned() {
             // As `MinIO` replaces a policy: a new version in effect, the oldest other
             // dropped when there are already as many as a policy keeps.
@@ -553,7 +558,7 @@ impl Draft<'_> {
     }
 
     /// [`Iam::minio_remove_policy`], as part of a change.
-    fn minio_remove_policy(&mut self, name: &str) -> Result<()> {
+    pub(super) fn minio_remove_policy(&mut self, name: &str) -> Result<()> {
         let Some(own) = own_policy(&self.state, name).cloned() else {
             return Err(if self.state.policy_named(name).is_some() {
                 MinioError::InvalidArgument(format!(

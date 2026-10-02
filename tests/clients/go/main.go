@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,6 +148,7 @@ func main() {
 	kms(ctx, adm)
 	configKV(ctx, adm)
 	idpConfig(ctx, adm)
+	iamTransfer(ctx, adm)
 	trace(ctx, adm, s3c, *bucket)
 	consoleLog(ctx, adm)
 	realtime(ctx, adm)
@@ -528,6 +530,38 @@ func idpConfig(ctx context.Context, adm *madmin.AdminClient) {
 	check(err != nil && madmin.ToErrorResponse(err).Code == "XMinioAdminNoSuchConfigTarget",
 		fmt.Sprintf("removed: %v", err))
 	must(adm.ClearConfigHistoryKV(ctx, "all"))
+}
+
+func iamTransfer(ctx context.Context, adm *madmin.AdminClient) {
+	step("IAM exported and imported, as mc admin cluster iam calls it")
+	must(adm.AddCannedPolicy(ctx, "go-mover", []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListAllMyBuckets"],"Resource":["*"]}]}`)))
+	must(adm.AddUser(ctx, "go-mover", "go-mover-secret-key"))
+	_, err := adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{Policies: []string{"go-mover"}, User: "go-mover"})
+	must(err)
+	exported, err := adm.ExportIAM(ctx)
+	must(err)
+	zipped, err := io.ReadAll(exported)
+	must(err)
+	exported.Close()
+	archive, err := zip.NewReader(bytes.NewReader(zipped), int64(len(zipped)))
+	must(err)
+	names := []string{}
+	for _, f := range archive.File {
+		names = append(names, f.Name)
+	}
+	check(len(names) == 7 && names[1] == "iam-assets/users.json", fmt.Sprintf("the zip: %v", names))
+
+	must(adm.RemoveUser(ctx, "go-mover"))
+	result, err := adm.ImportIAMV2(ctx, io.NopCloser(bytes.NewReader(zipped)))
+	must(err)
+	check(slices.Contains(result.Added.Users, "go-mover") && len(result.Failed.Users) == 0,
+		fmt.Sprintf("the import: %+v", result))
+	user, err := adm.GetUserInfo(ctx, "go-mover")
+	must(err)
+	check(user.PolicyName == "go-mover" && user.Status == madmin.AccountEnabled, fmt.Sprintf("moved back: %+v", user))
+	must(adm.ImportIAM(ctx, io.NopCloser(bytes.NewReader(zipped))))
+	must(adm.RemoveUser(ctx, "go-mover"))
+	must(adm.RemoveCannedPolicy(ctx, "go-mover"))
 }
 
 func configKV(ctx context.Context, adm *madmin.AdminClient) {

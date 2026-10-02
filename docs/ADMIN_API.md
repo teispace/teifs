@@ -171,6 +171,9 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/minio/admin/v3/idp-config/{type}/{name}` | Identity provider configuration `{name}`'s values (from the drive's configuration or `MinIO`'s variables, without secrets) and role ARN, as `madmin.IDPConfig` encrypted with the caller's secret key: `mc admin idp ldap|openid info` | `admin:ConfigUpdate` |
 | `GET` | `/minio/admin/v3/idp-config/{type}` | The identity provider configurations of `{type}`, whether each is on and its role ARN, as `madmin.IDPListItem` encrypted with the caller's secret key: `mc admin idp ldap|openid list` | `admin:ConfigUpdate` |
 | `DELETE` | `/minio/admin/v3/idp-config/{type}/{name}` | Removes identity provider configuration `{name}` (not one `MinIO`'s variables set): `mc admin idp ldap|openid remove` | `admin:ConfigUpdate` |
+| `GET` | `/minio/admin/v3/export-iam` | A zip of `MinIO`'s `iam-assets/*.json` with the IAM's policies, users, groups, service accounts and the policies mapped to them, secrets included: `mc admin cluster iam export` | root user |
+| `PUT` | `/minio/admin/v3/import-iam` | Merges such a zip (from TeiFS or `MinIO`) into the IAM: `mc admin cluster iam import` | root user |
+| `PUT` | `/minio/admin/v3/import-iam-v2` | Merges such a zip and answers what it added, removed, skipped and couldn't, as `madmin.ImportIAMResult` | root user |
 
 <!-- end generated -->
 
