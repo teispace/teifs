@@ -56,7 +56,7 @@ impl CustomerKey {
         } else {
             let text = std::str::from_utf8(bytes).ok()?.trim();
             let decoded = if text.len() == 64 {
-                hex_decode(text)?
+                Zeroizing::new(teifs_types::unhex::<32>(text)?).to_vec()
             } else {
                 STANDARD
                     .decode(format!("{text:=<44}"))
@@ -83,13 +83,6 @@ impl CustomerKey {
     pub fn md5(&self) -> String {
         self.md5.clone()
     }
-}
-
-fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-        .collect()
 }
 
 impl Sse {

@@ -1605,6 +1605,8 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
+mod property_tests;
+#[cfg(test)]
 mod sse_tests;
 #[cfg(test)]
 mod tests;

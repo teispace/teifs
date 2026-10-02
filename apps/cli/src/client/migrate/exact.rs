@@ -51,19 +51,9 @@ pub fn even_parts(size: u64, first: u64, count: u64) -> Option<Vec<Range<u64>>> 
 pub fn multipart_etag(parts: &[String]) -> Option<String> {
     let mut hasher = Md5::new();
     for part in parts {
-        hasher.update(hex_bytes(part.trim_matches('"'))?);
+        hasher.update(teifs_types::unhex::<16>(part.trim_matches('"'))?);
     }
     Some(format!("\"{}-{}\"", hex(&hasher.finalize()), parts.len()))
-}
-
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.len() != 32 {
-        return None;
-    }
-    (0..32)
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect()
 }
 
 /// Whether two ETags are the same, quotes aside.
@@ -406,6 +396,15 @@ async fn parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_etag_that_isnt_hex_is_refused_whatever_its_characters() {
+        // 32 bytes, with `é` across the first byte pair: no ETag, and no panic.
+        let etag = format!("a{}a", "\u{e9}".repeat(15));
+        assert_eq!(etag.len(), 32);
+        assert_eq!(multipart_etag(&[etag]), None);
+        assert_eq!(multipart_etag(&["+f".repeat(16)]), None);
+    }
 
     #[test]
     fn multipart_etags_are_read_and_made() {

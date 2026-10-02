@@ -67,6 +67,11 @@ edit a released migration.
   `crates/server/tests/` and use the official AWS SDK.
 - Tests never depend on the network, the clock's exact value, or the test machine's disk
   type, except where they check that behaviour (and then they detect it).
+- Code that reads what a client sends (keys, prefixes, escapes, policies) also gets a
+  property test: `proptest` with a strategy built from the pieces that matter (`..`,
+  `/`, the names of what lies beside it), checked to catch a broken guard before it's
+  kept. Examples: `crates/store/src/property_tests.rs`, `crates/types/src/names.rs`.
+  A failing case proptest saves under `proptest-regressions/` is committed with its fix.
 
 ## Commits and pull requests
 

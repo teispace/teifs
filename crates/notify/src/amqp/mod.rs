@@ -249,9 +249,9 @@ fn percent_decode(text: &str) -> Result<String, String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = text
+            let hex = bytes
                 .get(i + 1..i + 3)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .and_then(teifs_types::hex_byte)
                 .ok_or_else(|| format!("`{text}` isn't a virtual host's name"))?;
             out.push(hex);
             i += 3;
@@ -534,6 +534,13 @@ fn closed(mut args: Reader<'_>, what: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escapes_in_a_url_are_two_hex_digits() {
+        assert_eq!(percent_decode("%2Fvhost").unwrap(), "/vhost");
+        assert!(percent_decode("%+F").is_err());
+        assert!(percent_decode("%\u{e9}").is_err());
+    }
 
     #[test]
     fn urls_exchanges_and_keys_are_checked() {

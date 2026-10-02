@@ -691,9 +691,9 @@ pub(crate) fn urlencoding_decode(value: &str) -> S3Result<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = value
+            let hex = bytes
                 .get(i + 1..i + 3)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .and_then(teifs_types::hex_byte)
                 .ok_or_else(|| s3_error!(InvalidArgument, "invalid percent-encoding"))?;
             out.push(hex);
             i += 3;
@@ -3785,6 +3785,44 @@ fn check_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `%XX` decoded strictly: two hex digits, no sign, no half of a character.
+    fn reference_decode(value: &str) -> Option<String> {
+        let mut out = Vec::new();
+        let mut rest = value.as_bytes();
+        while let Some((&byte, tail)) = rest.split_first() {
+            if byte == b'%' {
+                let [high, low, ..] = *tail else { return None };
+                if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                    return None;
+                }
+                let pair = [high, low];
+                out.push(u8::from_str_radix(std::str::from_utf8(&pair).ok()?, 16).ok()?);
+                rest = &tail[2..];
+            } else {
+                out.push(byte);
+                rest = tail;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    #[test]
+    fn percent_escapes_are_two_hex_digits() {
+        assert_eq!(urlencoding_decode("a%2Fb%c3%A9").unwrap(), "a/bé");
+        for bad in ["%+F", "%+1", "%", "%4", "%zz", "%\u{e9}", "%4\u{e9}", "%ff"] {
+            assert!(urlencoding_decode(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn percent_decoding_agrees_with_a_strict_reading(
+            value in "([a-z/ +é]|%[0-9a-fA-F+ é-]{0,2})*",
+        ) {
+            proptest::prop_assert_eq!(urlencoding_decode(&value).ok(), reference_decode(&value));
+        }
+    }
 
     #[test]
     fn composite_checksums_need_every_parts() {

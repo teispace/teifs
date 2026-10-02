@@ -57,6 +57,7 @@ xxhash-rust.workspace = true
 pprof.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -389,4 +389,72 @@ mod tests {
         assert!(check_folder_bucket("con.logs", true).is_err());
         assert!(check_folder_bucket("A", true).is_err());
     }
+
+    mod properties {
+        use std::path::Component;
+
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// Keys made of the pieces that matter to a path: separators, dots, characters
+        /// some system treats specially, and plain names.
+        fn hostile_key() -> impl Strategy<Value = String> {
+            let piece = prop::sample::select(vec![
+                "/",
+                "/",
+                "/",
+                ".",
+                "..",
+                "\\",
+                "\0",
+                "a",
+                "b.txt",
+                "é",
+                " ",
+                ":",
+                "C:",
+                "~",
+                "%2e",
+                ".teifs-tmp",
+                ".teifs",
+                "\u{202e}",
+            ]);
+            prop::collection::vec(piece, 1..12).prop_map(|pieces| pieces.concat())
+        }
+
+        fn check(key: &str) {
+            let Ok(parsed) = ObjectKey::parse(key) else {
+                return;
+            };
+            // Only plain names: nothing climbs out of the bucket's folder, jumps to a
+            // root, or names the folder itself.
+            let names: Vec<&str> = parsed
+                .rel()
+                .components()
+                .map(|component| match component {
+                    Component::Normal(name) => name.to_str().expect("a key is UTF-8"),
+                    other => panic!("{key:?} maps to {other:?}"),
+                })
+                .collect();
+            assert!(!names.is_empty(), "{key:?} maps to the bucket itself");
+            // And the path is the key, name for name.
+            let folder = if parsed.is_folder() { "/" } else { "" };
+            assert_eq!(format!("{}{folder}", names.join("/")), key);
+            assert!(names.iter().all(|name| name.len() <= MAX_SEGMENT_LEN));
+            assert_ne!(names[0], BUCKET_STAGING);
+        }
+
+        proptest! {
+            #[test]
+            fn a_key_maps_to_a_path_inside_its_bucket(key in hostile_key()) {
+                check(&key);
+            }
+
+            #[test]
+            fn any_string_parses_or_is_refused_without_panicking(key in any::<String>()) {
+                check(&key);
+            }
+        }
+    }
 }

@@ -327,14 +327,25 @@ pub fn provisional_etag(stamp: Stamp) -> String {
 /// Parses exactly `2 × N` hex digits (either case).
 #[must_use]
 pub fn unhex<const N: usize>(hex: &str) -> Option<[u8; N]> {
-    if hex.len() != 2 * N || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if hex.len() != 2 * N {
         return None;
     }
     let mut out = [0u8; N];
     for (byte, pair) in out.iter_mut().zip(hex.as_bytes().chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        *byte = hex_byte(pair)?;
     }
     Some(out)
+}
+
+/// The byte two hex digits (either case) spell, as in a `%XX` escape; `None` for
+/// anything else. Stricter than `u8::from_str_radix`, which takes `+F` too.
+#[must_use]
+pub fn hex_byte(pair: &[u8]) -> Option<u8> {
+    let digit = |b: u8| char::from(b).to_digit(16);
+    match pair {
+        [high, low] => u8::try_from(digit(*high)? << 4 | digit(*low)?).ok(),
+        _ => None,
+    }
 }
 
 /// Parses an ETag's hex MD5 (a plain one, not a multipart one).
@@ -346,6 +357,27 @@ pub fn md5_of_etag(etag: &str) -> Option<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hex_byte_is_two_hex_digits_and_nothing_else() {
+        for high in 0..=u8::MAX {
+            for low in 0..=u8::MAX {
+                let digits = high.is_ascii_hexdigit() && low.is_ascii_hexdigit();
+                let expected = digits
+                    .then(|| {
+                        u8::from_str_radix(&format!("{}{}", char::from(high), char::from(low)), 16)
+                            .ok()
+                    })
+                    .flatten();
+                assert_eq!(hex_byte(&[high, low]), expected, "{high} {low}");
+            }
+        }
+        // `from_str_radix` alone would take a sign.
+        assert_eq!(hex_byte(b"+F"), None);
+        assert_eq!(hex_byte(b"F"), None);
+        assert_eq!(hex_byte(b"FFF"), None);
+        assert_eq!(unhex::<1>("+f"), None);
+    }
 
     #[test]
     fn etags_match_s3() {

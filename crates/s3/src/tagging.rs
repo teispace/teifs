@@ -131,9 +131,9 @@ fn decode(part: &str) -> S3Result<String> {
     while i < bytes.len() {
         match bytes[i] {
             b'%' => {
-                let hex = part
+                let hex = bytes
                     .get(i + 1..i + 3)
-                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .and_then(teifs_types::hex_byte)
                     .ok_or_else(|| s3_error!(InvalidArgument, "invalid x-amz-tagging header"))?;
                 out.push(hex);
                 i += 3;
@@ -174,6 +174,8 @@ mod tests {
         let tags = check(pairs, MAX_OBJECT_TAGS).unwrap();
         assert_eq!(tags.keys().collect::<Vec<_>>(), ["a b", "bar", "foo"]);
         assert!(from_header("k=%zz").is_err());
+        assert!(from_header("k=%+F").is_err());
+        assert!(from_header("k=%\u{e9}").is_err());
         assert!(from_header("").unwrap().is_empty());
     }
 

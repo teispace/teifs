@@ -89,6 +89,8 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 async-trait = "0.1"
 base64 = "0.23"
 tempfile = "3"
+# Property tests: parsers of untrusted input, against arbitrary and hostile strings.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 aws-sdk-s3 = { version = "1.150", default-features = false, features = ["behavior-version-latest", "http-1x", "default-https-client", "rt-tokio"] }
 aws-sdk-iam = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }

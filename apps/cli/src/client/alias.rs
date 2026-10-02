@@ -357,8 +357,7 @@ pub(crate) fn percent_decode(text: &str) -> Result<String, String> {
         if bytes[i] == b'%' {
             let hex = bytes
                 .get(i + 1..i + 3)
-                .and_then(|h| std::str::from_utf8(h).ok())
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .and_then(teifs_types::hex_byte)
                 .ok_or("a `%` isn't followed by two hex digits")?;
             out.push(hex);
             i += 3;
@@ -373,6 +372,13 @@ pub(crate) fn percent_decode(text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escapes_are_two_hex_digits() {
+        assert_eq!(percent_decode("a%2Bb").unwrap(), "a+b");
+        assert!(percent_decode("%+F").is_err());
+        assert!(percent_decode("%4\u{e9}").is_err());
+    }
 
     #[test]
     fn names_are_short_lowercase_words() {

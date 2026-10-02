@@ -306,3 +306,174 @@ fn the_root_user_is_denied_only_explicitly() {
         assert_ne!(decision, Decision::ImplicitDeny, "{text}");
     }
 }
+
+const NAMES: &[&str] = &[
+    "Version",
+    "Statement",
+    "Effect",
+    "Action",
+    "NotAction",
+    "Resource",
+    "NotResource",
+    "Principal",
+    "NotPrincipal",
+    "Condition",
+    "Sid",
+    "Id",
+    "AWS",
+    "Federated",
+    "Service",
+    "CanonicalUser",
+    "StringLike",
+    "StringEqualsIfExists",
+    "ForAllValues:StringEquals",
+    "ForAnyValue:IpAddress",
+    "IpAddress",
+    "DateLessThan",
+    "NumericGreaterThan",
+    "BinaryEquals",
+    "ArnLike",
+    "Bool",
+    "Null",
+    "aws:SourceIp",
+    "aws:CurrentTime",
+    "aws:SecureTransport",
+    "s3:prefix",
+    "s3:max-keys",
+    "aws:PrincipalTag/${aws:username}",
+    "",
+];
+const STRINGS: &[&str] = &[
+    "2012-10-17",
+    "2008-10-17",
+    "Allow",
+    "Deny",
+    "allow",
+    "*",
+    "",
+    "${",
+    "${aws:",
+    "${aws:username}",
+    "${*}${?}${$}",
+    "arn:aws:s3:::a/${aws:username}/*",
+    "arn:aws:iam::123456789012:root",
+    "arn:aws:iam::123456789012:user/alice",
+    "arn",
+    "s3:",
+    "sts:AssumeRole",
+    "10.0.0.0/8",
+    "10.0.0.0/33",
+    "::/0",
+    "fe80::1%eth0",
+    "2026-13-40T25:61:61Z",
+    "2026-10-03T00:00:00Z",
+    "1e999",
+    "-0",
+    "0x10",
+    "true",
+    "TRUE",
+    "AAEC",
+    "=",
+    "\u{0}",
+    "日本",
+];
+
+/// Any JSON at all, mostly made of the names and values a policy uses, so documents
+/// get deep into the parser before something is wrong with them.
+fn wild(rng: &mut Rng, depth: usize) -> Json {
+    match rng.below(if depth == 0 { 6 } else { 9 }) {
+        0 => Json::Null,
+        1 => json!(rng.chance(50)),
+        2 => json!(rng.pick(&[0.5, -1.0, 1e308, 4_294_967_296.0, 0.0])),
+        3 => json!(rng.next() >> rng.below(64)),
+        4 | 5 => json!(rng.pick(STRINGS)),
+        6 => Json::Array((0..rng.below(4)).map(|_| wild(rng, depth - 1)).collect()),
+        _ => Json::Object(
+            (0..rng.below(5))
+                .map(|_| (rng.pick(NAMES).to_string(), wild(rng, depth - 1)))
+                .collect(),
+        ),
+    }
+}
+
+/// A document: well formed, or a policy shaped one with any values, or the text of a
+/// real policy cut short or with a byte changed.
+fn document(rng: &mut Rng) -> String {
+    match rng.below(4) {
+        0 => wild(rng, 4).to_string(),
+        1 => {
+            let statements: Vec<Json> = (0..rng.below(3))
+                .map(|_| {
+                    let effect = *rng.pick(&["Allow", "Deny"]);
+                    let mut s = statement(rng, effect);
+                    for _ in 0..=rng.below(2) {
+                        s[*rng.pick(NAMES)] = wild(rng, 2);
+                    }
+                    s
+                })
+                .collect();
+            json!({"Version": rng.pick(STRINGS), "Statement": statements}).to_string()
+        }
+        _ => {
+            let statements = random_statements(rng);
+            let mut text = json!({"Version": "2012-10-17", "Statement": statements})
+                .to_string()
+                .into_bytes();
+            let at = rng.below(text.len());
+            if rng.chance(50) {
+                text.truncate(at);
+            } else {
+                text[at] = *rng.pick(b"{}[]\":,\\ 0a*$");
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        }
+    }
+}
+
+#[test]
+fn any_document_is_read_or_refused_without_panicking() {
+    let mut rng = Rng(0x00D0_C0DE_F00D_0005);
+    let mut read = 0;
+    for _ in 0..TRIALS * 5 {
+        let text = document(&mut rng);
+        for kind in [Kind::Identity, Kind::Resource, Kind::Trust] {
+            let context = context(&mut rng);
+            let request = Request {
+                action: rng.pick(REQUEST_ACTIONS),
+                resource: rng.pick(REQUEST_RESOURCES),
+                context: &context,
+            };
+            let outcome = std::panic::catch_unwind(|| {
+                let Ok(policy) = Policy::parse(&text, kind) else {
+                    return false;
+                };
+                // What's read is usable: every question about it gets an answer.
+                let _ = (
+                    policy.check_s3(),
+                    policy.check_bucket("a"),
+                    policy.is_public(),
+                );
+                let _ = (policy.principal_arns(), policy.federated_providers());
+                let _ = policy.unknown_condition_keys().count();
+                let policies = match kind {
+                    Kind::Resource => Policies {
+                        resource: Some(&policy),
+                        ..Policies::default()
+                    },
+                    _ => Policies {
+                        identity: &[&policy],
+                        ..Policies::default()
+                    },
+                };
+                let _ = evaluate(&policies, &request);
+                true
+            });
+            let usable = outcome.unwrap_or_else(|_| {
+                panic!("reading or using this {kind:?} policy panicked: {text}")
+            });
+            read += usize::from(usable);
+        }
+    }
+    // Enough of them are policies for the use of one to be tried too.
+    assert!(read > TRIALS / 8, "only {read} documents were policies");
+}

@@ -21,5 +21,6 @@ pub use names::{
 };
 pub use object::{
     ChecksumType, LockMode, ObjectAttrs, ObjectInfo, PartInfo, Retention, SseInfo, SseMode, Stamp,
-    UploadChecksum, empty_etag, hex, md5_of_etag, multipart_etag, provisional_etag, unhex,
+    UploadChecksum, empty_etag, hex, hex_byte, md5_of_etag, multipart_etag, provisional_etag,
+    unhex,
 };
