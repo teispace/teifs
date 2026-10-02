@@ -33,7 +33,7 @@ use crate::{
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_config, minio_heal, minio_iam, minio_info, minio_kms, minio_metrics,
-    minio_service, minio_service_accounts, minio_speedtest,
+    minio_profile, minio_service, minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -739,6 +739,36 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         api: Api::Minio,
         verb: Verb::Post,
+        path: "/minio/admin/v3/profile",
+        needs: Needs::Action("admin:Profiling", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Profile(
+            minio_profile::Call::Profile,
+        )),
+        about: "Takes the `profilerType` profiles (`cpu`) for `duration` (a minute unless told, an hour at most) and answers them in a zip with `cluster.info`, as MinIO does: `mc admin profile`, `mc support profile`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/profiling/start",
+        needs: Needs::Action("admin:Profiling", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Profile(
+            minio_profile::Call::Start,
+        )),
+        about: "Starts the `profilerType` profiles, answering a `madmin.StartProfilingResult` for each: MinIO's older profiling calls",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/profiling/download",
+        needs: Needs::Action("admin:Profiling", ANY),
+        handler: Handler::MinioSpeedtest(minio_speedtest::Call::Profile(
+            minio_profile::Call::Download,
+        )),
+        about: "Stops the profiles started and answers them in a zip, as `POST profile` does",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
         path: "/minio/admin/v3/speedtest",
         needs: Needs::Action("admin:OBDInfo", ANY),
         handler: Handler::MinioSpeedtest(minio_speedtest::Call::Object),
@@ -1072,6 +1102,8 @@ pub(crate) struct Routes {
     pub(crate) live: crate::metrics::Live,
     /// `MinIO`'s heal sequences.
     pub(crate) heals: Arc<crate::minio_heal::Heals>,
+    /// The profiles being taken (`mc admin profile`).
+    pub(crate) profiles: Arc<crate::minio_profile::Profiles>,
     /// Where events go: the server's notification targets and its listeners.
     pub(crate) events: Events,
     /// Where requests' access log records go, turned on when an import makes a bucket log.

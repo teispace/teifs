@@ -4,6 +4,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -22,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/google/pprof/profile"
 	"github.com/minio/madmin-go/v3"
 )
 
@@ -149,6 +151,7 @@ func main() {
 	realtime(ctx, adm)
 	heal(ctx, adm, *bucket)
 	speedtest(ctx, adm)
+	cpuProfile(ctx, adm)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -260,6 +263,29 @@ func speedtest(ctx context.Context, adm *madmin.AdminClient) {
 	}
 	check(len(disks) > 0 && disks[0].Error == "" && disks[0].WriteThroughput > 0 && disks[0].ReadThroughput > 0,
 		fmt.Sprintf("the drive speed test: %+v", disks))
+}
+
+func cpuProfile(ctx context.Context, adm *madmin.AdminClient) {
+	step("a CPU profile, as mc admin profile takes it, read by Go's pprof")
+	answer, err := adm.Profile(ctx, madmin.ProfilerCPU, time.Second)
+	must(err)
+	zipped, err := io.ReadAll(answer)
+	must(err)
+	answer.Close()
+	archive, err := zip.NewReader(bytes.NewReader(zipped), int64(len(zipped)))
+	must(err)
+	var cpu *zip.File
+	for _, file := range archive.File {
+		if strings.HasSuffix(file.Name, "-cpu.pprof") {
+			cpu = file
+		}
+	}
+	check(cpu != nil && archive.File[0].Name == "cluster.info", fmt.Sprintf("the zip: %+v", archive.File))
+	opened, err := cpu.Open()
+	must(err)
+	parsed, err := profile.Parse(opened)
+	must(err)
+	check(len(parsed.SampleType) > 0 && parsed.Period > 0, fmt.Sprintf("the profile: %v", parsed))
 }
 
 // lists says whether a client signing with this key may list buckets.

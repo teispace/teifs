@@ -48,6 +48,7 @@ flate2.workspace = true
 arrow-array.workspace = true
 orc-rust.workspace = true
 parquet.workspace = true
+zip.workspace = true
 bytes.workspace = true
 s3s.workspace = true
 tempfile.workspace = true

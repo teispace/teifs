@@ -8,5 +8,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
 	github.com/aws/smithy-go v1.28.1
+	github.com/google/pprof v0.0.0-20261002000307-77d3b59017a0
 	github.com/minio/madmin-go/v3 v3.0.109
 )

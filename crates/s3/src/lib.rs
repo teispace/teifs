@@ -36,6 +36,7 @@ mod minio_iam;
 mod minio_info;
 mod minio_kms;
 mod minio_metrics;
+mod minio_profile;
 mod minio_service;
 mod minio_service_accounts;
 mod minio_speedtest;
@@ -226,6 +227,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             tracers,
             live: watch.metrics.live(),
             heals: Arc::default(),
+            profiles: Arc::default(),
             events,
             access_log,
             request_metrics,

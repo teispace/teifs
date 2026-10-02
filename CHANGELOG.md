@@ -382,6 +382,9 @@ behaviour; the on-disk format is always upgraded automatically.
   as MinIO does, holding S3's requests meanwhile and removing what it wrote; the drive
   test writes, syncs and reads a file on each of the drive's disks. A server is one node,
   so there's no network between nodes or sites to measure.
+- `mc admin profile` (and `mc support profile`): CPU profiles of the server in pprof's
+  format, which `go tool pprof` reads, answered in a zip as MinIO answers them, on
+  Linux and macOS. Go's other profiles (heap, goroutines, blocking) are refused.
 - MinIO's realtime metrics (the console's realtime view, `mc admin scanner status`):
   S3's requests being served and since-start totals (requests, bytes, errors,
   cancellations, times), one document every interval. `mc admin top locks` lists no

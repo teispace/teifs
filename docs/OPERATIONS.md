@@ -856,6 +856,17 @@ can be faster than the disk. The files go where the drive stages its writes:
 node, so `mc support perf net` and `site` have no network to measure. Both tests need
 `admin:OBDInfo`.
 
+## Profiling
+
+`mc admin profile ALIAS --type cpu --duration 30s` takes a CPU profile of the server for
+the time asked (a minute unless told, an hour at most) and saves it in a zip with a
+`cluster.info` that describes the drive, as MinIO's. The profile samples the server 100
+times a second and is in pprof's format: `go tool pprof profile-*-cpu.pprof` (or any pprof
+viewer) shows where the time went, by function. CPU profiles are taken on Linux and
+macOS; the other types `mc` offers are a Go program's and aren't taken. Profiling needs
+`admin:Profiling`, and the names in a profile are the server's own functions, so give it
+only to the people who run the server.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the

@@ -48,6 +48,10 @@ flate2.workspace = true
 orc-rust.workspace = true
 parquet.workspace = true
 md-5.workspace = true
+zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pprof.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -55,6 +55,8 @@ pub(crate) enum Call {
     Drive,
     /// `POST speedtest/net`, `speedtest/site`: between nodes or sites.
     Network,
+    /// The profiling calls (`mc support profile`), diagnostics too.
+    Profile(crate::minio_profile::Call),
 }
 
 impl Call {
@@ -64,6 +66,7 @@ impl Call {
             Self::Object => "Speedtest",
             Self::Drive => "DriveSpeedtest",
             Self::Network => "Netperf",
+            Self::Profile(call) => call.name(),
         }
     }
 
@@ -76,6 +79,7 @@ impl Call {
         match self {
             Self::Object => object(routes, req, caller).await,
             Self::Drive => Ok(drive(routes, req).await),
+            Self::Profile(call) => call.call(routes, req).await,
             Self::Network => Err(error(
                 StatusCode::NOT_IMPLEMENTED,
                 "NotImplemented",
