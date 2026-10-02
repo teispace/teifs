@@ -445,10 +445,21 @@ impl Inner {
         precondition: &Precondition,
     ) -> Result<ObjectInfo> {
         // Fail before writing anything when the precondition already can't hold.
-        let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
-        precondition.check(current.as_ref())?;
+        Inner::check_current(conn, bucket, key, precondition)?;
         let written = self.write_object(bucket, key, finished)?;
         self.record_object(conn, bucket, written, precondition)
+    }
+
+    /// Whether `key`'s current version meets `precondition` now: checked before writing,
+    /// so a write that can't succeed fails early (it's checked again when recorded).
+    pub(crate) fn check_current(
+        conn: &Index,
+        bucket: &ObjectBucket,
+        key: &str,
+        precondition: &Precondition,
+    ) -> Result<()> {
+        let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
+        precondition.check(current.as_ref())
     }
 
     /// Puts the finished bytes in place as a new data file, with the footer the version

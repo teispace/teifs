@@ -1225,7 +1225,7 @@ impl Store {
                 }
                 _ => {
                     let source = (&src, src_key.as_str(), src_version.as_deref());
-                    inner.copy_across(source, &dst, &dst_key, attrs, &precondition)
+                    inner.copy_across(source, (&dst_bucket, &dst), &dst_key, attrs, &precondition)
                 }
             }
         })
@@ -1469,7 +1469,7 @@ impl Inner {
     fn copy_across(
         &self,
         (src, src_key, src_version): (&Bucket, &str, Option<&str>),
-        dst: &Bucket,
+        (dst_name, dst): (&str, &Bucket),
         dst_key: &str,
         attrs: Option<ObjectAttrs>,
         precondition: &Precondition,
@@ -1513,8 +1513,15 @@ impl Inner {
             None => teifs_types::hex(&md5_file(&tmp.path)?),
         };
         let attrs = copied_attrs(source.attrs, attrs);
-        let conn = self.lock();
         let finished = Finished::plain(&tmp.path, source.size, etag, attrs);
+        if let Bucket::Object(bucket) = dst {
+            // The copy goes in place (and is synced) before the commit lock, as a PUT does.
+            self.read_index(|conn| Inner::check_current(conn, bucket, dst_key, precondition))?;
+            let written = self.write_object(bucket, dst_key, finished)?;
+            tmp.keep();
+            return self.record_grouped(dst_name, &bucket.id, written, precondition.clone());
+        }
+        let conn = self.lock();
         let info = self.commit_to(&conn, dst, dst_key, finished, precondition)?;
         tmp.keep();
         Ok(info)

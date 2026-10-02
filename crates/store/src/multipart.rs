@@ -126,8 +126,7 @@ impl Store {
         let id = id.to_owned();
         self.blocking(move |inner| {
             inner
-                .lock()
-                .get_upload(&id)?
+                .read_index(|conn| Ok(conn.get_upload(&id)?))?
                 .ok_or(StoreError::NoSuchUpload)
         })
         .await
@@ -404,9 +403,10 @@ impl Store {
         let (crypt, checksums) = self.seal_object_sums(&upload, with).await?;
         let id = id.to_owned();
         self.blocking(move |inner| {
+            // Read without the commit lock, as the parts are joined: whether the upload
+            // still exists is checked again under it.
             let upload = inner
-                .lock()
-                .get_upload(&id)?
+                .read_index(|conn| Ok(conn.get_upload(&id)?))?
                 .ok_or(StoreError::NoSuchUpload)?;
             if listed.is_empty() {
                 return Err(StoreError::InvalidPart);
@@ -419,11 +419,6 @@ impl Store {
                 parts.keys.clear();
             }
 
-            let conn = inner.lock();
-            // Aborted while the parts were being joined: the upload no longer exists.
-            if conn.get_upload(&id)?.is_none() {
-                return Err(StoreError::NoSuchUpload);
-            }
             let bucket = inner.bucket(&upload.bucket)?;
             let stored_len = fs::metadata(&tmp.path)?.len();
             let size: u64 = parts.sizes.iter().sum();
@@ -443,8 +438,47 @@ impl Store {
                 parts: Some(parts),
                 ..Finished::plain(&tmp.path, size, multipart_etag(&md5s), attrs)
             };
-            let info = inner.commit_to(&conn, &bucket, &upload.key, finished, &precondition)?;
-            tmp.keep();
+            let (conn, info) = match &bucket {
+                // The data file goes in place (and is synced) before the commit lock, as
+                // a PUT's does: syncing a big object mustn't hold up every other write.
+                Bucket::Object(object_bucket) => {
+                    inner.read_index(|conn| {
+                        Inner::check_current(conn, object_bucket, &upload.key, &precondition)
+                    })?;
+                    let written = inner.write_object(object_bucket, &upload.key, finished)?;
+                    tmp.keep();
+                    let conn = inner.lock();
+                    // Aborted while the parts were being joined (the upload no longer
+                    // exists), or the bucket deleted.
+                    let still = match conn.get_upload(&id) {
+                        Ok(Some(_)) => inner.object_bucket(&upload.bucket, &object_bucket.id),
+                        Ok(None) => Err(StoreError::NoSuchUpload),
+                        Err(err) => Err(err.into()),
+                    };
+                    let object_bucket = match still {
+                        Ok(object_bucket) => object_bucket,
+                        Err(err) => {
+                            written.discard();
+                            return Err(err);
+                        }
+                    };
+                    let info =
+                        inner.record_object(&conn, &object_bucket, written, &precondition)?;
+                    (conn, info)
+                }
+                Bucket::Folder(..) => {
+                    let conn = inner.lock();
+                    // Aborted while the parts were being joined.
+                    if conn.get_upload(&id)?.is_none() {
+                        return Err(StoreError::NoSuchUpload);
+                    }
+                    let bucket = inner.bucket(&upload.bucket)?;
+                    let info =
+                        inner.commit_to(&conn, &bucket, &upload.key, finished, &precondition)?;
+                    tmp.keep();
+                    (conn, info)
+                }
+            };
             let result = CompletedResult {
                 etag: info.etag.clone(),
                 size: info.size,
@@ -520,8 +554,7 @@ impl Inner {
         listed: &[(u32, String)],
     ) -> Result<(TmpFile, PartsRecord, Vec<[u8; 16]>)> {
         let stored: BTreeMap<u32, Part> = self
-            .lock()
-            .list_parts(id, 0, usize::MAX)?
+            .read_index(|conn| Ok(conn.list_parts(id, 0, usize::MAX)?))?
             .into_iter()
             .map(|part| (part.number, part))
             .collect();

@@ -590,8 +590,9 @@ key. The S3 layer (`crates/s3/src/sse.rs`) maps the SSE headers, the bucket's de
    new id that nothing refers to yet, so it is synced and renamed into place before the
    lock; under the lock the store checks the preconditions, rewrites the footer if the
    bucket's versioning or Object Lock changed meanwhile, and records the row (or removes
-   the file when a precondition fails). A folder bucket's file is synced before the lock
-   too, and renamed into place under it. Writes waiting for the lock are recorded as a
+   the file when a precondition fails). A completed multipart upload and a copy into an
+   object bucket are put in place the same way, before the lock. A folder bucket's file
+   is synced before the lock too, and renamed into place under it. Writes waiting for the lock are recorded as a
    group (`crates/store/src/group.rs`): whoever gets it records all of them in one
    transaction, each in its own savepoint, so one sync of the index covers the group
    and a write that fails leaves the others alone. An object bucket's deletes join the

@@ -469,3 +469,114 @@ async fn concurrent_deletes_and_writes_are_all_recorded() {
     // The 32 old files went with their versions.
     assert_eq!(data_files(&store), 32);
 }
+
+/// A last change to make under a [`Held`] lock.
+type Last = Box<dyn FnOnce(&teifs_meta::Index) + Send>;
+
+/// The commit lock, held on a thread of its own until released with a last change to
+/// make under it.
+struct Held {
+    release: std::sync::mpsc::Sender<Last>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Held {
+    fn take(store: &std::sync::Arc<Store>) -> Self {
+        let store = store.clone();
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<Last>();
+        let thread = std::thread::spawn(move || {
+            let conn = store.inner.lock();
+            locked.send(()).unwrap();
+            released.recv().unwrap()(&conn);
+        });
+        is_locked.recv().unwrap();
+        Self { release, thread }
+    }
+
+    fn release(self, last: impl FnOnce(&teifs_meta::Index) + Send + 'static) {
+        self.release.send(Box::new(last)).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+/// Waits (at most 10 s) until the bucket `docs` holds `count` data files.
+async fn until_data_files(store: &Store, count: usize) {
+    let wait = async {
+        while data_files(store) != count {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), wait)
+        .await
+        .expect("the data file was written");
+}
+
+/// An upload of `key` in `docs` with one part; its id and the part's ETag.
+async fn one_part_upload(store: &Store, key: &str) -> (String, Vec<(u32, String)>) {
+    let upload = store
+        .create_upload(
+            "docs",
+            key,
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut staged = store.stage().await.unwrap();
+    staged.write(b"parts").await.unwrap();
+    let part = store
+        .put_part(&upload.id, 1, staged, std::collections::BTreeMap::new())
+        .await
+        .unwrap();
+    (upload.id, vec![(1, part.etag)])
+}
+
+#[tokio::test]
+async fn a_completed_upload_is_written_before_the_commit_lock() {
+    let (_dir, store) = object_bucket().await;
+    let store = std::sync::Arc::new(store);
+    let (id, parts) = one_part_upload(&store, "big").await;
+    let held = Held::take(&store);
+    let completing = store.clone();
+    let complete = tokio::spawn(async move {
+        completing
+            .complete(&id, parts, Precondition::default(), CompleteWith::default())
+            .await
+    });
+    // Synced and in place while another write holds the lock.
+    until_data_files(&store, 1).await;
+    held.release(|_| ());
+    assert_eq!(complete.await.unwrap().unwrap().size, 5);
+    assert_eq!(store.head("docs", "big").await.unwrap().size, 5);
+}
+
+#[tokio::test]
+async fn an_upload_aborted_while_its_object_is_written_leaves_no_file() {
+    let (_dir, store) = object_bucket().await;
+    let store = std::sync::Arc::new(store);
+    let (id, parts) = one_part_upload(&store, "big").await;
+    let held = Held::take(&store);
+    let (completing, upload) = (store.clone(), id.clone());
+    let complete = tokio::spawn(async move {
+        completing
+            .complete(
+                &upload,
+                parts,
+                Precondition::default(),
+                CompleteWith::default(),
+            )
+            .await
+    });
+    until_data_files(&store, 1).await;
+    held.release(move |conn| conn.delete_upload(&id).unwrap());
+    assert!(matches!(
+        complete.await.unwrap(),
+        Err(StoreError::NoSuchUpload)
+    ));
+    assert_eq!(data_files(&store), 0);
+    assert!(store.head("docs", "big").await.is_err());
+}

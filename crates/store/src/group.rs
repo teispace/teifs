@@ -321,7 +321,7 @@ impl Inner {
 
     /// The object bucket `name` if it's still the one with id `id` (it may have been
     /// deleted, and its folder with it, since the change began).
-    fn object_bucket(&self, name: &str, id: &str) -> Result<ObjectBucket> {
+    pub(crate) fn object_bucket(&self, name: &str, id: &str) -> Result<ObjectBucket> {
         match self.bucket(name) {
             Ok(Bucket::Object(bucket)) if bucket.id == id => Ok(bucket),
             Ok(_) => Err(StoreError::NoSuchBucket),

@@ -802,6 +802,9 @@ behaviour; the on-disk format is always upgraded automatically.
   recorded together with the writes waiting, and the data files they free are removed
   once that's committed. 4 KiB objects at 64 clients in Docker: about 3× the deletes
   per second, and about 1.7× the operations per second in a mixed load.
+- Completing a multipart upload, or copying into an object bucket from another bucket,
+  no longer holds up other writes while the new object is synced: its data file goes in
+  place before the drive's commit lock, as an upload's does.
 - Faster downloads of encrypted objects: about 1 MiB is read and decrypted at a time,
   in place and without a copy, instead of 64 KiB at a time (10 MiB objects at 64
   clients: about 1.5× in Docker).
