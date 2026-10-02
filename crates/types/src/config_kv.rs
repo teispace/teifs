@@ -17,6 +17,11 @@ pub const DEFAULT_TARGET: &str = "_";
 
 /// The key every sub-system has for a note about its settings.
 pub const COMMENT: &str = "comment";
+/// A configuration by sub-system and target, each target's keys and values in order.
+pub type Redacted = BTreeMap<&'static str, BTreeMap<String, Vec<(String, String)>>>;
+
+/// What a secret that's set reads in [`ConfigKv::redacted`], as `MinIO` writes it.
+pub const REDACTED: &str = "*redacted*";
 
 /// The key that turns a sub-system's target on or off.
 pub const ENABLE: &str = "enable";
@@ -1147,6 +1152,38 @@ impl ConfigKv {
         text
     }
 
+    /// Every sub-system's targets with their keys, as `MinIO`'s `RedactSensitiveInfo`
+    /// gives its configuration to `mc support diag`: a secret that's set reads
+    /// [`REDACTED`].
+    #[must_use]
+    pub fn redacted(&self) -> Redacted {
+        SUBSYSTEMS
+            .iter()
+            .map(|subsystem| {
+                let targets = self
+                    .targets(subsystem)
+                    .into_iter()
+                    .map(|written| {
+                        let kvs = written
+                            .kvs
+                            .into_iter()
+                            .map(|(key, value)| {
+                                let secret = subsystem.key(&key).is_some_and(|k| k.secret);
+                                if secret && !value.is_empty() {
+                                    (key, REDACTED.to_owned())
+                                } else {
+                                    (key, value)
+                                }
+                            })
+                            .collect();
+                        (written.target.to_owned(), kvs)
+                    })
+                    .collect();
+                (subsystem.name, targets)
+            })
+            .collect()
+    }
+
     /// The configuration as kept on disk: every target set, each line one `set` takes.
     #[must_use]
     pub fn to_text(&self) -> String {
@@ -1562,6 +1599,22 @@ mod tests {
         assert_eq!(variables["MINIO_IDENTITY_LDAP_ENABLE"], "on");
         // Defaults aren't variables.
         assert!(!variables.contains_key("MINIO_IDENTITY_LDAP_TLS_SKIP_VERIFY"));
+    }
+
+    #[test]
+    fn a_redacted_configuration_hides_the_secrets_set() {
+        let config = ConfigKv::parse(
+            "identity_ldap server_addr=ldap.example.com:636 lookup_bind_password=dummy-pw",
+        )
+        .unwrap();
+        let redacted = config.redacted();
+        let ldap = &redacted["identity_ldap"][DEFAULT_TARGET];
+        let value = |key: &str| ldap.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(value("server_addr"), Some("ldap.example.com:636"));
+        assert_eq!(value("lookup_bind_password"), Some(REDACTED));
+        // Sub-systems nothing set have their defaults, and an empty secret stays empty.
+        let openid = &redacted["identity_openid"][DEFAULT_TARGET];
+        assert!(openid.contains(&("client_secret".to_owned(), String::new())));
     }
 
     #[test]

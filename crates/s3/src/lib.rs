@@ -33,6 +33,7 @@ mod metrics;
 mod minio_bucket_metadata;
 mod minio_config;
 mod minio_heal;
+mod minio_health;
 mod minio_iam;
 mod minio_iam_transfer;
 mod minio_idp_config;
@@ -81,6 +82,7 @@ pub use drive::{Drive, LAYOUT_HEADER};
 pub use health::HEALTH_PATH;
 pub use limits::{MAX_HEADER_BYTES, MAX_USER_METADATA_BYTES};
 pub use minio_config::{CheckConfig, ConfigSettings};
+pub use minio_health::ServingCertificates;
 pub use minio_service::{Control, Stop};
 pub use proxy::{ProxyHeader, TrustedProxies};
 pub use routes::{Api, EndpointInfo, endpoints};
@@ -128,6 +130,9 @@ pub struct Options {
     /// Where the root key is kept, if the admin API may replace it (a key the drive
     /// generated); `None` answers that it's managed elsewhere.
     pub root_keys: Option<Arc<dyn RootKeyStore>>,
+    /// The certificates the server presents, which `mc support diag` describes; none
+    /// when it serves plain HTTP.
+    pub certificates: Option<Arc<dyn ServingCertificates>>,
     /// Serve metrics to anyone who can reach the server, not only to bearer tokens of
     /// keys that may `teifs:GetMetrics`: for a network only Prometheus shares.
     pub public_metrics: bool,
@@ -229,6 +234,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             started: std::time::SystemTime::now(),
             config: options.config.map(Arc::new),
             root_keys: options.root_keys,
+            certificates: options.certificates,
             tracers,
             live: watch.metrics.live(),
             heals: Arc::default(),

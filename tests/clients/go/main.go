@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -144,6 +145,7 @@ func main() {
 
 	minioIAM(ctx, adm)
 	serverInfo(ctx, adm, *bucket)
+	healthInfo(ctx, adm)
 	service(ctx, adm)
 	kms(ctx, adm)
 	configKV(ctx, adm)
@@ -449,6 +451,35 @@ func serverInfo(ctx context.Context, adm *madmin.AdminClient, bucket string) {
 	_, has := usage.BucketsUsage[bucket]
 	check(has && usage.TotalCapacity > 0 && usage.TotalCapacity >= usage.TotalUsedCapacity,
 		fmt.Sprintf("the data usage: %+v", usage))
+}
+
+// healthInfo is mc support diag: the report streamed as it's gathered, the version read
+// by madmin first and the rest by the caller, the last report the whole of it.
+func healthInfo(ctx context.Context, adm *madmin.AdminClient) {
+	step("the health report, as mc support diag gathers it")
+	resp, version, err := adm.ServerHealthInfo(ctx, madmin.HealthDataTypesList, 10*time.Second, "standard")
+	must(err)
+	defer resp.Body.Close()
+	check(version == madmin.HealthInfoVersion, "the report's version: "+version)
+	var last madmin.HealthInfo
+	decoder := json.NewDecoder(resp.Body)
+	reports := 0
+	for {
+		var report madmin.HealthInfo
+		if err := decoder.Decode(&report); err != nil {
+			check(errors.Is(err, io.EOF), fmt.Sprintf("the reports read: %v", err))
+			break
+		}
+		last = report
+		reports++
+	}
+	check(reports > 1 && len(last.Sys.CPUInfo) == 1 && len(last.Sys.MemInfo) == 1 &&
+		last.Sys.MemInfo[0].Total > 0 && len(last.Sys.ProcInfo) == 1 && last.Sys.ProcInfo[0].PID > 0 &&
+		len(last.Sys.Partitions) == 1 && len(last.Sys.OSInfo) == 1 && len(last.Sys.SysConfig) == 1,
+		fmt.Sprintf("the host in the report (%d reports): %+v", reports, last.Sys))
+	check(last.Minio.Info.DeploymentID != "" && len(last.Minio.Info.Servers) == 1 &&
+		last.Minio.Info.TLS != nil && last.Minio.Config.Config != nil,
+		fmt.Sprintf("the server in the report: %+v", last.Minio))
 }
 
 // The service calls a server answers before it acts: restart and stop only as dry runs

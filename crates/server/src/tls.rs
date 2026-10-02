@@ -317,6 +317,13 @@ fn pairs(source: &TlsSource) -> Result<Vec<(PathBuf, PathBuf)>, TlsError> {
     Ok(found)
 }
 
+impl teifs_s3::ServingCertificates for Tls {
+    fn leaves(&self) -> Vec<Vec<u8>> {
+        let certs = Arc::clone(&self.certs.read().unwrap_or_else(PoisonError::into_inner));
+        certs.0.iter().map(|entry| entry.leaf.to_vec()).collect()
+    }
+}
+
 impl TlsSource {
     /// Each certificate file it names, with the server's own certificate in it (the
     /// first of its chain), without loading the keys: for checking when they expire.

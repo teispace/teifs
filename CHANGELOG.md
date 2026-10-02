@@ -354,6 +354,12 @@ behaviour; the on-disk format is always upgraded automatically.
   or LDAP user's temporary credentials end before they expire, all of them or those
   issued with one `TokenRevokeType`, which MinIO's `AssumeRole` and
   `AssumeRoleWithLDAPIdentity` now take. A user without the admin action ends its own.
+- MinIO's health report (`mc support diag`, and `mc admin obd` before it): `healthinfo`
+  streams `madmin.HealthInfo` as it's gathered, with the host's CPUs, disks, OS,
+  memory, network interfaces, settings and known problems, the server's process, the
+  drive's configuration with its secrets redacted, and the server's info with the TLS
+  certificates it presents. `anonymize=strict` names the server `server1`. Needs
+  `admin:OBDInfo`.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the

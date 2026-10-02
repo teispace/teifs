@@ -704,6 +704,9 @@ impl Server {
                     check: config.config_check.0,
                 }),
                 root_keys,
+                certificates: tls
+                    .clone()
+                    .map(|tls| tls as Arc<dyn teifs_s3::ServingCertificates>),
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;

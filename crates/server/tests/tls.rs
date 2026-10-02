@@ -192,6 +192,28 @@ async fn https_requests_are_secure_transport() {
     assert_eq!(status, 200, "{text}");
     let info: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(info["servers"][0]["scheme"], "https");
+    // `mc support diag` describes the certificate the server presents.
+    let (status, text) = signing::signed_over(
+        &ca.reqwest(),
+        &server,
+        (common::ACCESS_KEY, common::SECRET_KEY),
+        "GET",
+        "/minio/admin/v3/healthinfo?minioinfo=true",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let report = serde_json::Deserializer::from_str(&text)
+        .into_iter::<serde_json::Value>()
+        .last()
+        .unwrap()
+        .unwrap();
+    let tls = &report["minio"]["info"]["tls"];
+    assert_eq!(tls["tls_enabled"], true, "{report}");
+    assert_eq!(tls["certs"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        tls["certs"][0]["signature_algo"], "ECDSA-SHA256",
+        "{report}"
+    );
 
     // The same policy on plain HTTP denies everyone, the root user too.
     let plain = common::start().await;

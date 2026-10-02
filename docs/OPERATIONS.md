@@ -870,6 +870,18 @@ can be faster than the disk. The files go where the drive stages its writes:
 node, so `mc support perf net` and `site` have no network to measure. Both tests need
 `admin:OBDInfo`.
 
+## Health report
+
+`mc support diag ALIAS` gathers what support asks for first: the host's CPUs, disks,
+operating system, memory, network interfaces and settings (open files limit, clock, and on
+Linux transparent huge pages and XFS's error retries), problems MinIO warns of (the
+kernel's audit on, `updatedb` installed), SELinux's mode, the server's own process, the
+drive's configuration with its secrets shown as `*redacted*`, and what `mc admin info`
+shows with the TLS certificates the server presents. `--anonymize strict` names the server
+`server1` instead of its address and host name. The report is written to a file
+`mc` names, for you to read or send; TeiFS sends nothing anywhere. It needs
+`admin:OBDInfo`.
+
 ## Pools
 
 `mc admin decommission status ALIAS` lists the drive as the server's only pool, named by

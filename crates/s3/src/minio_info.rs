@@ -22,6 +22,8 @@ const ONLINE: &str = "online";
 const OFFLINE: &str = "offline";
 /// `madmin.BackendType`'s `FS`, as `storageinfo` numbers it.
 const FS: u8 = 1;
+/// The language the server is built with, where `MinIO` names its Go.
+const RUNTIME_VERSION: &str = concat!("rust", env!("CARGO_PKG_RUST_VERSION"));
 
 /// A count, or why it isn't known (`madmin.Buckets`, `Objects`, …).
 #[derive(Serialize, Default)]
@@ -154,6 +156,13 @@ struct Server {
     /// Go's zero time: it isn't restarting.
     #[serde(rename = "restarting_since")]
     restarting_since: &'static str,
+    /// Go's `GOMAXPROCS`: the threads that run requests at once.
+    #[serde(rename = "go_max_procs")]
+    go_max_procs: usize,
+    #[serde(rename = "num_cpu")]
+    num_cpu: usize,
+    #[serde(rename = "runtime_version")]
+    runtime_version: &'static str,
 }
 
 /// `madmin.ErasureSetInfo`.
@@ -173,7 +182,7 @@ struct SetInfo {
 /// `madmin.InfoMessage`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InfoMessage {
+pub(crate) struct InfoMessage {
     mode: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     domain: Vec<String>,
@@ -372,6 +381,8 @@ pub(crate) enum Kind {
     Storage,
     /// `GET datausageinfo`.
     DataUsage,
+    /// `GET healthinfo` (`mc support diag`).
+    Health,
     /// The server's pools (`mc admin decommission`, `mc admin rebalance`).
     Pools(crate::minio_pools::Call),
 }
@@ -383,6 +394,7 @@ impl Kind {
             Self::Server => "ServerInfo",
             Self::Storage => "StorageInfo",
             Self::DataUsage => "DataUsageInfo",
+            Self::Health => "HealthInfo",
             Self::Pools(call) => call.name(),
         }
     }
@@ -396,6 +408,7 @@ impl Kind {
             Self::Server => info(routes, req).await,
             Self::Storage => storage_info(routes).await,
             Self::DataUsage => data_usage_info(routes, req).await,
+            Self::Health => crate::minio_health::health_info(routes, req).await,
             Self::Pools(call) => call.call(routes, req),
         }
     }
@@ -447,6 +460,21 @@ async fn counts(routes: &Routes) -> (Count, Count, Count, Count, Size) {
 
 /// `GET info`.
 async fn info(routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Response<Body>> {
+    Ok(json(&info_message(routes, req).await))
+}
+
+impl InfoMessage {
+    /// Names the server by `name` wherever it's named, as `MinIO`'s strict anonymizing does.
+    pub(crate) fn anonymize(&mut self, name: &str) {
+        for server in &mut self.servers {
+            name.clone_into(&mut server.endpoint);
+            server.network = BTreeMap::from([(name.to_owned(), ONLINE)]);
+        }
+    }
+}
+
+/// What `GET info` answers.
+pub(crate) async fn info_message(routes: &Routes, req: &S3Request<Body>) -> InfoMessage {
     let config = routes.config.as_deref();
     let disks = disks(routes).await;
     let (buckets, objects, versions, delete_markers, usage) = counts(routes).await;
@@ -463,6 +491,7 @@ async fn info(routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Response<Bod
         heal_disks: 0,
     };
     let endpoint = endpoint(routes, req);
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
     let server = Server {
         state: ONLINE,
         network: BTreeMap::from([(endpoint.clone(), ONLINE)]),
@@ -480,9 +509,12 @@ async fn info(routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Response<Bod
         ilm_expiry_in_progress: false,
         api_version: ApiVersion::default(),
         restarting_since: "0001-01-01T00:00:00Z",
+        go_max_procs: cpus,
+        num_cpu: cpus,
+        runtime_version: RUNTIME_VERSION,
         disks,
     };
-    let message = InfoMessage {
+    InfoMessage {
         mode: ONLINE,
         domain: config.map(|c| c.domains.clone()).unwrap_or_default(),
         region: REGION,
@@ -510,8 +542,7 @@ async fn info(routes: &Routes, req: &S3Request<Body>) -> S3Result<S3Response<Bod
         },
         servers: [server],
         pools: BTreeMap::from([(0, BTreeMap::from([(0, set)]))]),
-    };
-    Ok(json(&message))
+    }
 }
 
 /// `GET storageinfo`.

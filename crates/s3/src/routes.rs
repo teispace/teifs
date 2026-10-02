@@ -769,6 +769,22 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/healthinfo",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Health),
+        about: "Streams the health report `madmin.HealthInfo` (version 3), sent again as each part the query asks for is gathered: the host's CPUs, disks, OS, memory, network, the server's process, its known problems, SELinux and settings, the configuration with its secrets redacted, and the server's info with its TLS certificates; `deadline` bounds it, `anonymize=strict` names the server `server1`: `mc support diag`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/obdinfo",
+        needs: Needs::Action("admin:OBDInfo", ANY),
+        handler: Handler::MinioInfo(minio_info::Kind::Health),
+        about: "Streams the health report `madmin.HealthInfo` (version 3), sent again as each part the query asks for is gathered: the host's CPUs, disks, OS, memory, network, the server's process, its known problems, SELinux and settings, the configuration with its secrets redacted, and the server's info with its TLS certificates; `deadline` bounds it, `anonymize=strict` names the server `server1`: `mc admin obd`, its older name",
+    },
+    Endpoint {
+        api: Api::Minio,
         verb: Verb::Post,
         path: "/minio/admin/v3/service",
         needs: Needs::ServiceAction,
@@ -1341,6 +1357,8 @@ pub(crate) struct Routes {
     pub(crate) config: Option<Arc<ServerConfig>>,
     /// Where the root key is kept, if the admin API may replace it.
     pub(crate) root_keys: Option<Arc<dyn admin::RootKeyStore>>,
+    /// The certificates the server presents, if it serves TLS.
+    pub(crate) certificates: Option<Arc<dyn crate::ServingCertificates>>,
     /// Whoever watches live traces.
     pub(crate) tracers: Arc<Tracers>,
     /// The requests' live figures, for `MinIO`'s realtime metrics.
