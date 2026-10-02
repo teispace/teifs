@@ -251,6 +251,9 @@ pub struct ExportedServiceAccount {
     /// The name the LDAP user it acts for signs in with: set only for an LDAP user's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ldap_username: Option<String>,
+    /// The OpenID Connect user it acts for: set only for one's, without a `parent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openid: Option<ExportedOpenIdParent>,
     /// Whether requests signed with it are accepted.
     pub active: bool,
     /// The policy that narrows it; `None` for all its parent may do.
@@ -271,6 +274,21 @@ pub struct ExportedServiceAccount {
     /// (and reports it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+}
+
+/// The OpenID Connect user a service account acts for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedOpenIdParent {
+    /// Its provider's URL.
+    pub provider: String,
+    /// The `sub` of its tokens.
+    pub sub: String,
+    /// The client id its token was for.
+    pub aud: String,
+    /// The managed policies, by name, the session that made the account had.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<String>,
 }
 
 impl std::fmt::Debug for ExportedServiceAccount {

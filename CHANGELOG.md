@@ -338,6 +338,12 @@ behaviour; the on-disk format is always upgraded automatically.
   once a policy is mapped to it or its groups. Such an account has its user's mapped
   policies, follows its groups as the directory has them, and goes when the directory
   no longer has its user.
+- OpenID Connect users' own service accounts: a web identity's session (without an
+  IAM role) makes, lists and removes its user's, as MinIO's `mc admin accesskey create`
+  does with it. Such an account acts as the user, under MinIO's name for it, with the
+  policies the session had, until its provider is removed;
+  `idp/openid/list-access-keys-bulk` (`mc idp openid accesskey ls`) lists them by
+  user, and IAM exports and imports carry them.
 - MinIO's identity provider configurations (`mc admin idp ldap|openid add|update|
   remove|info|list`), kept as the `identity_ldap` and `identity_openid` settings
   `mc admin config` sets, and used when the server starts again.

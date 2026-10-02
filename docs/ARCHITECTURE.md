@@ -372,7 +372,8 @@ does it (`teifs_crypto::madmin`, Argon2id run one at a time off the async worker
 Users and groups have a `disabled` flag: the snapshot leaves out a disabled user (its
 keys and sessions find no one) and a disabled group's policies. `MinIO`'s service
 accounts (`minio_service_accounts.rs`, `ops/service_accounts.rs`) have their own table
-(`iam_service_accounts`, parent by the user's unique id, none for the root user). The
+(`iam_service_accounts`, parent by the user's unique id, none for the root user, an
+LDAP user's DN or an OpenID Connect user's provider, `sub` and policies). The
 snapshot gives each active one a credential: its parent's identity with a
 `SessionKind::Service` session that carries the account's policy as a session policy
 and its expiry, which `Snapshot::credential` checks on every request. A root user's
@@ -380,8 +381,10 @@ service account is a user principal with an allow-all policy, never the root use
 its session policy still narrows it. Their routes are `Needs::OrOwnAccount`: anything
 but an explicit deny passes the table, which tells the handler whether the caller holds
 the action; without it, the handler allows only the accounts of the user the caller
-acts as (`Iam::minio_parent`); a caller signing with session keys adds or deletes
-service accounts only with the action. `mc admin info`'s calls (`minio_info.rs`) describe
+acts as (`Iam::minio_parent`: for an OpenID Connect user, `MinIO`'s hash of its `sub` and
+issuer, which `Session::openid_user` carries); a caller signing with session keys adds
+or deletes service accounts only with the action, but for an LDAP or web identity
+session no session policy narrows. `mc admin info`'s calls (`minio_info.rs`) describe
 the drive in madmin's types from the store's disks and usage counters, asking the KMS
 (`Store::kms`) and the LDAP directory with a timeout. `MinIO`'s service calls
 (`minio_service.rs`) go through a `Control` shared by the routes, `Access` (whose check

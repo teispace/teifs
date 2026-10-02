@@ -14,7 +14,7 @@ use crate::{
     Draft, Iam, IamError, Identity, SessionKind, builtin, ids,
     ops::ldap::LdapUser,
     rules,
-    state::{Document, Parent, ServiceAccount, State},
+    state::{Document, OpenIdParent, Parent, ServiceAccount, State},
 };
 
 type Result<T> = std::result::Result<T, MinioError>;
@@ -81,6 +81,17 @@ impl std::fmt::Debug for AddedServiceAccount {
             .field("expires_ms", &self.expires_ms)
             .finish_non_exhaustive()
     }
+}
+
+/// An OpenID Connect user's service account, as `MinIO` lists it by user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenIdServiceAccount {
+    /// `MinIO`'s name for the user.
+    pub user: String,
+    /// The user's `sub`.
+    pub sub: String,
+    /// The account.
+    pub account: MinioServiceAccount,
 }
 
 /// A service account, as `MinIO` describes it.
@@ -160,12 +171,17 @@ fn taken(state: &State, root: Option<&str>, id: &str) -> bool {
         || root == Some(id)
 }
 
-/// The parent's name: a user's, the root user's access key, or a directory user's DN.
+/// The parent's name: a user's, the root user's access key, a directory user's DN, or
+/// `MinIO`'s name for an OpenID Connect user.
 fn parent_name(state: &State, root: Option<&str>, account: &ServiceAccount) -> String {
     match &account.parent {
         Parent::User(id) => state.users.get(id).map(|u| u.name.clone()),
         Parent::Root => root.map(str::to_owned),
         Parent::Ldap { dn, .. } => Some(dn.clone()),
+        Parent::OpenId(openid) => state
+            .oidc_providers
+            .get(&openid.provider)
+            .map(|p| openid.name(&p.url)),
     }
     .unwrap_or_default()
 }
@@ -190,6 +206,13 @@ fn describe(state: &State, root: Option<&str>, account: &ServiceAccount) -> Mini
     let policy = match (&account.policy, &account.parent) {
         (Some(policy), _) => policy.text.to_string(),
         (None, Parent::Ldap { dn, .. }) => merged(ldap_documents(state, dn)),
+        (None, Parent::OpenId(openid)) => merged(
+            openid
+                .policies
+                .iter()
+                .filter_map(|id| state.policies.get(id))
+                .map(|p| &*p.default_document().text),
+        ),
         (None, Parent::User(id)) => state.users.get(id).map_or_else(
             || merged([]),
             |user| {
@@ -359,6 +382,29 @@ impl Draft<'_> {
             Err(e) => return Err(invalid(e.to_string())),
         };
         let parent = match (&account.parent, &account.ldap_username) {
+            (None, _) if let Some(openid) = &account.openid => {
+                let provider = self
+                    .state
+                    .oidc_provider_by_issuer(&openid.provider)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "its OpenID Connect provider {} isn't here.",
+                            openid.provider
+                        ))
+                    })?;
+                Parent::OpenId(Box::new(OpenIdParent {
+                    provider: provider.id.clone(),
+                    sub: openid.sub.clone(),
+                    aud: openid.aud.clone(),
+                    // As a session would have them: those that exist.
+                    policies: openid
+                        .policies
+                        .iter()
+                        .filter_map(|name| self.state.policy_named(name))
+                        .map(|p| p.row.id.clone())
+                        .collect(),
+                }))
+            }
             (Some(dn), Some(username)) => {
                 let dn = crate::ldap::normalize(dn).map_err(invalid)?;
                 self.see_ldap_user(&dn, username, None, 0);
@@ -393,6 +439,22 @@ impl Draft<'_> {
             .service_accounts
             .values()
             .filter(|a| a.parent.ldap_dn() == Some(dn))
+            .map(|a| a.id.clone())
+            .collect();
+        for id in ids {
+            self.state.service_accounts.remove(&id);
+            self.write(IamWrite::DeleteServiceAccount(id));
+        }
+    }
+
+    /// Deletes the service accounts of the OpenID Connect users of the provider with
+    /// unique id `provider`.
+    pub(crate) fn remove_openid_service_accounts_of(&mut self, provider: &str) {
+        let ids: Vec<String> = self
+            .state
+            .service_accounts
+            .values()
+            .filter(|a| a.parent.openid_provider() == Some(provider))
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
@@ -454,6 +516,36 @@ impl Iam {
         })
     }
 
+    /// Makes a service account for the OpenID Connect user whose session `identity` is
+    /// (`add-service-account` signed with a web identity's session): it keeps what the
+    /// session knew of the user, its provider, `sub` and client, and has the managed
+    /// policies the session was issued with, as `MinIO` copies the session's claims.
+    /// It's removed with its provider.
+    ///
+    /// # Errors
+    ///
+    /// `identity` isn't such a session, or what [`Self::minio_add_service_account`]
+    /// refuses.
+    pub fn minio_add_openid_service_account(
+        &self,
+        identity: &Identity,
+        new: NewServiceAccount<'_>,
+    ) -> Result<AddedServiceAccount> {
+        let session = identity.session();
+        let (Some(name), Some(parent)) = (
+            session.and_then(crate::Session::openid_user),
+            session.and_then(crate::Session::openid_parent),
+        ) else {
+            return Err(MinioError::NoSuchUser);
+        };
+        self.change(|d| {
+            if !d.state.oidc_providers.contains_key(&parent.provider) {
+                return Err(MinioError::NoSuchUser);
+            }
+            d.add_service_account(Parent::OpenId(Box::new(parent)), name, new)
+        })
+    }
+
     /// Changes a service account (`update-service-account`).
     pub fn minio_update_service_account(
         &self,
@@ -475,9 +567,9 @@ impl Iam {
         })
     }
 
-    /// The service accounts of `parent`, a user's name, the root user's access key or a
-    /// directory user's DN written in one form, oldest first; none for a name that's none
-    /// of them (`list-service-accounts`).
+    /// The service accounts of `parent`, a user's name, the root user's access key, a
+    /// directory user's DN written in one form, or `MinIO`'s name for an OpenID Connect
+    /// user, oldest first; none for a name that's none of them (`list-service-accounts`).
     #[must_use]
     pub fn minio_service_accounts(&self, parent: &str) -> Vec<MinioServiceAccount> {
         let root = self.root_access_key();
@@ -487,6 +579,10 @@ impl Iam {
                 Parent::Root => root.as_deref() == Some(parent),
                 Parent::User(id) => user == Some(id.as_str()),
                 Parent::Ldap { dn, .. } => dn.eq_ignore_ascii_case(parent),
+                Parent::OpenId(openid) => s
+                    .oidc_providers
+                    .get(&openid.provider)
+                    .is_some_and(|p| openid.name(&p.url) == parent),
             };
             let mut accounts: Vec<MinioServiceAccount> = s
                 .service_accounts
@@ -496,6 +592,38 @@ impl Iam {
                 .collect();
             accounts
                 .sort_by(|a, b| (a.created_ms, &a.access_key).cmp(&(b.created_ms, &b.access_key)));
+            accounts
+        })
+    }
+
+    /// The service accounts of OpenID Connect users whose provider exists, by user
+    /// (`MinIO`'s name for it) and oldest first.
+    #[must_use]
+    pub fn minio_openid_service_accounts(&self) -> Vec<OpenIdServiceAccount> {
+        let root = self.root_access_key();
+        self.view(|s| {
+            let mut accounts: Vec<OpenIdServiceAccount> = s
+                .service_accounts
+                .values()
+                .filter_map(|a| {
+                    let Parent::OpenId(openid) = &a.parent else {
+                        return None;
+                    };
+                    let provider = s.oidc_providers.get(&openid.provider)?;
+                    Some(OpenIdServiceAccount {
+                        user: openid.name(&provider.url),
+                        sub: openid.sub.clone(),
+                        account: describe(s, root.as_deref(), a),
+                    })
+                })
+                .collect();
+            accounts.sort_by(|a, b| {
+                (&a.user, a.account.created_ms, &a.account.access_key).cmp(&(
+                    &b.user,
+                    b.account.created_ms,
+                    &b.account.access_key,
+                ))
+            });
             accounts
         })
     }
@@ -514,8 +642,9 @@ impl Iam {
     /// The `MinIO` user a caller acts as, whose service accounts it may manage itself: a
     /// user's name (for its keys, its service accounts and `MinIO`'s `AssumeRole`
     /// sessions), the root user's access key (for the root user and its service
-    /// accounts), or a directory user's DN (for its LDAP sessions and service accounts).
-    /// `None` for other sessions.
+    /// accounts), a directory user's DN (for its LDAP sessions and service accounts), or
+    /// `MinIO`'s name for an OpenID Connect user (for its web identity sessions without
+    /// an IAM role and its service accounts). `None` for other sessions.
     #[must_use]
     pub fn minio_parent(&self, identity: &Identity) -> Option<String> {
         let root = self.root_access_key();
@@ -524,6 +653,9 @@ impl Iam {
         }
         if let Some(user) = identity.session().and_then(crate::Session::ldap_user) {
             return Some(user.dn.to_owned());
+        }
+        if let Some(user) = identity.session().and_then(crate::Session::openid_user) {
+            return Some(user.to_owned());
         }
         let kind = identity.session().map(crate::Session::kind);
         if !matches!(kind, None | Some(SessionKind::User | SessionKind::Service)) {

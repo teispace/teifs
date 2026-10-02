@@ -350,6 +350,44 @@ pub(crate) enum Parent {
         /// The name it signs in with, which the group search filter takes.
         username: String,
     },
+    /// An OpenID Connect user: it has the managed policies the session that made it
+    /// had, while its provider exists.
+    OpenId(Box<OpenIdParent>),
+}
+
+/// The OpenID Connect user a service account acts for: what the web identity session
+/// that made it knew of it, as `MinIO` copies a session's claims into its service
+/// accounts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OpenIdParent {
+    /// The provider's unique id.
+    pub(crate) provider: String,
+    /// The token's `sub`.
+    pub(crate) sub: String,
+    /// The client id the token was for.
+    pub(crate) aud: String,
+    /// The managed policies (by unique id) the session had.
+    pub(crate) policies: Vec<String>,
+}
+
+impl OpenIdParent {
+    /// `MinIO`'s name for the user, given its provider's URL.
+    pub(crate) fn name(&self, iss: &str) -> String {
+        openid_parent(&self.sub, iss)
+    }
+}
+
+/// `MinIO`'s name for the OpenID Connect user `sub` of the provider `iss`: a hash, as
+/// the parent user of its sessions and service accounts.
+#[must_use]
+pub fn openid_parent(sub: &str, iss: &str) -> String {
+    use base64::Engine as _;
+    let digest = aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        format!("openid:{sub}:{iss}").as_bytes(),
+    );
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
 }
 
 impl Parent {
@@ -357,7 +395,7 @@ impl Parent {
     pub(crate) fn user(&self) -> Option<&str> {
         match self {
             Self::User(id) => Some(id),
-            Self::Root | Self::Ldap { .. } => None,
+            Self::Root | Self::Ldap { .. } | Self::OpenId(_) => None,
         }
     }
 
@@ -365,7 +403,15 @@ impl Parent {
     pub(crate) fn ldap_dn(&self) -> Option<&str> {
         match self {
             Self::Ldap { dn, .. } => Some(dn),
-            Self::Root | Self::User(_) => None,
+            Self::Root | Self::User(_) | Self::OpenId(_) => None,
+        }
+    }
+
+    /// The provider of the OpenID Connect user it is, if it's one.
+    pub(crate) fn openid_provider(&self) -> Option<&str> {
+        match self {
+            Self::OpenId(openid) => Some(&openid.provider),
+            Self::Root | Self::User(_) | Self::Ldap { .. } => None,
         }
     }
 }
@@ -399,7 +445,13 @@ impl ServiceAccount {
                     dn: dn.clone(),
                     username: username.clone(),
                 }),
-                Parent::Root | Parent::User(_) => None,
+                Parent::Root | Parent::User(_) | Parent::OpenId(_) => None,
+            },
+            openid: match &self.parent {
+                Parent::OpenId(openid) => {
+                    Some(serde_json::to_string(openid).expect("text serializes"))
+                }
+                Parent::Root | Parent::User(_) | Parent::Ldap { .. } => None,
             },
             secret: self.sealed.clone(),
             active: self.active,
@@ -1021,13 +1073,18 @@ fn load_service_accounts(
             .transpose()?;
         let account = ServiceAccount {
             secret: open_secret(key, &row.id, &row.secret)?,
-            parent: match (row.ldap, row.parent) {
-                (Some(ldap), _) => Parent::Ldap {
+            parent: match (row.ldap, row.openid, row.parent) {
+                (Some(ldap), _, _) => Parent::Ldap {
                     dn: ldap.dn,
                     username: ldap.username,
                 },
-                (None, parent) if parent.is_empty() => Parent::Root,
-                (None, parent) => Parent::User(parent),
+                (None, Some(openid), _) => {
+                    Parent::OpenId(Box::new(serde_json::from_str(&openid).map_err(|_| {
+                        IamError::Stored(format!("service account {}'s OpenID user", row.id))
+                    })?))
+                }
+                (None, None, parent) if parent.is_empty() => Parent::Root,
+                (None, None, parent) => Parent::User(parent),
             },
             sealed: row.secret,
             active: row.active,

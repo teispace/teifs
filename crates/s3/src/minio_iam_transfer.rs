@@ -14,7 +14,7 @@ use serde_json::Value;
 use teifs_iam::{
     MinioIamEntities, MinioIamImport, MinioImportGroup, MinioImportResult, MinioImportUser,
 };
-use teifs_types::admin::{ExportedServiceAccount, IamExport};
+use teifs_types::admin::{ExportedOpenIdParent, ExportedServiceAccount, IamExport};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zeroize::Zeroizing;
 
@@ -324,12 +324,24 @@ fn parse<T: serde::de::DeserializeOwned>(
 }
 
 fn service_account(a: &ExportedServiceAccount, root: Option<&str>) -> Option<ServiceAccountEntry> {
-    let parent = a.parent.as_deref().or(root)?.to_owned();
+    let parent = match &a.openid {
+        Some(openid) => teifs_iam::openid_parent(&openid.sub, &openid.provider),
+        None => a.parent.as_deref().or(root)?.to_owned(),
+    };
     let mut claims = BTreeMap::new();
     claims.insert("parent".to_owned(), Value::from(parent.clone()));
     if let Some(username) = &a.ldap_username {
         claims.insert("ldapUser".to_owned(), Value::from(parent.clone()));
         claims.insert("ldapUsername".to_owned(), Value::from(username.clone()));
+    }
+    // An OpenID Connect user's: the claims `MinIO` copies from its session.
+    if let Some(openid) = &a.openid {
+        claims.insert("sub".to_owned(), Value::from(openid.sub.clone()));
+        claims.insert("iss".to_owned(), Value::from(openid.provider.clone()));
+        claims.insert("aud".to_owned(), Value::from(openid.aud.clone()));
+        if !openid.policies.is_empty() {
+            claims.insert("policy".to_owned(), Value::from(openid.policies.join(",")));
+        }
     }
     let session_policy = a
         .policy
@@ -449,7 +461,9 @@ fn imported_account(
         .get("ldapUsername")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let parent = if root == Some(a.parent.as_str()) && ldap_username.is_none() {
+    let openid = openid_parent(&a.claims).filter(|_| ldap_username.is_none());
+    let parent = if openid.is_some() || (root == Some(a.parent.as_str()) && ldap_username.is_none())
+    {
         None
     } else {
         Some(a.parent)
@@ -470,6 +484,7 @@ fn imported_account(
         id,
         parent,
         ldap_username,
+        openid,
         active: a.status != "off",
         policy,
         name: a.name,
@@ -478,6 +493,35 @@ fn imported_account(
         created_ms: now_ms,
         secret: Some(a.secret_key),
     }
+}
+
+/// The OpenID Connect user a `MinIO` service account's claims name: its `sub` of the
+/// provider `iss`, the client (`aud`) and the policies its `policy` claim names.
+fn openid_parent(claims: &BTreeMap<String, Value>) -> Option<ExportedOpenIdParent> {
+    let text = |name: &str| claims.get(name).and_then(Value::as_str).map(str::to_owned);
+    let names = |value: &Value| -> Vec<String> {
+        let items: Vec<&str> = match value {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        items
+            .iter()
+            .flat_map(|item| item.split(','))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    Some(ExportedOpenIdParent {
+        provider: text("iss")?,
+        sub: text("sub")?,
+        aud: claims
+            .get("aud")
+            .and_then(|aud| names(aud).into_iter().next())
+            .unwrap_or_default(),
+        policies: claims.get("policy").map(names).unwrap_or_default(),
+    })
 }
 
 /// madmin's `ImportIAMResult`.
@@ -632,6 +676,7 @@ mod tests {
             id: "svc".to_owned(),
             parent: parent.map(str::to_owned),
             ldap_username: ldap_username.map(str::to_owned),
+            openid: None,
             active: false,
             policy: Some(LISTER.to_owned()),
             name: "backup".to_owned(),
@@ -682,6 +727,24 @@ mod tests {
         assert_eq!(back.parent, None, "the root user's again");
         let (_, back) = round_trip(&account(Some("bob"), None));
         assert_eq!(back.parent.as_deref(), Some("bob"));
+
+        // An OpenID Connect user's: `MinIO`'s name for the user, and its claims.
+        let openid = ExportedServiceAccount {
+            openid: Some(ExportedOpenIdParent {
+                provider: "https://idp.example.com".to_owned(),
+                sub: "ann".to_owned(),
+                aud: "teifs".to_owned(),
+                policies: vec!["readonly".to_owned(), "diagnostics".to_owned()],
+            }),
+            ..account(None, None)
+        };
+        let (entry, back) = round_trip(&openid);
+        assert_eq!(
+            entry.parent,
+            teifs_iam::openid_parent("ann", "https://idp.example.com")
+        );
+        assert_eq!(entry.claims["policy"], "readonly,diagnostics");
+        assert_eq!((back.parent, back.openid), (None, openid.openid));
 
         // `MinIO`'s session policy may come as a string, and its "never" is the epoch.
         let mut entry = service_account(&account(Some("bob"), None), None).unwrap();

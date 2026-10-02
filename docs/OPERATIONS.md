@@ -504,6 +504,13 @@ for another. Their client secrets, scopes and redirect URLs are for MinIO's cons
 aren't needed. Roles with trust policies, as on AWS, need none of this: a role that
 trusts the provider is assumed with `teifs sts assume-web`.
 
+A user signed in this way makes its own long-lived keys with its session, as with
+MinIO: `mc admin accesskey create` (or `mc admin user svcacct add`) with the session's
+credentials, unless a session policy narrowed it. The key acts as the user with the
+policies the session had, and goes when the provider is removed. `mc idp openid
+accesskey ls teifs --all` lists every user's, each by MinIO's name for the user and its
+`sub`.
+
 ## SAML providers
 
 A SAML identity provider (Okta, Microsoft Entra ID, Keycloak, AD FS) is added to the

@@ -208,6 +208,8 @@ pub(crate) enum Owner<'a> {
     Named(&'a str),
     /// A directory user, as the directory said just now (or the caller's session says).
     Ldap(LdapUser<'a>),
+    /// The OpenID Connect user whose session this is.
+    OpenId(&'a Identity),
 }
 
 /// A policy as `madmin` sends it: an empty document (no `Version`, no `Statement`) is
@@ -259,11 +261,12 @@ fn no_content() -> S3Response<Body> {
 /// Whether the caller signs with session credentials (a service account's or temporary
 /// ones): those make or remove service accounts only with the action, or a narrowed
 /// session could mint keys with all of its parent's rights. A directory user's session
-/// that no session policy narrows is the user, who can't sign any other way.
+/// that no session policy narrows is the user, who can't sign any other way, and so is
+/// an OpenID Connect user's web identity session.
 pub(crate) fn narrowed(identity: &Identity) -> bool {
-    identity
-        .session()
-        .is_some_and(|s| s.kind() != SessionKind::Ldap || s.is_narrowed())
+    identity.session().is_some_and(|s| {
+        !matches!(s.kind(), SessionKind::Ldap | SessionKind::Web) || s.is_narrowed()
+    })
 }
 
 pub(crate) fn denied() -> S3Error {
@@ -285,6 +288,9 @@ pub(crate) async fn add(
     }
     if mine && let Some(user) = identity.session().and_then(Session::ldap_user) {
         return create(iam, &req, &request, Owner::Ldap(user)).await;
+    }
+    if mine && identity.session().and_then(Session::openid_user).is_some() {
+        return create(iam, &req, &request, Owner::OpenId(identity)).await;
     }
     let parent = if mine {
         iam.minio_parent(identity).ok_or_else(|| {
@@ -333,6 +339,9 @@ pub(crate) async fn create(
         }
         Owner::Ldap(user) => iam
             .minio_add_ldap_service_account(&user, new)
+            .map_err(minio_error),
+        Owner::OpenId(identity) => iam
+            .minio_add_openid_service_account(identity, new)
             .map_err(minio_error),
     }?;
     let answer = Added {

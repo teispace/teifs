@@ -192,6 +192,12 @@ pub(crate) const LDAP_SERVICE_ACCOUNTS_MIGRATION: &str = "
     ALTER TABLE iam_service_accounts ADD COLUMN ldap_dn TEXT;
     ALTER TABLE iam_service_accounts ADD COLUMN ldap_username TEXT;";
 
+/// Service accounts of OpenID Connect users: migration 14. Their parent is empty, as an
+/// LDAP user's is, and `openid` holds, as JSON, the provider (by unique id), the token's
+/// `sub` and `aud`, and the managed policies (by unique id) its session had.
+pub(crate) const OPENID_SERVICE_ACCOUNTS_MIGRATION: &str = "
+    ALTER TABLE iam_service_accounts ADD COLUMN openid TEXT;";
+
 /// Revoked temporary credentials: migration 13. Sessions are kept nowhere, so revoking
 /// them records, per user they act for (`subject`) and per token revoke type (empty for
 /// all of them), when: sessions issued then or before are refused.
@@ -441,6 +447,8 @@ pub struct ServiceAccountRow {
     pub parent: String,
     /// The directory user it acts for, when it's an LDAP user's.
     pub ldap: Option<LdapParentRow>,
+    /// The OpenID Connect user it acts for, when it's one's: JSON its owner reads.
+    pub openid: Option<String>,
     /// The sealed secret key.
     pub secret: Vec<u8>,
     /// Whether requests signed with it are accepted.
@@ -472,6 +480,7 @@ impl std::fmt::Debug for ServiceAccountRow {
             .field("id", &self.id)
             .field("parent", &self.parent)
             .field("ldap", &self.ldap)
+            .field("openid", &self.openid)
             .field("active", &self.active)
             .field("name", &self.name)
             .field("expires_ms", &self.expires_ms)
@@ -742,7 +751,7 @@ impl System {
             .collect::<rusqlite::Result<_>>()?,
             service_accounts: all(
                 "SELECT id, parent, secret, active, policy, name, description, expires_ms,
-                        created_ms, ldap_dn, ldap_username
+                        created_ms, ldap_dn, ldap_username, openid
                  FROM iam_service_accounts ORDER BY id",
             )?
             .query_map([], |r| {
@@ -760,6 +769,7 @@ impl System {
                         (Some(dn), Some(username)) => Some(LdapParentRow { dn, username }),
                         _ => None,
                     },
+                    openid: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -1097,8 +1107,8 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
         IamWrite::PutServiceAccount(a) => run(
             "INSERT INTO iam_service_accounts
                  (id, parent, secret, active, policy, name, description, expires_ms, created_ms,
-                  ldap_dn, ldap_username)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                  ldap_dn, ldap_username, openid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT (id) DO UPDATE SET secret = excluded.secret,
                  active = excluded.active, policy = excluded.policy, name = excluded.name,
                  description = excluded.description, expires_ms = excluded.expires_ms",
@@ -1113,7 +1123,8 @@ fn apply(tx: &Transaction<'_>, write: &IamWrite) -> Result<()> {
                 a.expires_ms,
                 a.created_ms,
                 a.ldap.as_ref().map(|l| &l.dn),
-                a.ldap.as_ref().map(|l| &l.username)
+                a.ldap.as_ref().map(|l| &l.username),
+                a.openid
             ],
         ),
         IamWrite::DeleteServiceAccount(id) => run(
@@ -1259,6 +1270,7 @@ mod tests {
                 dn: "uid=ann,ou=people,dc=example,dc=com".into(),
                 username: "ann".into(),
             }),
+            openid: None,
             secret: vec![1, 2, 3],
             active: true,
             policy: Some("{}".into()),
@@ -1274,15 +1286,25 @@ mod tests {
             active: true,
             created_ms: 5,
         };
+        let openid = ServiceAccountRow {
+            id: "SVC2".into(),
+            ldap: None,
+            openid: Some(r#"{"provider":"P1","sub":"ann"}"#.into()),
+            ..account.clone()
+        };
         system
             .iam_apply(&[
                 IamWrite::PutServiceAccount(account.clone()),
+                IamWrite::PutServiceAccount(openid.clone()),
                 IamWrite::PutUser(user("U1", "alice")),
                 IamWrite::PutKey(key.clone()),
             ])
             .unwrap();
         let rows = system.iam_rows().unwrap();
-        assert_eq!(rows.service_accounts, std::slice::from_ref(&account));
+        assert_eq!(rows.service_accounts, [account.clone(), openid]);
+        system
+            .iam_apply(&[IamWrite::DeleteServiceAccount("SVC2".into())])
+            .unwrap();
         assert!(!format!("{:?}", rows.service_accounts[0]).contains("secret"));
         // An update changes everything but the parent and the creation time.
         let changed = ServiceAccountRow {

@@ -323,15 +323,31 @@ async fn list_bulk(
 #[serde(rename_all = "camelCase")]
 struct OpenIdAccessKeys {
     config_name: &'static str,
-    users: Vec<Listed>,
+    users: Vec<OpenIdUserKeys>,
+}
+
+/// `madmin.OpenIDUserAccessKeys`.
+#[derive(Serialize)]
+struct OpenIdUserKeys {
+    #[serde(rename = "minioAccessKey")]
+    minio_access_key: String,
+    #[serde(rename = "ID")]
+    id: String,
+    #[serde(rename = "readableName")]
+    readable_name: String,
+    #[serde(rename = "serviceAccounts")]
+    service_accounts: Vec<Listed>,
+    #[serde(rename = "stsKeys")]
+    sts_keys: Vec<Listed>,
 }
 
 /// The name `MinIO` gives the OpenID Connect configuration that has none.
 const DEFAULT_CONFIG: &str = "_";
 
-/// `GET idp/openid/list-access-keys-bulk`: OpenID Connect users' access keys, by
-/// configuration. Their sessions' keys aren't kept, and they own no service accounts, so
-/// each configuration lists no one; what's asked is checked as `MinIO` checks it.
+/// `GET idp/openid/list-access-keys-bulk`: OpenID Connect users' service accounts, by
+/// configuration (one, `MinIO`'s default, for every provider), each user by `MinIO`'s
+/// name for it with its `sub` as its id. Their sessions' keys aren't kept. A user is
+/// named by either; the caller is its own by default.
 async fn openid_bulk(
     iam: &Iam,
     req: &S3Request<Body>,
@@ -369,7 +385,7 @@ async fn openid_bulk(
     if !mine && !privileged {
         return Err(denied());
     }
-    list_type(&params)?;
+    let (_, service_accounts) = list_type(&params)?;
     let config = value("configName");
     if value("allConfigs") != "true" && !config.is_empty() && config != DEFAULT_CONFIG {
         return Err(admin::error(
@@ -378,11 +394,41 @@ async fn openid_bulk(
             "No such named configuration target exists",
         ));
     }
+    let named = |user: &str, sub: &str| {
+        if all {
+            return true;
+        }
+        if users.is_empty() {
+            return own.as_deref() == Some(user);
+        }
+        users.iter().any(|u| *u == user || *u == sub)
+    };
+    let mut listed: Vec<OpenIdUserKeys> = Vec::new();
+    if service_accounts {
+        for found in iam.minio_openid_service_accounts() {
+            if !named(&found.user, &found.sub) {
+                continue;
+            }
+            let account = Listed::from(found.account);
+            match listed.last_mut() {
+                Some(last) if last.minio_access_key == found.user => {
+                    last.service_accounts.push(account);
+                }
+                _ => listed.push(OpenIdUserKeys {
+                    minio_access_key: found.user,
+                    id: found.sub,
+                    readable_name: String::new(),
+                    service_accounts: vec![account],
+                    sts_keys: Vec::new(),
+                }),
+            }
+        }
+    }
     encrypted(
         req,
         &[OpenIdAccessKeys {
             config_name: DEFAULT_CONFIG,
-            users: Vec::new(),
+            users: listed,
         }],
     )
     .await

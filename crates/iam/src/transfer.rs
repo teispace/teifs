@@ -8,9 +8,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use teifs_crypto::DataKey;
 use teifs_meta::IamWrite;
 use teifs_types::admin::{
-    ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedPolicy, ExportedRole,
-    ExportedSamlProvider, ExportedServiceAccount, ExportedUser, ExportedVersion, IAM_FORMAT,
-    IamExport, ImportReport, LdapPolicyMapping, Tag,
+    ExportedGroup, ExportedKey, ExportedOidcProvider, ExportedOpenIdParent, ExportedPolicy,
+    ExportedRole, ExportedSamlProvider, ExportedServiceAccount, ExportedUser, ExportedVersion,
+    IAM_FORMAT, IamExport, ImportReport, LdapPolicyMapping, Tag,
 };
 
 use crate::{
@@ -226,15 +226,31 @@ fn export_service_accounts(state: &State, secrets: bool) -> Vec<ExportedServiceA
         .service_accounts
         .values()
         .filter_map(|a| {
-            let (parent, ldap_username) = match &a.parent {
-                Parent::User(id) => (Some(state.users.get(id)?.name.clone()), None),
-                Parent::Root => (None, None),
-                Parent::Ldap { dn, username } => (Some(dn.clone()), Some(username.clone())),
+            let (parent, ldap_username, openid) = match &a.parent {
+                Parent::User(id) => (Some(state.users.get(id)?.name.clone()), None, None),
+                Parent::Root => (None, None, None),
+                Parent::Ldap { dn, username } => (Some(dn.clone()), Some(username.clone()), None),
+                Parent::OpenId(openid) => (
+                    None,
+                    None,
+                    Some(ExportedOpenIdParent {
+                        provider: state.oidc_providers.get(&openid.provider)?.url.clone(),
+                        sub: openid.sub.clone(),
+                        aud: openid.aud.clone(),
+                        policies: openid
+                            .policies
+                            .iter()
+                            .filter_map(|id| state.policies.get(id))
+                            .map(|p| p.row.name.clone())
+                            .collect(),
+                    }),
+                ),
             };
             Some(ExportedServiceAccount {
                 id: a.id.clone(),
                 parent,
                 ldap_username,
+                openid,
                 active: a.active,
                 policy: a.policy.as_ref().map(|p| p.text.to_string()),
                 name: a.name.clone(),
@@ -366,6 +382,16 @@ impl Iam {
                 service_accounts: 0,
                 keys_without_secrets: Vec::new(),
             };
+            // Before the roles, whose trust policies may name them, and the service
+            // accounts of their users.
+            for provider in &export.oidc_providers {
+                d.create_oidc_provider(&NewOidcProvider {
+                    url: &provider.url,
+                    client_ids: &provider.client_ids,
+                    thumbprints: &provider.thumbprints,
+                    tags: &pairs(&provider.tags),
+                })?;
+            }
             import_users(d, &export.users, &arn, &mut report)?;
             for account in &export.service_accounts {
                 if account.secret.is_some() {
@@ -374,15 +400,6 @@ impl Iam {
                 } else {
                     report.keys_without_secrets.push(account.id.clone());
                 }
-            }
-            // Before the roles, whose trust policies may name them.
-            for provider in &export.oidc_providers {
-                d.create_oidc_provider(&NewOidcProvider {
-                    url: &provider.url,
-                    client_ids: &provider.client_ids,
-                    thumbprints: &provider.thumbprints,
-                    tags: &pairs(&provider.tags),
-                })?;
             }
             import_saml(d, &export.saml_providers)?;
             import_roles(d, &export.roles, &arn)?;

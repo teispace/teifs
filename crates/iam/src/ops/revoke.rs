@@ -27,7 +27,7 @@ pub enum SessionParent {
 impl Iam {
     /// The user `identity` is, or acts for: its own temporary credentials' parent, as
     /// `MinIO` has it. None for sessions `revoke-tokens` doesn't reach (roles', web
-    /// identities', federated users').
+    /// identities' and their service accounts', federated users').
     #[must_use]
     pub fn session_parent(&self, identity: &Identity) -> Option<SessionParent> {
         if identity.is_root() {
@@ -36,6 +36,9 @@ impl Iam {
         let session = identity.session();
         if let Some(user) = session.and_then(Session::ldap_user) {
             return Some(SessionParent::Ldap(user.dn.to_owned()));
+        }
+        if session.and_then(Session::openid_user).is_some() {
+            return None;
         }
         let kind = session.map(Session::kind);
         if !matches!(

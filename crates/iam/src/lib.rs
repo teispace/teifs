@@ -45,13 +45,14 @@ pub use ops::{
     MinioGroup, MinioIamEntities, MinioIamImport, MinioImportFailures, MinioImportGroup,
     MinioImportResult, MinioImportUser, MinioPolicy, MinioServiceAccount, MinioUser,
     MinioUserChange, NewAccessKey, NewOidcProvider, NewRole, NewSamlProvider, NewServiceAccount,
-    OidcProviderInfo, Owner, PolicyEntities, PolicyHolders, PolicyInfo, PolicyVersionInfo,
-    RoleInfo, SamlProviderInfo, SamlProviderUpdate, ServiceAccountChange, SessionParent, UserInfo,
-    UserPolicies,
+    OidcProviderInfo, OpenIdServiceAccount, Owner, PolicyEntities, PolicyHolders, PolicyInfo,
+    PolicyVersionInfo, RoleInfo, SamlProviderInfo, SamlProviderUpdate, ServiceAccountChange,
+    SessionParent, UserInfo, UserPolicies,
 };
 pub use rustls::pki_types::CertificateDer;
 pub use sessions::{AuthError, Issued};
 pub use snapshot::{Credential, Identity, RootKey, Session, SessionKind};
+pub use state::openid_parent;
 
 use crate::{snapshot::Snapshot, state::State};
 

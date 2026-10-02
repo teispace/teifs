@@ -329,10 +329,12 @@ impl Iam {
 
     /// Deletes an OpenID Connect provider; one that doesn't exist is already gone, as on
     /// AWS (`DeleteOpenIDConnectProvider`). Roles that trust it stay as they are, and
-    /// no one can assume them through it any more.
+    /// no one can assume them through it any more; its users' service accounts go
+    /// with it.
     pub fn delete_oidc_provider(&self, arn: &str) -> Result<()> {
         self.change(|d| match d.oidc_provider(arn) {
             Ok(provider) => {
+                d.remove_openid_service_accounts_of(&provider.id);
                 d.state.oidc_providers.remove(&provider.id);
                 d.write(IamWrite::DeleteOidcProvider(provider.id.clone()));
                 Ok(())

@@ -40,7 +40,8 @@ pub use revoke::SessionParent;
 pub use roles::{NewRole, RoleInfo};
 pub use saml::{NewSamlProvider, SamlProviderInfo, SamlProviderUpdate};
 pub use service_accounts::{
-    AddedServiceAccount, MinioServiceAccount, NewServiceAccount, ServiceAccountChange,
+    AddedServiceAccount, MinioServiceAccount, NewServiceAccount, OpenIdServiceAccount,
+    ServiceAccountChange,
 };
 
 /// A user.

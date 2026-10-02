@@ -52,6 +52,20 @@ pub struct Session {
     ldap: Option<Box<LdapClaims>>,
     /// MinIO's token revoke type, which `revoke-tokens` may name.
     revoke_type: Option<Box<str>>,
+    /// The OpenID Connect user it acts for, as MinIO names it: a web identity's session
+    /// without an IAM role, or such a user's service account.
+    openid: Option<Box<OpenIdUser>>,
+}
+
+/// The OpenID Connect user a session acts for.
+#[derive(Debug, Clone)]
+struct OpenIdUser {
+    /// MinIO's name for it ([`crate::state::openid_parent`]).
+    name: String,
+    /// The provider's unique id.
+    provider: String,
+    /// The managed policies (by unique id) the session was issued with.
+    policies: Vec<String>,
 }
 
 /// What an LDAP session's requests know of its user: MinIO's `ldap:user` (the DN),
@@ -149,6 +163,25 @@ impl Session {
             dn: &ldap.dn,
             username: &ldap.username,
             groups: &ldap.groups,
+        })
+    }
+
+    /// MinIO's name for the OpenID Connect user it acts for: a web identity's session
+    /// without an IAM role, or such a user's service account.
+    #[must_use]
+    pub fn openid_user(&self) -> Option<&str> {
+        self.openid.as_deref().map(|user| user.name.as_str())
+    }
+
+    /// The OpenID Connect user it acts for, as a service account it makes keeps it:
+    /// with what its token said and the policies it was issued with.
+    pub(crate) fn openid_parent(&self) -> Option<crate::state::OpenIdParent> {
+        let (openid, web) = (self.openid.as_deref()?, self.web.as_deref()?);
+        Some(crate::state::OpenIdParent {
+            provider: openid.provider.clone(),
+            sub: web.sub.clone(),
+            aud: web.aud.clone(),
+            policies: openid.policies.clone(),
         })
     }
 
@@ -447,8 +480,8 @@ pub(crate) struct Snapshot {
     roles: HashMap<Box<str>, RoleEntry>,
     /// Every managed policy's default version, by unique id.
     managed: HashMap<Box<str>, Arc<Policy>>,
-    /// Every OpenID Connect provider's unique id.
-    providers: std::collections::HashSet<Box<str>>,
+    /// Every OpenID Connect provider's URL, by unique id.
+    providers: HashMap<Box<str>, Box<str>>,
     /// The policies mapped to each LDAP DN.
     ldap_policies: LdapPolicyMap,
     /// Directory users with live sessions, by DN.
@@ -493,7 +526,7 @@ fn service_credential(
     root: Option<&RootKey>,
     account: &ServiceAccount,
 ) -> Option<Credential> {
-    let mut ldap = None;
+    let (mut ldap, mut web, mut openid_user) = (None, None, None);
     let base = match &account.parent {
         Parent::User(user) => Identity::clone(users.get(user.as_str())?),
         Parent::Ldap { dn, username } => {
@@ -511,6 +544,36 @@ fn service_credential(
                     .chain(&seen.groups)
                     .filter_map(|dn| ldap_policies.get(dn.as_str()))
                     .flat_map(|p| p.iter().cloned())
+                    .collect(),
+                boundary: None,
+                entity: None,
+                session: None,
+            }
+        }
+        Parent::OpenId(openid) => {
+            let provider = state.oidc_providers.get(&openid.provider)?;
+            let arn = state.oidc_provider_arn(provider);
+            let principal = Principal::web_identity(&arn, &openid.sub).in_account(&state.account);
+            web = Some(Box::new(WebClaims {
+                provider: arn,
+                aud: openid.aud.clone(),
+                sub: openid.sub.clone(),
+                amr: Vec::new(),
+            }));
+            openid_user = Some(Box::new(OpenIdUser {
+                name: openid.name(&provider.url),
+                provider: openid.provider.clone(),
+                policies: openid.policies.clone(),
+            }));
+            Identity {
+                principal,
+                root: false,
+                tags: Box::default(),
+                policies: openid
+                    .policies
+                    .iter()
+                    .filter_map(|id| state.policies.get(id))
+                    .map(|p| p.default_document().policy.clone())
                     .collect(),
                 boundary: None,
                 entity: None,
@@ -544,10 +607,11 @@ fn service_credential(
             .map_or(i64::MAX, |ms| ms.div_euclid(1000)),
         source_identity: None,
         transitive: Box::default(),
-        web: None,
+        web,
         saml: None,
         ldap,
         revoke_type: None,
+        openid: openid_user,
     };
     Some(Credential {
         secret: account.secret.clone(),
@@ -648,8 +712,8 @@ impl Snapshot {
             .collect();
         let providers = state
             .oidc_providers
-            .keys()
-            .map(|id| id.as_str().into())
+            .values()
+            .map(|p| (p.id.as_str().into(), p.url.as_str().into()))
             .collect();
         let ldap_users = state
             .ldap_sessions
@@ -746,6 +810,7 @@ impl Snapshot {
             saml: claims.saml.clone().map(Box::new),
             ldap: None,
             revoke_type: claims.revoke_type.as_deref().map(Into::into),
+            openid: None,
         };
         Some(match &claims.who {
             Who::Role {
@@ -791,10 +856,11 @@ impl Snapshot {
                 provider,
                 sub,
                 policies,
-            } => Identity {
-                session: Some(session(SessionKind::Web, false)),
-                ..self.web_identity(provider, sub, policies, claims.web.as_ref()?)?
-            },
+            } => self.web_identity(
+                (provider, sub, policies),
+                claims.web.as_ref()?,
+                session(SessionKind::Web, false),
+            )?,
             Who::Ldap {
                 dn,
                 username,
@@ -919,18 +985,21 @@ impl Snapshot {
 
     /// Whom MinIO's `AssumeRoleWithWebIdentity` without a role makes a session for:
     /// the web identity `sub` of the provider with unique id `provider`, with the
-    /// managed policies (by unique id) its token named. A deleted provider takes its
+    /// managed policies (by unique id) its token named, and `base` as the session (the
+    /// OpenID Connect user it acts for added). A deleted provider takes its
     /// sessions with it; a deleted policy only its own permissions.
     fn web_identity(
         &self,
-        provider: &str,
-        sub: &str,
-        policies: &[String],
+        (provider, sub, policies): (&str, &str, &[String]),
         web: &crate::sessions::WebClaims,
+        base: Session,
     ) -> Option<Identity> {
-        if !self.providers.contains(provider) {
-            return None;
-        }
+        let iss = self.providers.get(provider)?;
+        let openid = OpenIdUser {
+            name: crate::state::openid_parent(sub, iss),
+            provider: provider.to_owned(),
+            policies: policies.to_vec(),
+        };
         Some(Identity {
             principal: Principal::web_identity(&web.provider, sub).in_account(&self.account),
             root: false,
@@ -942,7 +1011,10 @@ impl Snapshot {
                 .collect(),
             boundary: None,
             entity: None,
-            session: None,
+            session: Some(Session {
+                openid: Some(Box::new(openid)),
+                ..base
+            }),
         })
     }
 }
