@@ -882,6 +882,17 @@ shows with the TLS certificates the server presents. `--anonymize strict` names 
 `mc` names, for you to read or send; TeiFS sends nothing anywhere. It needs
 `admin:OBDInfo`.
 
+## Object inspection
+
+When support asks how the drive keeps an object, `mc support inspect ALIAS/BUCKET/KEY/xl.meta`
+downloads what its index keeps about that key: each version's row (its id, size, ETag,
+attributes, how it's encrypted, its parts) and, in a folder bucket, the file's row, as
+`teifs.meta.json`, with the drive's `format.json`. A pattern names several keys
+(`ALIAS/BUCKET/photos/*/xl.meta`, `ALIAS/BUCKET/**`), up to 1,000 at a time. Objects' bytes
+are never included. The zip is encrypted: `mc` prints the key to give support with it, or,
+with `--public-key FILE` (an RSA public key in PKCS #1 form), only the matching private key
+opens it. It needs `admin:InspectData`.
+
 ## Pools
 
 `mc admin decommission status ALIAS` lists the drive as the server's only pool, named by

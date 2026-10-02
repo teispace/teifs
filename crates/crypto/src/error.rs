@@ -29,4 +29,7 @@ pub enum CryptoError {
     /// The KMS failed or refused; the message names the KMS.
     #[error("{0}")]
     Kms(String),
+    /// A public key isn't an RSA public key as PKCS #1 DER or PEM.
+    #[error("the public key isn't an RSA public key in PKCS #1 form")]
+    InvalidPublicKey,
 }

@@ -22,7 +22,7 @@ use crate::{
 /// The format this build writes.
 pub const FORMAT: u32 = 2;
 
-const FORMAT_FILE: &str = "format.json";
+pub(crate) const FORMAT_FILE: &str = "format.json";
 const LEGACY_DB: &str = "meta.db";
 /// The index database.
 pub(crate) const INDEX_DB: &str = "index.db";

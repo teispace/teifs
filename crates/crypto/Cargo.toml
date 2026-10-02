@@ -27,6 +27,7 @@ rustls.workspace = true
 rustls-platform-verifier.workspace = true
 time = { workspace = true, features = ["parsing"] }
 x509-parser.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -38,6 +38,7 @@ mod minio_iam;
 mod minio_iam_transfer;
 mod minio_idp_config;
 mod minio_info;
+mod minio_inspect;
 mod minio_kms;
 mod minio_ldap;
 mod minio_metrics;

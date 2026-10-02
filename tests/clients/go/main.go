@@ -7,7 +7,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +30,8 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/google/pprof/profile"
 	"github.com/minio/madmin-go/v3"
+	"github.com/minio/madmin-go/v3/estream"
+	"github.com/secure-io/sio-go"
 )
 
 func must(err error) {
@@ -146,6 +151,7 @@ func main() {
 	minioIAM(ctx, adm)
 	serverInfo(ctx, adm, *bucket)
 	healthInfo(ctx, adm)
+	inspect(ctx, adm, *bucket)
 	service(ctx, adm)
 	kms(ctx, adm)
 	configKV(ctx, adm)
@@ -480,6 +486,66 @@ func healthInfo(ctx context.Context, adm *madmin.AdminClient) {
 	check(last.Minio.Info.DeploymentID != "" && len(last.Minio.Info.Servers) == 1 &&
 		last.Minio.Info.TLS != nil && last.Minio.Config.Config != nil,
 		fmt.Sprintf("the server in the report: %+v", last.Minio))
+}
+
+// inspect is mc support inspect: what the drive keeps about small.txt, zipped, opened
+// with the key that comes first (format 1) and with the private key whose public half
+// was sent (format 2).
+func inspect(ctx context.Context, adm *madmin.AdminClient, bucket string) {
+	step("an object's records, as mc support inspect downloads them")
+	asked := madmin.InspectOptions{Volume: bucket, File: "small.txt/xl.meta"}
+	key, r, err := adm.Inspect(ctx, asked)
+	must(err)
+	stream, err := sio.AES_256_GCM.Stream(key)
+	must(err)
+	data, err := io.ReadAll(stream.DecryptReader(r, make([]byte, stream.NonceSize()), nil))
+	r.Close()
+	must(err)
+	inspected(data, bucket, "format 1")
+
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	must(err)
+	asked.PublicKey = x509.MarshalPKCS1PublicKey(&private.PublicKey)
+	_, r, err = adm.Inspect(ctx, asked)
+	must(err)
+	defer r.Close()
+	streams, err := estream.NewReader(r)
+	must(err)
+	streams.SetPrivateKey(private)
+	data = nil
+	for {
+		next, err := streams.NextStream()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		must(err)
+		if next.Name != "inspect.zip" {
+			must(next.Skip())
+			continue
+		}
+		data, err = io.ReadAll(next)
+		must(err)
+	}
+	inspected(data, bucket, "format 2")
+}
+
+// inspected checks an inspection's zip: what was asked, and small.txt's records.
+func inspected(data []byte, bucket, format string) {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	must(err)
+	var names []string
+	var records map[string]any
+	for _, file := range archive.File {
+		names = append(names, file.Name)
+		if strings.HasSuffix(file.Name, "/"+bucket+"/small.txt/teifs.meta.json") {
+			r, err := file.Open()
+			must(err)
+			must(json.NewDecoder(r).Decode(&records))
+			r.Close()
+		}
+	}
+	check(len(names) >= 3 && names[0] == "inspect-input.txt" && records["key"] == "small.txt",
+		fmt.Sprintf("the %s inspection: %v %v", format, names, records))
 }
 
 // The service calls a server answers before it acts: restart and stop only as dry runs

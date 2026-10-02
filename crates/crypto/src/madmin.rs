@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 
 const SALT: usize = 32;
-const NONCE: usize = 8;
+pub(crate) const NONCE: usize = 8;
 const TAG: usize = 16;
 /// The plaintext of every fragment but the last.
 const FRAGMENT: usize = 1 << 14;
@@ -57,8 +57,39 @@ pub fn encrypt(password: &str, data: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&salt);
     out.push(ARGON2ID_AES_GCM);
     out.extend_from_slice(&nonce);
-    let mut ad = associated_data(&cipher, nonce);
-    // Empty data is still one (empty) last fragment.
+    seal_stream(&cipher, nonce, data, &mut out);
+    out
+}
+
+/// The data `encrypted` holds, if `password` opens it: any other password, a changed,
+/// reordered or shortened stream, or an unknown algorithm is
+/// [`CryptoError::Authentication`].
+pub fn decrypt(password: &str, encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if encrypted.len() < SALT + 1 + NONCE + TAG {
+        return Err(CryptoError::Authentication);
+    }
+    let (salt, rest) = encrypted.split_at(SALT);
+    let (id, rest) = rest.split_at(1);
+    let (nonce, rest) = rest.split_at(NONCE);
+    let nonce: [u8; NONCE] = nonce.try_into().expect("split at the nonce's length");
+    let cipher = cipher(id[0], password, salt)?;
+    open_stream(&cipher, nonce, rest)
+}
+
+/// AES-256-GCM under a raw 32-byte `key`, as sio-go's `AES_256_GCM.Stream(key)`.
+pub(crate) fn aes_256_gcm(key: &[u8; 32]) -> LessSafeKey {
+    LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).expect("a 32-byte key is AES-256's"))
+}
+
+/// Appends `data` sealed as sio-go's stream under `nonce` (no additional data): 16 KiB
+/// fragments, the last flagged; empty data is one empty last fragment.
+pub(crate) fn seal_stream(
+    cipher: &LessSafeKey,
+    nonce: [u8; NONCE],
+    data: &[u8],
+    out: &mut Vec<u8>,
+) {
+    let mut ad = associated_data(cipher, nonce);
     let chunks: Vec<&[u8]> = if data.is_empty() {
         vec![&[]]
     } else {
@@ -75,22 +106,19 @@ pub fn encrypt(password: &str, data: &[u8]) -> Vec<u8> {
             .expect("a fragment is far shorter than AES-GCM's limit");
         out.extend_from_slice(&fragment);
     }
-    out
 }
 
-/// The data `encrypted` holds, if `password` opens it: any other password, a changed,
-/// reordered or shortened stream, or an unknown algorithm is
-/// [`CryptoError::Authentication`].
-pub fn decrypt(password: &str, encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    if encrypted.len() < SALT + 1 + NONCE + TAG {
+/// What sio-go's stream `sealed` under `nonce` holds; a changed, reordered or shortened
+/// stream is [`CryptoError::Authentication`].
+pub(crate) fn open_stream(
+    cipher: &LessSafeKey,
+    nonce: [u8; NONCE],
+    mut rest: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if rest.len() < TAG {
         return Err(CryptoError::Authentication);
     }
-    let (salt, rest) = encrypted.split_at(SALT);
-    let (id, rest) = rest.split_at(1);
-    let (nonce, mut rest) = rest.split_at(NONCE);
-    let nonce: [u8; NONCE] = nonce.try_into().expect("split at the nonce's length");
-    let cipher = cipher(id[0], password, salt)?;
-    let mut ad = associated_data(&cipher, nonce);
+    let mut ad = associated_data(cipher, nonce);
     let mut out = Zeroizing::new(Vec::with_capacity(rest.len()));
     let mut seq = 1;
     loop {

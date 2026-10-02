@@ -10,4 +10,5 @@ require (
 	github.com/aws/smithy-go v1.28.1
 	github.com/google/pprof v0.0.0-20261002000307-77d3b59017a0
 	github.com/minio/madmin-go/v3 v3.0.109
+	github.com/secure-io/sio-go v0.3.1
 )

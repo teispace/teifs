@@ -20,6 +20,7 @@ mod folder;
 mod folder_versions;
 mod folders;
 mod format;
+mod inspect;
 mod jobs;
 mod lifecycle;
 mod list;

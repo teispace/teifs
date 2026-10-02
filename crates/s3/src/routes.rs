@@ -33,8 +33,9 @@ use crate::{
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_bucket_metadata, minio_config, minio_heal, minio_iam,
-    minio_iam_transfer, minio_idp_config, minio_info, minio_kms, minio_ldap, minio_metrics,
-    minio_pools, minio_profile, minio_service, minio_service_accounts, minio_speedtest,
+    minio_iam_transfer, minio_idp_config, minio_info, minio_inspect, minio_kms, minio_ldap,
+    minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
+    minio_speedtest,
     observe::{self, Seen},
     quota,
     trace::Tracers,
@@ -179,6 +180,8 @@ enum Handler {
     MinioBucketMetadata(minio_bucket_metadata::Call),
     /// `MinIO`'s older `set-user-or-group-policy`.
     MinioSetPolicy,
+    /// `MinIO`'s `inspect-data`.
+    MinioInspect,
     RevokeTokens,
 }
 
@@ -247,6 +250,7 @@ impl Handler {
             Self::MinioIamTransfer(call) => call.name(),
             Self::MinioBucketMetadata(call) => call.name(),
             Self::MinioSetPolicy => "SetPolicyForUserOrGroup",
+            Self::MinioInspect => "InspectData",
             Self::RevokeTokens => "RevokeTokens",
         }
     }
@@ -782,6 +786,22 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::Action("admin:OBDInfo", ANY),
         handler: Handler::MinioInfo(minio_info::Kind::Health),
         about: "Streams the health report `madmin.HealthInfo` (version 3), sent again as each part the query asks for is gathered: the host's CPUs, disks, OS, memory, network, the server's process, its known problems, SELinux and settings, the configuration with its secrets redacted, and the server's info with its TLS certificates; `deadline` bounds it, `anonymize=strict` names the server `server1`: `mc admin obd`, its older name",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: "/minio/admin/v3/inspect-data",
+        needs: Needs::Action("admin:InspectData", ANY),
+        handler: Handler::MinioInspect,
+        about: "What the drive keeps about the objects `file` names in `volume` (a pattern: `*`, `?`, `[…]`, `**`): each key's index rows as `<host>/<drive>/<bucket>/<key>/teifs.meta.json`, with `inspect-input.txt` and `.teifs/format.json`, zipped and sealed under a random key sent first, or, with an RSA `public-key` (PKCS #1, base64), as an estream only its private key opens: `mc support inspect`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Post,
+        path: "/minio/admin/v3/inspect-data",
+        needs: Needs::Action("admin:InspectData", ANY),
+        handler: Handler::MinioInspect,
+        about: "What the drive keeps about the objects `file` names in `volume` (a pattern: `*`, `?`, `[…]`, `**`): each key's index rows as `<host>/<drive>/<bucket>/<key>/teifs.meta.json`, with `inspect-input.txt` and `.teifs/format.json`, zipped and sealed under a random key sent first, or, with an RSA `public-key` (PKCS #1, base64), as an estream only its private key opens: `mc support inspect`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1582,6 +1602,21 @@ impl Routes {
         Ok(identity.decide(context, action, &on_key, None).is_allowed())
     }
 
+    /// TeiFS's bucket settings import.
+    async fn import_buckets(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
+        bucket_export::import(
+            &self.store,
+            &self.rules,
+            self.events.notifier(),
+            (
+                &self.iam.account(),
+                (&self.access_log, &self.request_metrics),
+            ),
+            req,
+        )
+        .await
+    }
+
     /// Calls an endpoint the caller may call, with what deciding it read: a tags call's
     /// bucket and call, or the bucket its query names.
     async fn call(
@@ -1618,19 +1653,7 @@ impl Routes {
             Handler::Snapshots => admin::snapshots(&self.store).await,
             Handler::TakeSnapshot => admin::take_snapshot(&self.store).await,
             Handler::ExportBuckets => bucket_export::export(&self.store, req.uri.query()).await,
-            Handler::ImportBuckets => {
-                bucket_export::import(
-                    &self.store,
-                    &self.rules,
-                    self.events.notifier(),
-                    (
-                        &self.iam.account(),
-                        (&self.access_log, &self.request_metrics),
-                    ),
-                    req,
-                )
-                .await
-            }
+            Handler::ImportBuckets => self.import_buckets(req).await,
             Handler::Trace => admin::trace(&self.tracers, req.uri.query()),
             Handler::SetBucketQuota => quota::set(&self.store, &query_bucket.expect(ON), req).await,
             Handler::GetBucketQuota => quota::get(&self.store, &query_bucket.expect(ON)).await,
@@ -1688,6 +1711,7 @@ impl Routes {
             Handler::MinioIamTransfer(call) => call.call(self, req).await,
             Handler::MinioBucketMetadata(call) => call.call(self, req).await,
             Handler::MinioSetPolicy => minio_iam::set_user_or_group_policy(&self.iam, &req).await,
+            Handler::MinioInspect => minio_inspect::inspect(self, req).await,
             Handler::Query => unreachable!("the Query APIs are served by iam_api"),
         }
     }

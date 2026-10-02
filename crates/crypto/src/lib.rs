@@ -13,6 +13,7 @@ mod aws_kms;
 mod context;
 mod customer;
 mod error;
+pub mod inspect;
 mod kes;
 mod key;
 mod kms;

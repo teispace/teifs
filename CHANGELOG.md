@@ -360,6 +360,11 @@ behaviour; the on-disk format is always upgraded automatically.
   drive's configuration with its secrets redacted, and the server's info with the TLS
   certificates it presents. `anonymize=strict` names the server `server1`. Needs
   `admin:OBDInfo`.
+- MinIO's `inspect-data` (`mc support inspect`): what the drive keeps about the objects
+  a pattern names (`*`, `?`, `[…]`, `**`; `bucket/key/xl.meta` names the key), each
+  key's index rows as `teifs.meta.json`, with the drive's `format.json`, zipped and
+  sealed as madmin reads it: under a key sent with it, or, with `--public-key`, for the
+  private key alone. Objects' bytes are never included. Needs `admin:InspectData`.
 - MinIO's `info`, `storageinfo` and `datausageinfo` (`mc admin info`, the console's
   dashboard): one server with one pool of one set, its drives the disks the drive uses
   with their room, what the drive and each bucket hold, and whether the KMS and the
