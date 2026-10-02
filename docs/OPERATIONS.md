@@ -783,6 +783,15 @@ makes entries only while an audit log is kept or someone traces. A trace that re
 slowly skips entries rather than slow requests down, and every trace ends when the server
 stops.
 
+`mc admin trace` works too: `GET /minio/admin/v3/trace` answers each request as the
+`madmin.TraceInfo` MinIO would send, with a space every second while it's quiet. S3's
+requests are MinIO's `s3` type (`s3.GetObject`); the admin, IAM, STS and control APIs'
+are its `internal` type (`admin.ServerInfo`), which `mc admin trace --all` shows.
+`--errors` and `--response-threshold` are applied on the server; `mc`'s other filters
+(`--path`, `--funcname`, `--status-code`…) on the client, as with MinIO. Types TeiFS has
+no counterpart for (`storage`, `os`, `scanner`, `healing`…) are accepted and show nothing.
+It needs `admin:ServerTrace`.
+
 ## Server access logs
 
 A bucket's access log, as S3's server access logging, records every request on the

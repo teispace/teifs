@@ -8,7 +8,7 @@
 //! flags, environment and settings file, and after the real variable; see
 //! [`ConfigKv::variables`].
 
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -754,6 +754,48 @@ fn set(kvs: &mut Kvs, key: &str, value: String) {
     }
 }
 
+/// A duration as Go writes it and `MinIO` reads it (`time.ParseDuration`): `24h`,
+/// `1h30m`, `1.5s`, `500ms`, `0s`.
+///
+/// # Errors
+/// When it isn't one.
+pub fn go_duration(text: &str) -> Result<Duration, String> {
+    let wrong = || format!("`{text}` isn't a duration like 24h, 1h30m or 90s");
+    let mut rest = text.trim();
+    if rest == "0" {
+        return Ok(Duration::ZERO);
+    }
+    if rest.is_empty() {
+        return Err(wrong());
+    }
+    let mut total = Duration::ZERO;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or_else(wrong)?;
+        let number: f64 = rest[..digits].parse().map_err(|_| wrong())?;
+        rest = &rest[digits..];
+        let unit = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let seconds = match &rest[..unit] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            "s" => 1.0,
+            "ms" => 1e-3,
+            "us" | "\u{b5}s" | "\u{3bc}s" => 1e-6,
+            "ns" => 1e-9,
+            _ => return Err(wrong()),
+        };
+        rest = &rest[unit..];
+        total = Duration::try_from_secs_f64(number * seconds)
+            .ok()
+            .and_then(|part| total.checked_add(part))
+            .ok_or_else(wrong)?;
+    }
+    Ok(total)
+}
+
 /// An on or off value as `MinIO` takes it.
 #[must_use]
 pub fn switch(value: &str) -> Option<bool> {
@@ -1311,6 +1353,24 @@ mod tests {
 
     fn none(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn durations_are_go_s() {
+        for (text, expected) in [
+            ("24h", Duration::from_hours(24)),
+            ("1h30m", Duration::from_mins(90)),
+            ("1.5h", Duration::from_mins(90)),
+            ("500ms", Duration::from_millis(500)),
+            ("2\u{b5}s", Duration::from_micros(2)),
+            ("0s", Duration::ZERO),
+            ("0", Duration::ZERO),
+        ] {
+            assert_eq!(go_duration(text), Ok(expected), "{text}");
+        }
+        for bad in ["", "h", "10", "1d", "1h-", "-1s"] {
+            assert!(go_duration(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

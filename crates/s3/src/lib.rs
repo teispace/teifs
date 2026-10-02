@@ -35,6 +35,7 @@ mod minio_info;
 mod minio_kms;
 mod minio_service;
 mod minio_service_accounts;
+mod minio_trace;
 mod notification;
 mod object_lock;
 mod observe;

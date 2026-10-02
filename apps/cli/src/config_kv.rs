@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use teifs_server::{ConfiguredOidcProvider, LdapSettings, PluginSettings};
 use teifs_store::ConfigFiles;
-use teifs_types::config_kv::{ConfigKv, VARIABLE_PREFIX, switch};
+use teifs_types::config_kv::{self, ConfigKv, VARIABLE_PREFIX, switch};
 
 use crate::{
     ServeArgs,
@@ -151,42 +151,13 @@ fn api(variables: &BTreeMap<String, String>) -> Result<Api, String> {
     })
 }
 
-/// A duration as Go writes it and `MinIO` reads it: `24h`, `1h30m`, `90s`, `500ms`.
+/// A duration as Go writes it, longer than zero.
 fn go_duration(text: &str) -> Result<Duration, String> {
-    let wrong = || format!("`{text}` isn't a duration like 24h, 1h30m or 90s");
-    let mut rest = text.trim();
-    if rest.is_empty() {
-        return Err(wrong());
-    }
-    let mut total = Duration::ZERO;
-    while !rest.is_empty() {
-        let digits = rest
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .ok_or_else(wrong)?;
-        let number: f64 = rest[..digits].parse().map_err(|_| wrong())?;
-        rest = &rest[digits..];
-        let unit = rest
-            .find(|c: char| c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        let seconds = match &rest[..unit] {
-            "h" => 3600.0,
-            "m" => 60.0,
-            "s" => 1.0,
-            "ms" => 1e-3,
-            "us" | "\u{b5}s" | "\u{3bc}s" => 1e-6,
-            "ns" => 1e-9,
-            _ => return Err(wrong()),
-        };
-        rest = &rest[unit..];
-        total = Duration::try_from_secs_f64(number * seconds)
-            .ok()
-            .and_then(|part| total.checked_add(part))
-            .ok_or_else(wrong)?;
-    }
-    if total.is_zero() {
+    let duration = config_kv::go_duration(text)?;
+    if duration.is_zero() {
         return Err(format!("`{text}` must be longer than zero"));
     }
-    Ok(total)
+    Ok(duration)
 }
 
 /// The variables the drive's configuration stands for.

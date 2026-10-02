@@ -1,6 +1,6 @@
 // The AWS SDK for Go v2 against TeiFS: what applications do with it; and madmin-go, the
 // library `mc` calls MinIO's admin API with, for bucket quotas, users, groups, policies,
-// the KMS and settings.
+// the KMS, settings and traces.
 package main
 
 import (
@@ -144,6 +144,7 @@ func main() {
 	service(ctx, adm)
 	kms(ctx, adm)
 	configKV(ctx, adm)
+	trace(ctx, adm, s3c, *bucket)
 
 	step("empty and remove the bucket")
 	_, err = s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: bucket, Delete: &types.Delete{Objects: ids}})
@@ -151,6 +152,29 @@ func main() {
 	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: bucket})
 	must(err)
 	fmt.Println("ok")
+}
+
+// trace is mc admin trace: S3's calls as MinIO's trace documents, filtered on the server.
+func trace(ctx context.Context, adm *madmin.AdminClient, s3c *s3.Client, bucket string) {
+	step("a live trace, as mc admin trace reads it")
+	traced, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	traces := adm.ServiceTrace(traced, madmin.ServiceTraceOpts{S3: true, OnlyErrors: true})
+	// The trace starts once the server answers it: ask until one comes.
+	go func() {
+		for traced.Err() == nil {
+			_, _ = s3c.GetObject(traced, &s3.GetObjectInput{Bucket: &bucket, Key: aws.String("not-there")})
+			_, _ = s3c.ListObjectsV2(traced, &s3.ListObjectsV2Input{Bucket: &bucket})
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	info, ok := <-traces
+	check(ok, "a trace came")
+	must(info.Err)
+	got := info.Trace
+	check(got.FuncName == "s3.GetObject" && got.TraceType == madmin.TraceS3 && got.HTTP != nil &&
+		got.HTTP.RespInfo.StatusCode == 404 && got.HTTP.ReqInfo.Method == "GET",
+		fmt.Sprintf("only the failed call traced: %+v", got))
 }
 
 // lists says whether a client signing with this key may list buckets.

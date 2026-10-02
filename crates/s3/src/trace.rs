@@ -19,10 +19,18 @@ use crate::lines;
 /// How many entries wait for the slowest watcher before it skips some.
 const BACKLOG: usize = 4096;
 
+/// A request that was answered: its audit entry, and its method, which `MinIO`'s trace
+/// tells and the entry doesn't.
+#[derive(Debug)]
+pub(crate) struct Traced {
+    pub(crate) entry: AuditEntry,
+    pub(crate) method: String,
+}
+
 /// Everyone watching the requests.
 #[derive(Debug)]
 pub(crate) struct Tracers {
-    entries: broadcast::Sender<Arc<AuditEntry>>,
+    entries: broadcast::Sender<Arc<Traced>>,
     stopping: CancellationToken,
 }
 
@@ -40,9 +48,12 @@ impl Tracers {
     }
 
     /// Shows `entry` to whoever is watching.
-    pub(crate) fn show(&self, entry: &AuditEntry) {
+    pub(crate) fn show(&self, entry: &AuditEntry, method: Option<&http::Method>) {
         if self.watched() {
-            let _ = self.entries.send(Arc::new(entry.clone()));
+            let _ = self.entries.send(Arc::new(Traced {
+                entry: entry.clone(),
+                method: method.map(ToString::to_string).unwrap_or_default(),
+            }));
         }
     }
 
@@ -54,17 +65,31 @@ impl Tracers {
     /// A trace: the entries `filter` shows, as JSON lines, until the watcher leaves or
     /// the server stops.
     pub(crate) fn follow(&self, filter: TraceFilter) -> Body {
+        self.follow_with((lines::HEARTBEAT, b"\n"), move |traced: Arc<Traced>| {
+            filter.matches(&traced.entry).then(|| {
+                let mut line =
+                    serde_json::to_vec(&traced.entry).expect("an audit entry serializes");
+                line.push(b'\n');
+                Bytes::from(line)
+            })
+        })
+    }
+
+    /// A trace of the lines `line` makes (none: skipped), with `heartbeat` every so
+    /// often, until the watcher leaves or the server stops.
+    pub(crate) fn follow_with<F>(
+        &self,
+        heartbeat: (std::time::Duration, &'static [u8]),
+        line: F,
+    ) -> Body
+    where
+        F: FnMut(Arc<Traced>) -> Option<Bytes> + Send + 'static,
+    {
         lines::follow(
             self.entries.subscribe(),
             self.stopping.clone(),
-            (lines::HEARTBEAT, b"\n"),
-            move |entry: Arc<AuditEntry>| {
-                filter.matches(&entry).then(|| {
-                    let mut line = serde_json::to_vec(&*entry).expect("an audit entry serializes");
-                    line.push(b'\n');
-                    Bytes::from(line)
-                })
-            },
+            heartbeat,
+            line,
         )
     }
 }

@@ -390,7 +390,7 @@ impl Watch {
     fn audit(&self, asked: Option<Asked>, seen: &Seen, answer: &Answer, headers: &HeaderMap) {
         let Some(asked) = asked else { return };
         let entry = audit::entry(&self.drive, asked, seen, answer, headers);
-        self.tracers.show(&entry);
+        self.tracers.show(&entry, seen.method());
         if let Some(sink) = &self.audit
             && !sink.log(entry)
         {

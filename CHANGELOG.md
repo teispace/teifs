@@ -367,6 +367,9 @@ behaviour; the on-disk format is always upgraded automatically.
   the root key, its service accounts and its sessions so only IAM's users sign in, and
   `stale_uploads_expiry` sets how long unfinished uploads are kept when
   `--upload-expiry` isn't set. The other `api` keys are kept, not used.
+- `mc admin trace`: MinIO's live trace answers each request as the trace document MinIO
+  would send, S3's calls as its `s3` type and the other APIs' as `internal`, with
+  `--errors` and `--response-threshold` applied on the server and secrets redacted.
 - MinIO's `accountinfo` (`mc admin accountinfo`, the console's bucket list): any signed
   caller gets its name, its policies merged into one document, and the buckets it may
   read or write with their size, objects, versions, quota, versioning and Object Lock.
