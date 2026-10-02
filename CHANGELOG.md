@@ -816,8 +816,11 @@ behaviour; the on-disk format is always upgraded automatically.
   the system time), and about 1.7× as many go in per second through the store.
 - A `%` escape must be two hex digits wherever TeiFS reads one (`x-amz-tagging`,
   `x-amz-rename-source`, query parameters a policy condition tests, AMQP target URLs,
-  and alias URLs in the command line): `%+F` was read as `%0F`. The command line no longer panics on a part
-  ETag with non-ASCII characters while checking a migrated object's ETag.
+  and alias URLs in the command line): `%+F` was read as `%0F`. The command line no
+  longer panics on a part ETag with non-ASCII characters while checking a migrated
+  object's ETag.
+- A drive on a file system that reports no size (some FUSE and network file systems)
+  takes writes again: it was always called full, refusing every write with `507`.
 - The background pass that indexes files added to a folder bucket by other programs
   seeks to each page of the bucket's index instead of reading it from the first key,
   and reads it without holding up writes: a pass over 1.1M files takes about 100 s

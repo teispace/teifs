@@ -136,7 +136,8 @@ garbage is removed at the next start. In a folder bucket the file itself goes in
 before its row, so a crash between the two leaves the new file with the old row: it's
 read as a file changed outside TeiFS (a provisional ETag) until the index pass hashes
 it. `crates/store/tests/crash.rs` kills a writing process at many moments and checks
-all of this.
+all of this; the nightly run also runs it on [LazyFS](https://github.com/dsrhaslab/lazyfs),
+which drops everything not yet synced at each kill, as a power cut would.
 
 ### `index.db`
 

@@ -157,6 +157,59 @@ jobs:
         env:
           PROPTEST_CASES: 25000
 
+  power-loss:
+    # The same writes on LazyFS, a FUSE file system that keeps unsynced data in its own
+    # cache and throws it away when told: each kill is a power cut as well.
+    name: Power loss (LazyFS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      LAZYFS_COMMIT: fa7d32ee9710d55a7e529ac3c375f6616563c78b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build LazyFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake libfuse3-dev fuse3
+          sudo sed -i '/user_allow_other/s/^#//' /etc/fuse.conf
+          git init -q "$RUNNER_TEMP/lazyfs"
+          cd "$RUNNER_TEMP/lazyfs"
+          git fetch -q --depth 1 https://github.com/dsrhaslab/lazyfs "$LAZYFS_COMMIT"
+          git checkout -q FETCH_HEAD
+          (cd libs/libpcache && ./build.sh)
+          (cd lazyfs && ./build.sh)
+      - name: Mount LazyFS
+        run: |
+          mkfifo "$RUNNER_TEMP/faults.fifo" "$RUNNER_TEMP/done.fifo"
+          mkdir -p "$RUNNER_TEMP/lazyfs.mnt" "$RUNNER_TEMP/lazyfs.root"
+          cat > "$RUNNER_TEMP/lazyfs.toml" <<EOF
+          [faults]
+          fifo_path="$RUNNER_TEMP/faults.fifo"
+          fifo_path_completed="$RUNNER_TEMP/done.fifo"
+          [cache]
+          apply_eviction=false
+          [cache.simple]
+          custom_size="2gb"
+          blocks_per_page=1
+          [filesystem]
+          log_all_operations=false
+          logfile=""
+          EOF
+          cd "$RUNNER_TEMP/lazyfs/lazyfs"
+          ./scripts/mount-lazyfs.sh -c "$RUNNER_TEMP/lazyfs.toml" \
+            -m "$RUNNER_TEMP/lazyfs.mnt" -r "$RUNNER_TEMP/lazyfs.root"
+          for _ in $(seq 30); do mountpoint -q "$RUNNER_TEMP/lazyfs.mnt" && break; sleep 1; done
+          mountpoint "$RUNNER_TEMP/lazyfs.mnt"
+          mkdir "$RUNNER_TEMP/lazyfs.mnt/run"
+      - run: cargo test --locked --release -p teifs-store --test crash -- --nocapture
+        env:
+          TEIFS_CRASH_ROUNDS: 200
+          TEIFS_CRASH_DIR: ${{ runner.temp }}/lazyfs.mnt/run
+          TEIFS_CRASH_POWER: ${{ runner.temp }}/faults.fifo|${{ runner.temp }}/done.fifo
+      - if: always()
+        run: fusermount3 -u "$RUNNER_TEMP/lazyfs.mnt" || true
+
   external-kms:
     # Encryption with real external KMSes: an OpenBao transit engine, KES, and Moto for
     # AWS KMS (LocalStack needs an account since March 2026).

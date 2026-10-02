@@ -6,6 +6,11 @@
 //! must find no version without its data. `TEIFS_CRASH_ROUNDS` sets how many kills
 //! (10 by default), and `TEIFS_CRASH_DIR` keeps the drive in that folder, to look at
 //! after a failure.
+//!
+//! With `TEIFS_CRASH_POWER=FIFO|DONE`, each kill is a power loss too: the drive is on a
+//! [LazyFS](https://github.com/dsrhaslab/lazyfs) mount, and after the kill the test writes
+//! `lazyfs::clear-cache` to its fault FIFO and waits for the reply on the DONE FIFO, which
+//! throws away everything not yet synced to disk.
 
 #![allow(
     clippy::unwrap_used,
@@ -16,6 +21,7 @@
 
 use std::{
     collections::BTreeMap,
+    fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::Path,
     process::{Command, Stdio},
@@ -257,7 +263,12 @@ struct Last {
 type Model = BTreeMap<(&'static str, String), Last>;
 
 /// Every object as the writes acknowledged left it, or as the one in flight would have.
-async fn check(store: &Store, model: &mut Model, next: &[Op]) {
+///
+/// After a power loss, a folder bucket's file can also hold its last acknowledged write
+/// with a provisional ETag: `LazyFS` reports the time of the last write as a file's mtime
+/// until the cache is cleared and the time it synced the file afterwards, which no real
+/// file system does, so the row no longer matches the file.
+async fn check(store: &Store, model: &mut Model, next: &[Op], power_loss: bool) {
     for op in next {
         model.entry((op.bucket, op.key())).or_default();
     }
@@ -279,6 +290,10 @@ async fn check(store: &Store, model: &mut Model, next: &[Op]) {
             (Some(_), None) => false,
         };
         if matches(&last.op, last.provisional) {
+            continue;
+        }
+        if power_loss && matches(&last.op, true) {
+            last.provisional = true;
             continue;
         }
         let Some(op) = in_flight.filter(|op| matches(&Some(**op), true)) else {
@@ -330,6 +345,38 @@ async fn check(store: &Store, model: &mut Model, next: &[Op]) {
     }
 }
 
+/// The fault FIFO of the `LazyFS` mount, and the FIFO it answers on once a fault is done.
+struct PowerLoss {
+    faults: File,
+    done: BufReader<File>,
+}
+
+impl PowerLoss {
+    fn open(fifos: &str) -> Self {
+        let (faults, done) = fifos.split_once('|').unwrap();
+        Self {
+            faults: OpenOptions::new().write(true).open(faults).unwrap(),
+            // Read and write, so the open doesn't wait for LazyFS and LazyFS never finds
+            // the FIFO without a reader.
+            done: BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(done)
+                    .unwrap(),
+            ),
+        }
+    }
+
+    /// Drops every write the kernel accepted but nothing synced.
+    fn cut(&mut self) {
+        self.faults.write_all(b"lazyfs::clear-cache\n").unwrap();
+        let mut line = String::new();
+        self.done.read_line(&mut line).unwrap();
+        assert_eq!(line, "finished::clear-cache\n");
+    }
+}
+
 #[test]
 fn writes_survive_a_kill_at_any_moment() {
     if std::env::var_os(CHILD).is_some() {
@@ -347,6 +394,9 @@ fn writes_survive_a_kill_at_any_moment() {
         store.create_bucket("obj", Layout::Object).await.unwrap();
         store.create_bucket("fold", Layout::Folder).await.unwrap();
     });
+    let mut power = std::env::var("TEIFS_CRASH_POWER")
+        .ok()
+        .map(|fifos| PowerLoss::open(&fifos));
     let mut model = Model::new();
     let mut acks = 0;
     let rounds = std::env::var("TEIFS_CRASH_ROUNDS").map_or(ROUNDS, |n| n.parse().unwrap());
@@ -392,13 +442,16 @@ fn writes_survive_a_kill_at_any_moment() {
         assert!(!status.success(), "the child was killed");
         assert!(seen >= kill_after, "the child stopped early: {status}");
         acks += seen;
+        if let Some(power) = &mut power {
+            power.cut();
+        }
         // Each writer's next write may have happened or not.
         let next: Vec<Op> = (0..WORKERS)
             .map(|worker| Op::of(worker, last.get(&worker).map_or(first, |seq| seq + 1)))
             .collect();
         runtime.block_on(async {
             let store = open(&drive, &keys);
-            check(&store, &mut model, &next).await;
+            check(&store, &mut model, &next, power.is_some()).await;
         });
     }
     assert!(acks > rounds * 20);

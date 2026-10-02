@@ -22,8 +22,13 @@ fn reserve(total: u64) -> u64 {
 }
 
 /// Whether writing `len` bytes to a disk with `available` of `total` bytes free leaves
-/// the reserve. Encrypted objects take slightly more room than their size.
+/// the reserve. Encrypted objects take slightly more room than their size. A disk that
+/// reports no size at all (some FUSE and network file systems don't say) can't be
+/// measured, so it's never called full; its own writes fail when it is.
 fn has_room(available: u64, total: u64, len: u64) -> bool {
+    if total == 0 {
+        return true;
+    }
     let needed = len.saturating_add(len / 1024);
     available.saturating_sub(needed) >= reserve(total)
 }
@@ -198,6 +203,12 @@ mod tests {
         assert!(!has_room(10 * GIB, total, 10 * GIB - 50 * MIB));
         assert!(!has_room(90 * MIB, total, 1));
         assert!(!has_room(10 * GIB, total, u64::MAX));
+    }
+
+    #[test]
+    fn a_disk_that_reports_no_size_is_never_called_full() {
+        assert!(has_room(0, 0, 1));
+        assert!(has_room(0, 0, 10 * GIB));
     }
 
     #[tokio::test]
