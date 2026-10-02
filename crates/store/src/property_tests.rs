@@ -1,7 +1,7 @@
 //! Requests built from hostile strings: whatever a client sends as a prefix, a marker or
 //! a key, a folder bucket never shows or opens anything outside its own folder.
 
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use proptest::{
     prelude::*,
@@ -168,6 +168,160 @@ fn reads_stay_inside_a_folder_bucket() {
                 prop_assert!(inside(&key) && (body.is_some() || key.ends_with('/')));
             }
             Ok(())
+        })
+        .unwrap();
+}
+
+/// Keys a folder bucket can hold too: one to three names, none both a file and a folder.
+fn key_set() -> impl Strategy<Value = BTreeSet<String>> {
+    let name = prop::sample::select(vec!["a", "b", "ab", "a-b", "a~", "é", "z0"]);
+    prop::collection::vec(prop::collection::vec(name, 1..4), 1..20).prop_map(|keys| {
+        let mut set = BTreeSet::new();
+        for key in keys {
+            let key = key.join("/");
+            let clashes = set.iter().any(|k: &String| {
+                k.starts_with(&format!("{key}/")) || key.starts_with(&format!("{k}/"))
+            });
+            if !clashes {
+                set.insert(key);
+            }
+        }
+        set
+    })
+}
+
+/// A listing as S3 defines it: keys after `after` under `prefix`, in byte order, each
+/// rolled up to its common prefix at the first `delimiter` after the prefix, objects and
+/// common prefixes counting alike towards `max`.
+fn model(
+    keys: &BTreeSet<String>,
+    prefix: &str,
+    delimiter: Option<&str>,
+    after: Option<&After>,
+    max: usize,
+) -> (Vec<String>, Vec<String>, bool) {
+    let (mut objects, mut prefixes, mut taken) = (Vec::new(), Vec::new(), 0);
+    let mut last_prefix: Option<String> = None;
+    for key in keys {
+        let skipped = match after {
+            None => false,
+            Some(After::Key(marker)) => key <= marker,
+            Some(After::Prefix(marker)) => key <= marker || key.starts_with(marker.as_str()),
+        };
+        if skipped || !key.starts_with(prefix) {
+            continue;
+        }
+        let common = delimiter.filter(|d| !d.is_empty()).and_then(|d| {
+            key[prefix.len()..]
+                .find(d)
+                .map(|at| key[..prefix.len() + at + d.len()].to_owned())
+        });
+        if common.is_some() && common == last_prefix {
+            continue;
+        }
+        if taken == max {
+            return (objects, prefixes, true);
+        }
+        taken += 1;
+        match common {
+            Some(common) => {
+                last_prefix = Some(common.clone());
+                prefixes.push(common);
+            }
+            None => objects.push(key.clone()),
+        }
+    }
+    (objects, prefixes, false)
+}
+
+#[test]
+fn listings_follow_s3s_rules_in_both_layouts() {
+    let (runtime, mut runner) = runner();
+    let keys_and_query = key_set().prop_flat_map(|keys| {
+        let known: Vec<String> = keys.iter().cloned().collect();
+        let near = prop::sample::select(known).prop_flat_map(|key| {
+            (0..=key.len()).prop_map(move |cut| {
+                let mut cut = cut;
+                while !key.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                key[..cut].to_owned()
+            })
+        });
+        let prefix = prop_oneof![Just(String::new()), near.clone()];
+        let after = prop_oneof![
+            Just(None),
+            near.clone().prop_map(|k| Some(After::Key(k))),
+            near.prop_map(|p| Some(After::Prefix(p))),
+        ];
+        let delimiter =
+            prop::option::of(prop::sample::select(vec!["/", "b", "a/"]).prop_map(str::to_owned));
+        (Just(keys), prefix, delimiter, after, 1..6usize)
+    });
+    let dir = tempfile::tempdir().unwrap();
+    // Listings, not durability: nothing synced.
+    let options = StoreOptions {
+        durability: Durability::None,
+        ..StoreOptions::default()
+    };
+    let store = Store::open_with(dir.path(), options).unwrap();
+    let cases = std::sync::atomic::AtomicUsize::new(0);
+    runner
+        .run(&keys_and_query, |(keys, prefix, delimiter, after, max)| {
+            let case = cases.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runtime.block_on(async {
+                for layout in [Layout::Object, Layout::Folder] {
+                    let bucket = format!("{layout:?}-{case}").to_lowercase();
+                    store.create_bucket(&bucket, layout).await.unwrap();
+                    for key in &keys {
+                        store
+                            .put_bytes(&bucket, key, b"x", ObjectAttrs::default())
+                            .await
+                            .unwrap();
+                    }
+                    let query = |after: Option<After>, max_keys| ListQuery {
+                        prefix: prefix.clone(),
+                        delimiter: delimiter.clone(),
+                        after,
+                        max_keys,
+                    };
+                    let page = store
+                        .list(&bucket, query(after.clone(), max))
+                        .await
+                        .unwrap();
+                    let names: Vec<String> = page.objects.iter().map(|o| o.key.clone()).collect();
+                    let (objects, prefixes, truncated) =
+                        model(&keys, &prefix, delimiter.as_deref(), after.as_ref(), max);
+                    prop_assert_eq!(
+                        (&names, &page.prefixes, page.truncated),
+                        (&objects, &prefixes, truncated),
+                        "{} after {:?}",
+                        bucket,
+                        after
+                    );
+                    // Page after page, the whole listing, each entry once.
+                    let (mut all_objects, mut all_prefixes, mut next) =
+                        (Vec::new(), Vec::new(), None);
+                    for _ in 0..=keys.len() {
+                        let page = store.list(&bucket, query(next, max)).await.unwrap();
+                        all_objects.extend(page.objects.into_iter().map(|o| o.key));
+                        all_prefixes.extend(page.prefixes);
+                        next = page.next;
+                        if !page.truncated {
+                            break;
+                        }
+                    }
+                    let (objects, prefixes, _) =
+                        model(&keys, &prefix, delimiter.as_deref(), None, usize::MAX);
+                    prop_assert_eq!(
+                        (all_objects, all_prefixes),
+                        (objects, prefixes),
+                        "{} paged",
+                        bucket
+                    );
+                }
+                Ok(())
+            })
         })
         .unwrap();
 }

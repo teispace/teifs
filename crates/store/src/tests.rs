@@ -121,6 +121,28 @@ async fn files_changed_outside_get_a_provisional_etag_and_lose_stale_attributes(
 }
 
 #[tokio::test]
+async fn a_start_marker_inside_a_folder_rolls_up_only_what_follows_it() {
+    let (_dir, store) = with_bucket().await;
+    for key in ["a/a", "a/c", "b/a"] {
+        store
+            .put_bytes("photos", key, b"", ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    let after = |marker: &str| ListQuery {
+        delimiter: Some("/".into()),
+        after: Some(After::Key(marker.into())),
+        max_keys: 100,
+        ..ListQuery::default()
+    };
+    // Nothing in `b/` follows `b/a`, while `a/c` in `a/` follows `a/b`.
+    let listing = store.list("photos", after("b/a")).await.unwrap();
+    assert!(listing.prefixes.is_empty() && listing.objects.is_empty());
+    let listing = store.list("photos", after("a/b")).await.unwrap();
+    assert_eq!(listing.prefixes, ["a/", "b/"]);
+}
+
+#[tokio::test]
 async fn listing_follows_s3_byte_order() {
     let (_dir, store) = with_bucket().await;
     // '-' (0x2d) < '.' (0x2e) < '/' (0x2f) < '0' (0x30): a naive folder walk gets this wrong.

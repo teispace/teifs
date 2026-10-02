@@ -826,6 +826,9 @@ behaviour; the on-disk format is always upgraded automatically.
   object's ETag.
 - A drive on a file system that reports no size (some FUSE and network file systems)
   takes writes again: it was always called full, refusing every write with `507`.
+- Listing a folder bucket with a delimiter and a `StartAfter` or `Marker` inside a
+  folder no longer lists that folder's common prefix when nothing in it follows the
+  marker, as object buckets and AWS already did.
 - A configuration value that starts or ends with a quote (`mc admin config set`) is
   kept as given: it read back without its quotes, or empty, once the server restarted.
   A value holding another of its sub-system's keys followed by `=`, which would read

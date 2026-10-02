@@ -153,7 +153,7 @@ jobs:
           TEIFS_CRASH_ROUNDS: 200
       - run: >-
           cargo test --locked --release -p teifs-types -p teifs-store -p teifs-s3 --lib --
-          properties stay_inside agrees_with_a_strict_reading
+          properties stay_inside agrees_with_a_strict_reading follow_s3s_rules
         env:
           PROPTEST_CASES: 25000
 

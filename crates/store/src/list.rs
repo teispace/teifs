@@ -301,7 +301,12 @@ impl FolderWalk {
             } else if !under_prefix || !self.includes(&entry.key) {
                 continue;
             }
-            if under_prefix && let Some(common) = self.common_prefix(&entry.key) {
+            // A folder the start marker is inside may hold nothing after it, so it's
+            // looked into rather than rolled up whole.
+            if under_prefix
+                && !(entry.folder && self.marker_inside(&entry.key))
+                && let Some(common) = self.common_prefix(&entry.key)
+            {
                 if self.last_prefix.as_deref() == Some(common.as_str()) {
                     continue;
                 }
@@ -336,6 +341,14 @@ impl FolderWalk {
                 key > marker && !(matches!(after, After::Prefix(_)) && key.starts_with(marker))
             }
         }
+    }
+
+    /// Whether the start marker is a key under a folder.
+    fn marker_inside(&self, folder_key: &str) -> bool {
+        self.query
+            .after
+            .as_ref()
+            .is_some_and(|after| after.marker().starts_with(folder_key))
     }
 
     /// Whether every key under a folder is at or before the start marker.
