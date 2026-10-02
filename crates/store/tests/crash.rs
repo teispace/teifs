@@ -49,6 +49,33 @@ const ROUNDS: u64 = 10;
 const ROUND_SEQS: u64 = 1 << 32;
 /// The child gives up if it's somehow still running after this.
 const CHILD_DEADLINE: Duration = Duration::from_secs(60);
+/// The test fails when it waits this long for anything.
+const STALL: Duration = Duration::from_secs(120);
+
+/// What the test is waiting for, and since when.
+type Waiting = Arc<std::sync::Mutex<(Instant, String)>>;
+
+/// Ends the test when it waits too long, saying for what, instead of hanging: a process
+/// stuck in a file system can't be killed, and a stuck `LazyFS` never answers.
+fn watchdog() -> Waiting {
+    let waiting: Waiting = Arc::new(std::sync::Mutex::new((Instant::now(), String::new())));
+    let watched = Arc::clone(&waiting);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let (since, what) = &*watched.lock().unwrap();
+            if since.elapsed() > STALL {
+                eprintln!("waited {STALL:?} for {what}");
+                std::process::exit(1);
+            }
+        }
+    });
+    waiting
+}
+
+fn wait_for(waiting: &Waiting, what: impl Into<String>) {
+    *waiting.lock().unwrap() = (Instant::now(), what.into());
+}
 
 fn mix(mut x: u64) -> u64 {
     // splitmix64
@@ -397,11 +424,13 @@ fn writes_survive_a_kill_at_any_moment() {
     let mut power = std::env::var("TEIFS_CRASH_POWER")
         .ok()
         .map(|fifos| PowerLoss::open(&fifos));
+    let waiting = watchdog();
     let mut model = Model::new();
     let mut acks = 0;
     let rounds = std::env::var("TEIFS_CRASH_ROUNDS").map_or(ROUNDS, |n| n.parse().unwrap());
     for round in 1..=rounds {
         let first = round * ROUND_SEQS;
+        wait_for(&waiting, format!("round {round}'s first acknowledgement"));
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
             .env(
@@ -426,6 +455,7 @@ fn writes_survive_a_kill_at_any_moment() {
             let mut words = line[at + 4..].split(' ');
             let worker: u64 = words.next().unwrap().parse().unwrap();
             let seq: u64 = words.next().unwrap().parse().unwrap();
+            wait_for(&waiting, format!("round {round}'s acknowledgements"));
             let op = Op::of(worker, seq);
             let state = Last {
                 op: op.body().map(|_| op),
@@ -438,13 +468,19 @@ fn writes_survive_a_kill_at_any_moment() {
                 child.kill().unwrap();
             }
         }
+        wait_for(&waiting, format!("round {round}'s child to exit"));
         let status = child.wait().unwrap();
         assert!(!status.success(), "the child was killed");
         assert!(seen >= kill_after, "the child stopped early: {status}");
         acks += seen;
         if let Some(power) = &mut power {
+            wait_for(
+                &waiting,
+                format!("LazyFS to clear its cache after round {round}"),
+            );
             power.cut();
         }
+        wait_for(&waiting, format!("round {round}'s check"));
         // Each writer's next write may have happened or not.
         let next: Vec<Op> = (0..WORKERS)
             .map(|worker| Op::of(worker, last.get(&worker).map_or(first, |seq| seq + 1)))
@@ -453,6 +489,9 @@ fn writes_survive_a_kill_at_any_moment() {
             let store = open(&drive, &keys);
             check(&store, &mut model, &next, power.is_some()).await;
         });
+        if round % 25 == 0 {
+            eprintln!("{round} of {rounds} rounds checked");
+        }
     }
     assert!(acks > rounds * 20);
 }
