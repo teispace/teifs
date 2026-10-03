@@ -5,11 +5,13 @@ use std::collections::BTreeMap;
 
 use teifs_meta::QueuedDelete;
 use teifs_types::{
-    Retention,
+    Retention, SseMode,
     replication::{ReplicationConfig, ReplicationStatus, VersionReplication},
 };
 
-use crate::{ObjectAttrs, ObjectInfo, Store, StoreError, VersionsQuery, error::Result, now_ms};
+use crate::{
+    ObjectAttrs, ObjectInfo, ObjectVersion, Store, StoreError, VersionsQuery, error::Result, now_ms,
+};
 
 /// A version waiting to be replicated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +84,11 @@ const PAGE: usize = 1_000;
 impl Store {
     /// The versions of `bucket` still waiting for a destination, by key and each key's
     /// newest first: about `limit` of them, never only some of a key's (so a key's
-    /// versions can be replicated oldest first).
+    /// versions can be replicated oldest first). Existing versions the rules replicate
+    /// are marked waiting as they're found.
     pub async fn waiting_replication(&self, bucket: &str, limit: usize) -> Result<Vec<Waiting>> {
+        let config = self.bucket_replication(bucket).await?;
+        let existing = config.filter(|config| config.replicates_existing());
         let mut found: Vec<Waiting> = Vec::new();
         let mut query = VersionsQuery {
             max_keys: PAGE,
@@ -96,10 +101,22 @@ impl Store {
                 if found.len() >= limit && found.last().is_some_and(|last| &last.key != key) {
                     return Ok(found);
                 }
-                let (Some(replication), Some(version_id)) =
-                    (&version.info.attrs.replication, &version.info.version_id)
-                else {
+                let Some(version_id) = &version.info.version_id else {
                     continue;
+                };
+                let started;
+                let replication = match (&version.info.attrs.replication, &existing) {
+                    (Some(replication), _) => replication,
+                    (None, Some(config)) => {
+                        let Some(replication) =
+                            self.start_existing(bucket, config, &version).await?
+                        else {
+                            continue;
+                        };
+                        started = replication;
+                        &started
+                    }
+                    (None, None) => continue,
                 };
                 let destinations: Vec<String> = replication.waiting().map(str::to_owned).collect();
                 if !destinations.is_empty() {
@@ -124,6 +141,56 @@ impl Store {
                 }
                 _ => return Ok(found),
             }
+        }
+    }
+
+    /// Starts replicating an existing `version` (one with no replication status: written
+    /// before the rules, or that no rule took then) to the destinations of `config`'s
+    /// rules that replicate existing objects: what it then waits for, if anything. Only
+    /// objects are: delete markers lifecycle made can't be told from people's, and a
+    /// `null` version has no id to keep.
+    async fn start_existing(
+        &self,
+        bucket: &str,
+        config: &ReplicationConfig,
+        version: &ObjectVersion,
+    ) -> Result<Option<VersionReplication>> {
+        let info = &version.info;
+        if version.delete_marker || info.version_id.as_deref() == Some("null") {
+            return Ok(None);
+        }
+        let kms = info
+            .sse
+            .as_ref()
+            .is_some_and(|sse| matches!(sse.mode, SseMode::Kms | SseMode::Dsse));
+        let Some(pending) = VersionReplication::pending(config.existing_destinations(
+            &info.key,
+            &info.attrs.tags,
+            kms,
+        )) else {
+            return Ok(None);
+        };
+        let changed = self
+            .change_attrs(
+                bucket,
+                &info.key,
+                info.version_id.as_deref(),
+                move |attrs| {
+                    // Unless it got a status meanwhile.
+                    if attrs.replication.is_none() {
+                        attrs.replication = Some(pending);
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        match changed {
+            Ok(info) => Ok(info.attrs.replication),
+            // Gone meanwhile: nothing to replicate.
+            Err(
+                StoreError::NoSuchKey | StoreError::NoSuchVersion | StoreError::DeleteMarker { .. },
+            ) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 

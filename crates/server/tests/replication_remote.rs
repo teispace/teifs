@@ -14,8 +14,9 @@ use aws_sdk_s3::{
     Client,
     types::{
         BucketVersioningStatus, DeleteMarkerReplication, DeleteMarkerReplicationStatus,
-        Destination, ReplicationConfiguration, ReplicationRule, ReplicationRuleFilter,
-        ReplicationRuleStatus, ReplicationStatus, VersioningConfiguration,
+        Destination, ExistingObjectReplication, ExistingObjectReplicationStatus,
+        ReplicationConfiguration, ReplicationRule, ReplicationRuleFilter, ReplicationRuleStatus,
+        ReplicationStatus, VersioningConfiguration,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -71,7 +72,24 @@ async fn target(from: &Server, to: &Server, keys: (&str, &str)) -> String {
 
 /// Replicates every object of `source` to `arn`.
 async fn replicate(s3: &Client, arn: &str) {
+    replicate_with(s3, arn, false).await;
+}
+
+/// Replicates every object of `source` to `arn`, those already there too when
+/// `existing`.
+async fn replicate_with(s3: &Client, arn: &str, existing: bool) {
+    let status = if existing {
+        ExistingObjectReplicationStatus::Enabled
+    } else {
+        ExistingObjectReplicationStatus::Disabled
+    };
     let rule = ReplicationRule::builder()
+        .existing_object_replication(
+            ExistingObjectReplication::builder()
+                .status(status)
+                .build()
+                .unwrap(),
+        )
         .id("r")
         .priority(1)
         .status(ReplicationRuleStatus::Enabled)
@@ -179,6 +197,46 @@ async fn versions_reach_another_teifs_as_they_are() {
     assert_eq!(replica.tag_count(), Some(2));
     let body = replica.body.collect().await.unwrap().into_bytes();
     assert_eq!(&body[..], b"hello");
+}
+
+#[tokio::test]
+async fn objects_from_before_the_rule_go_when_it_replicates_existing_ones() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    let put = source
+        .put_object()
+        .bucket("source")
+        .key("old.txt")
+        .body(b"from before".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    let arn = target(&from, &to, (ACCESS_KEY, SECRET_KEY)).await;
+    replicate(&source, &arn).await;
+    assert_eq!(settled(&source, "old.txt").await, None);
+
+    // Sent at once (not at the next look round), with its version.
+    replicate_with(&source, &arn, true).await;
+    let mut status = None;
+    for _ in 0..400 {
+        status = settled(&source, "old.txt").await;
+        if status.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(status, Some(ReplicationStatus::Completed));
+    let replica = copy
+        .head_object()
+        .bucket("copy")
+        .key("old.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replica.version_id(), put.version_id());
+    assert_eq!(replica.replication_status, Some(ReplicationStatus::Replica));
 }
 
 #[tokio::test]

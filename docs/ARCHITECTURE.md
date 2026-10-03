@@ -512,7 +512,9 @@ Replication (`replicator.rs`): new versions a bucket's replication rules take ge
 bucket's cached configuration; a copy or a replica never inherits it), `PENDING` for each
 destination. The replication worker, one of the `Workers`, is woken by `Drive::notify` on
 every `ObjectCreated` event and every minute otherwise; it lists each replicating bucket's
-waiting versions (`Store::waiting_replication`, never splitting a key's), sends a key's
+waiting versions (`Store::waiting_replication`, never splitting a key's; versions with no
+status that a rule with `ExistingObjectReplication` takes are marked `PENDING` there, and
+`PutBucketReplication` wakes the worker), sends a key's
 oldest first, and writes each with `Store::commit_replica`, which keeps the source's
 version id and time and is idempotent, so a retry after a crash writes nothing twice.
 Each destination's outcome is recorded with `Store::set_replication_status`; one that

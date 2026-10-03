@@ -1247,7 +1247,15 @@ A replicating user on another TeiFS needs `s3:PutObject` and `s3:ReplicateObject
 versions (`s3:ReplicateTags` for their tags, and `s3:PutObjectRetention` and
 `s3:PutObjectLegalHold` for locked ones), `s3:GetObject` for metadata changes, and
 `s3:ReplicateDelete` and `s3:DeleteObject` for markers and removals, as `MinIO`
-documents for its replication users. Replicating existing objects is still to come.
+documents for its replication users.
+
+Objects that were there before a rule (or that no rule took when they were written) are
+replicated when the rule has `ExistingObjectReplication` enabled (`mc replicate add
+--replicate existing-objects`): the replication job finds them, starting as soon as the
+configuration is set, and they show `PENDING` until they're sent, with their version ids
+and times as new versions. Only versions with an id are: a `null` version (written
+before versioning was enabled) isn't, and neither are existing delete markers, since
+those lifecycle rules made can't be told from the others.
 
 ### Replication targets
 

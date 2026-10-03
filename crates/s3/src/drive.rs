@@ -2606,6 +2606,8 @@ impl S3 for Drive {
             .set_bucket_replication(&input.bucket, Some(config))
             .await
             .s3()?;
+        // Existing objects a rule now replicates start at once.
+        self.replication.notify_one();
         Ok(S3Response::new(dto::PutBucketReplicationOutput::default()))
     }
 

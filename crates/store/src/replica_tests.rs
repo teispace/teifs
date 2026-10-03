@@ -594,3 +594,97 @@ async fn a_replica_uploaded_in_parts_keeps_its_versions_id_time_and_etag() {
         assert_eq!(versions.versions.len(), 1, "{layout:?}");
     }
 }
+
+#[tokio::test]
+async fn existing_objects_wait_once_a_rule_replicates_them_in_either_layout() {
+    for layout in [Layout::Object, Layout::Folder] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create_bucket("source", layout).await.unwrap();
+        // Written before versioning: a `null` version, with no id to keep.
+        store
+            .put_bytes("source", "unversioned.txt", b"old", ObjectAttrs::default())
+            .await
+            .unwrap();
+        store
+            .set_bucket_versioning("source", Versioning::Enabled)
+            .await
+            .unwrap();
+        let older = store
+            .put_bytes("source", "a.txt", b"one", ObjectAttrs::default())
+            .await
+            .unwrap();
+        let newer = store
+            .put_bytes("source", "a.txt", b"two", ObjectAttrs::default())
+            .await
+            .unwrap();
+        store
+            .delete_with("source", "b.txt", None, Precondition::default(), false)
+            .await
+            .unwrap();
+        let status = |version_id: Option<String>| {
+            let store = store.clone();
+            async move {
+                store
+                    .head_version("source", "a.txt", version_id.as_deref())
+                    .await
+                    .unwrap()
+                    .attrs
+                    .replication
+                    .map(|r| r.status)
+            }
+        };
+
+        // A rule that doesn't replicate existing objects leaves them as they are.
+        store
+            .set_bucket_replication("source", Some(everything_to("copy")))
+            .await
+            .unwrap();
+        let waiting = store.waiting_replication("source", 10).await.unwrap();
+        assert!(waiting.is_empty(), "{layout:?}: {waiting:?}");
+        assert_eq!(status(older.version_id.clone()).await, None, "{layout:?}");
+
+        let mut config = everything_to("copy");
+        config.rules[0].existing_objects = Some(true);
+        store
+            .set_bucket_replication("source", Some(config))
+            .await
+            .unwrap();
+        let waiting = store.waiting_replication("source", 10).await.unwrap();
+        let found: Vec<_> = waiting
+            .iter()
+            .map(|w| (w.key.as_str(), Some(&w.version_id), w.destinations.clone()))
+            .collect();
+        let copy = vec!["arn:aws:s3:::copy".to_owned()];
+        assert_eq!(
+            found,
+            [
+                ("a.txt", newer.version_id.as_ref(), copy.clone()),
+                ("a.txt", older.version_id.as_ref(), copy),
+            ],
+            "{layout:?}"
+        );
+        for version in [older.version_id.clone(), newer.version_id.clone()] {
+            assert_eq!(
+                status(version).await,
+                Some(ReplicationStatus::Pending),
+                "{layout:?}"
+            );
+        }
+        // Once there, they aren't sent again.
+        for version in [&older, &newer] {
+            store
+                .set_replication_status(
+                    "source",
+                    "a.txt",
+                    version.version_id.as_deref().unwrap(),
+                    "arn:aws:s3:::copy",
+                    ReplicationStatus::Completed,
+                )
+                .await
+                .unwrap();
+        }
+        let waiting = store.waiting_replication("source", 10).await.unwrap();
+        assert!(waiting.is_empty(), "{layout:?}: {waiting:?}");
+    }
+}

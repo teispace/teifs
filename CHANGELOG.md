@@ -22,8 +22,8 @@ behaviour; the on-disk format is always upgraded automatically.
   marker) is replicated too when a rule has `MinIO`'s `DeleteReplication`, waiting in
   a queue until every target has it. Changes of a version's tags, retention and legal
   hold follow it, in place, to TeiFS and `MinIO` targets. Versions uploaded in parts
-  are replicated in parts and keep their ids both ways with `MinIO`. Existing objects are still to
-  come.
+  are replicated in parts and keep their ids both ways with `MinIO`. Objects from
+  before a rule are replicated too when it has `ExistingObjectReplication` enabled.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

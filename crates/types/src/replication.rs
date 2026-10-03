@@ -323,6 +323,36 @@ impl ReplicationConfig {
         found
     }
 
+    /// The destinations an existing version of `key` with `tags` (one written before
+    /// the rules, or that no rule took then) goes to: those of the enabled rules it
+    /// matches that replicate existing objects (`ExistingObjectReplication`), each once.
+    #[must_use]
+    pub fn existing_destinations(
+        &self,
+        key: &str,
+        tags: &BTreeMap<String, String>,
+        kms: bool,
+    ) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if rule.existing_objects == Some(true)
+                && rule.matches(key, tags, kms)
+                && !found.contains(&rule.destination.bucket)
+            {
+                found.push(rule.destination.bucket.clone());
+            }
+        }
+        found
+    }
+
+    /// Whether a rule replicates existing objects.
+    #[must_use]
+    pub fn replicates_existing(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.enabled && rule.existing_objects == Some(true))
+    }
+
     /// The destinations a delete marker of `key` goes to: those of the enabled rules
     /// that replicate delete markers and take the key (a marker has no tags, and S3
     /// refuses marker replication in rules that filter by tag), each once.
@@ -482,6 +512,41 @@ mod tests {
         let tagged = rule(ReplicationFilter::Tag(tag.clone()), None);
         assert_eq!(tagged.tags(), [tag]);
         assert_eq!(tagged.prefix(), "");
+    }
+
+    #[test]
+    fn existing_versions_go_only_where_rules_replicate_existing_objects() {
+        let mut existing = rule(ReplicationFilter::Prefix("docs/".to_owned()), None);
+        existing.existing_objects = Some(true);
+        existing.destination.bucket = "arn:aws:s3:::other".to_owned();
+        let mut config = ReplicationConfig {
+            role: String::new(),
+            rules: vec![rule(ReplicationFilter::All, None), existing.clone()],
+        };
+        assert!(config.replicates_existing());
+        let none = BTreeMap::new();
+        assert_eq!(
+            config.existing_destinations("docs/a", &none, false),
+            ["arn:aws:s3:::other"]
+        );
+        assert!(
+            config
+                .existing_destinations("photos/a", &none, false)
+                .is_empty()
+        );
+        // SSE-KMS versions only by rules that take them.
+        assert!(
+            config
+                .existing_destinations("docs/a", &none, true)
+                .is_empty()
+        );
+        config.rules[1].enabled = false;
+        assert!(!config.replicates_existing());
+        assert!(
+            config
+                .existing_destinations("docs/a", &none, false)
+                .is_empty()
+        );
     }
 
     #[test]
