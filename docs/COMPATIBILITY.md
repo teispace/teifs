@@ -264,6 +264,7 @@ that map keys to paths behave:
 | Behaviour | TeiFS | AWS |
 |---|---|---|
 | Key with `.` or `..` segments, an empty segment (`a//b`) or a leading `/` | `400 InvalidArgument` | Accepted |
+| A segment longer than 255 bytes, or a key whose path on the drive is longer than the system takes (1,024 bytes on macOS, the drive's own path included) | `400 InvalidArgument`; `400 KeyTooLongError` | Accepted up to 1,024 bytes |
 | Keys `a` and `a/b` at once | The second: `409 XTeiFSKeyConflict` | Both accepted |
 | Keys differing only in letter case, on a case-insensitive disk | The second: `409 XTeiFSKeyConflict` | Both accepted |
 | Keys differing only in Unicode form (`é` composed or decomposed), on a disk that treats them as one name (APFS, HFS+) | The second: `409 XTeiFSKeyConflict` | Both accepted |

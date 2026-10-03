@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- A folder bucket's key whose path on the drive is longer than the system takes
+  (1,024 bytes on macOS) is refused with `400 KeyTooLongError`, instead of failing with
+  `500 InternalError`.
 - Replication configurations: `PutBucketReplication`, `GetBucketReplication` and
   `DeleteBucketReplication`, kept as given and checked as S3 checks them, naming
   buckets on the same drive; a replicating bucket's versioning can't be suspended.

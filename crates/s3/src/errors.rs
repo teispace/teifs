@@ -34,6 +34,20 @@ fn encryption_error(err: &StoreError) -> Option<S3Error> {
     })
 }
 
+/// A folder bucket's key whose path is longer than the system takes (1,024 bytes on
+/// macOS, from the drive's root).
+fn path_too_long(err: &StoreError) -> Option<S3Error> {
+    match err {
+        StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidFilename => Some(s3_error!(
+            KeyTooLongError,
+            "Your key is too long for a folder bucket on this system: its path on the drive \
+             would be longer than the system allows. Object buckets take keys of up to 1,024 \
+             bytes."
+        )),
+        _ => None,
+    }
+}
+
 /// Maps a store error to the S3 error a client expects.
 pub(crate) fn from_store(err: StoreError) -> S3Error {
     if err.is_storage_full() {
@@ -45,7 +59,7 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         full.set_status_code(http::StatusCode::INSUFFICIENT_STORAGE);
         return full;
     }
-    if let Some(err) = encryption_error(&err) {
+    if let Some(err) = encryption_error(&err).or_else(|| path_too_long(&err)) {
         return err;
     }
     match err {
@@ -239,5 +253,13 @@ mod tests {
         }
         let other = from_store(StoreError::Io(std::io::Error::other("broken")));
         assert_eq!(other.code().as_str(), "InternalError");
+    }
+
+    #[test]
+    fn a_path_too_long_for_the_system_is_a_key_too_long() {
+        let err = std::io::Error::from(std::io::ErrorKind::InvalidFilename);
+        let s3 = from_store(StoreError::Io(err));
+        assert_eq!(s3.code().as_str(), "KeyTooLongError");
+        assert_eq!(s3.status_code(), Some(http::StatusCode::BAD_REQUEST));
     }
 }

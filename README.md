@@ -387,7 +387,9 @@ can open anywhere, with the limits below. Choose per bucket (`--layout`, or the
 - The same goes for keys that differ only in Unicode form (`é` composed or decomposed)
   on macOS.
 - A key can't name a file and a folder at once (`a` and `a/b`), and keys with `.`, `..`
-  or empty segments are refused.
+  or empty segments are refused, as are names longer than 255 bytes and keys whose
+  path on the drive is longer than the system takes (1,024 bytes on macOS):
+  `400 KeyTooLongError`.
 - Names Windows can't hold (`CON`, `NUL.txt`, `a:b`, `what?`, a name ending in a dot or
   a space) are refused everywhere, so the drive can move between systems;
   `--key-names host` allows them outside Windows.

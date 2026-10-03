@@ -1944,3 +1944,28 @@ async fn requests_can_name_the_account_they_expect_to_own_the_bucket() {
         403
     );
 }
+
+#[tokio::test]
+async fn keys_too_long_for_a_folder_bucket_are_refused_as_too_long() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    root.create_bucket().bucket("folder").send().await.unwrap();
+    // 1,019 bytes: within S3's limit, but beyond macOS's 1,024 for a whole path.
+    let key = vec!["k".repeat(250); 4].join("/") + "/x.txt";
+    let put = root
+        .put_object()
+        .bucket("folder")
+        .key(&key)
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await;
+    let answered = code(put);
+    if cfg!(target_os = "macos") {
+        assert_eq!(answered, "KeyTooLongError");
+    } else {
+        assert!(
+            ["ok", "KeyTooLongError"].contains(&answered.as_str()),
+            "{answered}"
+        );
+    }
+}
