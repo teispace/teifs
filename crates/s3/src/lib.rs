@@ -45,6 +45,7 @@ mod minio_metrics;
 mod minio_pools;
 mod minio_profile;
 mod minio_replication;
+mod minio_replication_metrics;
 mod minio_service;
 mod minio_service_accounts;
 mod minio_speedtest;
@@ -191,7 +192,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let notifier = options
         .notifier
         .unwrap_or_else(|| Arc::new(teifs_notify::Notifier::none()));
-    let metrics = metrics::Metrics::new(&store, Arc::clone(&notifier));
+    let mut metrics = metrics::Metrics::new(&store, Arc::clone(&notifier));
     let (access_log, records) =
         access_log::AccessLog::new(options.access_logging, metrics.access_log());
     let (request_metrics, answered) =
@@ -205,6 +206,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     )
     .with_access_log(Arc::clone(&access_log))
     .with_request_metrics(Arc::clone(&request_metrics));
+    metrics.watch_replication(drive.replication_stats());
     let interval = options
         .access_log_interval
         .unwrap_or(access_log::DEFAULT_INTERVAL);
@@ -236,7 +238,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         (Arc::clone(&access_log), Arc::clone(&request_metrics)),
     );
     let control = Arc::new(Control::default());
-    let replication = drive.replication_wake();
+    let (replication, replication_stats) = (drive.replication_wake(), drive.replication_stats());
     let mut builder = S3ServiceBuilder::new(drive);
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(s3_config(
         options.allow_sig_v2,
@@ -271,6 +273,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
                 .config_settings
                 .map(|settings| Arc::new(minio_config::Configs::new(settings))),
             replication,
+            replication_stats,
         });
     }
     let host = set_host(&mut builder, &options.domains)?;

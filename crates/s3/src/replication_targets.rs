@@ -67,6 +67,53 @@ struct BucketTarget {
     insecure_tls: bool,
     #[serde(default)]
     edge: bool,
+    /// Nanoseconds it's been unreachable in all.
+    #[serde(default, rename = "totalDowntime")]
+    total_downtime: u64,
+    /// When it was last reached (Go's zero time if never).
+    #[serde(default, rename = "lastOnline")]
+    last_online: String,
+    #[serde(default, rename = "isOnline")]
+    online: bool,
+    #[serde(default)]
+    latency: Latency,
+}
+
+/// `madmin.LatencyStat`, in nanoseconds.
+#[derive(Default, Serialize, Deserialize)]
+struct Latency {
+    #[serde(default)]
+    curr: u64,
+    #[serde(default)]
+    avg: u64,
+    #[serde(default)]
+    max: u64,
+}
+
+impl BucketTarget {
+    /// With how its replication went, from `stats`: online unless the last attempt
+    /// couldn't reach it.
+    fn with_health(mut self, stats: &crate::replicator::Stats) -> Self {
+        let target = stats
+            .bucket(&self.source_bucket)
+            .targets
+            .remove(&self.arn)
+            .unwrap_or_default();
+        let nanos = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        self.online = target.online != Some(false);
+        self.total_downtime = nanos(target.total_downtime(std::time::Instant::now()));
+        self.last_online = target.last_online.map_or_else(
+            || "0001-01-01T00:00:00Z".to_owned(),
+            |at| crate::minio_kms::rfc3339(crate::admin::millis(at)),
+        );
+        let (curr, avg, max) = target.latency();
+        self.latency = Latency {
+            curr: nanos(curr),
+            avg: nanos(avg),
+            max: nanos(max),
+        };
+        self
+    }
 }
 
 #[expect(
@@ -237,7 +284,7 @@ fn read(bucket: &str, given: BucketTarget, update: bool, new_secret: bool) -> S3
 /// `GET list-remote-targets?bucket=NAME[&type=replication]`: the bucket's targets, as
 /// `MinIO` answers them, without their secret keys.
 pub(crate) async fn list(
-    store: &Store,
+    (store, stats): (&Store, &crate::replicator::Stats),
     bucket: &str,
     req: &S3Request<Body>,
 ) -> S3Result<S3Response<Body>> {
@@ -248,7 +295,10 @@ pub(crate) async fn list(
         .unwrap_or_default();
     let targets = store.replication_targets(Some(bucket)).await.s3()?;
     let answer: Vec<BucketTarget> = if kind.is_empty() || kind == REPLICATION {
-        targets.into_iter().map(BucketTarget::from_target).collect()
+        targets
+            .into_iter()
+            .map(|target| BucketTarget::from_target(target).with_health(stats))
+            .collect()
     } else {
         Vec::new()
     };

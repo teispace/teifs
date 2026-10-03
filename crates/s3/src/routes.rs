@@ -1472,6 +1472,8 @@ pub(crate) struct Routes {
     pub(crate) configs: Option<Arc<minio_config::Configs>>,
     /// What wakes the replication job (a resync started).
     pub(crate) replication: Arc<tokio::sync::Notify>,
+    /// What replication did.
+    pub(crate) replication_stats: Arc<crate::replicator::Stats>,
 }
 
 #[async_trait::async_trait]
@@ -1746,9 +1748,7 @@ impl Routes {
             Handler::SetRemoteTarget => {
                 replication_targets::set(&self.store, &query_bucket.expect(ON), req).await
             }
-            Handler::ListRemoteTargets => {
-                replication_targets::list(&self.store, &query_bucket.expect(ON), &req).await
-            }
+            Handler::ListRemoteTargets => self.list_targets(&query_bucket.expect(ON), &req).await,
             Handler::RemoveRemoteTarget => {
                 replication_targets::remove(&self.store, &query_bucket.expect(ON), &req).await
             }
@@ -1867,8 +1867,17 @@ impl Routes {
         Ok(listen::response(body))
     }
 
-    /// Answers `MinIO`'s replication resync calls on a bucket, with
-    /// `s3:ResetBucketReplicationState` on it.
+    /// Lists `bucket`'s replication targets, with how replication to each went.
+    async fn list_targets(
+        &self,
+        bucket: &str,
+        req: &S3Request<Body>,
+    ) -> S3Result<S3Response<Body>> {
+        replication_targets::list((&self.store, &self.replication_stats), bucket, req).await
+    }
+
+    /// Answers `MinIO`'s replication calls on a bucket (its resync and metrics), with
+    /// the call's action on it.
     async fn resync(
         &self,
         (call, bucket): (minio_replication::Call, String),
@@ -1887,15 +1896,25 @@ impl Routes {
         if !allows(
             &identity,
             &context,
-            "s3:ResetBucketReplicationState",
+            call.action(),
             &teifs_policy::bucket_arn(&bucket),
             Some(&rules),
         ) {
             return Err(denied());
         }
+        let node = req
+            .headers
+            .get(http::header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .unwrap_or_default();
+        let replication = minio_replication::Replication {
+            store: &self.store,
+            wake: &self.replication,
+            stats: &self.replication_stats,
+            node,
+        };
         minio_replication::serve(
-            &self.store,
-            &self.replication,
+            replication,
             (call, &bucket),
             req.uri.query().unwrap_or_default(),
         )

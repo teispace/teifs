@@ -80,6 +80,8 @@ pub struct Drive {
     request_metrics: Option<Arc<RequestMetrics>>,
     /// Wakes the replication worker as objects are written.
     replication: Arc<tokio::sync::Notify>,
+    /// What replication did, and the replicas other servers sent.
+    replication_stats: Arc<crate::replicator::Stats>,
 }
 
 impl Drive {
@@ -103,6 +105,7 @@ impl Drive {
             access_log: None,
             request_metrics: None,
             replication: Arc::new(tokio::sync::Notify::new()),
+            replication_stats: Arc::default(),
         }
     }
 
@@ -123,6 +126,11 @@ impl Drive {
     /// What wakes the replication worker.
     pub(crate) fn replication_wake(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.replication)
+    }
+
+    /// What replication did, and the replicas other servers sent.
+    pub(crate) fn replication_stats(&self) -> Arc<crate::replicator::Stats> {
+        Arc::clone(&self.replication_stats)
     }
 
     /// Changes a replica's metadata as `MinIO` replicates a change of its source's: a
@@ -429,13 +437,20 @@ impl Drive {
     ) -> S3Result<ObjectInfo> {
         match replica {
             Some(replica) => {
-                self.store
+                let info = self
+                    .store
                     .commit_replica(bucket, key, staged, attrs, replica)
                     .await
+                    .s3()?;
+                self.replication_stats.received(bucket, info.size);
+                Ok(info)
             }
-            None => self.store.commit(bucket, key, staged, attrs, pre).await,
+            None => self
+                .store
+                .commit(bucket, key, staged, attrs, pre)
+                .await
+                .s3(),
         }
-        .s3()
     }
 
     /// Writes an object for one of S3's deliveries (an access log, an inventory report)
@@ -3917,6 +3932,7 @@ impl S3 for Drive {
             } else {
                 None
             };
+        let replicated = replica.is_some();
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -3959,6 +3975,9 @@ impl S3 for Drive {
             )
             .await
             .s3()?;
+        if replicated {
+            self.replication_stats.received(&input.bucket, info.size);
+        }
         self.notify(
             &req.extensions,
             "ObjectCreated:CompleteMultipartUpload",

@@ -7,11 +7,14 @@
 //! versions are gone.
 
 mod remote;
+mod stats;
+
+pub(crate) use stats::{Bucket, Rates, Stats, Target, Timed};
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use teifs_store::{
@@ -40,6 +43,8 @@ pub(crate) struct Worker {
     every: Duration,
     /// The targets on other S3 services this pass sends to.
     targets: Mutex<HashMap<String, Arc<remote::Target>>>,
+    /// What it did, for the replication metrics.
+    stats: Arc<Stats>,
 }
 
 /// Why a version didn't reach a destination.
@@ -49,6 +54,8 @@ enum Missed {
     Failed(String),
     /// It may later: tried again on the next pass.
     Later(String),
+    /// The destination didn't answer at all: tried again on the next pass.
+    Unreachable(String),
 }
 
 impl From<StoreError> for Missed {
@@ -72,7 +79,14 @@ impl Worker {
             wake,
             every: EVERY,
             targets: Mutex::default(),
+            stats: Arc::default(),
         }
+    }
+
+    /// Records what it does in `stats`.
+    pub(crate) fn with_stats(mut self, stats: Arc<Stats>) -> Self {
+        self.stats = stats;
+        self
     }
 
     /// Replicates what's waiting, then what comes, until `stopping`.
@@ -148,6 +162,9 @@ impl Worker {
             }
         };
         let full = waiting.len() >= BATCH;
+        self.queued(bucket, &waiting, false);
+        // The versions a destination still waits for after this pass.
+        let mut left = Vec::new();
         let mut through = false;
         // The destinations a resync still waits for, once this pass is over.
         let mut unsettled = Vec::new();
@@ -167,8 +184,12 @@ impl Worker {
                         .filter(|arn| held.contains(arn))
                         .cloned(),
                 );
+                if version.destinations.iter().any(|arn| held.contains(arn)) {
+                    left.push(version);
+                }
             }
         }
+        self.queued(bucket, left, true);
         if let Err(err) = self.store.settle_resyncs(bucket, &unsettled, full).await {
             tracing::warn!(bucket, error = %err, "couldn't settle the bucket's resyncs");
         }
@@ -211,7 +232,7 @@ impl Worker {
                 Err(Missed::Failed(err)) => {
                     tracing::warn!(bucket, key = %removal.key, destination = %arn, error = %err, "a version's removal can't be replicated");
                 }
-                Err(Missed::Later(err)) => {
+                Err(Missed::Later(err) | Missed::Unreachable(err)) => {
                     tracing::info!(bucket, key = %removal.key, destination = %arn, error = %err, "a version's removal will be replicated later");
                     left.push(arn.clone());
                 }
@@ -233,6 +254,25 @@ impl Worker {
         }
     }
 
+    /// Records what waits in `bucket`, in all and by destination: before a pass sends
+    /// (a sample of the queue), or what's `left` after.
+    fn queued<'a>(&self, bucket: &str, waiting: impl IntoIterator<Item = &'a Waiting>, left: bool) {
+        let mut all = (0, 0);
+        let mut by_target: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        for version in waiting {
+            all = (all.0 + 1, all.1 + version.size);
+            for arn in &version.destinations {
+                let pending = by_target.entry(arn.clone()).or_default();
+                *pending = (pending.0 + 1, pending.1 + version.size);
+            }
+        }
+        if left {
+            self.stats.left(bucket, all, &by_target);
+        } else {
+            self.stats.waiting(bucket, all, &by_target);
+        }
+    }
+
     /// Sends one version to each destination it waits for, but those `held` back for
     /// its key (to which it adds those it couldn't reach); whether any was settled.
     async fn version(
@@ -247,13 +287,27 @@ impl Worker {
             if held.contains(arn) {
                 continue;
             }
+            let started = Instant::now();
+            let size = if version.delete_marker {
+                0
+            } else {
+                version.size
+            };
             let status = match self.send(bucket, config, version, arn).await {
-                Ok(()) => ReplicationStatus::Completed,
+                Ok(()) => {
+                    self.stats.sent(bucket, arn, size, started.elapsed());
+                    ReplicationStatus::Completed
+                }
                 Err(Missed::Failed(err)) => {
+                    self.stats.failed(bucket, arn, size, false);
                     tracing::warn!(bucket, key = %version.key, destination = %arn, error = %err, "a version can't be replicated");
                     ReplicationStatus::Failed
                 }
-                Err(Missed::Later(err)) => {
+                Err(missed @ (Missed::Later(_) | Missed::Unreachable(_))) => {
+                    let unreachable = matches!(missed, Missed::Unreachable(_));
+                    self.stats.failed(bucket, arn, size, unreachable);
+                    let (Missed::Later(err) | Missed::Unreachable(err) | Missed::Failed(err)) =
+                        missed;
                     tracing::info!(bucket, key = %version.key, destination = %arn, error = %err, "a version will be replicated later");
                     held.push(arn.clone());
                     continue;

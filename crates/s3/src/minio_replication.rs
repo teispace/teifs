@@ -1,8 +1,11 @@
-//! `MinIO`'s replication resync (`mc replicate resync start|status|cancel`): bucket
-//! requests with `?replication-reset` (`PUT`), `?replication-reset-status` (`GET`) and
-//! `?replication-reset-cancel` (`PUT`), decided with `s3:ResetBucketReplicationState`.
-//! A resync sends every version from before it that the rules send to one destination
-//! there again ([`Store::start_resync`]), as when a target lost what it had.
+//! `MinIO`'s bucket replication calls. Its resync (`mc replicate resync
+//! start|status|cancel`): `?replication-reset` (`PUT`), `?replication-reset-status`
+//! (`GET`) and `?replication-reset-cancel` (`PUT`), decided with
+//! `s3:ResetBucketReplicationState`. A resync sends every version from before it that the
+//! rules send to one destination there again ([`Store::start_resync`]), as when a target
+//! lost what it had. And its replication metrics (`mc replicate status`):
+//! `?replication-metrics` (`GET`; `=2` for the second version,
+//! [`crate::minio_replication_metrics`]), decided with `s3:GetReplicationConfiguration`.
 
 use std::time::Duration;
 
@@ -13,7 +16,7 @@ use teifs_store::Store;
 use teifs_types::replication::ReplicationResync;
 use tokio::sync::Notify;
 
-use crate::{errors::StoreResultExt, minio_kms::rfc3339, replication};
+use crate::{errors::StoreResultExt, minio_kms::rfc3339, replication, replicator::Stats};
 
 /// What Go writes for a time never set.
 const NEVER: &str = "0001-01-01T00:00:00Z";
@@ -27,6 +30,8 @@ pub(crate) enum Call {
     Status,
     /// Cancels the resync going on.
     Cancel,
+    /// What replication did (`true`: the second version).
+    Metrics(bool),
 }
 
 impl Call {
@@ -38,11 +43,12 @@ impl Call {
         domains: &[String],
     ) -> Option<(Self, String)> {
         let query = uri.query()?;
-        let call = form_urlencoded::parse(query.as_bytes()).find_map(|(name, _)| {
+        let call = form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| {
             match (method, name.as_ref()) {
                 (&Method::PUT, "replication-reset") => Some(Self::Start),
                 (&Method::GET, "replication-reset-status") => Some(Self::Status),
                 (&Method::PUT, "replication-reset-cancel") => Some(Self::Cancel),
+                (&Method::GET, "replication-metrics") => Some(Self::Metrics(value == "2")),
                 _ => None,
             }
         })?;
@@ -61,8 +67,30 @@ impl Call {
             Self::Start => "ResetBucketReplicationStart",
             Self::Status => "ResetBucketReplicationStatus",
             Self::Cancel => "ResetBucketReplicationCancel",
+            Self::Metrics(false) => "GetBucketReplicationMetrics",
+            Self::Metrics(true) => "GetBucketReplicationMetricsV2",
         }
     }
+
+    /// The action it needs on the bucket.
+    pub(crate) const fn action(self) -> &'static str {
+        match self {
+            Self::Start | Self::Status | Self::Cancel => "s3:ResetBucketReplicationState",
+            Self::Metrics(_) => "s3:GetReplicationConfiguration",
+        }
+    }
+}
+
+/// What the calls act on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Replication<'a> {
+    pub(crate) store: &'a Store,
+    /// Wakes the replication job (a resync started).
+    pub(crate) wake: &'a Notify,
+    /// What replication did.
+    pub(crate) stats: &'a Stats,
+    /// The server's name, as the request reached it.
+    pub(crate) node: &'a str,
 }
 
 /// `MinIO`'s `ResyncTargetsInfo`.
@@ -127,14 +155,13 @@ impl Target {
     }
 }
 
-/// Answers `call` on `bucket` with the request's `query`; a started resync wakes the
-/// replication job with `wake`.
+/// Answers `call` on `bucket` with the request's `query`.
 pub(crate) async fn serve(
-    store: &Store,
-    wake: &Notify,
+    replication: Replication<'_>,
     (call, bucket): (Call, &str),
     query: &str,
 ) -> S3Result<S3Response<Body>> {
+    let Replication { store, wake, .. } = replication;
     let param = |name: &str| {
         form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == name)
@@ -212,6 +239,19 @@ pub(crate) async fn serve(
                 .s3()?
                 .ok_or_else(|| bad_request("no resync of this destination is going on"))?;
             Ok(S3Response::new(Body::from(id)))
+        }
+        Call::Metrics(v2) => {
+            let metrics = crate::minio_replication_metrics::Metrics::of(
+                replication.stats,
+                bucket,
+                &config,
+                replication.node,
+            );
+            Ok(if v2 {
+                json(&metrics)
+            } else {
+                json(&metrics.current)
+            })
         }
     }
 }

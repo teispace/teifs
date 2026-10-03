@@ -682,6 +682,11 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_notify_dropped_total` | counter | `target` | Events dropped because too many waited for it |
 | `teifs_notify_queued` | gauge | `target` | Events waiting on the drive for it |
 | `teifs_notify_online` | gauge | `target` | 1 when it took its last try |
+| `teifs_replication_sent_total`, `teifs_replication_sent_bytes_total` | counter | `bucket`, `target` | Versions [replicated](#replication) to each destination since the server started, and their bytes |
+| `teifs_replication_failed_total`, `teifs_replication_failed_bytes_total` | counter | `bucket`, `target` | Tries that didn't get through (most are tried again), and their bytes |
+| `teifs_replication_pending`, `teifs_replication_pending_bytes` | gauge | `bucket`, `target` | Versions waiting for each destination as the replication job last looked (a thousand at most per look), and their bytes |
+| `teifs_replication_target_online` | gauge | `bucket`, `target` | 1 unless the destination couldn't be reached when last tried |
+| `teifs_replication_received_total`, `teifs_replication_received_bytes_total` | counter | `bucket` | Replicas other servers sent each bucket, and their bytes |
 | `teifs_access_log_records_total` | counter | | Server access log records kept for delivery |
 | `teifs_access_log_objects_total` | counter | | Log objects delivered to target buckets |
 | `teifs_access_log_dropped_total` | counter | | Records lost: too many waited, the spool couldn't be written, or the target refused them |
@@ -709,6 +714,7 @@ teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearl
 max(teifs_job_failing) > 0                                          # a job keeps failing
 max(teifs_scrub_damaged_versions) > 0                               # damage on the disk
 max(teifs_notify_queued) > 1000                                     # a target is falling behind
+min(teifs_replication_target_online) == 0                           # a replication target is down
 histogram_quantile(0.99, sum by (le, stage) (rate(teifs_store_stage_seconds_bucket{op="write"}[5m])))
 topk(5, teifs_bucket_stored_bytes)                                  # the largest buckets
 ```
@@ -1267,6 +1273,14 @@ failed, and the key it sent last; `PUT /BUCKET?replication-reset-cancel&arn=ARN`
 it (what it marked already is still sent). Versions it takes show `PENDING` until
 they're sent, and are marked a thousand at a time, so a resync of a big bucket starts at
 once. A caller needs `s3:ResetBucketReplicationState` on the bucket.
+
+`mc replicate status ALIAS/BUCKET` shows what was replicated to each destination since
+the server started, the errors in the last minute and hour, what waits, the transfer
+rates and latency, whether the target is online (unreachable when last tried: offline,
+with its downtime) and the replicas other servers sent the bucket. The same figures are
+[Prometheus metrics](#whats-measured) (`teifs_replication_…`). They start again at zero
+when the server restarts; what each version stands at (`PENDING`, `COMPLETED`, `FAILED`)
+is kept with it.
 
 ### Replication targets
 

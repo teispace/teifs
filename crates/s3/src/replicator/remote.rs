@@ -657,7 +657,8 @@ fn missed<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
         {
             Missed::Failed(format!("the target answered {status}: {said}"))
         }
-        _ => Missed::Later(said),
+        Some(_) => Missed::Later(said),
+        None => Missed::Unreachable(said),
     }
 }
 

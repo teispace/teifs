@@ -47,7 +47,8 @@ impl Workers {
                 Arc::clone(&activity),
             ),
             analytics: analytics::Worker::new(drive.clone(), store.clone(), activity),
-            replicator: replicator::Worker::new(store.clone(), drive.replication_wake()),
+            replicator: replicator::Worker::new(store.clone(), drive.replication_wake())
+                .with_stats(drive.replication_stats()),
         }
     }
 

@@ -163,6 +163,12 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Reports how bucket replication is doing, from `stats`.
+    pub(crate) fn watch_replication(&mut self, stats: Arc<crate::replicator::Stats>) {
+        self.registry
+            .register_collector(Box::new(Replication(stats)));
+    }
+
     pub(crate) fn new(store: &Store, notifier: Arc<Notifier>) -> Self {
         let mut registry = Registry::with_prefix("teifs");
         let requests = Family::default();
@@ -669,6 +675,127 @@ impl Collector for Notifications {
             let mut family = encoder.encode_descriptor(name, help, None, MetricType::Gauge)?;
             for stat in &stats {
                 ConstGauge::new(read(stat)).encode(family.encode_family(&label(&stat.arn))?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How bucket replication is doing, by bucket and destination, since the server
+/// started.
+#[derive(Debug)]
+struct Replication(Arc<crate::replicator::Stats>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, EncodeLabelSet)]
+struct BucketTarget {
+    bucket: String,
+    target: String,
+}
+
+/// Reads one figure of a destination's.
+type ReadTarget = fn(&crate::replicator::Target) -> u64;
+/// Reads one figure of a bucket's.
+type ReadBucket = fn(&crate::replicator::Bucket) -> u64;
+
+impl Collector for Replication {
+    fn encode(&self, mut encoder: DescriptorEncoder) -> std::fmt::Result {
+        let buckets = self.0.buckets();
+        if buckets.is_empty() {
+            return Ok(());
+        }
+        let targets = || {
+            buckets.iter().flat_map(|(bucket, stats)| {
+                stats.targets.iter().map(move |(arn, target)| {
+                    let label = BucketTarget {
+                        bucket: bucket.clone(),
+                        target: arn.clone(),
+                    };
+                    (label, target)
+                })
+            })
+        };
+        let counters: [(&str, &str, Option<Unit>, ReadTarget); 4] = [
+            (
+                "replication_sent",
+                "Versions each bucket replicated to each destination",
+                None,
+                |t| t.replicated.0,
+            ),
+            (
+                "replication_sent",
+                "Bytes of the versions each bucket replicated to each destination",
+                Some(Unit::Bytes),
+                |t| t.replicated.1,
+            ),
+            (
+                "replication_failed",
+                "Tries to replicate a version that didn't get through (most are tried again)",
+                None,
+                |t| t.failed.0,
+            ),
+            (
+                "replication_failed",
+                "Bytes of the versions whose tries didn't get through",
+                Some(Unit::Bytes),
+                |t| t.failed.1,
+            ),
+        ];
+        for (name, help, unit, read) in counters {
+            let mut family =
+                encoder.encode_descriptor(name, help, unit.as_ref(), MetricType::Counter)?;
+            for (label, target) in targets() {
+                ConstCounter::new(read(target)).encode(family.encode_family(&label)?)?;
+            }
+        }
+        let gauges: [(&str, &str, Option<Unit>, ReadTarget); 3] = [
+            (
+                "replication_pending",
+                "Versions waiting to be replicated to each destination, as last seen",
+                None,
+                |t| t.pending.0,
+            ),
+            (
+                "replication_pending",
+                "Bytes of the versions waiting for each destination, as last seen",
+                Some(Unit::Bytes),
+                |t| t.pending.1,
+            ),
+            (
+                "replication_target_online",
+                "Whether each destination was reached when last tried",
+                None,
+                |t| u64::from(t.online != Some(false)),
+            ),
+        ];
+        for (name, help, unit, read) in gauges {
+            let mut family =
+                encoder.encode_descriptor(name, help, unit.as_ref(), MetricType::Gauge)?;
+            for (label, target) in targets() {
+                ConstGauge::new(i64::try_from(read(target)).unwrap_or(i64::MAX))
+                    .encode(family.encode_family(&label)?)?;
+            }
+        }
+        let received: [(&str, Option<Unit>, ReadBucket); 2] = [
+            ("Replicas other servers sent each bucket", None, |b| {
+                b.received.0
+            }),
+            (
+                "Bytes of the replicas other servers sent each bucket",
+                Some(Unit::Bytes),
+                |b| b.received.1,
+            ),
+        ];
+        for (help, unit, read) in received {
+            let mut family = encoder.encode_descriptor(
+                "replication_received",
+                help,
+                unit.as_ref(),
+                MetricType::Counter,
+            )?;
+            for (bucket, stats) in &buckets {
+                ConstCounter::new(read(stats)).encode(family.encode_family(&BucketLabel {
+                    bucket: bucket.clone(),
+                })?)?;
             }
         }
         Ok(())

@@ -26,6 +26,9 @@ behaviour; the on-disk format is always upgraded automatically.
   before a rule are replicated too when it has `ExistingObjectReplication` enabled.
   `MinIO`'s resync (`mc replicate resync start`, `status`, `cancel`) sends everything
   from before it to a destination again, as when a target lost what it had.
+  `mc replicate status` shows what replication did (`MinIO`'s replication metrics), the
+  same figures are Prometheus metrics (`teifs_replication_…`), and replication targets
+  say whether they're online.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

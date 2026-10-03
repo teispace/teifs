@@ -666,3 +666,87 @@ async fn a_resync_sends_again_what_a_target_lost() {
     let (status, text) = resync(&from, "PUT", &format!("replication-reset-cancel&arn={arn}")).await;
     assert_eq!(status, 400, "{text}");
 }
+
+#[tokio::test]
+async fn what_replication_did_is_reported_as_minio_reports_it() {
+    let ((from, to), source, _copy) = replicating().await;
+    source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    let arn = {
+        let (status, text) = signed(
+            &from,
+            (ACCESS_KEY, SECRET_KEY),
+            "GET",
+            "/minio/admin/v3/list-remote-targets?bucket=source&type=replication",
+            &[],
+            b"",
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let targets: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // Reached when last tried: `mc replicate status` shows it online.
+        assert_eq!(targets[0]["isOnline"], true, "{targets}");
+        assert!(
+            targets[0]["latency"]["max"].as_u64().unwrap() > 0,
+            "{targets}"
+        );
+        targets[0]["arn"].as_str().unwrap().to_owned()
+    };
+
+    let (status, text) = resync(&from, "GET", "replication-metrics=2").await;
+    assert_eq!(status, 200, "{text}");
+    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let target = &metrics["currStats"]["Stats"][&arn];
+    assert_eq!(target["replicationCount"], 1, "{metrics}");
+    assert_eq!(target["completedReplicationSize"], 5);
+    assert_eq!(metrics["currStats"]["replicationCount"], 1);
+    assert_eq!(metrics["queueStats"]["nodes"][0]["activeWorkers"]["max"], 1);
+    // The first version is the current figures alone.
+    let (status, text) = resync(&from, "GET", "replication-metrics").await;
+    assert_eq!(status, 200, "{text}");
+    let first: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(first["Stats"][&arn]["replicationCount"], 1, "{first}");
+
+    // And for Prometheus, where the target counts what it received.
+    let scraped = scrape(&from).await;
+    for wanted in [
+        format!("teifs_replication_sent_total{{bucket=\"source\",target=\"{arn}\"}} 1\n"),
+        format!("teifs_replication_sent_bytes_total{{bucket=\"source\",target=\"{arn}\"}} 5\n"),
+        format!("teifs_replication_target_online{{bucket=\"source\",target=\"{arn}\"}} 1\n"),
+    ] {
+        assert!(scraped.contains(&wanted), "{wanted} in {scraped}");
+    }
+    let received = scrape(&to).await;
+    assert!(
+        received.contains("teifs_replication_received_total{bucket=\"copy\"} 1\n"),
+        "{received}"
+    );
+}
+
+/// `server`'s Prometheus metrics.
+async fn scrape(server: &Server) -> String {
+    let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
+    reqwest::Client::new()
+        .get(format!(
+            "{}{}",
+            server.endpoint,
+            teifs_types::admin::METRICS_PATH
+        ))
+        .bearer_auth(token.as_str())
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
