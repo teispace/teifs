@@ -519,3 +519,78 @@ async fn a_replicas_metadata_follows_its_sources_but_never_weakens_a_lock() {
         .unwrap_err();
     assert!(matches!(err, StoreError::InvalidRequest(_)), "{err:?}");
 }
+
+/// Uploads `bytes` in one part as a replica of `VERSION`, completed with its time and
+/// ETag.
+async fn send_in_parts(store: &Store, bucket: &str, bytes: &[u8]) -> Result<ObjectInfo> {
+    let upload = store
+        .create_replica_upload(
+            (bucket, "a.txt"),
+            ObjectAttrs::default(),
+            None,
+            &Encryption::None,
+            None,
+            VERSION.to_owned(),
+        )
+        .await?;
+    let mut staged = store.stage_part(&upload.id, 1, None).await?;
+    staged.write(bytes).await?;
+    let part = store
+        .put_part(&upload.id, 1, staged, BTreeMap::new())
+        .await?;
+    store
+        .complete(
+            &upload.id,
+            vec![(1, part.etag)],
+            Precondition::default(),
+            crate::CompleteWith {
+                replica: Some((MODIFIED_MS, Some(ETAG.to_owned()))),
+                ..crate::CompleteWith::default()
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_replica_uploaded_in_parts_keeps_its_versions_id_time_and_etag() {
+    for layout in [Layout::Object, Layout::Folder] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create_bucket("copy", layout).await.unwrap();
+        // Only where versions are kept.
+        assert!(matches!(
+            send_in_parts(&store, "copy", b"hello").await,
+            Err(StoreError::InvalidRequest(_))
+        ));
+        store
+            .set_bucket_versioning("copy", Versioning::Enabled)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let info = send_in_parts(&store, "copy", b"hello").await.unwrap();
+            assert_eq!(info.version_id.as_deref(), Some(VERSION), "{layout:?}");
+            assert_eq!(info.etag, ETAG, "{layout:?}");
+            assert_eq!(
+                info.modified,
+                UNIX_EPOCH + Duration::from_millis(MODIFIED_MS.try_into().unwrap()),
+                "{layout:?}"
+            );
+            assert_eq!(
+                info.attrs.replication.map(|r| r.status),
+                Some(ReplicationStatus::Replica)
+            );
+        }
+        // Sent twice, kept once.
+        let versions = store
+            .list_versions(
+                "copy",
+                VersionsQuery {
+                    max_keys: 100,
+                    ..VersionsQuery::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(versions.versions.len(), 1, "{layout:?}");
+    }
+}

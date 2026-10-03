@@ -1213,7 +1213,8 @@ suspended). In a folder bucket a replica is a plain file like any other, its
 modification time the version's. Objects encrypted with SSE-C
 fail: the server never holds their keys. Destinations on other S3 services are
 replication targets (below): each version goes there as a `PutObject` signed with the
-target's keys, streamed with its `Content-MD5`, or as a multipart upload above 5 GiB. A
+target's keys, streamed with its `Content-MD5`, or as a multipart upload when it was
+uploaded in parts (in the same parts, when none is above 64 MiB) or is above 5 GiB. A
 target that answers `4xx` (it refused the keys, or the bucket isn't there) fails the
 version; one that can't be reached, or answers `5xx`, has it tried again on later
 passes. Another TeiFS (or a `MinIO`) keeps the version's id, time and ETag when the

@@ -141,6 +141,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::usage::MIGRATION,
     // 11: deletes of versions waiting to be replicated (the versions themselves are gone).
     crate::replicated_deletes::MIGRATION,
+    // 12: the version id an upload replicating another server's version keeps.
+    "ALTER TABLE uploads ADD COLUMN replica_version TEXT;",
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.
@@ -205,6 +207,9 @@ pub struct Upload {
     pub checksum: Option<String>,
     /// The most the object may be, all parts together, if its creation capped it.
     pub max_size: Option<u64>,
+    /// When it replicates another server's version: that version's id, which the object
+    /// keeps.
+    pub replica_version: Option<String>,
 }
 
 /// A completed multipart upload, remembered for a while so a retried Complete gets the
@@ -263,6 +268,7 @@ fn upload_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Upload> {
         crypt: r.get(6)?,
         checksum: r.get(7)?,
         max_size: r.get::<_, Option<i64>>(8)?.map(from_db),
+        replica_version: r.get(9)?,
     })
 }
 
@@ -482,8 +488,9 @@ impl Index {
     /// Records a new multipart upload.
     pub fn insert_upload(&self, upload: &Upload) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO uploads (id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO uploads
+             (id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size, replica_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 upload.id,
                 upload.bucket,
@@ -493,7 +500,8 @@ impl Index {
                 upload.created_ms,
                 upload.crypt,
                 upload.checksum,
-                upload.max_size.map(to_db)
+                upload.max_size.map(to_db),
+                upload.replica_version
             ],
         )?;
         Ok(())
@@ -504,7 +512,7 @@ impl Index {
         Ok(self
             .conn
             .prepare_cached(
-                "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads WHERE id = ?1",
+                "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size, replica_version FROM uploads WHERE id = ?1",
             )?
             .query_row([id], upload_from_row)
             .optional()?)
@@ -514,7 +522,7 @@ impl Index {
     /// the KMS key `kms_key` older than `newest`.
     pub fn uploads_sealed_before(&self, kms_key: &str, newest: u32) -> Result<Vec<Upload>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size, replica_version FROM uploads
              WHERE crypt IS NOT NULL
                AND ((json_extract(crypt, '$.sealed.kmsKey') = ?1
                      AND json_extract(crypt, '$.sealed.kmsVersion') < ?2)
@@ -545,7 +553,7 @@ impl Index {
     ) -> Result<Vec<Upload>> {
         let (key_marker, id_marker) = after.unwrap_or(("", ""));
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size FROM uploads
+            "SELECT id, bucket, key, owner, attrs, created_ms, crypt, checksum, max_size, replica_version FROM uploads
              WHERE bucket = ?1 AND substr(key, 1, length(?2)) = ?2 AND (key > ?3 OR (key = ?3 AND id > ?4))
              ORDER BY key, id LIMIT ?5",
         )?;
@@ -888,6 +896,7 @@ mod tests {
                     crypt,
                     checksum: None,
                     max_size: None,
+                    replica_version: None,
                 })
                 .unwrap();
         }
@@ -928,12 +937,20 @@ mod tests {
             crypt: None,
             checksum: None,
             max_size,
+            replica_version: None,
         };
         index
             .insert_upload(&upload("capped", Some(u64::MAX)))
             .unwrap();
         index.insert_upload(&upload("open", None)).unwrap();
         let max = |id| index.get_upload(id).unwrap().unwrap().max_size;
+        // A replica's upload keeps the version id it was started with.
+        let replica = Upload {
+            replica_version: Some("0192f0a1b2c37d4e8f90a1b2c3d4e5f6".into()),
+            ..upload("replica", None)
+        };
+        index.insert_upload(&replica).unwrap();
+        assert_eq!(index.get_upload("replica").unwrap(), Some(replica));
         assert_eq!(max("capped"), Some(u64::MAX));
         assert_eq!(max("open"), None);
         assert_eq!(index.parts_size("capped", 0).unwrap(), 0);

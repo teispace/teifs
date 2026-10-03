@@ -261,6 +261,13 @@ fn replicas_from_another_server_need_minios_replication_actions() {
         ]
     );
     assert_eq!(
+        actions("CreateMultipartUpload", replication),
+        [
+            ("s3:PutObject", Target::Object, true),
+            ("s3:ReplicateObject", Target::Object, true)
+        ]
+    );
+    assert_eq!(
         actions("CopyObject", tagged),
         [
             ("s3:GetObject", Target::Source, true),

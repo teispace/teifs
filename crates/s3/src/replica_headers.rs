@@ -33,14 +33,48 @@ pub(crate) const VERSION_ID: &str = "versionId";
 /// The replica a write describes (its headers, and the `versionId` of its query), if
 /// its headers say it's one.
 pub(crate) fn replica(headers: &HeaderMap, version_id: Option<&str>) -> S3Result<Option<Replica>> {
-    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     // Elsewhere, `versionId` means nothing to a write, as on S3.
-    if !text(REQUEST).is_some_and(|value| value.eq_ignore_ascii_case("true")) {
+    if !is_request(headers) {
         return Ok(None);
     }
     let version_id = version_id
         .filter(|id| is_version_id(id))
         .ok_or_else(|| s3_error!(InvalidArgument, "a replica's versionId must name a version"))?;
+    let (modified_ms, etag) = source(headers)?;
+    Ok(Some(Replica {
+        version_id: version_id.to_owned(),
+        modified_ms,
+        etag,
+    }))
+}
+
+/// The version a multipart upload replicates (the `versionId` of its query), if its
+/// headers say it's a replication request: its time and ETag come when it completes.
+pub(crate) fn upload_version<'a>(
+    headers: &HeaderMap,
+    version_id: Option<&'a str>,
+) -> S3Result<Option<&'a str>> {
+    if !is_request(headers) {
+        return Ok(None);
+    }
+    version_id
+        .filter(|id| is_version_id(id))
+        .map(Some)
+        .ok_or_else(|| s3_error!(InvalidArgument, "a replica's versionId must name a version"))
+}
+
+/// Whether the headers say a request is another server's replication.
+pub(crate) fn is_request(headers: &HeaderMap) -> bool {
+    headers
+        .get(REQUEST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// The replicated version's time (Unix milliseconds) and ETag, as a replication
+/// request's headers give them (when a multipart upload completes, for one).
+pub(crate) fn source(headers: &HeaderMap) -> S3Result<(i64, Option<String>)> {
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let modified = text(MTIME)
         .and_then(|mtime| OffsetDateTime::parse(mtime, &Rfc3339).ok())
         .ok_or_else(|| s3_error!(InvalidArgument, "{MTIME} must be an RFC 3339 time"))?;
@@ -53,11 +87,7 @@ pub(crate) fn replica(headers: &HeaderMap, version_id: Option<&str>) -> S3Result
                 .ok_or_else(|| s3_error!(InvalidArgument, "{ETAG} must be an ETag"))?,
         ),
     };
-    Ok(Some(Replica {
-        version_id: version_id.to_owned(),
-        modified_ms,
-        etag,
-    }))
+    Ok((modified_ms, etag))
 }
 
 /// The delete marker a delete describes (its headers, and the `versionId` of its

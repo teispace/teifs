@@ -21,7 +21,8 @@ behaviour; the on-disk format is always upgraded automatically.
   versions are taken into folder buckets too. Removing a version (or a replicated
   marker) is replicated too when a rule has `MinIO`'s `DeleteReplication`, waiting in
   a queue until every target has it. Changes of a version's tags, retention and legal
-  hold follow it, in place, to TeiFS and `MinIO` targets. Existing objects are still to
+  hold follow it, in place, to TeiFS and `MinIO` targets. Versions uploaded in parts
+  are replicated in parts and keep their ids both ways with `MinIO`. Existing objects are still to
   come.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret

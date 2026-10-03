@@ -1,9 +1,11 @@
 //! Sending replicas to a replication target: a bucket on another S3 service (another
 //! TeiFS, `MinIO`, AWS…). Each version is one `PutObject` streamed with its
 //! `Content-MD5` (which S3 wants of a locked object's write), and never with
-//! `aws-chunked` framing, which not every service takes; above 5 GiB, a multipart
-//! upload. To services other than AWS go `MinIO`'s replica headers, so another TeiFS or
-//! a `MinIO` keeps the version's id, time and ETag.
+//! `aws-chunked` framing, which not every service takes; a version uploaded in parts,
+//! and any above 5 GiB, as a multipart upload (with the version's own parts where they
+//! aren't too big to hold, as `MinIO` sends them). To services other than AWS go
+//! `MinIO`'s replica headers, so another TeiFS or a `MinIO` keeps the version's id, time
+//! and ETag.
 
 use std::time::Duration;
 
@@ -25,7 +27,7 @@ use bytes::Bytes;
 use futures::TryStreamExt as _;
 use md5::{Digest as _, Md5};
 use teifs_store::{ObjectAttrs, Replica, Store};
-use teifs_types::{SseMode, md5_of_etag, replication::RemoteTarget};
+use teifs_types::{PartInfo, SseMode, md5_of_etag, replication::RemoteTarget};
 use tokio::io::AsyncReadExt as _;
 
 use super::{CHUNK, Missed, Sending};
@@ -99,7 +101,7 @@ impl Target {
 
     /// Sends a version.
     pub(super) async fn send(&self, sending: Sending<'_>) -> Result<(), Missed> {
-        if sending.info.size > MULTIPART_ABOVE {
+        if sending.info.size > MULTIPART_ABOVE || !sending.info.parts.is_empty() {
             self.send_parts(sending).await
         } else {
             self.send_whole(sending).await
@@ -302,6 +304,19 @@ impl Target {
     /// Sends a version as a multipart upload, a part at a time.
     async fn send_parts(&self, sending: Sending<'_>) -> Result<(), Missed> {
         let what = Described::of(&sending.info.attrs, &sending, self);
+        // The replica's id goes with the start, its time and ETag with the end.
+        let identity = self.replica_headers.then(|| sending.replica.clone());
+        let (start, end) = match &identity {
+            Some(replica) => (
+                vec![
+                    (replica_headers::REQUEST, "true".to_owned()),
+                    (replica_headers::STATUS, "REPLICA".to_owned()),
+                ],
+                replica_headers::of(replica),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let version_id = identity.map(|replica| replica.version_id);
         let started = self
             .client
             .create_multipart_upload()
@@ -322,6 +337,18 @@ impl Target {
             .set_server_side_encryption(what.sse)
             .set_ssekms_key_id(what.kms_key)
             .set_storage_class(what.storage_class)
+            .customize()
+            .mutate_request(move |request| {
+                for (name, value) in &start {
+                    request.headers_mut().insert(*name, value.clone());
+                }
+                if let Some(id) = &version_id {
+                    // Ids are hex and dashes: nothing to encode.
+                    let uri = request.uri().to_owned();
+                    let sep = if uri.contains('?') { '&' } else { '?' };
+                    let _ = request.set_uri(format!("{uri}{sep}versionId={id}"));
+                }
+            })
             .send()
             .await
             .map_err(|err| missed(&err))?;
@@ -341,6 +368,12 @@ impl Target {
                         .set_parts(Some(parts))
                         .build(),
                 )
+                .customize()
+                .mutate_request(move |request| {
+                    for (name, value) in &end {
+                        request.headers_mut().insert(*name, value.clone());
+                    }
+                })
                 .send()
                 .await
                 .map(|_| ())
@@ -367,25 +400,19 @@ impl Target {
         sending: &Sending<'_>,
         upload_id: &str,
     ) -> Result<Vec<CompletedPart>, Missed> {
-        let size = sending.info.size;
-        let part_size = PART.max(size.div_ceil(MOST_PARTS));
+        let layout = part_layout(sending.info.size, &sending.info.parts);
         let (_, body) = sending.reread().await?;
         let mut reader = match body {
             Some(body) => body.all().await?,
             None => return Err(Missed::Later("the version has no bytes".to_owned())),
         };
         let mut parts = Vec::new();
-        let mut left = size;
-        let mut number = 0;
-        while left > 0 {
-            number += 1;
-            let len = part_size.min(left);
+        for (number, len) in (1..).zip(layout) {
             let mut part = vec![0; usize::try_from(len).unwrap_or(usize::MAX)];
             reader
                 .read_exact(&mut part)
                 .await
                 .map_err(|err| Missed::Later(err.to_string()))?;
-            left -= len;
             let md5 = Md5::digest(&part);
             let answer = self
                 .client
@@ -509,6 +536,29 @@ impl Described {
     }
 }
 
+/// The sizes of the parts a version of `size` bytes goes in: its own `parts`, when they
+/// add up and none is too big to hold (so the replica's ETag is the version's anywhere),
+/// else parts of [`PART`] (more when 10,000 of them wouldn't hold it).
+fn part_layout(size: u64, parts: &[PartInfo]) -> Vec<u64> {
+    let own: Vec<u64> = parts.iter().map(|part| part.size).collect();
+    if !own.is_empty()
+        && own.iter().sum::<u64>() == size
+        && own.iter().all(|len| *len <= PART)
+        && own.len() <= usize::try_from(MOST_PARTS).unwrap_or(usize::MAX)
+    {
+        return own;
+    }
+    let part = PART.max(size.div_ceil(MOST_PARTS));
+    let mut layout = Vec::new();
+    let mut left = size;
+    while left > 0 {
+        let len = part.min(left);
+        layout.push(len);
+        left -= len;
+    }
+    layout
+}
+
 /// A version's tags as the `x-amz-tagging` header says them.
 fn tagging_of(attrs: &ObjectAttrs) -> Option<String> {
     (!attrs.tags.is_empty()).then(|| {
@@ -614,6 +664,31 @@ fn missed<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_go_in_their_own_parts_when_they_can_be_held() {
+        let parts = |sizes: &[u64]| -> Vec<PartInfo> {
+            sizes
+                .iter()
+                .map(|size| PartInfo {
+                    size: *size,
+                    checksums: std::collections::BTreeMap::new(),
+                })
+                .collect()
+        };
+        let mib = 1024 * 1024;
+        assert_eq!(
+            part_layout(11 * mib, &parts(&[5 * mib, 5 * mib, mib])),
+            [5 * mib, 5 * mib, mib]
+        );
+        // Parts that don't add up, or too big to hold: parts of our own.
+        assert_eq!(part_layout(70 * mib, &parts(&[5 * mib])), [PART, 6 * mib]);
+        assert_eq!(
+            part_layout(100 * mib, &parts(&[100 * mib])),
+            [PART, 36 * mib]
+        );
+        assert_eq!(part_layout(0, &[]), Vec::<u64>::new());
+    }
 
     #[test]
     fn only_aws_goes_without_minios_headers() {

@@ -172,12 +172,13 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
             ],
         ),
         "GetObjectAttributes" => needs.read(facts, &[]),
-        // A browser upload (a form; not in the SDK's reference) is a PutObject.
-        "PutObject" => {
+        // Another server's replica, whole or in parts, needs `s3:ReplicateObject` too.
+        "PutObject" | "CreateMultipartUpload" => {
             needs.write(facts);
             needs.need_if(facts.replication, "s3:ReplicateObject");
         }
-        "PostObject" | "CreateMultipartUpload" => needs.write(facts),
+        // A browser upload (a form; not in the SDK's reference) is a PutObject.
+        "PostObject" => needs.write(facts),
         "CopyObject" => {
             needs.source(facts);
             needs.write(facts);

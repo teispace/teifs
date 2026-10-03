@@ -3566,18 +3566,36 @@ impl S3 for Drive {
                 },
             )
             .await?;
-        let upload = self
-            .store
-            .create_upload(
-                &input.bucket,
-                &input.key,
-                attrs,
-                owner,
-                &encryption,
-                Some(&checksum),
-                max_size,
-            )
-            .await
+        // Another server replicating a version in parts (the access check made sure the
+        // caller may `s3:ReplicateObject`): the object keeps its id.
+        let upload =
+            match replica_headers::upload_version(&req.headers, input.version_id.as_deref())? {
+                Some(version_id) => {
+                    self.store
+                        .create_replica_upload(
+                            (&input.bucket, &input.key),
+                            attrs,
+                            owner,
+                            &encryption,
+                            Some(&checksum),
+                            version_id.to_owned(),
+                        )
+                        .await
+                }
+                None => {
+                    self.store
+                        .create_upload(
+                            &input.bucket,
+                            &input.key,
+                            attrs,
+                            owner,
+                            &encryption,
+                            Some(&checksum),
+                            max_size,
+                        )
+                        .await
+                }
+            }
             .s3()?;
         let (abort_date, abort_rule_id) = self.abort_date(&upload).await;
         let mut out = dto::CreateMultipartUploadOutput {
@@ -3890,6 +3908,13 @@ impl S3 for Drive {
             other => other.s3()?,
         };
         check_owner(&upload, &input.bucket, &input.key, &who)?;
+        // A replicated version's time and ETag come with its Complete.
+        let replica =
+            if upload.replica_version.is_some() && replica_headers::is_request(&req.headers) {
+                Some(replica_headers::source(&req.headers)?)
+            } else {
+                None
+            };
         let customer = sse::customer_key(
             input.sse_customer_algorithm.as_deref(),
             input.sse_customer_key.as_deref(),
@@ -3927,6 +3952,7 @@ impl S3 for Drive {
                     checksums: sums.clone(),
                     checksum_type: kind,
                     customer,
+                    replica,
                 },
             )
             .await

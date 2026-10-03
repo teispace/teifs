@@ -244,6 +244,17 @@ async fn empty_objects_and_uploads_in_parts_go_too() {
         .unwrap();
     assert_eq!(parts.e_tag(), done.e_tag());
     assert_eq!(parts.content_length(), Some(1024));
+    // Sent in parts too, it keeps its id and time.
+    assert_eq!(parts.version_id(), done.version_id());
+    let there = source
+        .head_object()
+        .bucket("source")
+        .key("parts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parts.last_modified(), there.last_modified());
+    assert_eq!(parts.replication_status, Some(ReplicationStatus::Replica));
 }
 
 #[tokio::test]

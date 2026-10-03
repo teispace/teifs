@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fs, io, time::Duration, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 use teifs_crypto::PartId;
-use teifs_meta::{CompletedUpload, Part, Upload};
+use teifs_meta::{CompletedUpload, Part, Upload, Versioning};
 use teifs_types::{ChecksumType, PartInfo, UploadChecksum, md5_of_etag, multipart_etag};
 
 use teifs_types::SseMode;
@@ -14,7 +14,7 @@ use crate::{
     Bucket, CustomerKey, Encryption, Inner, ObjectInfo, Precondition, Staged, Store, StoreError,
     error::Result,
     now_ms,
-    objects::{Finished, PartKey, PartsRecord},
+    objects::{Finished, PartKey, PartsRecord, Replica},
     sse::{self, Crypt, Keyed},
     staged::TmpFile,
 };
@@ -35,6 +35,9 @@ pub struct CompleteWith {
     pub checksum_type: Option<ChecksumType>,
     /// SSE-C: the customer's key, needed to seal the checksums.
     pub customer: Option<CustomerKey>,
+    /// When the upload replicates another server's version: that version's time (Unix
+    /// milliseconds) and ETag, which the object keeps.
+    pub replica: Option<(i64, Option<String>)>,
 }
 
 /// What a completed upload answered (`completed_uploads.result`, JSON).
@@ -71,6 +74,50 @@ impl Store {
         checksum: Option<&UploadChecksum>,
         max_size: Option<u64>,
     ) -> Result<Upload> {
+        self.create_upload_of(
+            (bucket, key),
+            attrs,
+            owner,
+            encryption,
+            (checksum, max_size),
+            None,
+        )
+        .await
+    }
+
+    /// Starts a multipart upload that replicates another server's version `version_id`
+    /// (its object keeps that id, and its time and ETag as Complete gives them), as
+    /// [`Store::create_upload`] does otherwise. Only a bucket with versioning enabled
+    /// takes it.
+    pub async fn create_replica_upload(
+        &self,
+        (bucket, key): (&str, &str),
+        attrs: crate::ObjectAttrs,
+        owner: Option<String>,
+        encryption: &Encryption,
+        checksum: Option<&UploadChecksum>,
+        version_id: String,
+    ) -> Result<Upload> {
+        self.create_upload_of(
+            (bucket, key),
+            attrs,
+            owner,
+            encryption,
+            (checksum, None),
+            Some(version_id),
+        )
+        .await
+    }
+
+    async fn create_upload_of(
+        &self,
+        (bucket, key): (&str, &str),
+        attrs: crate::ObjectAttrs,
+        owner: Option<String>,
+        encryption: &Encryption,
+        (checksum, max_size): (Option<&UploadChecksum>, Option<u64>),
+        replica_version: Option<String>,
+    ) -> Result<Upload> {
         let crypt = match encryption {
             Encryption::None => None,
             encryption => {
@@ -98,9 +145,15 @@ impl Store {
             crypt,
             checksum: checksum.map(|c| serde_json::to_string(c).expect("checksum serializes")),
             max_size,
+            replica_version,
         };
         self.blocking(move |inner| {
             let bucket = inner.bucket(&upload.bucket)?;
+            if upload.replica_version.is_some() && bucket.versioning() != Versioning::Enabled {
+                return Err(StoreError::InvalidRequest(
+                    "replicas need a bucket with versioning enabled",
+                ));
+            }
             // A lock the bucket can't give is refused now, not when the upload completes
             // (which applies the bucket's default retention then).
             inner.lock_new_version(bucket.versions(), &mut upload.attrs.clone())?;
@@ -406,21 +459,50 @@ impl Store {
         with: CompleteWith,
     ) -> Result<ObjectInfo> {
         let upload = self.upload(id).await?;
+        if listed.is_empty() {
+            return Err(StoreError::InvalidPart);
+        }
+        if listed.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err(StoreError::InvalidPartOrder);
+        }
+        // A replica that's here already (an earlier attempt completed) stays as it is.
+        if let Some(version_id) = &upload.replica_version
+            && let Ok(there) = self
+                .head_version(&upload.bucket, &upload.key, Some(version_id))
+                .await
+        {
+            self.abort(id).await?;
+            return Ok(there);
+        }
+        let replica = upload.replica_version.clone().map(|version_id| {
+            let (modified_ms, etag) = with.replica.clone().unwrap_or((now_ms(), None));
+            Replica {
+                version_id,
+                modified_ms,
+                etag,
+            }
+        });
+        self.join_upload(upload, (listed, precondition), with, replica)
+            .await
+    }
+
+    /// Completes `upload` as [`Store::complete`] says, as `replica` when it's one.
+    async fn join_upload(
+        &self,
+        upload: Upload,
+        (listed, precondition): (Vec<(u32, String)>, Precondition),
+        with: CompleteWith,
+        replica: Option<Replica>,
+    ) -> Result<ObjectInfo> {
+        let id = upload.id.clone();
         let checksum_type = with.checksum_type;
         let (crypt, checksums) = self.seal_object_sums(&upload, with).await?;
-        let id = id.to_owned();
         self.blocking(move |inner| {
             // Read without the commit lock, as the parts are joined: whether the upload
             // still exists is checked again under it.
             let upload = inner
                 .read_index(|conn| Ok(conn.get_upload(&id)?))?
                 .ok_or(StoreError::NoSuchUpload)?;
-            if listed.is_empty() {
-                return Err(StoreError::InvalidPart);
-            }
-            if listed.windows(2).any(|w| w[0].0 >= w[1].0) {
-                return Err(StoreError::InvalidPartOrder);
-            }
             let (tmp, mut parts, md5s) = inner.join_parts(&id, &upload.bucket, &listed)?;
             if upload.crypt.is_none() {
                 parts.keys.clear();
@@ -439,11 +521,17 @@ impl Store {
                 checksum_type,
                 ..upload.attrs.clone()
             };
+            // A replica keeps its version's ETag, as its source gave it.
+            let etag = replica
+                .as_ref()
+                .and_then(|replica| replica.etag.clone())
+                .unwrap_or_else(|| multipart_etag(&md5s));
             let finished = Finished {
                 stored_len,
                 sealed,
                 parts: Some(parts),
-                ..Finished::plain(&tmp.path, size, multipart_etag(&md5s), attrs)
+                replica,
+                ..Finished::plain(&tmp.path, size, etag, attrs)
             };
             let (conn, info) = match &bucket {
                 // The data file goes in place (and is synced) before the commit lock, as

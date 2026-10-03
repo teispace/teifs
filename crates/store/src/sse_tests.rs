@@ -620,6 +620,7 @@ async fn multipart_checksums_are_sealed_under_kms_and_customer_keys() {
                     checksums: object_sums.clone(),
                     checksum_type: Some(teifs_types::ChecksumType::Composite),
                     customer: key.clone(),
+                    replica: None,
                 },
             )
             .await
@@ -689,6 +690,7 @@ async fn sse_s3_upload(drive: &Drive, key: &str, bytes: &[u8]) -> ObjectInfo {
                 checksums: [("SHA256".into(), "whole-sum".into())].into(),
                 checksum_type: Some(teifs_types::ChecksumType::Composite),
                 customer: None,
+                replica: None,
             },
         )
         .await

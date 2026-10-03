@@ -537,7 +537,10 @@ removals are never queued. Changing a version's tags, retention or legal hold
 (`VersionReplication::changed`): destinations that have it wait only for the change
 (`VersionReplication.metadata`), sent as `MinIO`'s copy of the version onto itself
 (`Target::send_metadata`, `Store::update_replica_metadata` on the same drive), which
-`copy_object` takes as `Drive::replica_metadata`.
+`copy_object` takes as `Drive::replica_metadata`. Versions uploaded in parts go as
+multipart uploads (`Target::send_parts`, the version's own parts per `part_layout`) with
+the id on `CreateMultipartUpload` (`?versionId`), taken by `Store::create_replica_upload`
+(`uploads.replica_version`), and the time and ETag on Complete (`CompleteWith.replica`).
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues
