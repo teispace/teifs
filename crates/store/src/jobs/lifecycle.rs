@@ -6,12 +6,15 @@
 //! and aborts old uploads. Every change goes through the same store operations a
 //! request would, with the object's ETag, size and modification time as conditions, so
 //! an object written again meanwhile is left alone, and Object Lock is honoured: a
-//! protected version stays until it may go.
+//! protected version stays until it may go, and so does one replication still holds
+//! (`PENDING` or `FAILED`), as on S3.
 //!
 //! The job keeps where it is between steps; a pass that ends waits for the job's idle
 //! interval before the next one starts.
 
 use std::{sync::Arc, time::Duration};
+
+use teifs_types::replication::ReplicationStatus;
 
 use super::{BATCH, Job, Step, millis};
 use crate::{
@@ -274,9 +277,10 @@ impl ApplyLifecycle {
             if version.latest {
                 if version.delete_marker {
                     marker = Some(version);
-                } else if lifecycle
-                    .expiry(&version.info, day_ms)
-                    .is_some_and(|expiry| expiry.at_ms <= now)
+                } else if !held(version)
+                    && lifecycle
+                        .expiry(&version.info, day_ms)
+                        .is_some_and(|expiry| expiry.at_ms <= now)
                 {
                     // Only the object that was listed: one written since isn't due.
                     let precondition = Precondition {
@@ -310,9 +314,9 @@ impl ApplyLifecycle {
                 }
             } else {
                 let since = successor.unwrap_or(made);
-                let removed =
-                    lifecycle.removes_noncurrent(&version.info, since, newer, now, day_ms)
-                        && self.remove(bucket, version).await?;
+                let removed = !held(version)
+                    && lifecycle.removes_noncurrent(&version.info, since, newer, now, day_ms)
+                    && self.remove(bucket, version).await?;
                 if !removed {
                     kept += 1;
                 }
@@ -322,6 +326,7 @@ impl ApplyLifecycle {
         }
         if let Some(marker) = marker
             && kept == 0
+            && !held(marker)
             && lifecycle.removes_marker(key, millis(marker.info.modified), now, day_ms)
         {
             self.remove(bucket, marker).await?;
@@ -358,6 +363,23 @@ impl ApplyLifecycle {
 
 /// Lets through what a change made meanwhile explains: the object was written again,
 /// removed, or is protected.
+/// Whether replication holds a version back from the rules, as on S3: one still to
+/// reach a destination (`PENDING`), or that couldn't (`FAILED`), isn't expired until it
+/// does or is deleted.
+fn held(version: &ObjectVersion) -> bool {
+    version
+        .info
+        .attrs
+        .replication
+        .as_ref()
+        .is_some_and(|replication| {
+            matches!(
+                replication.status,
+                ReplicationStatus::Pending | ReplicationStatus::Failed
+            )
+        })
+}
+
 fn tolerate(result: Result<()>) -> Result<()> {
     match result {
         Err(StoreError::PreconditionFailed | StoreError::NoSuchKey | StoreError::ObjectLocked) => {

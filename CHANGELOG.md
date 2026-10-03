@@ -32,6 +32,8 @@ behaviour; the on-disk format is always upgraded automatically.
   asks each target whether it can take replicas without writing, and TeiFS answers
   `MinIO`'s. Replication sends events: `s3:Replication:OperationFailedReplication`,
   `OperationReplicatedAfterThreshold` and `MinIO`'s `OperationCompletedReplication`.
+  Lifecycle rules don't expire versions still waiting for replication or that failed
+  it, as on S3.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

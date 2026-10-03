@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
+use teifs_types::replication::{ReplicationStatus, VersionReplication};
+
 use super::*;
 use crate::{
     jobs::{ApplyLifecycle, Step},
@@ -24,6 +26,7 @@ in_both_layouts!(
     a_key_with_more_versions_than_a_page,
     noncurrent_days_count_from_the_successor,
     a_recreated_bucket_has_no_rules,
+    versions_waiting_for_replication_stay,
 );
 
 const DAY: Duration = Duration::from_hours(24);
@@ -475,4 +478,89 @@ async fn a_recreated_bucket_has_no_rules(layout: Layout) {
     assert_eq!(store.bucket_lifecycle("bkt").await.unwrap(), None);
     let info = put(&store, "a").await;
     assert_eq!(store.expiry("bkt", &info).await.unwrap(), None);
+}
+
+async fn versions_waiting_for_replication_stay(layout: Layout) {
+    let (_dir, store) = bucket(layout, Some(Versioning::Enabled)).await;
+    let mut all = rule("all", "");
+    all.expiration = Some(Expiration::Days(1));
+    all.noncurrent_expiration = Some(NoncurrentExpiration {
+        days: Some(1),
+        newer_versions: None,
+    });
+    set_rules(&store, vec![all]).await;
+    let arn = "arn:aws:s3:::copy";
+    for (key, status) in [
+        ("pending", ReplicationStatus::Pending),
+        ("failed", ReplicationStatus::Failed),
+        ("done", ReplicationStatus::Completed),
+    ] {
+        let version = put(&store, key).await.version_id.unwrap();
+        store
+            .change_replication("bkt", key, &version, move |_| {
+                VersionReplication::pending([arn.to_owned()]).map(|r| r.with(arn, status))
+            })
+            .await
+            .unwrap();
+    }
+    // A version still to reach its destination, or that couldn't, isn't expired; one
+    // that did is.
+    pass(&store, 2).await;
+    assert_eq!(versions(&store, "pending").await, [(false, true)]);
+    assert_eq!(versions(&store, "failed").await, [(false, true)]);
+    assert_eq!(
+        versions(&store, "done").await,
+        [(true, true), (false, false)]
+    );
+    // Nor is it removed once noncurrent, and the marker in front of it stays.
+    let pending = store
+        .head("bkt", "pending")
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    store.delete("bkt", "pending").await.unwrap();
+    store
+        .change_replication("bkt", "pending", &pending, move |_| {
+            VersionReplication::pending([arn.to_owned()])
+        })
+        .await
+        .unwrap();
+    for day in [4, 6] {
+        pass(&store, day).await;
+        assert_eq!(
+            versions(&store, "pending").await,
+            [(true, true), (false, false)]
+        );
+    }
+    assert_eq!(versions(&store, "done").await, []);
+    // Once it gets there, the rules apply.
+    store
+        .set_replication_status(
+            "bkt",
+            "pending",
+            &pending,
+            arn,
+            ReplicationStatus::Completed,
+        )
+        .await
+        .unwrap();
+    pass(&store, 8).await;
+    assert_eq!(versions(&store, "pending").await, []);
+    // A delete marker still to reach its destination stays too, alone.
+    put(&store, "marked").await;
+    let marker = store
+        .delete_if("bkt", "marked", None, Precondition::default())
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    store
+        .change_replication("bkt", "marked", &marker, move |_| {
+            VersionReplication::pending([arn.to_owned()])
+        })
+        .await
+        .unwrap();
+    pass(&store, 10).await;
+    assert_eq!(versions(&store, "marked").await, [(true, true)]);
 }

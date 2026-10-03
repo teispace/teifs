@@ -1235,6 +1235,11 @@ for a rule of the configuration's first version): the destination's current vers
 becomes a marker with the same id and time (on AWS, a marker of its own). Markers made
 by lifecycle expirations aren't replicated, as on S3.
 
+Lifecycle rules leave alone a version or delete marker that's still to reach a
+destination (`PENDING`) or couldn't (`FAILED`), as S3 does, so nothing expires before it
+has a copy: it's expired once it replicates (a resync sends `FAILED` ones again), or when
+it's deleted.
+
 Removing a version by its id is replicated as `MinIO` does it, which S3 doesn't: when the
 rule has `MinIO`'s `DeleteReplication` (`mc replicate add --replicate
 delete,delete-marker`), the destination removes that version too, and removing a delete
