@@ -672,7 +672,7 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_usage_versions` | gauge | | Versions kept, current ones included, delete markers not |
 | `teifs_usage_delete_markers` | gauge | | Delete markers |
 | `teifs_usage_stored_bytes` | gauge | | The size of every version kept |
-| `teifs_bucket_objects`, `_versions`, `_delete_markers`, `_stored_bytes` | gauge | `bucket` | The same by bucket, with `?buckets=1` |
+| `teifs_bucket_objects`, `teifs_bucket_versions`, `teifs_bucket_delete_markers`, `teifs_bucket_stored_bytes` | gauge | `bucket` | The same by bucket, with `?buckets=1` |
 | `teifs_scrub_checked_versions`, `teifs_scrub_checked_bytes` | gauge | `pass` | What the scrub read, in the pass under way (`current`) and the last finished (`last`) |
 | `teifs_scrub_damaged_versions` | gauge | `pass` | Versions it found damaged |
 | `teifs_scrub_unverifiable_versions` | gauge | `pass` | Versions it couldn't check (SSE-C, whose keys it doesn't have) |

@@ -574,3 +574,57 @@ async fn an_imported_metrics_configuration_starts_watching() {
     )
     .await;
 }
+
+/// Every metric a scrape has is in the operations guide's table, under the name a
+/// Prometheus query uses.
+#[tokio::test]
+async fn every_metric_is_documented() {
+    let server = start_with(|config| config.public_metrics = true).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("measured").send().await.unwrap();
+    measure(&s3, "measured", "EntireBucket", None).await;
+    s3.put_object()
+        .bucket("measured")
+        .key("a")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+    let text = reqwest::get(format!("{}{METRICS_PATH}?buckets=1", server.endpoint))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let guide = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/OPERATIONS.md"
+    ))
+    .unwrap();
+    let mut seen = 0;
+    let mut missing = Vec::new();
+    for line in text.lines() {
+        let Some((name, kind)) = line
+            .strip_prefix("# TYPE ")
+            .and_then(|rest| rest.split_once(' '))
+        else {
+            continue;
+        };
+        seen += 1;
+        let queried = match kind {
+            "counter" => format!("{name}_total"),
+            _ => name.to_owned(),
+        };
+        // Request metrics are named after CloudWatch's, listed in their own section.
+        let request_metric = queried.starts_with("teifs_request_metrics_")
+            && guide.contains("`teifs_request_metrics_…`");
+        if !guide.contains(&format!("`{queried}`")) && !request_metric {
+            missing.push(queried);
+        }
+    }
+    assert!(seen > 30, "{text}");
+    assert!(
+        missing.is_empty(),
+        "not in docs/OPERATIONS.md's metrics: {missing:?}"
+    );
+}

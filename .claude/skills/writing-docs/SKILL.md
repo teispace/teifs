@@ -16,6 +16,7 @@ description: Writes or updates TeiFS documentation (README, docs/COMPATIBILITY, 
 | How code is written | `docs/CONVENTIONS.md` |
 | Commands or flags | Each command's and argument's doc comment (it's the `--help` text and `docs/CLI.md`, which is generated: `UPDATE_DOCS=1 cargo test -p teifs --bin teifs reference`, never edited; a test fails when one says nothing), and the README's command table for the main ones |
 | The admin API, S3 Control, or the IAM/STS route | `docs/ADMIN_API.md`: its prose by hand; its endpoint tables are generated from `ENDPOINTS` in `crates/s3/src/routes.rs` (each entry's `about`), rewritten with `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -E 'test(admin_api_reference)'`, never edited |
+| A metric | The table under "What's measured" in `docs/OPERATIONS.md`, by the name queries use (`_total` on counters); `every_metric_is_documented` in `crates/server/tests/metrics.rs` fails on one missing |
 | Anything users notice | `CHANGELOG.md` under "Unreleased" |
 
 ## Rules
