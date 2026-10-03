@@ -304,8 +304,23 @@ impl VersionReplication {
         self.overall()
     }
 
-    /// With the overall status matching each destination's.
+    /// After a replica's metadata changed here: waiting for `destinations` (where
+    /// replica modifications go) to take the change. It stays a replica.
+    #[must_use]
+    pub fn replica_changed(mut self, destinations: impl IntoIterator<Item = String>) -> Self {
+        for arn in destinations {
+            self.targets.insert(arn.clone(), ReplicationStatus::Pending);
+            self.metadata.insert(arn);
+        }
+        self
+    }
+
+    /// With the overall status matching each destination's; a replica's stays
+    /// `REPLICA`.
     fn overall(mut self) -> Self {
+        if self.status == ReplicationStatus::Replica {
+            return self;
+        }
         let statuses = || self.targets.values().copied();
         self.status = if statuses().any(|s| s == ReplicationStatus::Failed) {
             ReplicationStatus::Failed
@@ -450,6 +465,23 @@ impl ReplicationConfig {
         for rule in &self.rules {
             if rule.existing_objects == Some(true)
                 && rule.matches(key, tags, kms)
+                && !found.contains(&rule.destination.bucket)
+            {
+                found.push(rule.destination.bucket.clone());
+            }
+        }
+        found
+    }
+
+    /// The destinations a change of a replica's metadata goes to (`key`, with `tags`
+    /// once changed): those of the enabled rules it matches that sync replica
+    /// modifications (`ReplicaModifications`), each once.
+    #[must_use]
+    pub fn replica_destinations(&self, key: &str, tags: &BTreeMap<String, String>) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if rule.replica_modifications == Some(true)
+                && rule.matches(key, tags, false)
                 && !found.contains(&rule.destination.bucket)
             {
                 found.push(rule.destination.bucket.clone());
@@ -663,6 +695,25 @@ mod tests {
     }
 
     #[test]
+    fn a_replicas_changes_go_only_where_rules_sync_replica_modifications() {
+        let mut sync = rule(ReplicationFilter::Prefix("docs/".to_owned()), None);
+        sync.replica_modifications = Some(true);
+        sync.destination.bucket = "arn:aws:s3:::other".to_owned();
+        let mut config = ReplicationConfig {
+            role: String::new(),
+            rules: vec![rule(ReplicationFilter::All, None), sync],
+        };
+        let none = BTreeMap::new();
+        assert_eq!(
+            config.replica_destinations("docs/a", &none),
+            ["arn:aws:s3:::other"]
+        );
+        assert!(config.replica_destinations("photos/a", &none).is_empty());
+        config.rules[1].enabled = false;
+        assert!(config.replica_destinations("docs/a", &none).is_empty());
+    }
+
+    #[test]
     fn markers_go_where_rules_that_replicate_them_send_the_key() {
         let mut other = rule(ReplicationFilter::Prefix("docs/".to_owned()), Some(true));
         other.destination.bucket = "arn:aws:s3:::other".to_owned();
@@ -744,11 +795,19 @@ mod tests {
         assert_eq!(changed.metadata, BTreeSet::from(["arn:a".to_owned()]));
         let sent = changed.with("arn:a", ReplicationStatus::Completed);
         assert!(sent.metadata.is_empty());
-        // A replica's changes aren't sent back.
+        // A replica's changes aren't sent back, but to where its rules sync them; it
+        // stays a replica through it.
         assert_eq!(
             VersionReplication::replica().changed(),
             VersionReplication::replica()
         );
+        let back = VersionReplication::replica().replica_changed(["arn:src".to_owned()]);
+        assert_eq!(back.status, ReplicationStatus::Replica);
+        assert_eq!(back.waiting().collect::<Vec<_>>(), ["arn:src"]);
+        assert_eq!(back.metadata, BTreeSet::from(["arn:src".to_owned()]));
+        let sent = back.with("arn:src", ReplicationStatus::Completed);
+        assert_eq!(sent.status, ReplicationStatus::Replica);
+        assert_eq!(sent.waiting().count(), 0);
         // Written before there was a `metadata`, it reads as empty.
         let old: VersionReplication =
             serde_json::from_str(r#"{"status":"COMPLETED","targets":{"arn:a":"COMPLETED"}}"#)

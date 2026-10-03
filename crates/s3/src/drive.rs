@@ -618,6 +618,18 @@ fn check_location(configuration: Option<&dto::CreateBucketConfiguration>) -> S3R
 
 /// Checks a version id a request names: `null`, or one TeiFS makes (32 hex digits).
 /// Anything else can't name a version, which AWS refuses before looking.
+/// The id of the version a read found, as the request `named` it: `MinIO` writes
+/// TeiFS's ids with dashes, and takes a version it finds by its id as its own only when
+/// the answer names it so too.
+fn as_named(named: Option<&str>, found: Option<&str>) -> Option<String> {
+    match (named, found) {
+        (Some(named), Some(found)) if teifs_store::same_version(named, found) => {
+            Some(named.to_owned())
+        }
+        (_, found) => found.map(str::to_owned),
+    }
+}
+
 fn check_version(version_id: Option<&str>) -> S3Result<Option<&str>> {
     match version_id {
         None => Ok(None),
@@ -1755,7 +1767,7 @@ impl S3 for Drive {
         )
         .await;
         let mut out = dto::GetObjectOutput {
-            version_id: info.version_id.clone(),
+            version_id: as_named(version_id, info.version_id.as_deref()),
             body: Some(body),
             content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
             content_range: slice.content_range.clone(),
@@ -1847,7 +1859,7 @@ impl S3 for Drive {
         )
         .await;
         let mut out = dto::HeadObjectOutput {
-            version_id: info.version_id.clone(),
+            version_id: as_named(version_id, info.version_id.as_deref()),
             content_length: Some(i64::try_from(slice.len).unwrap_or(i64::MAX)),
             content_range: slice.content_range.clone(),
             parts_count: slice.parts_count,
@@ -1924,7 +1936,7 @@ impl S3 for Drive {
         .await;
         let mut out = dto::GetObjectAttributesOutput {
             last_modified: Some(info.modified.into()),
-            version_id: info.version_id.clone(),
+            version_id: as_named(version_id, info.version_id.as_deref()),
             ..Default::default()
         };
         if wants(dto::ObjectAttributes::ETAG) {

@@ -26,6 +26,38 @@ pub enum VersionsFrom<'a> {
 /// The version id of an object written without versioning.
 pub const NULL_VERSION: &str = "null";
 
+/// A version id written the other way: a UUID's 32 hex digits (as TeiFS makes ids)
+/// with its dashes, or one with dashes (as `MinIO` makes them, and writes TeiFS's)
+/// without. `MinIO` names TeiFS's versions so when it replicates back, so either names
+/// the same version. `None` for any other id.
+#[must_use]
+pub fn other_form(version_id: &str) -> Option<String> {
+    let hex = |part: &str| part.bytes().all(|b| b.is_ascii_hexdigit());
+    match version_id.len() {
+        32 if hex(version_id) => Some(format!(
+            "{}-{}-{}-{}-{}",
+            &version_id[..8],
+            &version_id[8..12],
+            &version_id[12..16],
+            &version_id[16..20],
+            &version_id[20..]
+        )),
+        36 => {
+            let parts: Vec<&str> = version_id.split('-').collect();
+            let lengths: Vec<usize> = parts.iter().map(|part| part.len()).collect();
+            (lengths == [8, 4, 4, 4, 12] && parts.iter().all(|part| hex(part)))
+                .then(|| parts.concat())
+        }
+        _ => None,
+    }
+}
+
+/// Whether two version ids name the same version ([`other_form`]).
+#[must_use]
+pub fn same_version(a: &str, b: &str) -> bool {
+    a == b || other_form(a).is_some_and(|other| other == b)
+}
+
 /// One version of an object in an object bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionRow {
@@ -120,6 +152,22 @@ impl Index {
 
     /// A version of `key` by its id, delete markers included.
     pub fn version(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<Option<VersionRow>> {
+        if let Some(row) = self.version_as_written(bucket_id, key, version_id)? {
+            return Ok(Some(row));
+        }
+        match other_form(version_id) {
+            Some(other) => self.version_as_written(bucket_id, key, &other),
+            None => Ok(None),
+        }
+    }
+
+    /// The version whose id is written exactly `version_id`.
+    fn version_as_written(
         &self,
         bucket_id: &str,
         key: &str,
@@ -752,6 +800,26 @@ fn queue_garbage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_are_written_with_or_without_dashes() {
+        let teifs = "01a10264a1197720afd0b3b3449b10de";
+        let minio = "01a10264-a119-7720-afd0-b3b3449b10de";
+        assert_eq!(other_form(teifs).as_deref(), Some(minio));
+        assert_eq!(other_form(minio).as_deref(), Some(teifs));
+        assert!(same_version(teifs, minio) && same_version(minio, teifs));
+        assert!(same_version(teifs, teifs));
+        assert!(!same_version(teifs, "01a10264a1197720afd0b3b3449b10df"));
+        for other in [
+            NULL_VERSION,
+            "",
+            "01a10264-a119-7720-afd0b-3b3449b10de",
+            "zz",
+        ] {
+            assert_eq!(other_form(other), None, "{other}");
+        }
+        assert_eq!(other_form(&"g".repeat(32)), None);
+    }
 
     fn index() -> (tempfile::TempDir, Index) {
         let dir = tempfile::tempdir().unwrap();

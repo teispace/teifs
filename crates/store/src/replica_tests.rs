@@ -506,7 +506,7 @@ async fn a_replicas_metadata_follows_its_sources_but_never_weakens_a_lock() {
             .is_err()
     );
 
-    // A version written here isn't a replica.
+    // A version written here that was never replicated takes no such change.
     let own = store
         .put_bytes("copy", "b.txt", b"mine", ObjectAttrs::default())
         .await

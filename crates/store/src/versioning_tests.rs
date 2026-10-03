@@ -17,6 +17,7 @@ in_both_layouts!(
     a_key_marker_inside_a_common_prefix_rolls_up_what_follows_it,
     a_page_of_delete_markers_doesnt_end_a_listing,
     a_key_with_more_versions_than_a_batch_lists_them_all,
+    a_version_is_named_with_or_without_dashes,
 );
 
 async fn versioned(layout: Layout, versioning: Versioning) -> (TempDir, Store) {
@@ -931,4 +932,64 @@ async fn a_version_linked_but_not_recorded_changes_nothing_else() {
         "{report:?}"
     );
     assert!(orphan.is_file());
+}
+
+async fn a_version_is_named_with_or_without_dashes(layout: Layout) {
+    let (_dir, store) = versioned(layout, Versioning::Enabled).await;
+    let old = put(&store, "a.txt", b"one").await;
+    let current = put(&store, "a.txt", b"two").await;
+    // As `MinIO` writes TeiFS's ids, the current version's and an older one's.
+    for id in [&current, &old] {
+        let dashed = teifs_meta::other_form(id).unwrap();
+        let copied = store
+            .copy_with(
+                ("docs", "a.txt", Some(&dashed)),
+                ("docs", "copied.txt"),
+                None,
+                Precondition::default(),
+                None,
+                &Encryption::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            copied.etag,
+            store
+                .head_version("docs", "a.txt", Some(id))
+                .await
+                .unwrap()
+                .etag
+        );
+        let info = store
+            .head_version("docs", "a.txt", Some(&dashed))
+            .await
+            .unwrap();
+        assert_eq!(info.version_id.as_ref(), Some(id), "{layout:?}");
+        let tags = std::collections::BTreeMap::from([("side".to_owned(), "minio".to_owned())]);
+        let tagged = store
+            .set_tags("docs", "a.txt", Some(&dashed), tags.clone())
+            .await
+            .unwrap();
+        assert_eq!(tagged.attrs.tags, tags, "{layout:?}");
+        store
+            .delete_if("docs", "a.txt", Some(&dashed), Precondition::default())
+            .await
+            .unwrap();
+        assert!(
+            store.head_version("docs", "a.txt", Some(id)).await.is_err(),
+            "{layout:?}"
+        );
+    }
+    // An id no version has, either way, names none.
+    let none = "0123456789abcdef0123456789abcdef";
+    assert!(
+        store
+            .head_version(
+                "docs",
+                "a.txt",
+                Some(&teifs_meta::other_form(none).unwrap())
+            )
+            .await
+            .is_err()
+    );
 }

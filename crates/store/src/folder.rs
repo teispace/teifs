@@ -88,7 +88,9 @@ impl Inner {
             }
         };
         let info = Inner::info(&conn, &bucket.name, key.as_str(), &meta)?;
-        if version_id.is_some_and(|id| id != crate::folder_versions::current_id(&info)) {
+        if version_id.is_some_and(|id| {
+            !teifs_meta::same_version(id, crate::folder_versions::current_id(&info))
+        }) {
             return Inner::open_older_version(&conn, bucket, key.as_str(), version_id);
         }
         Ok((bucket.describe(info), file))
@@ -628,7 +630,7 @@ impl Inner {
                 .version_id
                 .as_deref()
                 .unwrap_or(teifs_meta::NULL_VERSION);
-            if version_id.is_none_or(|id| id == current) {
+            if version_id.is_none_or(|id| teifs_meta::same_version(id, current)) {
                 let mut row = row;
                 change(&mut row.attrs)?;
                 crate::lock::check_folder(key, &row.attrs)?;

@@ -1254,6 +1254,15 @@ in place (no new version), on the same drive, another TeiFS or a `MinIO`. AWS ta
 whose versions have ids of their own, don't get changes. A destination that lost the
 version gets all of it again.
 
+Two buckets can replicate to each other (two-way, or active-active), each with a rule
+naming the other: what's written on either side reaches the other, and replicas aren't
+sent on again. A replica's own tag, retention and legal hold changes go back too when
+its bucket's rule has `ReplicaModifications` enabled (`--replicate
+'delete,delete-marker,existing-objects,replica-metadata-sync'` with `mc replicate add`):
+the version they came from takes them in place. Without it, a replica's changes stay
+where they're made. With `MinIO` on the other side, versions keep their ids both ways
+(`MinIO` writes TeiFS's with dashes; TeiFS finds a version by either spelling).
+
 A replicating user on another TeiFS needs `s3:PutObject` and `s3:ReplicateObject` for
 versions (`s3:ReplicateTags` for their tags, and `s3:PutObjectRetention` and
 `s3:PutObjectLegalHold` for locked ones), `s3:GetObject` for metadata changes, and

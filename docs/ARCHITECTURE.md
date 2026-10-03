@@ -542,7 +542,9 @@ same transaction; the worker drains the queue after the versions
 `Target::send_removal` elsewhere), and `Marking::Lifecycle` and `Marking::Replicated`
 removals are never queued. Changing a version's tags, retention or legal hold
 (`Store::set_tags`, `set_retention`, `set_legal_hold`) makes it wait again
-(`VersionReplication::changed`): destinations that have it wait only for the change
+(`VersionReplication::changed`; a replica's, `replica_changed`, for the destinations its
+rules sync replica modifications to, staying `REPLICA`): destinations that have it wait
+only for the change
 (`VersionReplication.metadata`), sent as `MinIO`'s copy of the version onto itself
 (`Target::send_metadata`, `Store::update_replica_metadata` on the same drive), which
 `copy_object` takes as `Drive::replica_metadata`. Versions uploaded in parts go as

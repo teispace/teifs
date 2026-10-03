@@ -65,9 +65,18 @@ pub(crate) fn removal(
     }
 }
 
-/// Records that a version's metadata changed: it waits again for its destinations.
-pub(crate) fn changed(attrs: &mut ObjectAttrs) {
-    attrs.replication = attrs.replication.take().map(VersionReplication::changed);
+/// Records that a version of `key` changed its metadata here: it waits again for its
+/// destinations; a replica, for those `config`'s rules send replica modifications to.
+pub(crate) fn changed(attrs: &mut ObjectAttrs, key: &str, config: Option<&ReplicationConfig>) {
+    attrs.replication = match attrs.replication.take() {
+        Some(replica) if replica.status == ReplicationStatus::Replica => {
+            let destinations = config
+                .map(|config| config.replica_destinations(key, &attrs.tags))
+                .unwrap_or_default();
+            Some(replica.replica_changed(destinations))
+        }
+        replication => replication.map(VersionReplication::changed),
+    };
 }
 
 /// What a replica's metadata becomes when its source's changed; `None` leaves a part as
@@ -272,7 +281,7 @@ impl Store {
             };
             if row.delete_marker {
                 row.attrs.replication = change(row.attrs.replication.take());
-                conn.set_version_attrs(&versions.id, &key, &version_id, &row.attrs, None)?;
+                conn.set_version_attrs(&versions.id, &key, &row.version_id, &row.attrs, None)?;
             }
             Ok(())
         })
@@ -294,10 +303,11 @@ impl Store {
         }
         let now = now_ms();
         self.change_attrs(bucket, key, Some(version_id), move |attrs| {
-            let replica = attrs.replication.as_ref().map(|r| r.status);
-            if replica != Some(ReplicationStatus::Replica) {
+            // A replica's, or a replicated version's (whose replicas send changes back
+            // when their rules sync replica modifications). The change isn't sent on.
+            if attrs.replication.is_none() {
                 return Err(StoreError::InvalidRequest(
-                    "only a replica's metadata changes as its source's",
+                    "only a replicated version's metadata changes as its copy's",
                 ));
             }
             if let Some(tags) = update.tags {

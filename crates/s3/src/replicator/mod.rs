@@ -1063,4 +1063,79 @@ mod tests {
             assert_eq!(versions.versions.len(), 2, "{layout:?}");
         }
     }
+
+    #[tokio::test]
+    async fn a_replicas_changes_go_back_when_its_rules_sync_them_in_either_layout() {
+        for layout in [Layout::Object, Layout::Folder] {
+            let (_dir, store) = replicating_in(layout).await;
+            // Two-way: `copy` replicates back to `source`, replica modifications on.
+            let mut back = everything_to("source");
+            back.rules[0].replica_modifications = Some(true);
+            store
+                .set_bucket_replication("copy", Some(back))
+                .await
+                .unwrap();
+            let id = put(&store, "a.txt", b"one").await;
+            let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
+            let stopping = CancellationToken::new();
+            worker.pass(&stopping).await;
+            let tags = std::collections::BTreeMap::from([("team".to_owned(), "red".to_owned())]);
+            let replica = store
+                .set_tags("copy", "a.txt", Some(&id), tags.clone())
+                .await
+                .unwrap();
+            // Still a replica, waiting for the change to go back.
+            let replication = replica.attrs.replication.unwrap();
+            assert_eq!(replication.status, ReplicationStatus::Replica, "{layout:?}");
+            assert_eq!(
+                replication.waiting().collect::<Vec<_>>(),
+                ["arn:aws:s3:::source"],
+                "{layout:?}"
+            );
+            while worker.pass(&stopping).await {}
+            let source = store
+                .head_version("source", "a.txt", Some(&id))
+                .await
+                .unwrap();
+            assert_eq!(source.attrs.tags, tags, "{layout:?}");
+            // Taken in place, and not sent on again: nothing waits on either side.
+            for bucket in ["source", "copy"] {
+                assert!(
+                    store
+                        .waiting_replication(bucket, BATCH)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{layout:?} {bucket}"
+                );
+            }
+            let copy = store
+                .head_version("copy", "a.txt", Some(&id))
+                .await
+                .unwrap();
+            assert_eq!(
+                copy.attrs.replication.map(|r| r.status),
+                Some(ReplicationStatus::Replica),
+                "{layout:?}"
+            );
+            // Without replica modifications, a replica's changes stay where they're made.
+            store
+                .set_bucket_replication("copy", Some(everything_to("source")))
+                .await
+                .unwrap();
+            let blue = std::collections::BTreeMap::from([("team".to_owned(), "blue".to_owned())]);
+            store
+                .set_tags("copy", "a.txt", Some(&id), blue)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .waiting_replication("copy", BATCH)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{layout:?}"
+            );
+        }
+    }
 }

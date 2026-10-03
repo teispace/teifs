@@ -89,7 +89,7 @@ pub use teifs_crypto::{
     AwsKms, CryptoError, CustomerKey, DEFAULT_KEY, DefaultKeyNamed, KesAuth, KesKms, Kms, LocalKms,
     TransitKms, create_private, replace_private,
 };
-pub use teifs_meta::{Layout, Part, QueuedDelete, Upload, Usage, Versioning};
+pub use teifs_meta::{Layout, Part, QueuedDelete, Upload, Usage, Versioning, same_version};
 pub use teifs_types::admin::Snapshot;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,
@@ -996,9 +996,11 @@ impl Store {
         version_id: Option<&str>,
         tags: std::collections::BTreeMap<String, String>,
     ) -> Result<ObjectInfo> {
+        let config = self.bucket_replication(bucket).await?;
+        let name = key.to_owned();
         self.change_attrs(bucket, key, version_id, move |attrs| {
             attrs.tags = tags;
-            crate::replicating::changed(attrs);
+            crate::replicating::changed(attrs, &name, config.as_deref());
             Ok(())
         })
         .await

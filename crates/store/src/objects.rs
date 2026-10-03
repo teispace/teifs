@@ -845,7 +845,7 @@ impl Inner {
         }
         crate::lock::check_removal(&row.attrs, bypass, now_ms())?;
         if let Some((removed, files)) =
-            conn.delete_version(&bucket.id, key, version_id, now_ms())?
+            conn.delete_version(&bucket.id, key, &row.version_id, now_ms())?
         {
             if let Some(config) = removals {
                 let removal = crate::replicating::removal(

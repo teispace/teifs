@@ -288,10 +288,12 @@ impl Store {
     ) -> Result<ObjectInfo> {
         self.require_lock(bucket).await?;
         let now = now_ms();
+        let config = self.bucket_replication(bucket).await?;
+        let name = key.to_owned();
         self.change_attrs(bucket, key, version_id, move |attrs| {
             check_retention_change(attrs.retention.as_ref(), retention.as_ref(), bypass, now)?;
             attrs.retention = retention;
-            crate::replicating::changed(attrs);
+            crate::replicating::changed(attrs, &name, config.as_deref());
             Ok(())
         })
         .await
@@ -306,9 +308,11 @@ impl Store {
         on: bool,
     ) -> Result<ObjectInfo> {
         self.require_lock(bucket).await?;
+        let config = self.bucket_replication(bucket).await?;
+        let name = key.to_owned();
         self.change_attrs(bucket, key, version_id, move |attrs| {
             attrs.legal_hold = Some(on);
-            crate::replicating::changed(attrs);
+            crate::replicating::changed(attrs, &name, config.as_deref());
             Ok(())
         })
         .await

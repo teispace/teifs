@@ -325,7 +325,7 @@ impl Inner {
         };
         if let Found::File(_, meta) | Found::Folder(_, meta) = Inner::find(&bucket.dir, key)? {
             let current = Inner::info(conn, &bucket.name, key.as_str(), &meta)?;
-            if current_id(&current) == version_id {
+            if teifs_meta::same_version(current_id(&current), version_id) {
                 precondition.check_delete(Some(&current))?;
                 check_removal(&current.attrs, bypass, now_ms())?;
                 self.delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
@@ -357,7 +357,8 @@ impl Inner {
         }
         check_removal(&row.attrs, bypass, now_ms())?;
         let Some((removed, files)) = conn.try_batch(|conn| {
-            let removed = conn.delete_version(&versions.id, key.as_str(), version_id, now_ms())?;
+            let removed =
+                conn.delete_version(&versions.id, key.as_str(), &row.version_id, now_ms())?;
             if let (Some(config), Some((removed, _))) = (&removals, &removed) {
                 let removal = crate::replicating::removal(
                     config,
@@ -461,7 +462,10 @@ impl Inner {
         if let Ok(parsed) = ObjectKey::parse(key)
             && let Found::File(_, meta) | Found::Folder(_, meta) =
                 Inner::find(&bucket.dir, &parsed)?
-            && current_id(&Inner::info(&conn, &bucket.name, key, &meta)?) == id
+            && teifs_meta::same_version(
+                current_id(&Inner::info(&conn, &bucket.name, key, &meta)?),
+                id,
+            )
         {
             return Ok(None);
         }

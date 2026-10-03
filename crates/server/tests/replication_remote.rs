@@ -812,6 +812,116 @@ async fn replicated_and_failed_versions_are_events() {
     );
 }
 
+/// A TeiFS version id as `MinIO` writes it: a UUID, with dashes.
+fn dashed(id: &str) -> String {
+    format!(
+        "{}-{}-{}-{}-{}",
+        &id[..8],
+        &id[8..12],
+        &id[12..16],
+        &id[16..20],
+        &id[20..]
+    )
+}
+
+#[tokio::test]
+async fn minio_names_teifs_versions_with_dashes_when_it_sends_changes_back() {
+    let ((from, _to), source, _copy) = replicating().await;
+    let id = source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    // The replica's tags changed there, and its rule syncs replica modifications.
+    let named = dashed(&id);
+    let copy_source = format!("/source/a.txt?versionId={named}");
+    let replicating = [
+        ("x-minio-source-replication-request", "true"),
+        ("x-amz-replication-status", "REPLICA"),
+        ("x-minio-source-mtime", "2026-01-01T00:00:00Z"),
+    ];
+    let mut headers = vec![
+        ("x-amz-copy-source", copy_source.as_str()),
+        ("x-amz-tagging-directive", "REPLACE"),
+        ("x-amz-tagging", "side=minio"),
+    ];
+    headers.extend(replicating);
+    let (status, text) = signed(
+        &from,
+        (ACCESS_KEY, SECRET_KEY),
+        "PUT",
+        &format!("/source/a.txt?versionId={named}"),
+        &headers,
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let tags = source
+        .get_object_tagging()
+        .bucket("source")
+        .key("a.txt")
+        .version_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tag_set()[0].value(), "minio");
+    // Asked for so, it's answered so: `MinIO` then takes it as the version it has.
+    let head = source
+        .head_object()
+        .bucket("source")
+        .key("a.txt")
+        .version_id(&named)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.version_id(), Some(named.as_str()));
+    // Sent whole, it's the version this server has: no other is made.
+    let (status, text) = signed(
+        &from,
+        (ACCESS_KEY, SECRET_KEY),
+        "PUT",
+        &format!("/source/a.txt?versionId={named}"),
+        &replicating,
+        b"hello",
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let versions = source
+        .list_object_versions()
+        .bucket("source")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 1, "{versions:?}");
+    // Its removal names it so too.
+    let (status, text) = signed(
+        &from,
+        (ACCESS_KEY, SECRET_KEY),
+        "DELETE",
+        &format!("/source/a.txt?versionId={named}"),
+        &replicating,
+        b"",
+    )
+    .await;
+    assert_eq!(status, 204, "{text}");
+    let versions = source
+        .list_object_versions()
+        .bucket("source")
+        .send()
+        .await
+        .unwrap();
+    assert!(versions.versions().is_empty(), "{versions:?}");
+}
+
 /// `MinIO`'s replication check on `bucket` of `server`, signed by the root user: its
 /// status and answer.
 async fn check(server: &Server, bucket: &str) -> (u16, String) {

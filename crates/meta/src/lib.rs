@@ -33,7 +33,7 @@ pub use index::{CompletedUpload, Index, Part, Row, Upload};
 pub use replicated_deletes::QueuedDelete;
 pub use system::{BucketRecord, Layout, System, Versioning};
 pub use usage::{Usage, Usages};
-pub use versions::{NULL_VERSION, VersionRow, VersionsFrom};
+pub use versions::{NULL_VERSION, VersionRow, VersionsFrom, other_form, same_version};
 
 /// Why a metadata database failed.
 #[derive(Debug, thiserror::Error)]
