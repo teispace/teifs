@@ -299,3 +299,112 @@ async fn markers_people_make_are_replicated_and_lifecycles_arent() {
         Some(ReplicationStatus::Replica)
     );
 }
+
+#[tokio::test]
+async fn removals_people_make_are_queued_as_the_rules_say_in_either_layout() {
+    for layout in [Layout::Object, Layout::Folder] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create_bucket("source", layout).await.unwrap();
+        store
+            .set_bucket_versioning("source", Versioning::Enabled)
+            .await
+            .unwrap();
+        let mut config = everything_to("copy");
+        config.rules[0].delete_replication = Some(true);
+        store
+            .set_bucket_replication("source", Some(config.clone()))
+            .await
+            .unwrap();
+        let put = |key: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .put_bytes("source", key, b"hello", ObjectAttrs::default())
+                    .await
+                    .unwrap()
+                    .version_id
+                    .unwrap()
+            }
+        };
+        let remove = |key: &'static str, id: String, marking: Marking| {
+            let store = store.clone();
+            async move {
+                store
+                    .delete_marking(
+                        "source",
+                        key,
+                        Some(&id),
+                        Precondition::default(),
+                        (false, marking),
+                    )
+                    .await
+                    .unwrap();
+                id
+            }
+        };
+        let (older, current) = (put("a.txt").await, put("a.txt").await);
+        // An older version (a row in either layout), then the current one (a file in a
+        // folder bucket).
+        let older = remove("a.txt", older, Marking::Request).await;
+        let current = remove("a.txt", current, Marking::Request).await;
+        // Neither lifecycle's removals nor replicated ones are sent on.
+        let expired = put("b.txt").await;
+        remove("b.txt", expired, Marking::Lifecycle).await;
+        let replicated = put("b.txt").await;
+        store
+            .delete_replicated_version("source", "b.txt", &replicated)
+            .await
+            .unwrap();
+        let copy = vec!["arn:aws:s3:::copy".to_owned()];
+        let queued = |key: &str, version_id: &str, delete_marker| QueuedDelete {
+            key: key.to_owned(),
+            version_id: version_id.to_owned(),
+            delete_marker,
+            destinations: copy.clone(),
+        };
+        assert_eq!(
+            store.waiting_removals("source", 100).await.unwrap(),
+            [
+                queued("a.txt", &older, false),
+                queued("a.txt", &current, false)
+            ],
+            "{layout:?}"
+        );
+        for id in [&older, &current] {
+            store
+                .set_removal_destinations("source", "a.txt", id, Vec::new())
+                .await
+                .unwrap();
+        }
+        assert!(
+            store
+                .waiting_removals("source", 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Without `DeleteReplication`, a version's removal stays here, but a marker's
+        // follows the marker.
+        config.rules[0].delete_replication = None;
+        store
+            .set_bucket_replication("source", Some(config))
+            .await
+            .unwrap();
+        let version = put("c.txt").await;
+        remove("c.txt", version, Marking::Request).await;
+        let marker = store
+            .delete_with("source", "c.txt", None, Precondition::default(), false)
+            .await
+            .unwrap()
+            .version_id
+            .unwrap();
+        let marker = remove("c.txt", marker, Marking::Request).await;
+        assert_eq!(
+            store.waiting_removals("source", 100).await.unwrap(),
+            [queued("c.txt", &marker, true)],
+            "{layout:?}"
+        );
+    }
+}

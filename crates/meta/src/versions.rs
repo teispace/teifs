@@ -425,6 +425,10 @@ impl Index {
             "DELETE FROM object_versions WHERE bucket_id = ?1",
             [bucket_id],
         )?;
+        tx.execute(
+            "DELETE FROM replicated_deletes WHERE bucket_id = ?1",
+            [bucket_id],
+        )?;
         queue_garbage(&tx, bucket_id, &ids, now_ms)?;
         tx.commit()?;
         Ok(ids)

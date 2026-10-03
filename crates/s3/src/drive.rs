@@ -107,9 +107,9 @@ impl Drive {
     }
 
     /// Wakes the replication worker when `name` happened to a version it may send: one
-    /// was written, or a delete marker made.
+    /// was written, a delete marker made, or a version removed.
     fn wake_replication(&self, name: &str) {
-        if name.starts_with("ObjectCreated:") || name == MARKED {
+        if name.starts_with("ObjectCreated:") || name == MARKED || name == REMOVED {
             self.replication.notify_one();
         }
     }
@@ -2996,22 +2996,28 @@ impl S3 for Drive {
             ..precondition(input.if_match.as_ref(), None)
         };
         // The access check made sure the caller may bypass governance when it asks, and
-        // `s3:ReplicateDelete` for another server's delete marker.
+        // `s3:ReplicateDelete` for another server's replicated delete.
         let bypass = input.bypass_governance_retention == Some(true);
         let marker = replica_headers::marker(&req.headers, version_id)?;
+        let removal = replica_headers::removal(&req.headers, version_id)?;
         // A replicated marker names its id, but no version is removed.
         let named = if marker.is_some() {
             None
         } else {
             input.version_id.as_deref()
         };
-        let deleted = match marker {
-            Some(replica) => {
+        let deleted = match (marker, removal) {
+            (Some(replica), _) => {
                 self.store
                     .commit_replica_marker(&input.bucket, &input.key, replica)
                     .await
             }
-            None => {
+            (None, Some(version_id)) => {
+                self.store
+                    .delete_replicated_version(&input.bucket, &input.key, version_id)
+                    .await
+            }
+            (None, None) => {
                 self.store
                     .delete_with(&input.bucket, &input.key, version_id, precondition, bypass)
                     .await
@@ -3109,7 +3115,7 @@ impl S3 for Drive {
                 }),
             }
         }
-        if !markers.is_empty() {
+        if !markers.is_empty() || !removals.is_empty() {
             self.wake_replication(MARKED);
         }
         for (name, objects) in [(REMOVED, removals), (MARKED, markers)] {

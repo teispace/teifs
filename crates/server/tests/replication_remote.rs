@@ -18,9 +18,11 @@ use aws_sdk_s3::{
         ReplicationRuleStatus, ReplicationStatus, VersioningConfiguration,
     },
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{ACCESS_KEY, SECRET_KEY, Server, client, start_with};
+use md5::{Digest, Md5};
 use serde_json::json;
-use signing::signed_response;
+use signing::{signed, signed_response};
 use teifs_crypto::madmin;
 use teifs_store::Layout;
 
@@ -332,4 +334,85 @@ async fn delete_markers_reach_another_teifs_with_their_ids() {
             .await
             .is_err()
     );
+}
+
+/// Replicates every object of `source` to `arn`, removals of versions too (`MinIO`'s
+/// `DeleteReplication`, which the SDK can't write).
+async fn replicate_removals(from: &Server, arn: &str) {
+    let body = format!(
+        "<ReplicationConfiguration><Role></Role><Rule><ID>r</ID><Status>Enabled</Status>\
+         <Priority>1</Priority><DeleteMarkerReplication><Status>Enabled</Status>\
+         </DeleteMarkerReplication><DeleteReplication><Status>Enabled</Status>\
+         </DeleteReplication><Filter><Prefix></Prefix></Filter>\
+         <Destination><Bucket>{arn}</Bucket></Destination></Rule>\
+         </ReplicationConfiguration>"
+    );
+    let md5 = STANDARD.encode(Md5::digest(body.as_bytes()));
+    let (status, text) = signed(
+        from,
+        (ACCESS_KEY, SECRET_KEY),
+        "PUT",
+        "/source?replication",
+        &[("content-md5", &md5)],
+        body.as_bytes(),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+}
+
+#[tokio::test]
+async fn removed_versions_leave_another_teifs_too() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    let arn = target(&from, &to, (ACCESS_KEY, SECRET_KEY)).await;
+    replicate_removals(&from, &arn).await;
+    let mut ids = Vec::new();
+    for body in ["one", "two"] {
+        let put = source
+            .put_object()
+            .bucket("source")
+            .key("a.txt")
+            .body(body.as_bytes().to_vec().into())
+            .send()
+            .await
+            .unwrap();
+        ids.push(put.version_id.unwrap());
+        assert_eq!(
+            settled(&source, "a.txt").await,
+            Some(ReplicationStatus::Completed)
+        );
+    }
+    source
+        .delete_object()
+        .bucket("source")
+        .key("a.txt")
+        .version_id(&ids[1])
+        .send()
+        .await
+        .unwrap();
+    let mut current = None;
+    for _ in 0..200 {
+        current = copy
+            .head_object()
+            .bucket("copy")
+            .key("a.txt")
+            .send()
+            .await
+            .unwrap()
+            .version_id;
+        if current.as_ref() == Some(&ids[0]) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(current.as_ref(), Some(&ids[0]));
+    let versions = copy
+        .list_object_versions()
+        .bucket("copy")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 1);
 }

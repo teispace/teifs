@@ -88,7 +88,7 @@ pub use teifs_crypto::{
     AwsKms, CryptoError, CustomerKey, DEFAULT_KEY, DefaultKeyNamed, KesAuth, KesKms, Kms, LocalKms,
     TransitKms, create_private, replace_private,
 };
-pub use teifs_meta::{Layout, Part, Upload, Usage, Versioning};
+pub use teifs_meta::{Layout, Part, QueuedDelete, Upload, Usage, Versioning};
 pub use teifs_types::admin::Snapshot;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,
@@ -1123,7 +1123,27 @@ impl Store {
         .await
     }
 
-    /// Deletes as [`Store::delete_with`] does; a delete marker it makes is `marking`'s.
+    /// Removes `key`'s version `version_id` as another bucket's replicated removal of it
+    /// (`MinIO`'s `DeleteReplication`): it isn't replicated again. One that isn't there
+    /// is gone already, which succeeds.
+    pub async fn delete_replicated_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<Deleted> {
+        self.delete_marking(
+            bucket,
+            key,
+            Some(version_id),
+            Precondition::default(),
+            (false, Marking::Replicated),
+        )
+        .await
+    }
+
+    /// Deletes as [`Store::delete_with`] does; `marking` says who deletes (and so whether
+    /// it's replicated).
     pub(crate) async fn delete_marking(
         &self,
         bucket: &str,
@@ -1163,7 +1183,7 @@ impl Store {
                             &key,
                             id,
                             &precondition,
-                            bypass,
+                            (bypass, &marking),
                         ),
                         (None, Some(versions)) => inner.delete_folder_versioned(
                             &conn,

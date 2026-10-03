@@ -9,7 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::Versioning;
-use teifs_types::{LockMode, ObjectKey, Retention, replication::VersionReplication};
+use teifs_types::{
+    LockMode, ObjectKey, Retention,
+    replication::{ReplicationConfig, VersionReplication},
+};
 
 use crate::{
     Bucket, Inner, ObjectAttrs, ObjectInfo, Store, StoreError,
@@ -208,9 +211,24 @@ impl Inner {
                         VersionReplication::pending(replication.marker_destinations(key));
                 }
             }
-            Marking::Request | Marking::Lifecycle => {}
+            Marking::Request | Marking::Lifecycle | Marking::Replicated => {}
         }
         Ok(attrs)
+    }
+
+    /// The replication configuration that decides where a version removal `marking`
+    /// makes in the bucket whose version store is `versions` goes: none for lifecycle's
+    /// removals, replicated ones, or without versioning enabled.
+    pub(crate) fn removal_config(
+        &self,
+        versions: &ObjectBucket,
+        marking: &Marking,
+    ) -> Result<Option<ReplicationConfig>> {
+        if !matches!(marking, Marking::Request) || versions.versioning != Versioning::Enabled {
+            return Ok(None);
+        }
+        let json = self.system().bucket_config_by_id(&versions.id)?;
+        Ok(crate::settings::read_config(json.as_deref())?.replication)
     }
 }
 

@@ -1226,10 +1226,19 @@ them unencrypted); SSE-KMS versions ask for the rule's replica KMS key.
 Delete markers are replicated when the rule says so (`DeleteMarkerReplication`, always
 for a rule of the configuration's first version): the destination's current version
 becomes a marker with the same id and time (on AWS, a marker of its own). Markers made
-by lifecycle expirations aren't replicated, as on S3, and neither is removing a version
-by its id. A replicating user on another TeiFS needs `s3:ReplicateDelete` and
-`s3:DeleteObject` for markers. Replicating existing objects and metadata changes is
-still to come.
+by lifecycle expirations aren't replicated, as on S3.
+
+Removing a version by its id is replicated as `MinIO` does it, which S3 doesn't: when the
+rule has `MinIO`'s `DeleteReplication` (`mc replicate add --replicate
+delete,delete-marker`), the destination removes that version too, and removing a delete
+marker that was replicated removes it there as well. The removal waits in a queue until
+every destination has it, so a target that's down gets it later; a target that refuses
+it is logged and skipped. Removals by lifecycle rules aren't replicated, and AWS targets
+(whose versions have ids of their own) get none.
+
+A replicating user on another TeiFS needs `s3:ReplicateDelete` and `s3:DeleteObject` for
+markers and removals. Replicating existing objects and metadata changes is still to
+come.
 
 ### Replication targets
 

@@ -62,8 +62,6 @@ pub struct Facts {
     pub bucket_tags: bool,
     /// Another server replicating (`MinIO`'s `x-minio-source-replication-request`).
     pub replication: bool,
-    /// A replicated delete marker (`MinIO`'s `x-minio-source-deletemarker`).
-    pub replica_marker: bool,
 }
 
 /// The permissions one request needs (at most six).
@@ -189,11 +187,13 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
             needs.push("s3:DeleteObject", Target::Source, true);
             needs.need("s3:PutObject");
         }
-        // A replicated delete marker names its id but removes nothing, as `MinIO` decides
-        // it: replicating it needs `s3:ReplicateDelete`.
-        "DeleteObject" if facts.replication && facts.replica_marker => {
+        // A replicated delete (a marker with its id, or the removal of a version), as
+        // `MinIO` decides it: `s3:ReplicateDelete` besides `s3:DeleteObject`, whether or
+        // not it names a version.
+        "DeleteObject" if facts.replication => {
             needs.need("s3:DeleteObject");
             needs.need("s3:ReplicateDelete");
+            needs.need_if(facts.bypass_governance, "s3:BypassGovernanceRetention");
         }
         "DeleteObject" | "DeleteObjects" => {
             needs.versioned(facts, "s3:DeleteObject", "s3:DeleteObjectVersion");

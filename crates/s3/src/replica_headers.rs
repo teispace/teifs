@@ -4,7 +4,8 @@
 //! version was made and its ETag. Such a write, from a caller allowed
 //! `s3:ReplicateObject` (the access check sees to it), is recorded as a replica of that
 //! version; a `DeleteObject` saying it makes a delete marker, from a caller allowed
-//! `s3:ReplicateDelete`, makes a marker with that id.
+//! `s3:ReplicateDelete`, makes a marker with that id, and one that doesn't removes the
+//! version it names (`MinIO`'s `DeleteReplication`), as a replicated removal.
 
 use http::HeaderMap;
 use s3s::{S3Result, s3_error};
@@ -67,6 +68,37 @@ pub(crate) fn marker(headers: &HeaderMap, version_id: Option<&str>) -> S3Result<
         return Ok(None);
     }
     replica(headers, version_id)
+}
+
+/// The version a delete removes as a replicated removal (the `versionId` of its query),
+/// if its headers say it's one (a replication request that doesn't make a marker).
+pub(crate) fn removal<'a>(
+    headers: &HeaderMap,
+    version_id: Option<&'a str>,
+) -> S3Result<Option<&'a str>> {
+    let flag = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    };
+    if !flag(REQUEST) || flag(DELETE_MARKER) {
+        return Ok(None);
+    }
+    version_id
+        .filter(|id| is_version_id(id))
+        .map(Some)
+        .ok_or_else(|| {
+            s3_error!(
+                InvalidArgument,
+                "a replicated removal's versionId must name a version"
+            )
+        })
+}
+
+/// The headers that make a delete of a version a replicated removal.
+pub(crate) fn of_removal() -> Vec<(&'static str, String)> {
+    vec![(REQUEST, "true".to_owned()), (STATUS, "REPLICA".to_owned())]
 }
 
 /// The headers that make a delete of `replica`'s id a replicated delete marker.
@@ -232,6 +264,22 @@ mod tests {
             map.insert(name, HeaderValue::from_str(&value).unwrap());
         }
         assert_eq!(marker(&map, Some(MINIO_ID)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_removal_is_a_replication_request_without_the_marker_flag() {
+        let mut map = HeaderMap::new();
+        for (name, value) in of_removal() {
+            map.insert(name, HeaderValue::from_str(&value).unwrap());
+        }
+        assert_eq!(removal(&map, Some(MINIO_ID)).unwrap(), Some(MINIO_ID));
+        for id in [None, Some("null"), Some("a/b")] {
+            let err = removal(&map, id).unwrap_err();
+            assert_eq!(*err.code(), s3s::S3ErrorCode::InvalidArgument, "{id:?}");
+        }
+        map.insert(DELETE_MARKER, HeaderValue::from_static("true"));
+        assert_eq!(removal(&map, Some(MINIO_ID)).unwrap(), None);
+        assert_eq!(removal(&HeaderMap::new(), Some(MINIO_ID)).unwrap(), None);
     }
 
     #[test]

@@ -18,8 +18,10 @@ behaviour; the on-disk format is always upgraded automatically.
   TeiFS or a `MinIO` keeps their version ids through `MinIO`'s replica headers, which
   TeiFS takes from callers allowed `s3:ReplicateObject`. Delete markers are replicated
   when a rule says so (not lifecycle's), keeping their ids on TeiFS and `MinIO`;
-  versions are taken into folder buckets too. Version deletes, metadata changes and
-  existing objects are still to come.
+  versions are taken into folder buckets too. Removing a version (or a replicated
+  marker) is replicated too when a rule has `MinIO`'s `DeleteReplication`, waiting in
+  a queue until every target has it. Metadata changes and existing objects are still
+  to come.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

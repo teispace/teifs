@@ -988,7 +988,6 @@ fn facts(cx: &S3AccessContext<'_>, form: Option<&Form>, source: Option<&Source>)
         // In the body: set once it's read (`S3Access::create_bucket`).
         bucket_tags: false,
         replication: is_true(crate::replica_headers::REQUEST),
-        replica_marker: is_true(crate::replica_headers::DELETE_MARKER),
     }
 }
 

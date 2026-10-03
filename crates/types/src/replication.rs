@@ -308,6 +308,30 @@ impl ReplicationConfig {
         }
         found
     }
+
+    /// The destinations the removal of a version of `key` (with `tags`; SSE-KMS, `kms`)
+    /// goes to, as `MinIO` decides: those of the enabled rules it matches that replicate
+    /// version deletes (`DeleteReplication`) and, for a delete marker, those it was
+    /// replicated to (`sent_to`), each once. S3 replicates neither.
+    #[must_use]
+    pub fn removal_destinations(
+        &self,
+        key: &str,
+        (tags, kms): (&BTreeMap<String, String>, bool),
+        sent_to: &[&str],
+    ) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            let arn = &rule.destination.bucket;
+            if rule.matches(key, tags, kms)
+                && (rule.delete_replication == Some(true) || sent_to.contains(&arn.as_str()))
+                && !found.contains(arn)
+            {
+                found.push(arn.clone());
+            }
+        }
+        found
+    }
 }
 
 impl ReplicationRule {
@@ -450,6 +474,50 @@ mod tests {
         assert_eq!(
             config.destinations("docs/a", &BTreeMap::new(), false),
             ["arn:aws:s3:::copy", "arn:aws:s3:::other"]
+        );
+    }
+    #[test]
+    fn removals_go_where_rules_replicate_deletes_or_the_marker_went() {
+        let mut deletes = rule(ReplicationFilter::Prefix("docs/".to_owned()), Some(true));
+        deletes.delete_replication = Some(true);
+        deletes.destination.bucket = "arn:aws:s3:::deletes".to_owned();
+        let config = ReplicationConfig {
+            role: String::new(),
+            rules: vec![
+                rule(ReplicationFilter::All, Some(true)),
+                deletes.clone(),
+                ReplicationRule {
+                    enabled: false,
+                    destination: ReplicationDestination {
+                        bucket: "arn:aws:s3:::off".to_owned(),
+                        ..deletes.destination.clone()
+                    },
+                    ..deletes
+                },
+            ],
+        };
+        let none = BTreeMap::new();
+        assert_eq!(
+            config.removal_destinations("docs/a", (&none, false), &[]),
+            ["arn:aws:s3:::deletes"]
+        );
+        assert!(
+            config
+                .removal_destinations("photos/a", (&none, false), &[])
+                .is_empty()
+        );
+        // A marker's removal follows the marker, where a rule still sends the key.
+        assert_eq!(
+            config.removal_destinations(
+                "photos/a",
+                (&none, false),
+                &["arn:aws:s3:::copy", "arn:aws:s3:::off", "arn:aws:s3:::gone"]
+            ),
+            ["arn:aws:s3:::copy"]
+        );
+        assert_eq!(
+            config.removal_destinations("docs/a", (&none, false), &["arn:aws:s3:::copy"]),
+            ["arn:aws:s3:::copy", "arn:aws:s3:::deletes"]
         );
     }
 }

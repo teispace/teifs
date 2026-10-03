@@ -329,15 +329,17 @@ impl ApplyLifecycle {
         Ok(())
     }
 
-    /// Removes a version for good unless Object Lock protects it; whether it's gone.
+    /// Removes a version for good unless Object Lock protects it; whether it's gone. The
+    /// removal isn't replicated, as `MinIO` decides.
     async fn remove(&self, bucket: &str, version: &ObjectVersion) -> Result<bool> {
         let result = self
             .store
-            .delete_if(
+            .delete_marking(
                 bucket,
                 &version.info.key,
                 version.info.version_id.as_deref(),
                 Precondition::default(),
+                (false, crate::objects::Marking::Lifecycle),
             )
             .await;
         match result {

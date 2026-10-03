@@ -313,8 +313,12 @@ impl Inner {
         key: &ObjectKey,
         version_id: &str,
         precondition: &Precondition,
-        bypass: bool,
+        (bypass, marking): (bool, &Marking),
     ) -> Result<Deleted> {
+        let removals = match &bucket.versions {
+            Some(versions) => self.removal_config(versions, marking)?,
+            None => None,
+        };
         let named = |delete_marker| Deleted {
             version_id: bucket.named(Some(version_id)),
             delete_marker,
@@ -326,6 +330,17 @@ impl Inner {
                 check_removal(&current.attrs, bypass, now_ms())?;
                 self.delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
                 if let Some(versions) = &bucket.versions {
+                    // Queued once the file is gone: a crash between leaves the
+                    // destinations a version too many, never one too few.
+                    if let Some(config) = &removals {
+                        let removal = crate::replicating::removal(
+                            config,
+                            (key.as_str(), version_id),
+                            false,
+                            &current.attrs,
+                        );
+                        conn.queue_replicated_delete(&versions.id, &removal, now_ms())?;
+                    }
                     self.restore_newest(conn, bucket, versions, key)?;
                 }
                 return Ok(named(false));
@@ -341,8 +356,19 @@ impl Inner {
             precondition.check_delete(Some(&versions.info(&row)))?;
         }
         check_removal(&row.attrs, bypass, now_ms())?;
-        let Some((removed, files)) =
-            conn.delete_version(&versions.id, key.as_str(), version_id, now_ms())?
+        let Some((removed, files)) = conn.try_batch(|conn| {
+            let removed = conn.delete_version(&versions.id, key.as_str(), version_id, now_ms())?;
+            if let (Some(config), Some((removed, _))) = (&removals, &removed) {
+                let removal = crate::replicating::removal(
+                    config,
+                    (key.as_str(), version_id),
+                    removed.delete_marker,
+                    &removed.attrs,
+                );
+                conn.queue_replicated_delete(&versions.id, &removal, now_ms())?;
+            }
+            Ok::<_, StoreError>(removed)
+        })?
         else {
             return Ok(named(false));
         };

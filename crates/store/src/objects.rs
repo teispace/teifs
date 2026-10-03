@@ -20,7 +20,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use teifs_crypto::PartId;
 use teifs_meta::{Index, NULL_VERSION, VersionRow, Versioning};
-use teifs_types::SseMode;
+use teifs_types::{SseMode, replication::ReplicationConfig};
 
 use crate::{
     Durability, Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
@@ -239,7 +239,8 @@ pub(crate) struct Finished<'a> {
     pub replica: Option<Replica>,
 }
 
-/// Who makes a delete marker, which decides whether it's replicated.
+/// Who deletes (makes a delete marker, or removes a version), which decides whether
+/// the delete is replicated.
 #[derive(Debug, Clone, Default)]
 pub(crate) enum Marking {
     /// A request's delete: replicated as the bucket's rules say.
@@ -249,6 +250,8 @@ pub(crate) enum Marking {
     Lifecycle,
     /// A replicated marker: it keeps the source marker's id and time.
     Replica(Replica),
+    /// Another bucket's removal of a version, replicated here: not replicated again.
+    Replicated,
 }
 
 impl Marking {
@@ -256,7 +259,7 @@ impl Marking {
     pub(crate) fn replica(&self) -> Option<&Replica> {
         match self {
             Self::Replica(replica) => Some(replica),
-            Self::Request | Self::Lifecycle => None,
+            Self::Request | Self::Lifecycle | Self::Replicated => None,
         }
     }
 }
@@ -828,7 +831,7 @@ impl Inner {
         key: &str,
         version_id: &str,
         precondition: &Precondition,
-        bypass: bool,
+        (bypass, removals): (bool, Option<&ReplicationConfig>),
     ) -> Result<(Deleted, Vec<String>)> {
         let Some(row) = conn.version(&bucket.id, key, version_id)? else {
             let deleted = Deleted {
@@ -844,6 +847,15 @@ impl Inner {
         if let Some((removed, files)) =
             conn.delete_version(&bucket.id, key, version_id, now_ms())?
         {
+            if let Some(config) = removals {
+                let removal = crate::replicating::removal(
+                    config,
+                    (key, &removed.version_id),
+                    removed.delete_marker,
+                    &removed.attrs,
+                );
+                conn.queue_replicated_delete(&bucket.id, &removal, now_ms())?;
+            }
             let deleted = Deleted {
                 version_id: bucket.named(&removed.version_id),
                 delete_marker: removed.delete_marker,

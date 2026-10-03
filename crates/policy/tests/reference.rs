@@ -91,7 +91,6 @@ fn every_facts() -> impl Iterator<Item = Facts> {
             bucket_tags: bit(9),
             // MinIO's replication requests (not S3's), checked on their own below.
             replication: false,
-            replica_marker: false,
         }
     })
 }
@@ -248,13 +247,13 @@ fn replicas_from_another_server_need_minios_replication_actions() {
             ("s3:ReplicateObject", Target::Object, true)
         ]
     );
-    // A replicated delete marker names its id, but removes no version.
+    // A replicated delete marker names its id, and a replicated removal the version it
+    // removes: both need `s3:ReplicateDelete`, as in `MinIO`.
     assert_eq!(
         actions(
             "DeleteObject",
             Facts {
                 version_id: true,
-                replica_marker: true,
                 ..replication
             }
         ),
@@ -263,13 +262,12 @@ fn replicas_from_another_server_need_minios_replication_actions() {
             ("s3:ReplicateDelete", Target::Object, true)
         ]
     );
-    // The marker header alone, from anyone else, changes nothing.
+    // Anyone else's delete of a version needs `s3:DeleteObjectVersion`.
     assert_eq!(
         actions(
             "DeleteObject",
             Facts {
                 version_id: true,
-                replica_marker: true,
                 ..none
             }
         ),

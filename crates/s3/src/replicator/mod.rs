@@ -2,7 +2,9 @@
 //! destinations. Woken as objects are written, and every so often to find what a restart
 //! or a failed attempt left waiting (each version keeps where it stands, so nothing is
 //! lost). A version a destination can't take is marked `FAILED`; one that may get
-//! through later stays `PENDING` and is tried again.
+//! through later stays `PENDING` and is tried again. Removals of versions the rules
+//! replicate (`MinIO`'s `DeleteReplication`) wait in a queue of their own, since the
+//! versions are gone.
 
 mod remote;
 
@@ -12,7 +14,9 @@ use std::{
     time::Duration,
 };
 
-use teifs_store::{Encryption, ObjectBody, ObjectInfo, Replica, Store, StoreError, Waiting};
+use teifs_store::{
+    Encryption, ObjectBody, ObjectInfo, QueuedDelete, Replica, Store, StoreError, Waiting,
+};
 use teifs_types::{
     SseMode,
     replication::{LOCAL_ARN, ReplicationConfig, ReplicationStatus},
@@ -52,6 +56,7 @@ impl From<StoreError> for Missed {
             StoreError::NoSuchBucket
             | StoreError::InvalidRequest(_)
             | StoreError::CustomerKeyRequired
+            | StoreError::ObjectLocked
             | StoreError::NoKms => Self::Failed(err.to_string()),
             err => Self::Later(err.to_string()),
         }
@@ -132,9 +137,67 @@ impl Worker {
                         .await;
                 }
             }
+            let removals = match self.store.waiting_removals(&bucket.name, BATCH).await {
+                Ok(removals) => removals,
+                Err(err) => {
+                    tracing::warn!(bucket = %bucket.name, error = %err, "couldn't find the removals waiting to be replicated");
+                    Vec::new()
+                }
+            };
+            let full = full || removals.len() >= BATCH;
+            for removal in &removals {
+                if stopping.is_cancelled() {
+                    return false;
+                }
+                through |= self.removal(&bucket.name, removal).await;
+            }
             again |= full && through;
         }
         again
+    }
+
+    /// Sends a version's removal to each destination it's still to reach; whether any
+    /// was settled. One a destination can't take is given up on (and logged).
+    async fn removal(&self, bucket: &str, removal: &QueuedDelete) -> bool {
+        let mut left = Vec::new();
+        for arn in &removal.destinations {
+            let sent = if let Some(local) = arn.strip_prefix(LOCAL_ARN) {
+                self.store
+                    .delete_replicated_version(local, &removal.key, &removal.version_id)
+                    .await
+                    .map(drop)
+                    .map_err(Missed::from)
+            } else {
+                match self.remote(arn).await {
+                    Ok(target) => target.send_removal(&removal.key, &removal.version_id).await,
+                    Err(missed) => Err(missed),
+                }
+            };
+            match sent {
+                Ok(()) => {}
+                Err(Missed::Failed(err)) => {
+                    tracing::warn!(bucket, key = %removal.key, destination = %arn, error = %err, "a version's removal can't be replicated");
+                }
+                Err(Missed::Later(err)) => {
+                    tracing::info!(bucket, key = %removal.key, destination = %arn, error = %err, "a version's removal will be replicated later");
+                    left.push(arn.clone());
+                }
+            }
+        }
+        if left.len() == removal.destinations.len() {
+            return false;
+        }
+        match self
+            .store
+            .set_removal_destinations(bucket, &removal.key, &removal.version_id, left)
+            .await
+        {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(bucket, key = %removal.key, error = %err, "couldn't record a removal's replication");
+                false
+            }
+        }
     }
 
     /// Sends one version to each destination it waits for, but those `held` back for
@@ -513,6 +576,72 @@ mod tests {
                 store.head_version("copy", "a.txt", Some(&marker)).await,
                 Err(StoreError::DeleteMarker { .. })
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn removals_reach_the_destination_once_in_either_layout() {
+        for layout in [Layout::Object, Layout::Folder] {
+            let (_dir, store) = replicating_in(layout).await;
+            let mut config = everything_to("copy");
+            config.rules[0].delete_replication = Some(true);
+            store
+                .set_bucket_replication("source", Some(config))
+                .await
+                .unwrap();
+            let older = put(&store, "a.txt", b"one").await;
+            let current = put(&store, "a.txt", b"two").await;
+            put(&store, "b.txt", b"kept").await;
+            let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
+            let stopping = CancellationToken::new();
+            worker.pass(&stopping).await;
+            let marker = store
+                .delete_with("source", "b.txt", None, Precondition::default(), false)
+                .await
+                .unwrap()
+                .version_id
+                .unwrap();
+            worker.pass(&stopping).await;
+            assert!(store.head_version("copy", "b.txt", None).await.is_err());
+
+            // The current version goes, and the marker: what was under it is back.
+            for (key, id) in [("a.txt", &current), ("b.txt", &marker)] {
+                store
+                    .delete_with("source", key, Some(id), Precondition::default(), false)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                store.waiting_removals("source", BATCH).await.unwrap().len(),
+                2
+            );
+            worker.pass(&stopping).await;
+            assert!(
+                store
+                    .waiting_removals("source", BATCH)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{layout:?}"
+            );
+            let (now, _) = store.read("copy", "a.txt").await.unwrap();
+            assert_eq!(
+                now.version_id.as_deref(),
+                Some(older.as_str()),
+                "{layout:?}"
+            );
+            assert!(
+                store.head_version("copy", "b.txt", None).await.is_ok(),
+                "{layout:?}"
+            );
+            // The destination doesn't send them on.
+            assert!(
+                store
+                    .waiting_removals("copy", BATCH)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 }

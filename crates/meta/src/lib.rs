@@ -15,6 +15,7 @@
 mod db;
 mod iam;
 mod index;
+mod replicated_deletes;
 #[cfg(test)]
 mod schemas;
 mod system;
@@ -28,6 +29,7 @@ pub use iam::{
     SamlKeyRow, SamlProviderRow, ServiceAccountRow, UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
+pub use replicated_deletes::QueuedDelete;
 pub use system::{BucketRecord, Layout, System, Versioning};
 pub use usage::{Usage, Usages};
 pub use versions::{NULL_VERSION, VersionRow, VersionsFrom};

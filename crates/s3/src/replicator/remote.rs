@@ -120,6 +120,42 @@ impl Target {
         Ok(())
     }
 
+    /// Removes the version `version_id` of `key` from the target, as a replicated
+    /// removal. On AWS (whose versions have ids of their own, and which doesn't take
+    /// replicated removals) there's nothing to remove.
+    pub(super) async fn send_removal(&self, key: &str, version_id: &str) -> Result<(), Missed> {
+        if !self.replica_headers {
+            return Ok(());
+        }
+        let headers = replica_headers::of_removal();
+        let sent = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(version_id)
+            .customize()
+            .mutate_request(move |request| {
+                for (name, value) in &headers {
+                    request.headers_mut().insert(*name, value.clone());
+                }
+            })
+            .send()
+            .await;
+        match sent {
+            Ok(_) => Ok(()),
+            // Not there (never sent, or removed already): nothing left to remove.
+            Err(err)
+                if err
+                    .raw_response()
+                    .is_some_and(|r| r.status().as_u16() == 404) =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(missed(&err)),
+        }
+    }
+
     /// Sends a version in one `PutObject`, streamed.
     async fn send_whole(&self, sending: Sending<'_>) -> Result<(), Missed> {
         let md5 = match whole_md5(&sending) {

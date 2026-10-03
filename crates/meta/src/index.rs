@@ -139,6 +139,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "ALTER TABLE parts ADD COLUMN salt TEXT;",
     // 10: what each bucket holds, kept by triggers.
     crate::usage::MIGRATION,
+    // 11: deletes of versions waiting to be replicated (the versions themselves are gone).
+    crate::replicated_deletes::MIGRATION,
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.

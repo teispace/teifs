@@ -1,7 +1,8 @@
 //! Where versions stand in replication: which still wait (found again after a restart,
 //! since the status is kept with each version), and each destination's outcome.
 
-use teifs_types::replication::ReplicationStatus;
+use teifs_meta::QueuedDelete;
+use teifs_types::replication::{ReplicationConfig, ReplicationStatus};
 
 use crate::{ObjectAttrs, Store, StoreError, VersionsQuery, error::Result};
 
@@ -18,6 +19,37 @@ pub struct Waiting {
     pub delete_marker: bool,
     /// When it was made.
     pub modified: std::time::SystemTime,
+}
+
+/// The removal of `key`'s version `version_id` (a delete marker or not, described by
+/// `attrs`) to queue for the destinations `config` sends it to
+/// ([`ReplicationConfig::removal_destinations`]): a marker's removal follows the
+/// marker.
+pub(crate) fn removal(
+    config: &ReplicationConfig,
+    (key, version_id): (&str, &str),
+    delete_marker: bool,
+    attrs: &ObjectAttrs,
+) -> QueuedDelete {
+    let sent_to: Vec<&str> = attrs
+        .replication
+        .iter()
+        .filter(|_| delete_marker)
+        .flat_map(|r| r.targets.keys().map(String::as_str))
+        .collect();
+    // A version's tags pick the rules, as for its replication; whether it's SSE-KMS
+    // doesn't (a destination without it takes the removal as done).
+    let tags = if delete_marker {
+        std::collections::BTreeMap::new()
+    } else {
+        attrs.tags.clone()
+    };
+    QueuedDelete {
+        key: key.to_owned(),
+        version_id: version_id.to_owned(),
+        delete_marker,
+        destinations: config.removal_destinations(key, (&tags, false), &sent_to),
+    }
 }
 
 /// How many versions a page of the search reads.
@@ -127,6 +159,45 @@ impl Store {
                 conn.set_version_attrs(&versions.id, &key, &version_id, &row.attrs, None)?;
             }
             Ok(())
+        })
+        .await
+    }
+
+    /// The removals of versions of `bucket` still to be replicated, oldest first: at
+    /// most `limit`.
+    pub async fn waiting_removals(&self, bucket: &str, limit: usize) -> Result<Vec<QueuedDelete>> {
+        let bucket = bucket.to_owned();
+        self.blocking(move |inner| {
+            let found = inner.bucket(&bucket)?;
+            let Some(versions) = found.versions() else {
+                return Ok(Vec::new());
+            };
+            Ok(inner.lock().replicated_deletes(&versions.id, limit)?)
+        })
+        .await
+    }
+
+    /// Records that the removal of `key`'s version `version_id` is still to reach only
+    /// `destinations` (none: it's done).
+    pub async fn set_removal_destinations(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        destinations: Vec<String>,
+    ) -> Result<()> {
+        let (bucket, key, version_id) = (bucket.to_owned(), key.to_owned(), version_id.to_owned());
+        self.blocking(move |inner| {
+            let found = inner.bucket(&bucket)?;
+            let Some(versions) = found.versions() else {
+                return Ok(());
+            };
+            Ok(inner.lock().set_replicated_delete(
+                &versions.id,
+                &key,
+                &version_id,
+                &destinations,
+            )?)
         })
         .await
     }

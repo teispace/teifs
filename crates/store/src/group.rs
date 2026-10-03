@@ -321,9 +321,12 @@ impl Inner {
                 marking,
             } => {
                 let bucket = self.object_bucket(&bucket, &bucket_id)?;
-                let marker = match &version_id {
-                    None => self.marker_attrs(&bucket, &key, &marking)?,
-                    Some(_) => ObjectAttrs::default(),
+                let (marker, removals) = match &version_id {
+                    None => (self.marker_attrs(&bucket, &key, &marking)?, None),
+                    Some(_) => (
+                        ObjectAttrs::default(),
+                        self.removal_config(&bucket, &marking)?,
+                    ),
                 };
                 let (deleted, files) = conn.try_batch(|conn| match &version_id {
                     None => Inner::delete_object(
@@ -333,9 +336,14 @@ impl Inner {
                         precondition,
                         (marker.clone(), marking.replica()),
                     ),
-                    Some(id) => {
-                        Inner::delete_object_version(conn, &bucket, &key, id, precondition, bypass)
-                    }
+                    Some(id) => Inner::delete_object_version(
+                        conn,
+                        &bucket,
+                        &key,
+                        id,
+                        precondition,
+                        (bypass, removals.as_ref()),
+                    ),
                 })?;
                 Ok((Done::Deleted(deleted), files, Some(bucket)))
             }

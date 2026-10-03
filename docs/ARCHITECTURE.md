@@ -526,6 +526,13 @@ which `put_object` takes as a `Store::commit_replica` (the access check needs
 waits for the rules that replicate markers (`Inner::marker_attrs`); the worker sends it
 with `Store::commit_replica_marker`, or a `DeleteObject` naming its id with `MinIO`'s
 delete-marker headers, which `delete_object` takes the same way (`s3:ReplicateDelete`).
+Removing a version leaves nothing to carry a status, so a request's removal that the
+rules replicate (`ReplicationConfig::removal_destinations`: `MinIO`'s
+`DeleteReplication`, or a marker that was sent) queues a `replicated_deletes` row in the
+same transaction; the worker drains the queue after the versions
+(`Store::waiting_removals`, `Store::delete_replicated_version` on the same drive,
+`Target::send_removal` elsewhere), and `Marking::Lifecycle` and `Marking::Replicated`
+removals are never queued.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues
