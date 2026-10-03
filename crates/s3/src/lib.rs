@@ -56,6 +56,7 @@ mod operations_doc;
 mod post_form;
 mod proxy;
 mod quota;
+mod replica_headers;
 mod replication;
 mod replication_targets;
 mod replicator;

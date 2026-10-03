@@ -517,6 +517,11 @@ oldest first, and writes each with `Store::commit_replica`, which keeps the sour
 version id and time and is idempotent, so a retry after a crash writes nothing twice.
 Each destination's outcome is recorded with `Store::set_replication_status`; one that
 may get through later stays `PENDING` and holds back that key's newer versions.
+Targets on other S3 services (`replicator/remote.rs`) get an aws-sdk-s3 client per pass,
+signed with the target's unsealed keys, without SDK retries (the next pass retries) or
+`aws-chunked` framing; `replica_headers.rs` writes and reads `MinIO`'s replica headers,
+which `put_object` takes as a `Store::commit_replica` when the caller may
+`s3:ReplicateObject`.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

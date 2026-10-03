@@ -1210,8 +1210,17 @@ Lock settings, marked `REPLICA` and not replicated again. `x-amz-replication-sta
 on the source says `PENDING` until every destination has it, then `COMPLETED`, or
 `FAILED` when a destination can't take it (it was removed, its versioning suspended, or
 it's a folder bucket, which doesn't take replicas yet). Objects encrypted with SSE-C
-fail: the server never holds their keys. Copying to targets on other S3 services, and
-replicating deletes and existing objects, are still to come.
+fail: the server never holds their keys. Destinations on other S3 services are
+replication targets (below): each version goes there as a `PutObject` signed with the
+target's keys, streamed with its `Content-MD5`, or as a multipart upload above 5 GiB. A
+target that answers `4xx` (it refused the keys, or the bucket isn't there) fails the
+version; one that can't be reached, or answers `5xx`, has it tried again on later
+passes. Another TeiFS (or a `MinIO`) keeps the version's id, time and ETag when the
+target's keys may `s3:ReplicateObject` there as well as `s3:PutObject`; give the
+replicating user both. A `MinIO` replicates into TeiFS the same way, keeping its version
+ids, once `mc replicate add` on it names a TeiFS bucket. Versions encrypted with SSE-S3
+arrive encrypted as the target bucket's default says (a `MinIO` without a KMS stores
+them unencrypted); SSE-KMS versions ask for the rule's replica KMS key. Replicating deletes and existing objects is still to come.
 
 ### Replication targets
 

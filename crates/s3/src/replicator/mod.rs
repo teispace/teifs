@@ -4,9 +4,15 @@
 //! lost). A version a destination can't take is marked `FAILED`; one that may get
 //! through later stays `PENDING` and is tried again.
 
-use std::{sync::Arc, time::Duration};
+mod remote;
 
-use teifs_store::{Encryption, Replica, Store, StoreError, Waiting};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use teifs_store::{Encryption, ObjectBody, ObjectInfo, Replica, Store, StoreError, Waiting};
 use teifs_types::{
     SseMode,
     replication::{LOCAL_ARN, ReplicationConfig, ReplicationStatus},
@@ -27,15 +33,17 @@ pub(crate) struct Worker {
     store: Store,
     wake: Arc<Notify>,
     every: Duration,
+    /// The targets on other S3 services this pass sends to.
+    targets: Mutex<HashMap<String, Arc<remote::Target>>>,
 }
 
 /// Why a version didn't reach a destination.
 #[derive(Debug)]
 enum Missed {
     /// It never will as things are: the destination is missing or doesn't take replicas.
-    Failed(StoreError),
+    Failed(String),
     /// It may later: tried again on the next pass.
-    Later(StoreError),
+    Later(String),
 }
 
 impl From<StoreError> for Missed {
@@ -44,8 +52,8 @@ impl From<StoreError> for Missed {
             StoreError::NoSuchBucket
             | StoreError::InvalidRequest(_)
             | StoreError::CustomerKeyRequired
-            | StoreError::NoKms => Self::Failed(err),
-            err => Self::Later(err),
+            | StoreError::NoKms => Self::Failed(err.to_string()),
+            err => Self::Later(err.to_string()),
         }
     }
 }
@@ -57,6 +65,7 @@ impl Worker {
             store,
             wake,
             every: EVERY,
+            targets: Mutex::default(),
         }
     }
 
@@ -86,6 +95,8 @@ impl Worker {
                 return false;
             }
         };
+        // Targets are read again each pass, so changes to them count.
+        lock(&self.targets).clear();
         let mut again = false;
         for bucket in buckets {
             if stopping.is_cancelled() {
@@ -141,12 +152,7 @@ impl Worker {
                 continue;
             }
             let status = match self.send(bucket, config, version, arn).await {
-                Ok(true) => ReplicationStatus::Completed,
-                // Not sent yet (a destination this server can't reach yet).
-                Ok(false) => {
-                    held.push(arn.clone());
-                    continue;
-                }
+                Ok(()) => ReplicationStatus::Completed,
                 Err(Missed::Failed(err)) => {
                     tracing::warn!(bucket, key = %version.key, destination = %arn, error = %err, "a version can't be replicated");
                     ReplicationStatus::Failed
@@ -171,18 +177,14 @@ impl Worker {
         settled
     }
 
-    /// Copies a version to the destination `arn`; whether it was sent.
+    /// Copies a version to the destination `arn`; whether it was sent (or is gone).
     async fn send(
         &self,
         bucket: &str,
         config: &ReplicationConfig,
         version: &Waiting,
         arn: &str,
-    ) -> Result<bool, Missed> {
-        let Some(destination) = arn.strip_prefix(LOCAL_ARN) else {
-            // Other S3 services: not yet.
-            return Ok(false);
-        };
+    ) -> Result<(), Missed> {
         let (info, body) = match self
             .store
             .read_with(bucket, &version.key, Some(&version.version_id), None)
@@ -190,16 +192,66 @@ impl Worker {
         {
             Ok(read) => read,
             // Removed meanwhile: there's nothing left to send.
-            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => return Ok(true),
+            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => return Ok(()),
             Err(err) => return Err(err.into()),
         };
-        let replica_key = config
+        if info
+            .sse
+            .as_ref()
+            .is_some_and(|sse| sse.mode == SseMode::Customer)
+        {
+            return Err(Missed::Failed(
+                "the server doesn't hold an SSE-C object's key".to_owned(),
+            ));
+        }
+        let destination = config
             .rules
             .iter()
             .find(|rule| rule.destination.bucket == arn)
-            .and_then(|rule| rule.destination.encryption.as_ref())
-            .and_then(|encryption| encryption.kms_key.clone());
-        let encryption = match info.sse.as_ref().map(|sse| sse.mode) {
+            .map(|rule| &rule.destination);
+        let replica = Replica {
+            version_id: version.version_id.clone(),
+            modified_ms: info
+                .modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|since| i64::try_from(since.as_millis()).ok())
+                .unwrap_or_default(),
+            etag: Some(info.etag.clone()),
+        };
+        let sending = Sending {
+            store: &self.store,
+            bucket,
+            key: &version.key,
+            info,
+            body,
+            replica,
+            replica_key: destination
+                .and_then(|d| d.encryption.as_ref())
+                .and_then(|encryption| encryption.kms_key.clone()),
+            storage_class: destination.and_then(|d| d.storage_class.clone()),
+        };
+        if let Some(local) = arn.strip_prefix(LOCAL_ARN) {
+            self.local(local, sending).await?;
+        } else {
+            self.remote(arn).await?.send(sending).await?;
+        }
+        Ok(())
+    }
+
+    /// The target `arn` names, ready to send to (made once a pass).
+    async fn remote(&self, arn: &str) -> Result<Arc<remote::Target>, Missed> {
+        if let Some(target) = lock(&self.targets).get(arn) {
+            return Ok(Arc::clone(target));
+        }
+        let target = Arc::new(remote::Target::of(&self.store, arn).await?);
+        lock(&self.targets).insert(arn.to_owned(), Arc::clone(&target));
+        Ok(target)
+    }
+
+    /// Writes a replica into `destination`, a bucket on this drive.
+    async fn local(&self, destination: &str, sending: Sending<'_>) -> Result<(), Missed> {
+        let encryption = match sending.info.sse.as_ref().map(|sse| sse.mode) {
             // The destination's default, as a write without encryption headers gets.
             None => {
                 let default = self.store.bucket_encryption(destination).await?;
@@ -208,53 +260,71 @@ impl Worker {
             }
             Some(SseMode::S3) => Encryption::S3,
             Some(SseMode::Kms) => Encryption::Kms {
-                key: replica_key,
+                key: sending.replica_key,
                 context: std::collections::BTreeMap::new(),
                 bucket_key: false,
             },
-            Some(SseMode::Dsse) => Encryption::Dsse {
-                key: replica_key,
+            Some(SseMode::Dsse | SseMode::Customer) => Encryption::Dsse {
+                key: sending.replica_key,
                 context: std::collections::BTreeMap::new(),
             },
-            Some(SseMode::Customer) => return Err(Missed::Failed(StoreError::CustomerKeyRequired)),
         };
         let mut staged = self.store.stage_for(destination, &encryption).await?;
-        if let Some(body) = body {
+        if let Some(body) = sending.body {
             let mut reader = body.all().await?;
             let mut chunk = vec![0; CHUNK];
             loop {
                 let read = reader
                     .read(&mut chunk)
                     .await
-                    .map_err(|err| Missed::Later(StoreError::Io(err)))?;
+                    .map_err(|err| Missed::Later(err.to_string()))?;
                 if read == 0 {
                     break;
                 }
                 staged.write(&chunk[..read]).await?;
             }
         }
-        let modified_ms = info
-            .modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|since| i64::try_from(since.as_millis()).ok())
-            .unwrap_or_default();
-        let mut attrs = info.attrs;
+        let mut attrs = sending.info.attrs;
         attrs.replication = None;
         self.store
-            .commit_replica(
-                destination,
-                &version.key,
-                staged,
-                attrs,
-                Replica {
-                    version_id: version.version_id.clone(),
-                    modified_ms,
-                },
-            )
+            .commit_replica(destination, sending.key, staged, attrs, sending.replica)
             .await?;
-        Ok(true)
+        Ok(())
     }
+}
+
+/// A version on its way to a destination.
+struct Sending<'a> {
+    store: &'a Store,
+    bucket: &'a str,
+    key: &'a str,
+    info: ObjectInfo,
+    body: Option<ObjectBody>,
+    /// What the replica keeps of the version.
+    replica: Replica,
+    /// The KMS key the rule names for replicas of SSE-KMS versions.
+    replica_key: Option<String>,
+    /// The storage class the rule names for replicas.
+    storage_class: Option<String>,
+}
+
+impl Sending<'_> {
+    /// The version read again, for another pass over its bytes.
+    async fn reread(&self) -> Result<(ObjectInfo, Option<ObjectBody>), Missed> {
+        Ok(self
+            .store
+            .read_with(self.bucket, self.key, Some(&self.replica.version_id), None)
+            .await?)
+    }
+}
+
+/// The cache of targets, whatever a panic elsewhere left.
+fn lock(
+    targets: &Mutex<HashMap<String, Arc<remote::Target>>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, Arc<remote::Target>>> {
+    targets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

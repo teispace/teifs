@@ -4744,6 +4744,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "aws-lc-rs",
+ "aws-sdk-s3",
  "base64 0.23.1",
  "bytes",
  "flate2",

@@ -1,0 +1,285 @@
+//! Replication to a target on another S3 service, here a second TeiFS: the replica
+//! keeps the version's id, time, ETag and what describes it, when the target's keys
+//! may `s3:ReplicateObject`; keys that may only write fail the version.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers fail the test on any error"
+)]
+
+mod common;
+mod signing;
+
+use aws_sdk_s3::{
+    Client,
+    types::{
+        BucketVersioningStatus, DeleteMarkerReplication, DeleteMarkerReplicationStatus,
+        Destination, ReplicationConfiguration, ReplicationRule, ReplicationRuleFilter,
+        ReplicationRuleStatus, ReplicationStatus, VersioningConfiguration,
+    },
+};
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, start_with};
+use serde_json::json;
+use signing::signed_response;
+use teifs_crypto::madmin;
+use teifs_store::Layout;
+
+async fn object_server() -> Server {
+    start_with(|c| c.default_layout = Layout::Object).await
+}
+
+async fn versioned(s3: &Client, bucket: &str) {
+    s3.create_bucket().bucket(bucket).send().await.unwrap();
+    s3.put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// `source`'s target on `to` (its bucket `copy`), signed in with `keys`; its ARN.
+async fn target(from: &Server, to: &Server, keys: (&str, &str)) -> String {
+    let endpoint = to.endpoint.strip_prefix("http://").unwrap();
+    let target = json!({
+        "sourcebucket": "source",
+        "endpoint": endpoint,
+        "credentials": {"accessKey": keys.0, "secretKey": keys.1},
+        "targetbucket": "copy",
+        "secure": false,
+        "type": "replication",
+    });
+    let body = madmin::encrypt(SECRET_KEY, target.to_string().as_bytes());
+    let response = signed_response(
+        from,
+        (ACCESS_KEY, SECRET_KEY),
+        "PUT",
+        "/minio/admin/v3/set-remote-target?bucket=source",
+        &[],
+        &body,
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    response.json().await.unwrap()
+}
+
+/// Replicates every object of `source` to `arn`.
+async fn replicate(s3: &Client, arn: &str) {
+    let rule = ReplicationRule::builder()
+        .id("r")
+        .priority(1)
+        .status(ReplicationRuleStatus::Enabled)
+        .filter(ReplicationRuleFilter::builder().build())
+        .delete_marker_replication(
+            DeleteMarkerReplication::builder()
+                .status(DeleteMarkerReplicationStatus::Disabled)
+                .build(),
+        )
+        .destination(Destination::builder().bucket(arn).build().unwrap())
+        .build()
+        .unwrap();
+    s3.put_bucket_replication()
+        .bucket("source")
+        .replication_configuration(
+            ReplicationConfiguration::builder()
+                .role("")
+                .rules(rule)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// The replication status of `key`, once it's no longer `PENDING`.
+async fn settled(s3: &Client, key: &str) -> Option<ReplicationStatus> {
+    for _ in 0..400 {
+        let status = s3
+            .head_object()
+            .bucket("source")
+            .key(key)
+            .send()
+            .await
+            .unwrap()
+            .replication_status;
+        if status != Some(ReplicationStatus::Pending) {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Some(ReplicationStatus::Pending)
+}
+
+/// Two servers, the first's `source` replicating to the second's `copy` with its root
+/// keys; their clients (the servers stop when dropped).
+async fn replicating() -> ((Server, Server), Client, Client) {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    let arn = target(&from, &to, (ACCESS_KEY, SECRET_KEY)).await;
+    replicate(&source, &arn).await;
+    ((from, to), source, copy)
+}
+
+#[tokio::test]
+async fn versions_reach_another_teifs_as_they_are() {
+    let (_servers, source, copy) = replicating().await;
+
+    let put = source
+        .put_object()
+        .bucket("source")
+        .key("docs/a.txt")
+        .body(b"hello".to_vec().into())
+        .content_type("text/plain")
+        .cache_control("max-age=60")
+        .metadata("owner", "ana")
+        .tagging("team=red&year=2026")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "docs/a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    let head = source
+        .head_object()
+        .bucket("source")
+        .key("docs/a.txt")
+        .send()
+        .await
+        .unwrap();
+    let replica = copy
+        .get_object()
+        .bucket("copy")
+        .key("docs/a.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replica.version_id(), put.version_id());
+    assert_eq!(replica.replication_status, Some(ReplicationStatus::Replica));
+    assert_eq!(replica.last_modified(), head.last_modified());
+    assert_eq!(replica.e_tag(), head.e_tag());
+    assert_eq!(replica.content_type(), Some("text/plain"));
+    assert_eq!(replica.cache_control(), Some("max-age=60"));
+    assert_eq!(
+        replica
+            .metadata()
+            .and_then(|m| m.get("owner"))
+            .map(String::as_str),
+        Some("ana")
+    );
+    assert_eq!(replica.tag_count(), Some(2));
+    let body = replica.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"hello");
+}
+
+#[tokio::test]
+async fn empty_objects_and_uploads_in_parts_go_too() {
+    let (_servers, source, copy) = replicating().await;
+    // An upload's ETag (not its bytes' MD5) goes with it.
+    source
+        .put_object()
+        .bucket("source")
+        .key("empty")
+        .body(Vec::new().into())
+        .send()
+        .await
+        .unwrap();
+    let upload = source
+        .create_multipart_upload()
+        .bucket("source")
+        .key("parts")
+        .send()
+        .await
+        .unwrap();
+    let part = source
+        .upload_part()
+        .bucket("source")
+        .key("parts")
+        .upload_id(upload.upload_id().unwrap())
+        .part_number(1)
+        .body(vec![7; 1024].into())
+        .send()
+        .await
+        .unwrap();
+    let done = source
+        .complete_multipart_upload()
+        .bucket("source")
+        .key("parts")
+        .upload_id(upload.upload_id().unwrap())
+        .multipart_upload(
+            aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .parts(
+                    aws_sdk_s3::types::CompletedPart::builder()
+                        .part_number(1)
+                        .set_e_tag(part.e_tag)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    for key in ["empty", "parts"] {
+        assert_eq!(
+            settled(&source, key).await,
+            Some(ReplicationStatus::Completed),
+            "{key}"
+        );
+    }
+    let parts = copy
+        .head_object()
+        .bucket("copy")
+        .key("parts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parts.e_tag(), done.e_tag());
+    assert_eq!(parts.content_length(), Some(1024));
+}
+
+#[tokio::test]
+async fn keys_that_may_not_replicate_fail_the_version() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    // Writes, but not replicas.
+    to.iam.create_user("writer", None, &[], None).unwrap();
+    to.iam
+        .put_inline(
+            teifs_iam::Owner::User("writer"),
+            "policy",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}"#,
+        )
+        .unwrap();
+    let key = to.iam.create_access_key("writer").unwrap();
+    let arn = target(&from, &to, (key.info.id.as_str(), key.secret.as_str())).await;
+    replicate(&source, &arn).await;
+    source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Failed)
+    );
+    assert!(
+        copy.head_object()
+            .bucket("copy")
+            .key("a.txt")
+            .send()
+            .await
+            .is_err()
+    );
+}

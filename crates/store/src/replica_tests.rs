@@ -13,11 +13,14 @@ use super::*;
 
 const VERSION: &str = "0192f0a1b2c37d4e8f90a1b2c3d4e5f6";
 const MODIFIED_MS: i64 = 1_700_000_000_123;
+/// A multipart upload's ETag: not the replica's bytes' MD5.
+const ETAG: &str = "9b2cf535f27731c974343645a3985328-2";
 
 fn replica() -> Replica {
     Replica {
         version_id: VERSION.to_owned(),
         modified_ms: MODIFIED_MS,
+        etag: Some(ETAG.to_owned()),
     }
 }
 
@@ -74,6 +77,7 @@ async fn a_replica_keeps_its_versions_id_and_time_and_is_never_sent_on() {
         .unwrap();
     let info = send(&store, "copy", b"hello").await.unwrap();
     assert_eq!(info.version_id.as_deref(), Some(VERSION));
+    assert_eq!(info.etag, ETAG);
     assert_eq!(
         info.modified,
         UNIX_EPOCH + Duration::from_millis(MODIFIED_MS.try_into().unwrap())

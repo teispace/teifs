@@ -13,8 +13,11 @@ behaviour; the on-disk format is always upgraded automatically.
   Admin exports and imports carry them. New versions a rule takes are copied to buckets
   on the same drive by a background job, keeping their version ids, times, metadata,
   tags and Object Lock settings; `x-amz-replication-status` says where each stands
-  (`PENDING`, `COMPLETED`, `FAILED`, or `REPLICA` on the copy). Copying to other S3
-  services, delete replication and existing objects are still to come.
+  (`PENDING`, `COMPLETED`, `FAILED`, or `REPLICA` on the copy). Versions also go to
+  replication targets on other S3 services, streamed with their `Content-MD5`; another
+  TeiFS or a `MinIO` keeps their version ids through `MinIO`'s replica headers, which
+  TeiFS takes from callers allowed `s3:ReplicateObject`. Delete replication and
+  existing objects are still to come.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

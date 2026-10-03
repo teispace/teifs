@@ -246,6 +246,9 @@ pub struct Replica {
     pub version_id: String,
     /// When the version was made (Unix milliseconds).
     pub modified_ms: i64,
+    /// The version's ETag, kept when given (a multipart upload's, or an encrypted
+    /// object's, isn't the bytes' MD5); else the replica's own.
+    pub etag: Option<String>,
 }
 
 impl<'a> Finished<'a> {

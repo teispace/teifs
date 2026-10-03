@@ -803,6 +803,10 @@ impl Store {
             if !matches!(bucket, Bucket::Object(_)) {
                 staged.spill()?;
             }
+            let etag = replica
+                .as_ref()
+                .and_then(|replica| replica.etag.clone())
+                .unwrap_or(etag);
             let finished = Finished {
                 tmp: staged.path(),
                 held: staged.held(),

@@ -37,7 +37,7 @@ use crate::{
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     observe,
     post_form::{self, Form},
-    quota, replication,
+    quota, replica_headers, replication,
     request_metrics::RequestMetrics,
     sse::{self, set_sse},
     tagging, website,
@@ -365,6 +365,27 @@ impl Drive {
         self.store.head_version(bucket, key, version_id).await.s3()
     }
 
+    /// Records a write's staged bytes: as a replica of another server's version when
+    /// it is one (`pre` then doesn't count), else as a new version if `pre` holds.
+    async fn commit_write(
+        &self,
+        bucket: &str,
+        key: &str,
+        (staged, attrs): (Staged, ObjectAttrs),
+        pre: Precondition,
+        replica: Option<teifs_store::Replica>,
+    ) -> S3Result<ObjectInfo> {
+        match replica {
+            Some(replica) => {
+                self.store
+                    .commit_replica(bucket, key, staged, attrs, replica)
+                    .await
+            }
+            None => self.store.commit(bucket, key, staged, attrs, pre).await,
+        }
+        .s3()
+    }
+
     /// Writes an object for one of S3's deliveries (an access log, an inventory report)
     /// into its target, as its service: only if the target's policy or ACL lets the
     /// service in (when IAM decides requests), encrypted as the delivery asks over the
@@ -629,7 +650,7 @@ pub(crate) fn written_version(info: &ObjectInfo) -> Option<String> {
 }
 
 fn is_version_id(id: &str) -> bool {
-    id == NULL_VERSION || (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    id == NULL_VERSION || replica_headers::is_version_id(id)
 }
 
 /// Where a V1 listing (or a versions listing) resumes after `marker`. A marker ending in
@@ -1068,6 +1089,25 @@ fn read_lock(caller: Option<&access::Caller>, attrs: &ObjectAttrs) -> ReadLock {
     ReadLock::of(attrs, may(READ_RETENTION), may(READ_LEGAL_HOLD))
 }
 
+/// The replica of another server's version a write's headers ask for, if any: only
+/// for a caller who may `s3:ReplicateObject` (without IAM, anyone).
+fn replica_write(
+    headers: &http::HeaderMap,
+    extensions: &http::Extensions,
+    input: &dto::PutObjectInput,
+) -> S3Result<Option<teifs_store::Replica>> {
+    let replica = replica_headers::replica(headers, input.version_id.as_deref())?;
+    if replica.is_some()
+        && extensions.get::<access::Caller>().is_some_and(|caller| {
+            let arn = teifs_policy::object_arn(&input.bucket, &input.key);
+            !caller.allows(replica_headers::REPLICATE_OBJECT, &arn)
+        })
+    {
+        return Err(s3_error!(AccessDenied, "Access Denied"));
+    }
+    Ok(replica)
+}
+
 /// `x-amz-tagging-count`, when the object has tags.
 fn tag_count(attrs: &ObjectAttrs) -> Option<i32> {
     (!attrs.tags.is_empty()).then(|| i32::try_from(attrs.tags.len()).unwrap_or(i32::MAX))
@@ -1429,6 +1469,7 @@ impl S3 for Drive {
         let limit = caps::body_limit(input.content_length, cap)?;
         let tags = header_tags(input.tagging.as_deref())?;
         let lock = write_lock!(input)?;
+        let replica = replica_write(&req.headers, &req.extensions, &input)?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
         // S3 wants a locked object's bytes checked on the way in (a browser form has no
         // way to send a checksum header).
@@ -1500,10 +1541,8 @@ impl S3 for Drive {
         lock.apply(&mut attrs);
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
         let info = self
-            .store
-            .commit(&input.bucket, &input.key, staged, attrs, pre)
-            .await
-            .s3()?;
+            .commit_write(&input.bucket, &input.key, (staged, attrs), pre, replica)
+            .await?;
         let name = if req.extensions.get::<Form>().is_some() {
             "ObjectCreated:Post"
         } else {
