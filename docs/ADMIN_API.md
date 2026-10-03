@@ -75,6 +75,14 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `GET` | `/v20180820/tags/{resourceArn}` | A bucket's tags (`ListTagsForResource`) | `s3:ListTagsForResource` |
 | `POST` | `/v20180820/tags/{resourceArn}` | Adds tags to a bucket, or changes their values (`TagResource`), with ABAC too | `s3:TagResource` |
 | `DELETE` | `/v20180820/tags/{resourceArn}` | Removes a bucket's tags by key (`UntagResource`), with ABAC too | `s3:UntagResource` |
+| `POST` | `/v20180820/jobs/{id}/priority` | Changes a batch job's priority (`UpdateJobPriority`) | `s3:UpdateJobPriority` |
+| `POST` | `/v20180820/jobs/{id}/status` | Confirms a suspended batch job, or cancels one (`UpdateJobStatus`) | `s3:UpdateJobStatus` |
+| `GET` | `/v20180820/jobs/{id}/tagging` | A batch job's tags (`GetJobTagging`) | `s3:GetJobTagging` |
+| `PUT` | `/v20180820/jobs/{id}/tagging` | Replaces a batch job's tags (`PutJobTagging`) | `s3:PutJobTagging` |
+| `DELETE` | `/v20180820/jobs/{id}/tagging` | Removes a batch job's tags (`DeleteJobTagging`) | `s3:DeleteJobTagging` |
+| `GET` | `/v20180820/jobs/{id}` | A batch job: its operation, manifest, status and progress (`DescribeJob`) | `s3:DescribeJob` |
+| `POST` | `/v20180820/jobs` | Makes an S3 Batch Operations job, run as an IAM role (`CreateJob`) | `s3:CreateJob` |
+| `GET` | `/v20180820/jobs` | The account's batch jobs, newest first (`ListJobs`) | `s3:ListJobs` |
 
 ### IAM and STS
 

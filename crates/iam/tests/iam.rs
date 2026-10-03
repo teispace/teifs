@@ -1266,3 +1266,66 @@ async fn a_server_without_a_root_key_has_none_to_replace() {
     assert_eq!(code(result), "InvalidInput");
     assert!(iam.credential("TFNEWROOTKEY").is_none());
 }
+
+#[tokio::test]
+async fn a_service_assumes_only_the_roles_that_trust_it() {
+    let drive = Drive::new();
+    let iam = drive.open().await;
+    let account = iam.account();
+    let batch = "batchoperations.s3.amazonaws.com";
+    let trusting = |service: &str| {
+        format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"sts:AssumeRole",
+            "Principal":{{"Service":"{service}"}}}}]}}"#
+        )
+    };
+    let role = iam
+        .create_role(
+            "batch",
+            &NewRole {
+                trust: &trusting(batch),
+                max_session: Some(3600),
+                ..NewRole::default()
+            },
+        )
+        .unwrap();
+    iam.create_role(
+        "logs",
+        &NewRole {
+            trust: &trusting("logging.s3.amazonaws.com"),
+            ..NewRole::default()
+        },
+    )
+    .unwrap();
+
+    let issued = iam.service_session(&role.arn, batch, "job-1", 900).unwrap();
+    let identity = iam
+        .identify(&issued.access_key, Some(&issued.token))
+        .unwrap();
+    assert_eq!(
+        identity.principal().arn(),
+        Some(format!("arn:aws:sts::{account}:assumed-role/batch/job-1").as_str())
+    );
+    let lasts = i128::from(issued.expires) - identity.session().unwrap().issued().unix_seconds();
+    assert_eq!(lasts, 900);
+    // Never longer than the role allows.
+    let issued = iam
+        .service_session(&role.arn, batch, "job-1", 7200)
+        .unwrap();
+    let identity = iam
+        .identify(&issued.access_key, Some(&issued.token))
+        .unwrap();
+    let lasts = i128::from(issued.expires) - identity.session().unwrap().issued().unix_seconds();
+    assert_eq!(lasts, 3600);
+
+    let logs = format!("arn:aws:iam::{account}:role/logs");
+    assert_eq!(
+        code(iam.service_session(&logs, batch, "job-1", 900)),
+        "AccessDenied"
+    );
+    let missing = format!("arn:aws:iam::{account}:role/nobody");
+    assert_eq!(
+        code(iam.service_session(&missing, batch, "job-1", 900)),
+        "NoSuchEntity"
+    );
+}

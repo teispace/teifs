@@ -30,7 +30,7 @@ use crate::{
     access::{Client, allows, base_context, with_resource_tags},
     admin,
     bucket_access::Rules,
-    bucket_export, control,
+    bucket_export, control, control_jobs,
     errors::StoreResultExt,
     events::Events,
     iam_api, listen, minio_batch, minio_bucket_metadata, minio_config, minio_heal, minio_iam,
@@ -113,6 +113,9 @@ pub(crate) enum Needs {
     PerCall,
     /// Only the account's root user, whatever policies say.
     Root,
+    /// This action on the job the path names (on the account, for a new job), decided
+    /// by the handler once it read the job, with its S3 condition keys.
+    OnJob(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +145,7 @@ enum Handler {
     PutAccountBlock,
     DeleteAccountBlock,
     Tags(control::TagCallKind),
+    Jobs(control_jobs::Call),
     Info,
     Config,
     ExportIam,
@@ -222,6 +226,7 @@ impl Handler {
             Self::Tags(control::TagCallKind::List) => "ListTagsForResource",
             Self::Tags(control::TagCallKind::Tag) => "TagResource",
             Self::Tags(control::TagCallKind::Untag) => "UntagResource",
+            Self::Jobs(call) => call.name(),
             Self::Info => "GetServerInfo",
             Self::Config => "GetServerConfig",
             Self::ExportIam => "ExportIAM",
@@ -364,6 +369,70 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::OnBucket("s3:UntagResource"),
         handler: Handler::Tags(control::TagCallKind::Untag),
         about: "Removes a bucket's tags by key (`UntagResource`), with ABAC too",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Post,
+        path: control_jobs::PRIORITY,
+        needs: Needs::OnJob("s3:UpdateJobPriority"),
+        handler: Handler::Jobs(control_jobs::Call::Priority),
+        about: "Changes a batch job's priority (`UpdateJobPriority`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Post,
+        path: control_jobs::STATUS,
+        needs: Needs::OnJob("s3:UpdateJobStatus"),
+        handler: Handler::Jobs(control_jobs::Call::Status),
+        about: "Confirms a suspended batch job, or cancels one (`UpdateJobStatus`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Get,
+        path: control_jobs::TAGGING,
+        needs: Needs::OnJob("s3:GetJobTagging"),
+        handler: Handler::Jobs(control_jobs::Call::GetTagging),
+        about: "A batch job's tags (`GetJobTagging`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Put,
+        path: control_jobs::TAGGING,
+        needs: Needs::OnJob("s3:PutJobTagging"),
+        handler: Handler::Jobs(control_jobs::Call::PutTagging),
+        about: "Replaces a batch job's tags (`PutJobTagging`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Delete,
+        path: control_jobs::TAGGING,
+        needs: Needs::OnJob("s3:DeleteJobTagging"),
+        handler: Handler::Jobs(control_jobs::Call::DeleteTagging),
+        about: "Removes a batch job's tags (`DeleteJobTagging`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Get,
+        path: control_jobs::JOB,
+        needs: Needs::OnJob("s3:DescribeJob"),
+        handler: Handler::Jobs(control_jobs::Call::Describe),
+        about: "A batch job: its operation, manifest, status and progress (`DescribeJob`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Post,
+        path: control_jobs::JOBS,
+        needs: Needs::OnJob("s3:CreateJob"),
+        handler: Handler::Jobs(control_jobs::Call::Create),
+        about: "Makes an S3 Batch Operations job, run as an IAM role (`CreateJob`)",
+    },
+    Endpoint {
+        api: Api::Control,
+        verb: Verb::Get,
+        path: control_jobs::JOBS,
+        needs: Needs::Action("s3:ListJobs", ACCOUNT),
+        handler: Handler::Jobs(control_jobs::Call::List),
+        about: "The account's batch jobs, newest first (`ListJobs`)",
     },
     Endpoint {
         api: Api::Admin,
@@ -1427,7 +1496,8 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             | Needs::OrOwnKey(action)
             | Needs::NotDenied(action)
             | Needs::OrOwnAccount(action)
-            | Needs::OnKmsKey(action) => Some(action),
+            | Needs::OnKmsKey(action)
+            | Needs::OnJob(action) => Some(action),
             Needs::PerCall | Needs::Root | Needs::Signed | Needs::ServiceAction => None,
         },
         or_actions: match e.needs {
@@ -1478,19 +1548,24 @@ fn endpoint(api: Api, method: &Method, path: &str) -> Option<&'static Endpoint> 
         .find(|e| e.api == api && e.verb == verb && matches(e.path, &path))
 }
 
-/// Whether `path` is an endpoint's: the same, or, for a path ending in `{label}`s, one
-/// with a segment in each label's place (the last one taking the rest of the path).
+/// Whether `path` is an endpoint's: the same, or, for a path with `{label}`s, one with a
+/// segment in each label's place and the pattern's own segments after them (the last
+/// segment taking the rest of the path).
 fn matches(pattern: &str, path: &str) -> bool {
     let Some(start) = pattern.find('{') else {
         return pattern == path;
     };
-    let (prefix, labels) = pattern.split_at(start);
+    let (prefix, wanted) = pattern.split_at(start);
     let Some(rest) = path.strip_prefix(prefix) else {
         return false;
     };
-    let labels = labels.split('/').count();
-    let segments: Vec<&str> = rest.splitn(labels, '/').collect();
-    segments.len() == labels && segments.iter().all(|s| !s.is_empty())
+    let wanted: Vec<&str> = wanted.split('/').collect();
+    let segments: Vec<&str> = rest.splitn(wanted.len(), '/').collect();
+    segments.len() == wanted.len()
+        && wanted
+            .iter()
+            .zip(&segments)
+            .all(|(w, s)| !s.is_empty() && (w.starts_with('{') || w == s))
 }
 
 /// The route s3s hands everything but S3's operations to.
@@ -1636,8 +1711,8 @@ impl Routes {
             Api::Admin | Api::Minio => admin::not_found(),
             Api::Control | Api::Query => S3Error::with_message(
                 S3ErrorCode::NotImplemented,
-                "TeiFS serves the account's Block Public Access and buckets' tags from S3 \
-                 Control, and nothing else yet.",
+                "TeiFS serves the account's Block Public Access, buckets' tags and batch \
+                 jobs from S3 Control, and nothing else yet.",
             ),
         })?;
         observe::name(&req.extensions, endpoint.handler.name());
@@ -1708,7 +1783,8 @@ impl Routes {
                     .is_allowed()
             }
             Needs::Root => identity.is_root(),
-            Needs::Signed => true,
+            // Decided by the handler.
+            Needs::Signed | Needs::OnJob(_) => true,
             Needs::PerCall => false,
         };
         if !allowed {
@@ -1764,6 +1840,25 @@ impl Routes {
         .await
     }
 
+    /// S3 Control's batch jobs: the worker is woken when one may run.
+    async fn jobs(
+        &self,
+        call: control_jobs::Call,
+        req: S3Request<Body>,
+        (identity, context): (&Identity, &Context),
+    ) -> S3Result<S3Response<Body>> {
+        let caller = control_jobs::Caller {
+            identity,
+            context,
+            account: &self.iam.account(),
+        };
+        let (response, runs) = control_jobs::serve(call, &self.store, &caller, req).await?;
+        if runs {
+            self.batch.notify_one();
+        }
+        Ok(response)
+    }
+
     /// Calls an endpoint the caller may call, with what deciding it read: a tags call's
     /// bucket and call, or the bucket its query names.
     async fn call(
@@ -1786,6 +1881,7 @@ impl Routes {
                 let (bucket, call) = on_bucket.expect("decided as a call on a bucket");
                 call.call(&self.store, &self.rules, &bucket).await
             }
+            Handler::Jobs(call) => self.jobs(call, req, (identity, context)).await,
             Handler::Info => admin::info(&self.store, &self.iam, self.started).await,
             Handler::Config => admin::config(self.config.as_deref()),
             Handler::ExportIam => Ok(admin::export(&self.iam, false)),
@@ -2098,6 +2194,13 @@ mod tests {
         assert!(!matches(heal, "/minio/admin/v3/heal/"));
         assert!(matches("/minio/admin/v3/info", "/minio/admin/v3/info"));
         assert!(!matches("/minio/admin/v3/info", "/minio/admin/v3/info/x"));
+        // The pattern's own segments after a label must be there.
+        let priority = "/v20180820/jobs/{id}/priority";
+        assert!(matches(priority, "/v20180820/jobs/abc/priority"));
+        assert!(!matches(priority, "/v20180820/jobs/abc/status"));
+        assert!(!matches(priority, "/v20180820/jobs/abc/x/priority"));
+        assert!(!matches(priority, "/v20180820/jobs//priority"));
+        assert!(!matches(priority, "/v20180820/jobs/abc"));
         // The named form is listed first, so a name goes to it.
         let get = endpoint(
             Api::Minio,
@@ -2270,6 +2373,10 @@ mod tests {
                 Needs::OnBucket(action) => {
                     assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
                     assert!(matches!(e.handler, Handler::Tags(_)), "{e:?}");
+                }
+                Needs::OnJob(action) => {
+                    assert!(e.api == Api::Control && action.starts_with("s3:"), "{e:?}");
+                    assert!(matches!(e.handler, Handler::Jobs(_)), "{e:?}");
                 }
                 Needs::OnKmsKey(action) => {
                     assert!(e.path.starts_with(MINIO_KMS) && action.starts_with("kms:"));

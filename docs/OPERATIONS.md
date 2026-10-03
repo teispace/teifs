@@ -1459,6 +1459,52 @@ for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
 `admin:ListBatchJobs`, describing it `admin:DescribeBatchJob`, cancelling it
 `admin:CancelBatchJob`.
 
+### S3 Batch Operations
+
+AWS's S3 Batch Operations run through S3 Control, as `aws s3control` and the SDKs call
+it: a job runs one operation on every object a CSV manifest lists, as an IAM role. TeiFS
+runs `S3PutObjectTagging`, `S3DeleteObjectTagging`, `S3PutObjectLegalHold` and
+`S3PutObjectRetention`. Make the role first; it must trust the service, and its policies
+decide what each task may do (reading the manifest included):
+
+```sh
+aws iam create-role --role-name batch --assume-role-policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+    "Principal":{"Service":"batchoperations.s3.amazonaws.com"}}]}'
+aws iam put-role-policy --role-name batch --policy-name tag --policy-document \
+  '{"Version":"2012-10-17","Statement":[
+    {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::manifests/*"},
+    {"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::photos/*"}]}'
+
+# photos,2026/a.jpg       one object a line: bucket, URL-encoded key[, version]
+aws s3 cp manifest.csv s3://manifests/manifest.csv
+ETAG=$(aws s3api head-object --bucket manifests --key manifest.csv --query ETag --output text)
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+aws s3control create-job --account-id "$ACCOUNT" --priority 10 \
+  --role-arn "arn:aws:iam::$ACCOUNT:role/batch" --no-confirmation-required \
+  --operation '{"S3PutObjectTagging":{"TagSet":[{"Key":"team","Value":"blue"}]}}' \
+  --manifest "{\"Spec\":{\"Format\":\"S3BatchOperations_CSV_20180820\",\"Fields\":[\"Bucket\",\"Key\"]},
+    \"Location\":{\"ObjectArn\":\"arn:aws:s3:::manifests/manifest.csv\",\"ETag\":$ETAG}}" \
+  --report '{"Enabled":false}'
+aws s3control describe-job --account-id "$ACCOUNT" --job-id …
+aws s3control list-jobs --account-id "$ACCOUNT" --job-statuses Active Complete
+```
+
+The manifest is read, counted and checked first, at the ETag given: a changed manifest,
+or a line that names no bucket or key, fails the job. With `--confirmation-required` the
+job then waits as `Suspended` until `aws s3control update-job-status
+--requested-job-status Ready`; `Cancelled` stops one that hasn't ended. Jobs run one at a
+time by priority (`update-job-priority`), carry on after a restart, and end `Complete`
+with the tasks that failed counted, or `Failed` once at least 1,000 tasks ran and more
+than half failed. Making a job takes `s3:CreateJob` and `iam:PassRole` on its role;
+policies can test `s3:RequestJobPriority` and `s3:RequestJobOperation` then, and
+`s3:ExistingJobPriority` and `s3:ExistingJobOperation` on the job's other calls
+(`s3:DescribeJob`, `s3:UpdateJobPriority`, `s3:UpdateJobStatus`, `s3:GetJobTagging`,
+`s3:PutJobTagging`, `s3:DeleteJobTagging`; `s3:ListJobs` on the account), whose resource
+is `arn:aws:s3:us-east-1:ACCOUNT:job/ID`. Completion reports aren't written yet, so
+`Report` must say `Enabled: false`.
+
 ## Migrating from MinIO or another S3 service
 
 `teifs migrate SOURCE DEST` moves buckets from any S3 service to another, through the S3

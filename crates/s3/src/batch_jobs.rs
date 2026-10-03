@@ -1,5 +1,5 @@
-//! The batch worker: runs batch jobs ([`crate::minio_batch`]) one at a time, a page of
-//! keys per step, keeping each one's progress with it so a restart picks it up where
+//! The batch worker: runs batch jobs ([`crate::minio_batch`], and S3 Batch Operations'
+//! in [`crate::batch_operations`]) one at a time, a page of keys per step, keeping each one's progress with it so a restart picks it up where
 //! it was. The job running goes on until it ends; then the one with the highest
 //! priority, the oldest first. A job whose page fails as a whole (the drive, not one
 //! object) is tried again as its retries say, then fails. When a job ends, its result
@@ -12,7 +12,10 @@ use teifs_types::batch::{BatchJob, JobSpec, JobStatus};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::minio_batch::Ended;
+use crate::{
+    batch_operations::{self, Operations},
+    minio_batch::Ended,
+};
 
 /// How long the worker waits for a job when none is waiting.
 const IDLE: Duration = Duration::from_secs(30);
@@ -28,6 +31,8 @@ pub(crate) struct Worker {
     wake: Arc<Notify>,
     /// How many times in a row each job's pages failed.
     errors: std::sync::Mutex<HashMap<String, u32>>,
+    /// What runs S3 Batch Operations' tasks, with IAM.
+    operations: Option<Operations>,
 }
 
 impl Worker {
@@ -36,7 +41,13 @@ impl Worker {
             store,
             wake,
             errors: std::sync::Mutex::default(),
+            operations: None,
         }
+    }
+
+    /// Runs S3 Batch Operations' jobs too.
+    pub(crate) fn run_operations(&mut self, operations: Operations) {
+        self.operations = Some(operations);
     }
 
     /// Runs jobs until `stopping`.
@@ -69,7 +80,8 @@ impl Worker {
         };
         let mut job = jobs
             .into_iter()
-            .filter(|job| !job.status.finished())
+            // A suspended job waits for a person to confirm it.
+            .filter(|job| !job.status.finished() && job.status != JobStatus::Suspended)
             .max_by_key(|job| {
                 (
                     job.status == JobStatus::Active,
@@ -78,27 +90,12 @@ impl Worker {
                 )
             })?;
         let now = crate::admin::millis(std::time::SystemTime::now());
-        if job.status != JobStatus::Active {
+        if job.status != JobStatus::Active && !batch_operations::preparing(job.status) {
             job.status = JobStatus::Active;
             job.progress.started_ms = Some(now);
             tracing::info!(job = job.id, kind = job.spec.kind(), "a batch job started");
         }
-        let result = match job.spec.clone() {
-            JobSpec::Expire(expire) => self.store.expire_batch_page(&mut job, &expire).await,
-            JobSpec::KeyRotate(rotate) => self.store.rotate_batch_page(&mut job, &rotate).await,
-            JobSpec::Replicate(replicate) => match self.store.batch_job_secrets(&job.id).await {
-                Ok(secrets) => {
-                    Box::pin(crate::batch_replicate::page(
-                        &self.store,
-                        &mut job,
-                        &replicate,
-                        &secrets,
-                    ))
-                    .await
-                }
-                Err(err) => Err(err),
-            },
-        };
+        let result = Box::pin(self.page(&mut job)).await;
         let retry = job.spec.retry();
         let (attempts, delay) = (retry.attempts.max(1), retry.delay_ms);
         let pause = match result {
@@ -106,7 +103,8 @@ impl Worker {
                 self.errors_of(&job.id, false);
                 if done {
                     let failed = job.progress.objects_failed + job.progress.delete_markers_failed;
-                    job.status = if failed > 0 {
+                    // An S3 Batch Operations job completes with the tasks that failed.
+                    job.status = if failed > 0 && job.spec.is_minio() {
                         JobStatus::Failed
                     } else {
                         JobStatus::Complete
@@ -157,6 +155,32 @@ impl Worker {
             }
         }
         Some(pause)
+    }
+
+    /// Runs a page of `job`; whether it's done.
+    async fn page(&self, job: &mut BatchJob) -> Result<bool, StoreError> {
+        match job.spec.clone() {
+            JobSpec::Expire(expire) => self.store.expire_batch_page(job, &expire).await,
+            JobSpec::KeyRotate(rotate) => self.store.rotate_batch_page(job, &rotate).await,
+            JobSpec::Replicate(replicate) => {
+                let secrets = self.store.batch_job_secrets(&job.id).await?;
+                Box::pin(crate::batch_replicate::page(
+                    &self.store,
+                    job,
+                    &replicate,
+                    &secrets,
+                ))
+                .await
+            }
+            JobSpec::Operation(operation) => match &self.operations {
+                Some(operations) => {
+                    Box::pin(batch_operations::page(operations, job, &operation)).await
+                }
+                None => Err(StoreError::Io(std::io::Error::other(
+                    "S3 Batch Operations' jobs run only with IAM",
+                ))),
+            },
+        }
     }
 
     /// Counts a failed page of job `id` (`failed`), or forgets its failures; how many

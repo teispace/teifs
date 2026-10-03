@@ -311,11 +311,19 @@ async fn s3_control_is_told_apart_from_a_bucket() {
     let account = server.iam.account();
     let root_key = (ACCESS_KEY, SECRET_KEY);
     let headers = [("x-amz-account-id", account.as_str())];
-    let (status, answer) = signed(&server, root_key, "GET", "/v20180820/jobs", &headers, b"").await;
+    let (status, answer) = signed(
+        &server,
+        root_key,
+        "GET",
+        "/v20180820/accesspoint",
+        &headers,
+        b"",
+    )
+    .await;
     assert_eq!(status, 501, "{answer}");
     // Unsigned, even what isn't served is refused before anything else.
     let unsigned = reqwest::Client::new()
-        .get(format!("{}/v20180820/jobs", server.endpoint))
+        .get(format!("{}/v20180820/accesspoint", server.endpoint))
         .header("x-amz-account-id", account.as_str())
         .send()
         .await

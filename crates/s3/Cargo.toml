@@ -35,6 +35,8 @@ reqwest.workspace = true
 uuid.workspace = true
 aws-lc-rs.workspace = true
 aws-sdk-s3.workspace = true
+aws-smithy-runtime-api.workspace = true
+quick-xml = { workspace = true, features = ["serialize"] }
 http = "1"
 http-body = "1"
 mime = "0.3"

@@ -572,6 +572,19 @@ version and writes it with `Store::commit_replica`/`commit_replica_marker`. The 
 failures) is written back with `Store::update_batch_job`, which leaves a job cancelled
 meanwhile alone, so a restart resumes from the last page; an ended job's result is
 posted to its webhook.
+S3 Batch Operations (`control_jobs.rs`, `batch_operations.rs`, `loopback.rs`): S3
+Control's job calls make and change `JobSpec::Operation` jobs in the same table, each
+decided in `control_jobs` once its job or request is read (`Needs::OnJob`), so the job
+condition keys are in the context; `CreateJob` also needs `iam:PassRole` on the role. The
+worker skips `Suspended` jobs. For each page it asks IAM for a session of the job's role
+(`Iam::service_session`, which checks the role's trust policy for the service principal
+`batchoperations.s3.amazonaws.com`) and runs the job through an aws-sdk-s3 client whose
+HTTP client is `loopback::Loopback`: it calls the S3 service in-process
+(`s3s::service::S3Service`, set once the service is built), so every task and the
+manifest read are signed as the role and authorized like any request. A new job's
+manifest is read in 256 KiB ranged GETs pinned by `If-Match` (and its version), each
+line checked and counted (`progress.total`); then each page runs up to 100 tasks, 8 at a
+time, from `progress.offset`, the byte where the next line starts.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

@@ -8,6 +8,7 @@ mod admin;
 mod analytics;
 mod audit;
 mod batch_jobs;
+mod batch_operations;
 mod batch_replicate;
 mod bucket_access;
 mod bucket_export;
@@ -16,6 +17,7 @@ mod checksums;
 mod configs;
 mod console_log;
 mod control;
+mod control_jobs;
 mod cors;
 mod crc_combine;
 mod delivery;
@@ -31,6 +33,7 @@ mod limits;
 mod lines;
 mod listen;
 mod logging;
+mod loopback;
 mod metrics;
 mod minio_batch;
 mod minio_bucket_metadata;
@@ -206,6 +209,14 @@ fn tell_expirations(
     expirations
 }
 
+/// Who may scrape the metrics: those IAM allows, unless they're public.
+fn scrapers(iam: Option<&Arc<Iam>>, public: bool) -> metrics::Scrapers {
+    match iam {
+        Some(iam) if !public => metrics::Scrapers::Allowed(Arc::clone(iam)),
+        _ => metrics::Scrapers::Anyone,
+    }
+}
+
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
     let notifier = options
@@ -229,7 +240,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let interval = options
         .access_log_interval
         .unwrap_or(access_log::DEFAULT_INTERVAL);
-    let workers = Workers::new(
+    let mut workers = Workers::new(
         (&drive, &store),
         (records, Arc::clone(&access_log), interval),
         (answered, Arc::clone(&request_metrics)),
@@ -238,10 +249,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     let events = drive.events();
     let expirations = tell_expirations(&store, &events, &access_log);
     let rules = drive.rules();
-    let scrapers = match &options.iam {
-        Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
-        _ => metrics::Scrapers::Anyone,
-    };
+    let scrapers = scrapers(options.iam.as_ref(), options.public_metrics);
     let tracers = Arc::new(trace::Tracers::new());
     let watch = observe::Watch::new(
         metrics,
@@ -261,7 +269,9 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(s3_config(
         options.allow_sig_v2,
     )))));
+    let loopback = loopback::Loopback::default();
     if let Some(iam) = options.iam {
+        workers.run_operations(&iam, &loopback);
         builder.set_auth(access::Auth(iam.clone()));
         builder.set_access(access::Access::new(
             iam.clone(),
@@ -297,7 +307,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     }
     let host = set_host(&mut builder, &options.domains)?;
     Ok(Service::new(
-        builder.build(),
+        loopback.serving(builder.build()),
         store,
         host,
         options.body_timeout,

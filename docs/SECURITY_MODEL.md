@@ -120,6 +120,12 @@ or, for the IAM and STS Query APIs, the action each call names, which IAM decide
 field has no default, so an endpoint can't be added without it. S3 Control's calls on a
 bucket's tags are decided on the bucket, with its policy and ABAC tags and the tags or
 keys the call names, read (at most 64 KiB, and only as signed) before the decision.
+Its calls on batch jobs are decided once the job (or, for `CreateJob`, the signed
+request) is read, with the job condition keys; a job that doesn't exist is decided on
+its ARN alone first, so a caller without the action can't learn which jobs exist.
+`CreateJob` also needs `iam:PassRole` on the job's role, and the job's tasks run as
+that role (its trust policy must name `batchoperations.s3.amazonaws.com`) through the
+S3 API in-process, never with the creator's permissions or the server's.
 Their paths carry an ARN, which botocore signs as sent and AWS's other SDKs encode
 again first; s3s checks only the first, so a failed signature is checked once more
 with the path encoded again, before anything runs. The admin API's actions

@@ -7,11 +7,13 @@ use std::{
 };
 
 use teifs_meta::IamWrite;
+use teifs_policy::{Date, StsKey};
 
 use super::{TagKeys, by_name, checked_tags, merged, removed, under};
 use crate::{
-    Draft, Iam, IamError, Result, ids,
+    Draft, Iam, IamError, Identity, Issued, Result, ids,
     rules::{self, MAX_ROLES},
+    sessions::{Claims, Who, now_seconds},
     state::{Document, Role, State},
 };
 
@@ -208,6 +210,44 @@ impl Iam {
     /// Creates a role (`CreateRole`).
     pub fn create_role(&self, name: &str, new: &NewRole<'_>) -> Result<RoleInfo> {
         self.change(|d| d.create_role(name, new))
+    }
+
+    /// Temporary credentials for an AWS service acting as the role at `role_arn`, as
+    /// S3 Batch Operations runs a job's tasks: the role's trust policy must let the
+    /// `service` principal (`batchoperations.s3.amazonaws.com`) assume it. The session
+    /// lasts `seconds`, or the role's longest session if that's shorter.
+    pub fn service_session(
+        &self,
+        role_arn: &str,
+        service: &str,
+        session_name: &str,
+        seconds: u32,
+    ) -> Result<Issued> {
+        let role = self
+            .read(|s| Ok(s.id_of(role_arn).and_then(|id| s.roles.get(id)).cloned()))?
+            .ok_or_else(|| {
+                IamError::NoSuchEntity(format!("The role {role_arn} cannot be found."))
+            })?;
+        let identity = Identity::service(service);
+        let context = identity
+            .context(Date::from_unix_seconds(now_seconds()))
+            .with_sts(StsKey::RoleSessionName, session_name);
+        if !identity.allows_with(
+            &context,
+            "sts:AssumeRole",
+            role_arn,
+            Some(&role.trust.policy),
+        ) {
+            return Err(IamError::AccessDenied(format!(
+                "The role {role_arn} doesn't trust {service} to assume it."
+            )));
+        }
+        let who = Who::Role {
+            role: role.id.clone(),
+            name: session_name.to_owned(),
+            chained: false,
+        };
+        self.issue_at_least(&Claims::issued_now(who, seconds.min(role.max_session)), 0)
     }
 
     /// A role (`GetRole`).

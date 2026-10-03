@@ -57,6 +57,18 @@ behaviour; the on-disk format is always upgraded automatically.
   service's keys sealed by the KMS. Jobs run in the background one at a time,
   carry on after a restart, are retried as they say, and post their result to a
   webhook whose token is kept sealed by the KMS and hidden when a job is described.
+- S3 Batch Operations, with S3 Control's API (`aws s3control create-job`,
+  `describe-job`, `list-jobs`, `update-job-priority`, `update-job-status`, and
+  `get|put|delete-job-tagging`): a job runs one operation (`S3PutObjectTagging`,
+  `S3DeleteObjectTagging`, `S3PutObjectLegalHold` or `S3PutObjectRetention`) on every
+  object its CSV manifest lists, as the IAM role it names, which must trust
+  `batchoperations.s3.amazonaws.com`, so each task may do only what the role may. The
+  manifest is read, counted and checked first, pinned to its ETag; a job made with
+  `ConfirmationRequired` waits until it's confirmed; jobs run by priority, carry on
+  after a restart, and fail once at least 1,000 tasks ran and more than half of them
+  failed. Making one takes `s3:CreateJob` and `iam:PassRole` on its role, and policies
+  can test `s3:RequestJobPriority`, `s3:RequestJobOperation`, `s3:ExistingJobPriority`
+  and `s3:ExistingJobOperation`.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`
   and minio-go's empty filter elements, and `DeleteBucketReplication` answering `200`;
   MinIO's lifecycle and versioning extensions (`DelMarkerExpiration`,

@@ -110,6 +110,9 @@ pub enum JobSpec {
     /// Copies objects between a bucket here and one on another S3 service, either way
     /// (`MinIO`'s `replicate`).
     Replicate(ReplicateJob),
+    /// One operation on each object a manifest lists, as an IAM role (S3 Batch
+    /// Operations).
+    Operation(OperationJob),
 }
 
 impl JobSpec {
@@ -120,16 +123,25 @@ impl JobSpec {
             Self::Expire(_) => "expire",
             Self::KeyRotate(_) => "keyrotate",
             Self::Replicate(_) => "replicate",
+            Self::Operation(_) => "operation",
         }
     }
 
-    /// The bucket it works on: a `replicate` job's here.
+    /// Whether it's one of `MinIO`'s kinds, which `mc batch` lists; S3 Batch
+    /// Operations' jobs are listed apart.
+    #[must_use]
+    pub const fn is_minio(&self) -> bool {
+        !matches!(self, Self::Operation(_))
+    }
+
+    /// The bucket it works on: a `replicate` job's here, an operation's manifest's.
     #[must_use]
     pub fn bucket(&self) -> &str {
         match self {
             Self::Expire(job) => &job.bucket,
             Self::KeyRotate(job) => &job.bucket,
             Self::Replicate(job) => &job.here().bucket,
+            Self::Operation(job) => &job.manifest.bucket,
         }
     }
 
@@ -140,6 +152,7 @@ impl JobSpec {
             Self::Expire(job) => job.notify.as_ref(),
             Self::KeyRotate(job) => job.notify.as_ref(),
             Self::Replicate(job) => job.notify.as_ref(),
+            Self::Operation(_) => None,
         }
     }
 
@@ -150,6 +163,7 @@ impl JobSpec {
             Self::Expire(job) => job.retry,
             Self::KeyRotate(job) => job.retry,
             Self::Replicate(job) => job.retry,
+            Self::Operation(_) => JobRetry::DEFAULT,
         }
     }
 }
@@ -371,6 +385,138 @@ pub struct RemoteEnd {
     pub session_token: bool,
 }
 
+/// An S3 Batch Operations job: its operation, the manifest that lists its objects, and
+/// the role its tasks run as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationJob {
+    /// What it does to each object.
+    pub operation: Operation,
+    /// The objects.
+    pub manifest: Manifest,
+    /// The IAM role its tasks run as.
+    pub role_arn: String,
+    /// Its description.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Whether it waits for a person to confirm it before it runs.
+    #[serde(default)]
+    pub confirmation_required: bool,
+    /// The token that made it: the same request again makes no other.
+    pub client_token: String,
+    /// Its tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<KeyValue>,
+    /// Where its completion report goes, if anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<JobReport>,
+    /// Why its status last changed, when someone said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+}
+
+/// What an S3 Batch Operations job does to each object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Operation {
+    /// Replaces its tags (`S3PutObjectTagging`).
+    PutObjectTagging {
+        /// The tags.
+        #[serde(default)]
+        tags: Vec<KeyValue>,
+    },
+    /// Removes its tags (`S3DeleteObjectTagging`).
+    DeleteObjectTagging,
+    /// Puts a legal hold on it or takes it off (`S3PutObjectLegalHold`).
+    PutObjectLegalHold {
+        /// On or off.
+        on: bool,
+    },
+    /// Sets its retention (`S3PutObjectRetention`); without a mode, takes it off.
+    PutObjectRetention {
+        /// `GOVERNANCE` or `COMPLIANCE`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+        /// Until when (Unix milliseconds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_until_ms: Option<i64>,
+        /// Whether governance-mode retention may be shortened or taken off.
+        #[serde(default)]
+        bypass_governance: bool,
+    },
+}
+
+impl Operation {
+    /// Its name in S3 Control (`ListJobs`' `Operation`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::PutObjectTagging { .. } => "S3PutObjectTagging",
+            Self::DeleteObjectTagging => "S3DeleteObjectTagging",
+            Self::PutObjectLegalHold { .. } => "S3PutObjectLegalHold",
+            Self::PutObjectRetention { .. } => "S3PutObjectRetention",
+        }
+    }
+}
+
+/// The CSV object that lists an S3 Batch Operations job's objects
+/// (`S3BatchOperations_CSV_20180820`), pinned to the version it was when the job was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Manifest {
+    /// Its bucket.
+    pub bucket: String,
+    /// Its key.
+    pub key: String,
+    /// Its version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    /// Its `ETag`, quoted.
+    pub etag: String,
+    /// What each column is.
+    pub fields: Vec<ManifestField>,
+}
+
+/// A column of a manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManifestField {
+    /// Skipped.
+    Ignore,
+    /// The object's bucket.
+    Bucket,
+    /// The object's key, URL-encoded.
+    Key,
+    /// The object's version.
+    VersionId,
+}
+
+impl ManifestField {
+    /// Its name in S3 Control.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "Ignore",
+            Self::Bucket => "Bucket",
+            Self::Key => "Key",
+            Self::VersionId => "VersionId",
+        }
+    }
+}
+
+/// Where an S3 Batch Operations job's completion report goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobReport {
+    /// The bucket.
+    pub bucket: String,
+    /// The prefix its files go under (`job-{id}/` follows).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    /// Whether it lists failed tasks only.
+    #[serde(default)]
+    pub failed_only: bool,
+}
+
 /// A key and a value a condition needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyValue {
@@ -410,12 +556,17 @@ pub struct JobRetry {
     pub delay_ms: u64,
 }
 
+impl JobRetry {
+    /// Three runs, half a second apart.
+    pub const DEFAULT: Self = Self {
+        attempts: 3,
+        delay_ms: 500,
+    };
+}
+
 impl Default for JobRetry {
     fn default() -> Self {
-        Self {
-            attempts: 3,
-            delay_ms: 500,
-        }
+        Self::DEFAULT
     }
 }
 
@@ -460,6 +611,20 @@ pub struct JobProgress {
     /// How many times it ran again after failing as a whole.
     #[serde(default)]
     pub retry_attempts: u32,
+    /// How many tasks it has, once its manifest was read (an S3 Batch Operations job's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Where in its manifest it goes on, in bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: u64,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+const fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Whether `text` matches `pattern`, where `*` is any run of characters and `?` any one.

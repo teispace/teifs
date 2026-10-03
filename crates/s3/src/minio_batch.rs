@@ -112,6 +112,7 @@ impl Call {
             }
             Self::Cancel => {
                 let id = required(&req, "id")?;
+                job(store, &id).await?;
                 let cancel = |job: &mut BatchJob| job.status = JobStatus::Cancelled;
                 store
                     .update_batch_job(&id, cancel)
@@ -161,7 +162,13 @@ fn not_runnable(kind: &str) -> S3Error {
 }
 
 async fn job(store: &Store, id: &str) -> S3Result<BatchJob> {
-    store.batch_job(id).await.s3()?.ok_or_else(no_such_job)
+    // S3 Batch Operations' jobs are S3 Control's.
+    store
+        .batch_job(id)
+        .await
+        .s3()?
+        .filter(|job| job.spec.is_minio())
+        .ok_or_else(no_such_job)
 }
 
 /// `POST start-job` with a job in YAML: records it to run, answering its id.
@@ -227,6 +234,7 @@ async fn list(store: &Store, req: &S3Request<Body>) -> S3Result<S3Response<Body>
         .await
         .s3()?
         .iter()
+        .filter(|job| job.spec.is_minio())
         .filter(|job| kind.as_ref().is_none_or(|k| k == job.spec.kind()))
         .filter(|job| bucket.as_ref().is_none_or(|b| b == job.spec.bucket()))
         .map(JobResult::of)
@@ -376,7 +384,7 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 delete_markers: p.delete_markers,
                 delete_markers_failed: p.delete_markers_failed,
             }),
-            JobSpec::KeyRotate(_) | JobSpec::Replicate(_) => None,
+            JobSpec::KeyRotate(_) | JobSpec::Replicate(_) | JobSpec::Operation(_) => None,
         },
         rotation: match &job.spec {
             JobSpec::KeyRotate(rotate) => Some(RotationCounts {
@@ -385,7 +393,7 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 objects: p.objects,
                 objects_failed: p.objects_failed,
             }),
-            JobSpec::Expire(_) | JobSpec::Replicate(_) => None,
+            JobSpec::Expire(_) | JobSpec::Replicate(_) | JobSpec::Operation(_) => None,
         },
         replicate: match &job.spec {
             JobSpec::Replicate(replicate) => Some(ReplicateCounts {
@@ -398,7 +406,7 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 bytes_transferred: p.bytes,
                 bytes_failed: p.bytes_failed,
             }),
-            JobSpec::Expire(_) | JobSpec::KeyRotate(_) => None,
+            JobSpec::Expire(_) | JobSpec::KeyRotate(_) | JobSpec::Operation(_) => None,
         },
     }
 }
@@ -1275,6 +1283,7 @@ fn describe(job: &BatchJob) -> S3Result<String> {
         JobSpec::Expire(expire) => request.expire = Some(expire_yaml(expire)),
         JobSpec::KeyRotate(rotate) => request.keyrotate = Some(keyrotate_yaml(rotate)),
         JobSpec::Replicate(replicate) => request.replicate = Some(replicate_yaml(replicate)),
+        JobSpec::Operation(_) => unreachable!("S3 Control describes its own jobs"),
     }
     serde_saphyr::to_string(&request).map_err(S3Error::internal_error)
 }

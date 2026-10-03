@@ -12,9 +12,11 @@ use crate::{
     AccessLogWorker,
     access_log::{AccessLog, Record},
     analytics::{self, Activity},
-    batch_jobs,
+    batch_jobs, batch_operations,
     drive::Drive,
-    inventory, replicator,
+    inventory,
+    loopback::Loopback,
+    replicator,
     request_metrics::{self, Done, RequestMetrics},
 };
 
@@ -54,6 +56,15 @@ impl Workers {
                 .with_events(drive.events()),
             batch: batch_jobs::Worker::new(store.clone(), drive.batch_wake()),
         }
+    }
+
+    /// Runs S3 Batch Operations' jobs too, as roles IAM gives sessions of, through
+    /// `loopback`.
+    pub(crate) fn run_operations(&mut self, iam: &Arc<teifs_iam::Iam>, loopback: &Loopback) {
+        self.batch.run_operations(batch_operations::Operations {
+            iam: Arc::clone(iam),
+            loopback: loopback.clone(),
+        });
     }
 
     /// Runs every job until `stop`.
