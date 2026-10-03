@@ -41,7 +41,7 @@ fn everything_to(to: &str) -> ReplicationConfig {
             priority: Some(1),
             enabled: true,
             filter: ReplicationFilter::All,
-            delete_markers: Some(false),
+            delete_markers: Some(true),
             delete_replication: None,
             existing_objects: None,
             sse_kms_objects: None,
@@ -215,5 +215,87 @@ async fn a_folder_bucket_keeps_a_replicas_version_as_a_file() {
     assert!(
         matches!(folder, Err(StoreError::InvalidRequest(_))),
         "{folder:?}"
+    );
+}
+
+#[tokio::test]
+async fn markers_people_make_are_replicated_and_lifecycles_arent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    for bucket in ["source", "copy"] {
+        store.create_bucket(bucket, Layout::Object).await.unwrap();
+        store
+            .set_bucket_versioning(bucket, Versioning::Enabled)
+            .await
+            .unwrap();
+    }
+    store
+        .set_bucket_replication("source", Some(everything_to("copy")))
+        .await
+        .unwrap();
+    let status = |id: Option<String>| {
+        let store = store.clone();
+        async move {
+            let waiting = store.waiting_replication("source", 100).await.unwrap();
+            waiting
+                .into_iter()
+                .find(|w| Some(&w.version_id) == id.as_ref())
+                .map(|w| (w.delete_marker, w.destinations))
+        }
+    };
+    let marked = store
+        .delete_with("source", "a.txt", None, Precondition::default(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(marked.version_id).await,
+        Some((true, vec!["arn:aws:s3:::copy".to_owned()]))
+    );
+    let expired = store
+        .delete_marking(
+            "source",
+            "b.txt",
+            None,
+            Precondition::default(),
+            (false, Marking::Lifecycle),
+        )
+        .await
+        .unwrap();
+    assert!(expired.delete_marker);
+    assert_eq!(status(expired.version_id).await, None);
+
+    // The marker arrives with its id and time, once however often it's sent.
+    let replica = Replica {
+        version_id: VERSION.to_owned(),
+        modified_ms: MODIFIED_MS,
+        etag: None,
+    };
+    for _ in 0..2 {
+        let made = store
+            .commit_replica_marker("copy", "a.txt", replica.clone())
+            .await
+            .unwrap();
+        assert_eq!(made.version_id.as_deref(), Some(VERSION));
+    }
+    let versions = store
+        .list_versions(
+            "copy",
+            VersionsQuery {
+                max_keys: 1000,
+                ..VersionsQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.versions.len(), 1);
+    let made = &versions.versions[0];
+    assert!(made.delete_marker);
+    assert_eq!(
+        made.info.modified,
+        UNIX_EPOCH + Duration::from_millis(MODIFIED_MS.try_into().unwrap())
+    );
+    assert_eq!(
+        made.info.attrs.replication.as_ref().map(|r| r.status),
+        Some(ReplicationStatus::Replica)
     );
 }

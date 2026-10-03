@@ -7,6 +7,7 @@
     reason = "test helpers fail the test on any error"
 )]
 
+#[macro_use]
 mod common;
 mod signing;
 
@@ -679,3 +680,96 @@ async fn folder_buckets_replicate_and_take_replicas() {
     let file = server.dir.path().join("copy").join("docs").join("a.txt");
     assert_eq!(std::fs::read(file).unwrap(), b"two");
 }
+
+/// The delete markers of `bucket`, once there are `count` (or after a while).
+async fn markers(s3: &Client, bucket: &str, count: usize) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for _ in 0..200 {
+        let listed = s3
+            .list_object_versions()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap();
+        found = listed
+            .delete_markers()
+            .iter()
+            .map(|m| {
+                (
+                    m.key().unwrap().to_owned(),
+                    m.version_id().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        if found.len() >= count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    found.sort();
+    found
+}
+
+async fn deleted_in_both_layouts(layout: Layout) {
+    let server = start_with(|c| c.default_layout = layout).await;
+    let s3 = client(&server, SECRET_KEY);
+    buckets(&s3).await;
+    let markers_too = rule("markers", 1)
+        .filter(ReplicationRuleFilter::builder().prefix("docs/").build())
+        .delete_marker_replication(
+            DeleteMarkerReplication::builder()
+                .status(DeleteMarkerReplicationStatus::Enabled)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    put(
+        &s3,
+        config(vec![markers_too, rule("rest", 2).build().unwrap()]),
+    )
+    .await
+    .unwrap();
+    for key in ["docs/a.txt", "photos/b.jpg"] {
+        s3.put_object()
+            .bucket("source")
+            .key(key)
+            .body(b"hello".to_vec().into())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&s3, "source", key).await.as_deref(),
+            Some("COMPLETED")
+        );
+    }
+    let mut made = Vec::new();
+    for key in ["docs/a.txt", "photos/b.jpg"] {
+        let deleted = s3
+            .delete_object()
+            .bucket("source")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        made.push((key.to_owned(), deleted.version_id().unwrap().to_owned()));
+    }
+    // Only the rule that replicates markers sends one, with its id.
+    assert_eq!(markers(&s3, "copy", 1).await, [made[0].clone()]);
+    let gone = s3
+        .head_object()
+        .bucket("copy")
+        .key("docs/a.txt")
+        .send()
+        .await;
+    assert!(gone.is_err());
+    assert!(
+        s3.head_object()
+            .bucket("copy")
+            .key("photos/b.jpg")
+            .send()
+            .await
+            .is_ok()
+    );
+}
+
+in_both_layouts!(deleted_in_both_layouts);

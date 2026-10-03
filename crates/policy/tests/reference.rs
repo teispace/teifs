@@ -89,6 +89,9 @@ fn every_facts() -> impl Iterator<Item = Facts> {
             object_lock: bit(7),
             ownership: bit(8),
             bucket_tags: bit(9),
+            // MinIO's replication requests (not S3's), checked on their own below.
+            replication: false,
+            replica_marker: false,
         }
     })
 }
@@ -228,6 +231,49 @@ fn versions_tags_and_locks_change_the_action() {
             ("s3:DeleteObject", Target::Object, true),
             ("s3:BypassGovernanceRetention", Target::Object, true)
         ]
+    );
+}
+
+#[test]
+fn replicas_from_another_server_need_minios_replication_actions() {
+    let none = Facts::default();
+    let replication = Facts {
+        replication: true,
+        ..none
+    };
+    assert_eq!(
+        actions("PutObject", replication),
+        [
+            ("s3:PutObject", Target::Object, true),
+            ("s3:ReplicateObject", Target::Object, true)
+        ]
+    );
+    // A replicated delete marker names its id, but removes no version.
+    assert_eq!(
+        actions(
+            "DeleteObject",
+            Facts {
+                version_id: true,
+                replica_marker: true,
+                ..replication
+            }
+        ),
+        [
+            ("s3:DeleteObject", Target::Object, true),
+            ("s3:ReplicateDelete", Target::Object, true)
+        ]
+    );
+    // The marker header alone, from anyone else, changes nothing.
+    assert_eq!(
+        actions(
+            "DeleteObject",
+            Facts {
+                version_id: true,
+                replica_marker: true,
+                ..none
+            }
+        ),
+        [("s3:DeleteObjectVersion", Target::Object, true)]
     );
 }
 

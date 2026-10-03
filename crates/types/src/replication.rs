@@ -291,6 +291,23 @@ impl ReplicationConfig {
         }
         found
     }
+
+    /// The destinations a delete marker of `key` goes to: those of the enabled rules
+    /// that replicate delete markers and take the key (a marker has no tags, and S3
+    /// refuses marker replication in rules that filter by tag), each once.
+    #[must_use]
+    pub fn marker_destinations(&self, key: &str) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if rule.replicates_delete_markers()
+                && rule.matches(key, &BTreeMap::new(), false)
+                && !found.contains(&rule.destination.bucket)
+            {
+                found.push(rule.destination.bucket.clone());
+            }
+        }
+        found
+    }
 }
 
 impl ReplicationRule {
@@ -410,5 +427,29 @@ mod tests {
         let tagged = rule(ReplicationFilter::Tag(tag.clone()), None);
         assert_eq!(tagged.tags(), [tag]);
         assert_eq!(tagged.prefix(), "");
+    }
+
+    #[test]
+    fn markers_go_where_rules_that_replicate_them_send_the_key() {
+        let mut other = rule(ReplicationFilter::Prefix("docs/".to_owned()), Some(true));
+        other.destination.bucket = "arn:aws:s3:::other".to_owned();
+        let config = ReplicationConfig {
+            role: String::new(),
+            rules: vec![
+                rule(ReplicationFilter::All, Some(false)),
+                other.clone(),
+                ReplicationRule {
+                    enabled: false,
+                    ..rule(ReplicationFilter::All, Some(true))
+                },
+            ],
+        };
+        assert_eq!(config.marker_destinations("docs/a"), ["arn:aws:s3:::other"]);
+        assert!(config.marker_destinations("photos/a").is_empty());
+        // Versions go to both.
+        assert_eq!(
+            config.destinations("docs/a", &BTreeMap::new(), false),
+            ["arn:aws:s3:::copy", "arn:aws:s3:::other"]
+        );
     }
 }

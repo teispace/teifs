@@ -185,6 +185,9 @@ impl Worker {
         version: &Waiting,
         arn: &str,
     ) -> Result<(), Missed> {
+        if version.delete_marker {
+            return self.send_marker(version, arn).await;
+        }
         let (info, body) = match self
             .store
             .read_with(bucket, &version.key, Some(&version.version_id), None)
@@ -211,12 +214,7 @@ impl Worker {
             .map(|rule| &rule.destination);
         let replica = Replica {
             version_id: version.version_id.clone(),
-            modified_ms: info
-                .modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|since| i64::try_from(since.as_millis()).ok())
-                .unwrap_or_default(),
+            modified_ms: millis(info.modified),
             etag: Some(info.etag.clone()),
         };
         let sending = Sending {
@@ -235,6 +233,27 @@ impl Worker {
             self.local(local, sending).await?;
         } else {
             self.remote(arn).await?.send(sending).await?;
+        }
+        Ok(())
+    }
+
+    /// Copies a delete marker to the destination `arn`: there too, the key's current
+    /// version becomes a marker (with this one's id and time, where that's kept).
+    async fn send_marker(&self, version: &Waiting, arn: &str) -> Result<(), Missed> {
+        let replica = Replica {
+            version_id: version.version_id.clone(),
+            modified_ms: millis(version.modified),
+            etag: None,
+        };
+        if let Some(local) = arn.strip_prefix(LOCAL_ARN) {
+            self.store
+                .commit_replica_marker(local, &version.key, replica)
+                .await?;
+        } else {
+            self.remote(arn)
+                .await?
+                .send_marker(&version.key, &replica)
+                .await?;
         }
         Ok(())
     }
@@ -318,6 +337,14 @@ impl Sending<'_> {
     }
 }
 
+/// A time as Unix milliseconds.
+fn millis(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or_default()
+}
+
 /// The cache of targets, whatever a panic elsewhere left.
 fn lock(
     targets: &Mutex<HashMap<String, Arc<remote::Target>>>,
@@ -345,7 +372,7 @@ mod tests {
                 priority: Some(1),
                 enabled: true,
                 filter: ReplicationFilter::All,
-                delete_markers: Some(false),
+                delete_markers: Some(true),
                 delete_replication: None,
                 existing_objects: None,
                 sse_kms_objects: None,
@@ -365,6 +392,11 @@ mod tests {
 
     /// A drive (with a KMS, as a server has) whose `source` replicates to `copy`.
     async fn replicating() -> (tempfile::TempDir, Store) {
+        replicating_in(Layout::Object).await
+    }
+
+    /// As [`replicating`], with buckets of `layout`.
+    async fn replicating_in(layout: Layout) -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let kms = Arc::new(teifs_crypto::LocalKms::open(dir.path().join("keys.json")).unwrap());
         let drive = dir.path().join("drive");
@@ -375,7 +407,7 @@ mod tests {
         };
         let store = Store::open_with(&drive, options).unwrap();
         for bucket in ["source", "copy"] {
-            store.create_bucket(bucket, Layout::Object).await.unwrap();
+            store.create_bucket(bucket, layout).await.unwrap();
             store
                 .set_bucket_versioning(bucket, Versioning::Enabled)
                 .await
@@ -448,5 +480,39 @@ mod tests {
         let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
         worker.pass(&CancellationToken::new()).await;
         assert!(store.head_version("copy", "a.txt", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_markers_are_sent_once_in_either_layout() {
+        for layout in [Layout::Object, Layout::Folder] {
+            let (_dir, store) = replicating_in(layout).await;
+            put(&store, "a.txt", b"one").await;
+            let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
+            let stopping = CancellationToken::new();
+            worker.pass(&stopping).await;
+            let marker = store
+                .delete_with("source", "a.txt", None, Precondition::default(), false)
+                .await
+                .unwrap()
+                .version_id
+                .unwrap();
+            let waiting = store.waiting_replication("source", BATCH).await.unwrap();
+            assert_eq!(waiting.len(), 1, "{layout:?}");
+            assert!(waiting[0].delete_marker);
+            worker.pass(&stopping).await;
+            // Sent, and recorded so: it waits no more.
+            assert!(
+                store
+                    .waiting_replication("source", BATCH)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{layout:?}"
+            );
+            assert!(matches!(
+                store.head_version("copy", "a.txt", Some(&marker)).await,
+                Err(StoreError::DeleteMarker { .. })
+            ));
+        }
     }
 }

@@ -239,6 +239,28 @@ pub(crate) struct Finished<'a> {
     pub replica: Option<Replica>,
 }
 
+/// Who makes a delete marker, which decides whether it's replicated.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum Marking {
+    /// A request's delete: replicated as the bucket's rules say.
+    #[default]
+    Request,
+    /// A lifecycle expiration: never replicated, as on S3.
+    Lifecycle,
+    /// A replicated marker: it keeps the source marker's id and time.
+    Replica(Replica),
+}
+
+impl Marking {
+    /// The replicated marker's identity, when it's one.
+    pub(crate) fn replica(&self) -> Option<&Replica> {
+        match self {
+            Self::Replica(replica) => Some(replica),
+            Self::Request | Self::Lifecycle => None,
+        }
+    }
+}
+
 /// What a replica keeps of the version it copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Replica {
@@ -752,7 +774,13 @@ impl Inner {
         bucket: &ObjectBucket,
         key: &str,
         precondition: &Precondition,
+        (attrs, replica): (ObjectAttrs, Option<&Replica>),
     ) -> Result<(Deleted, Vec<String>)> {
+        if replica.is_some() && bucket.versioning != Versioning::Enabled {
+            return Err(StoreError::InvalidRequest(
+                "a replica needs a bucket with versioning enabled",
+            ));
+        }
         let current = Inner::object_row(conn, bucket, key)?.map(|row| to_info(&row));
         let exists = precondition.check_delete(current.as_ref())?;
         if bucket.versioning == Versioning::Unversioned {
@@ -770,13 +798,13 @@ impl Inner {
         let marker = VersionRow {
             bucket_id: bucket.id.clone(),
             key: key.to_owned(),
-            version_id: bucket.new_version_id(),
+            version_id: replica.map_or_else(|| bucket.new_version_id(), |r| r.version_id.clone()),
             delete_marker: true,
             object_id: None,
             size: 0,
             etag: String::new(),
-            modified_ms: now,
-            attrs: ObjectAttrs::default(),
+            modified_ms: replica.map_or(now, |r| r.modified_ms),
+            attrs,
             crypt: None,
             parts: None,
             inline: None,

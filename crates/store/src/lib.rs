@@ -101,7 +101,7 @@ pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 
 use error::not_found_as;
 use folder::{FolderBucket, Found};
-use objects::{BUCKETS_DIR, Finished, ObjectBucket};
+use objects::{BUCKETS_DIR, Finished, Marking, ObjectBucket};
 pub use objects::{Deleted, INLINE_MAX, Replica};
 use staged::{TmpFile, sync_dir};
 
@@ -1077,6 +1077,61 @@ impl Store {
         precondition: Precondition,
         bypass: bool,
     ) -> Result<Deleted> {
+        self.delete_marking(
+            bucket,
+            key,
+            version_id,
+            precondition,
+            (bypass, Marking::Request),
+        )
+        .await
+    }
+
+    /// Records a delete marker replicated from another bucket: it keeps that marker's id
+    /// and time, and isn't replicated again. Only a bucket with versioning enabled takes
+    /// it; a marker already there is left as it is.
+    pub async fn commit_replica_marker(
+        &self,
+        bucket: &str,
+        key: &str,
+        replica: Replica,
+    ) -> Result<Deleted> {
+        let named = |version_id: String| Deleted {
+            version_id: Some(version_id),
+            delete_marker: true,
+        };
+        match self
+            .head_version(bucket, key, Some(&replica.version_id))
+            .await
+        {
+            Err(StoreError::DeleteMarker { .. }) => return Ok(named(replica.version_id)),
+            Ok(_) => {
+                return Err(StoreError::InvalidRequest(
+                    "a version with the marker's id is there",
+                ));
+            }
+            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => {}
+            Err(err) => return Err(err),
+        }
+        self.delete_marking(
+            bucket,
+            key,
+            None,
+            Precondition::default(),
+            (false, Marking::Replica(replica)),
+        )
+        .await
+    }
+
+    /// Deletes as [`Store::delete_with`] does; a delete marker it makes is `marking`'s.
+    pub(crate) async fn delete_marking(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        precondition: Precondition,
+        (bypass, marking): (bool, Marking),
+    ) -> Result<Deleted> {
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
         let version_id = version_id.map(str::to_owned);
         self.blocking(move |inner| {
@@ -1087,7 +1142,7 @@ impl Store {
                     &key,
                     version_id.as_deref(),
                     precondition.clone(),
-                    bypass,
+                    (bypass, marking.clone()),
                 )
             };
             if let Bucket::Object(found) = inner.bucket(&bucket)? {
@@ -1116,6 +1171,7 @@ impl Store {
                             versions,
                             &key,
                             &precondition,
+                            &marking,
                         ),
                         (None, None) => {
                             let current = match Inner::find(&bucket.dir, &key)? {

@@ -106,6 +106,14 @@ impl Drive {
         }
     }
 
+    /// Wakes the replication worker when `name` happened to a version it may send: one
+    /// was written, or a delete marker made.
+    fn wake_replication(&self, name: &str) {
+        if name.starts_with("ObjectCreated:") || name == MARKED {
+            self.replication.notify_one();
+        }
+    }
+
     /// What wakes the replication worker.
     pub(crate) fn replication_wake(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.replication)
@@ -138,9 +146,7 @@ impl Drive {
         bucket: &str,
         happened: Happened,
     ) {
-        if name.starts_with("ObjectCreated:") {
-            self.replication.notify_one();
-        }
+        self.wake_replication(name);
         self.events
             .happened(extensions, name, bucket, vec![happened])
             .await;
@@ -1089,25 +1095,6 @@ fn read_lock(caller: Option<&access::Caller>, attrs: &ObjectAttrs) -> ReadLock {
     ReadLock::of(attrs, may(READ_RETENTION), may(READ_LEGAL_HOLD))
 }
 
-/// The replica of another server's version a write's headers ask for, if any: only
-/// for a caller who may `s3:ReplicateObject` (without IAM, anyone).
-fn replica_write(
-    headers: &http::HeaderMap,
-    extensions: &http::Extensions,
-    input: &dto::PutObjectInput,
-) -> S3Result<Option<teifs_store::Replica>> {
-    let replica = replica_headers::replica(headers, input.version_id.as_deref())?;
-    if replica.is_some()
-        && extensions.get::<access::Caller>().is_some_and(|caller| {
-            let arn = teifs_policy::object_arn(&input.bucket, &input.key);
-            !caller.allows(replica_headers::REPLICATE_OBJECT, &arn)
-        })
-    {
-        return Err(s3_error!(AccessDenied, "Access Denied"));
-    }
-    Ok(replica)
-}
-
 /// `x-amz-tagging-count`, when the object has tags.
 fn tag_count(attrs: &ObjectAttrs) -> Option<i32> {
     (!attrs.tags.is_empty()).then(|| i32::try_from(attrs.tags.len()).unwrap_or(i32::MAX))
@@ -1469,7 +1456,9 @@ impl S3 for Drive {
         let limit = caps::body_limit(input.content_length, cap)?;
         let tags = header_tags(input.tagging.as_deref())?;
         let lock = write_lock!(input)?;
-        let replica = replica_write(&req.headers, &req.extensions, &input)?;
+        // Another server's replica keeps its version (the access check made sure the
+        // caller may `s3:ReplicateObject`).
+        let replica = replica_headers::replica(&req.headers, input.version_id.as_deref())?;
         let mut sent = checksums::from_dto(&checksum_of!(input));
         // S3 wants a locked object's bytes checked on the way in (a browser form has no
         // way to send a checksum header).
@@ -3006,14 +2995,30 @@ impl S3 for Drive {
                 .map(to_system_time),
             ..precondition(input.if_match.as_ref(), None)
         };
-        // The access check made sure the caller may bypass governance when it asks.
+        // The access check made sure the caller may bypass governance when it asks, and
+        // `s3:ReplicateDelete` for another server's delete marker.
         let bypass = input.bypass_governance_retention == Some(true);
-        let deleted = self
-            .store
-            .delete_with(&input.bucket, &input.key, version_id, precondition, bypass)
-            .await
-            .s3()?;
-        let (name, happened) = removed(&input.key, input.version_id.as_deref(), &deleted);
+        let marker = replica_headers::marker(&req.headers, version_id)?;
+        // A replicated marker names its id, but no version is removed.
+        let named = if marker.is_some() {
+            None
+        } else {
+            input.version_id.as_deref()
+        };
+        let deleted = match marker {
+            Some(replica) => {
+                self.store
+                    .commit_replica_marker(&input.bucket, &input.key, replica)
+                    .await
+            }
+            None => {
+                self.store
+                    .delete_with(&input.bucket, &input.key, version_id, precondition, bypass)
+                    .await
+            }
+        }
+        .s3()?;
+        let (name, happened) = removed(&input.key, named, &deleted);
         self.notify(&req.extensions, name, &input.bucket, happened)
             .await;
         Ok(S3Response::new(dto::DeleteObjectOutput {
@@ -3103,6 +3108,9 @@ impl S3 for Drive {
                     version_id: object.version_id,
                 }),
             }
+        }
+        if !markers.is_empty() {
+            self.wake_replication(MARKED);
         }
         for (name, objects) in [(REMOVED, removals), (MARKED, markers)] {
             self.events

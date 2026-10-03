@@ -26,7 +26,7 @@ use crate::{
     },
     lock::check_removal,
     md5_file, now_ms,
-    objects::ObjectBucket,
+    objects::{Marking, ObjectBucket},
     staged::{Publish, TmpFile, publish},
 };
 
@@ -238,7 +238,15 @@ impl Inner {
         versions: &ObjectBucket,
         key: &ObjectKey,
         precondition: &Precondition,
+        marking: &Marking,
     ) -> Result<Deleted> {
+        let replica = marking.replica();
+        if replica.is_some() && bucket.versioning() != Versioning::Enabled {
+            return Err(StoreError::InvalidRequest(
+                "a replica needs a bucket with versioning enabled",
+            ));
+        }
+        let attrs = self.marker_attrs(versions, key.as_str(), marking)?;
         let found = Inner::find(&bucket.dir, key)?;
         let current = match &found {
             Found::File(_, meta) | Found::Folder(_, meta) => {
@@ -254,7 +262,10 @@ impl Inner {
         if (!exists && precondition.is_conditional()) || matches!(found, Found::Other) {
             return Ok(Deleted::default());
         }
-        let marker_id = bucket.new_version_id();
+        let marker_id = match replica {
+            Some(replica) => Some(replica.version_id.clone()),
+            None => bucket.new_version_id(),
+        };
         if let Found::File(path, meta) = &found {
             let keep = marker_id.is_some()
                 || current
@@ -273,8 +284,8 @@ impl Inner {
             object_id: None,
             size: 0,
             etag: String::new(),
-            modified_ms: now,
-            attrs: ObjectAttrs::default(),
+            modified_ms: replica.map_or(now, |r| r.modified_ms),
+            attrs,
             crypt: None,
             parts: None,
             inline: None,

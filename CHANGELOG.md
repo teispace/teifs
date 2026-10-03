@@ -16,7 +16,9 @@ behaviour; the on-disk format is always upgraded automatically.
   (`PENDING`, `COMPLETED`, `FAILED`, or `REPLICA` on the copy). Versions also go to
   replication targets on other S3 services, streamed with their `Content-MD5`; another
   TeiFS or a `MinIO` keeps their version ids through `MinIO`'s replica headers, which
-  TeiFS takes from callers allowed `s3:ReplicateObject`. Delete replication and
+  TeiFS takes from callers allowed `s3:ReplicateObject`. Delete markers are replicated
+  when a rule says so (not lifecycle's), keeping their ids on TeiFS and `MinIO`;
+  versions are taken into folder buckets too. Version deletes, metadata changes and
   existing objects are still to come.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret

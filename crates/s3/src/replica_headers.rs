@@ -2,7 +2,9 @@
 //! keep each other's version ids): a `PutObject` with the version's id as `versionId`
 //! in the query and `MinIO`'s headers saying it's a replication request, when the
 //! version was made and its ETag. Such a write, from a caller allowed
-//! `s3:ReplicateObject`, is recorded as a replica of that version.
+//! `s3:ReplicateObject` (the access check sees to it), is recorded as a replica of that
+//! version; a `DeleteObject` saying it makes a delete marker, from a caller allowed
+//! `s3:ReplicateDelete`, makes a marker with that id.
 
 use http::HeaderMap;
 use s3s::{S3Result, s3_error};
@@ -15,12 +17,12 @@ pub(crate) const REQUEST: &str = "x-minio-source-replication-request";
 pub(crate) const MTIME: &str = "x-minio-source-mtime";
 /// The replicated version's ETag.
 pub(crate) const ETAG: &str = "x-minio-source-etag";
+/// Says a replicated delete makes a delete marker (with the `versionId` given).
+pub(crate) const DELETE_MARKER: &str = "x-minio-source-deletemarker";
 /// What minio-go also sends with a replica: its status there.
 pub(crate) const STATUS: &str = "x-amz-replication-status";
 /// The query parameter naming the replicated version.
 pub(crate) const VERSION_ID: &str = "versionId";
-/// The permission a replica's write needs besides `s3:PutObject`.
-pub(crate) const REPLICATE_OBJECT: &str = "s3:ReplicateObject";
 
 /// The replica a write describes (its headers, and the `versionId` of its query), if
 /// its headers say it's one.
@@ -50,6 +52,28 @@ pub(crate) fn replica(headers: &HeaderMap, version_id: Option<&str>) -> S3Result
         modified_ms,
         etag,
     }))
+}
+
+/// The delete marker a delete describes (its headers, and the `versionId` of its
+/// query), if its headers say it's a replicated one.
+pub(crate) fn marker(headers: &HeaderMap, version_id: Option<&str>) -> S3Result<Option<Replica>> {
+    let flag = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    };
+    if !(flag(REQUEST) && flag(DELETE_MARKER)) {
+        return Ok(None);
+    }
+    replica(headers, version_id)
+}
+
+/// The headers that make a delete of `replica`'s id a replicated delete marker.
+pub(crate) fn of_marker(replica: &Replica) -> Vec<(&'static str, String)> {
+    let mut headers = of(replica);
+    headers.push((DELETE_MARKER, "true".to_owned()));
+    headers
 }
 
 /// The headers that make a write of `replica` one, for a `MinIO` or TeiFS target (its
@@ -187,6 +211,27 @@ mod tests {
                 .as_deref(),
             Some("9b2cf535f27731c974343645a3985328")
         );
+    }
+
+    #[test]
+    fn a_marker_round_trips_and_needs_both_flags() {
+        let replica = Replica {
+            version_id: MINIO_ID.to_owned(),
+            modified_ms: 1_700_000_000_123,
+            etag: None,
+        };
+        let mut map = HeaderMap::new();
+        for (name, value) in of_marker(&replica) {
+            map.insert(name, HeaderValue::from_str(&value).unwrap());
+        }
+        assert_eq!(marker(&map, Some(MINIO_ID)).unwrap(), Some(replica.clone()));
+        map.remove(REQUEST);
+        assert_eq!(marker(&map, Some(MINIO_ID)).unwrap(), None);
+        let mut map = HeaderMap::new();
+        for (name, value) in of(&replica) {
+            map.insert(name, HeaderValue::from_str(&value).unwrap());
+        }
+        assert_eq!(marker(&map, Some(MINIO_ID)).unwrap(), None);
     }
 
     #[test]

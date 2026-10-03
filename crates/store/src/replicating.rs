@@ -3,7 +3,7 @@
 
 use teifs_types::replication::ReplicationStatus;
 
-use crate::{Store, StoreError, VersionsQuery, error::Result};
+use crate::{ObjectAttrs, Store, StoreError, VersionsQuery, error::Result};
 
 /// A version waiting to be replicated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,10 @@ pub struct Waiting {
     pub version_id: String,
     /// The destinations (ARNs) it still waits for.
     pub destinations: Vec<String>,
+    /// Whether it's a delete marker.
+    pub delete_marker: bool,
+    /// When it was made.
+    pub modified: std::time::SystemTime,
 }
 
 /// How many versions a page of the search reads.
@@ -47,6 +51,8 @@ impl Store {
                         key: key.clone(),
                         version_id: version_id.clone(),
                         destinations,
+                        delete_marker: version.delete_marker,
+                        modified: version.info.modified,
                     });
                 }
             }
@@ -70,19 +76,58 @@ impl Store {
         arn: &str,
         status: ReplicationStatus,
     ) -> Result<()> {
-        let arn = arn.to_owned();
-        match self
-            .change_attrs(bucket, key, Some(version_id), move |attrs| {
+        let record = {
+            let arn = arn.to_owned();
+            move |attrs: &mut ObjectAttrs| {
                 if let Some(replication) = attrs.replication.take() {
                     attrs.replication = Some(replication.with(&arn, status));
                 }
+            }
+        };
+        let changed = self
+            .change_attrs(bucket, key, Some(version_id), move |attrs| {
+                record(attrs);
                 Ok(())
             })
-            .await
-        {
+            .await;
+        match changed {
             // Gone meanwhile: nothing to record.
             Ok(_) | Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(()),
+            Err(StoreError::DeleteMarker { .. }) => {
+                self.set_marker_replication(bucket, key, version_id, arn, status)
+                    .await
+            }
             Err(err) => Err(err),
         }
+    }
+
+    /// Records where the delete marker `version_id` of `key` stands with `arn` (a
+    /// marker's attributes are in the version store, in either layout).
+    async fn set_marker_replication(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        arn: &str,
+        status: ReplicationStatus,
+    ) -> Result<()> {
+        let (bucket, key) = (bucket.to_owned(), key.to_owned());
+        let (version_id, arn) = (version_id.to_owned(), arn.to_owned());
+        self.blocking(move |inner| {
+            let found = inner.bucket(&bucket)?;
+            let Some(versions) = found.versions() else {
+                return Ok(());
+            };
+            let conn = inner.lock();
+            let Some(mut row) = conn.version(&versions.id, &key, &version_id)? else {
+                return Ok(());
+            };
+            if let (true, Some(replication)) = (row.delete_marker, row.attrs.replication.take()) {
+                row.attrs.replication = Some(replication.with(&arn, status));
+                conn.set_version_attrs(&versions.id, &key, &version_id, &row.attrs, None)?;
+            }
+            Ok(())
+        })
+        .await
     }
 }

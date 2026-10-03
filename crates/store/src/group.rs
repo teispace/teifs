@@ -18,7 +18,7 @@ use teifs_types::ObjectAttrs;
 use crate::{
     Bucket, Inner, ObjectInfo, Precondition, StoreError,
     error::Result,
-    objects::{Deleted, ObjectBucket, Written},
+    objects::{Deleted, Marking, ObjectBucket, Written},
     stages,
 };
 
@@ -55,6 +55,7 @@ enum Job {
         key: String,
         version_id: Option<String>,
         bypass: bool,
+        marking: Marking,
     },
 }
 
@@ -173,7 +174,7 @@ impl Inner {
         key: &str,
         version_id: Option<&str>,
         precondition: Precondition,
-        bypass: bool,
+        (bypass, marking): (bool, Marking),
     ) -> Result<Deleted> {
         let job = Job::Delete {
             bucket: bucket.to_owned(),
@@ -181,6 +182,7 @@ impl Inner {
             key: key.to_owned(),
             version_id: version_id.map(str::to_owned),
             bypass,
+            marking,
         };
         match self.grouped(job, precondition)? {
             Done::Deleted(deleted) => Ok(deleted),
@@ -316,10 +318,21 @@ impl Inner {
                 key,
                 version_id,
                 bypass,
+                marking,
             } => {
                 let bucket = self.object_bucket(&bucket, &bucket_id)?;
+                let marker = match &version_id {
+                    None => self.marker_attrs(&bucket, &key, &marking)?,
+                    Some(_) => ObjectAttrs::default(),
+                };
                 let (deleted, files) = conn.try_batch(|conn| match &version_id {
-                    None => Inner::delete_object(conn, &bucket, &key, precondition),
+                    None => Inner::delete_object(
+                        conn,
+                        &bucket,
+                        &key,
+                        precondition,
+                        (marker.clone(), marking.replica()),
+                    ),
                     Some(id) => {
                         Inner::delete_object_version(conn, &bucket, &key, id, precondition, bypass)
                     }

@@ -520,8 +520,12 @@ may get through later stays `PENDING` and holds back that key's newer versions.
 Targets on other S3 services (`replicator/remote.rs`) get an aws-sdk-s3 client per pass,
 signed with the target's unsealed keys, without SDK retries (the next pass retries) or
 `aws-chunked` framing; `replica_headers.rs` writes and reads `MinIO`'s replica headers,
-which `put_object` takes as a `Store::commit_replica` when the caller may
-`s3:ReplicateObject`.
+which `put_object` takes as a `Store::commit_replica` (the access check needs
+`s3:ReplicateObject` for them). Delete markers are versions too: who makes one
+(`objects::Marking`: a request, a lifecycle expiration, or a replica) decides whether it
+waits for the rules that replicate markers (`Inner::marker_attrs`); the worker sends it
+with `Store::commit_replica_marker`, or a `DeleteObject` naming its id with `MinIO`'s
+delete-marker headers, which `delete_object` takes the same way (`s3:ReplicateDelete`).
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

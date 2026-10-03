@@ -225,8 +225,9 @@ answered, and without a KMS no target can be added. They're unsealed only to sig
 the replicas sent to their target, over TLS unless the target was added with `secure`
 off. A write that asks to be recorded as a replica of another server's version (with
 its version id and time, `MinIO`'s `x-minio-source-*` headers) needs
-`s3:ReplicateObject` on the object besides `s3:PutObject`, so ordinary writers can't
-forge a version's identity or history.
+`s3:ReplicateObject` on the object besides `s3:PutObject`, and a delete that asks to
+make a replicated delete marker with a given id needs `s3:ReplicateDelete` besides
+`s3:DeleteObject`, so ordinary writers can't forge a version's identity or history.
 A SAML response is read without a document type declaration or entities (no XXE or
 entity expansion), and only what a verified signature covers is used: the signature must
 be in the element it signs and reference that element's `ID`, which no other element may

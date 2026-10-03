@@ -285,7 +285,17 @@ impl ApplyLifecycle {
                         if_modified_at: Some(version.info.modified),
                         ..Precondition::default()
                     };
-                    let deleted = self.store.delete_if(bucket, key, None, precondition).await;
+                    // Its delete marker isn't replicated, as on S3.
+                    let deleted = self
+                        .store
+                        .delete_marking(
+                            bucket,
+                            key,
+                            None,
+                            precondition,
+                            (false, crate::objects::Marking::Lifecycle),
+                        )
+                        .await;
                     if let Ok(deleted) = &deleted {
                         self.store
                             .expired(

@@ -76,7 +76,7 @@ async fn replicate(s3: &Client, arn: &str) {
         .filter(ReplicationRuleFilter::builder().build())
         .delete_marker_replication(
             DeleteMarkerReplication::builder()
-                .status(DeleteMarkerReplicationStatus::Disabled)
+                .status(DeleteMarkerReplicationStatus::Enabled)
                 .build(),
         )
         .destination(Destination::builder().bucket(arn).build().unwrap())
@@ -274,6 +274,56 @@ async fn keys_that_may_not_replicate_fail_the_version() {
         settled(&source, "a.txt").await,
         Some(ReplicationStatus::Failed)
     );
+    assert!(
+        copy.head_object()
+            .bucket("copy")
+            .key("a.txt")
+            .send()
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn delete_markers_reach_another_teifs_with_their_ids() {
+    let (_servers, source, copy) = replicating().await;
+    source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    let deleted = source
+        .delete_object()
+        .bucket("source")
+        .key("a.txt")
+        .send()
+        .await
+        .unwrap();
+    let mut there = Vec::new();
+    for _ in 0..200 {
+        there = copy
+            .list_object_versions()
+            .bucket("copy")
+            .send()
+            .await
+            .unwrap()
+            .delete_markers()
+            .iter()
+            .map(|m| m.version_id().unwrap().to_owned())
+            .collect();
+        if !there.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(there, [deleted.version_id().unwrap()]);
     assert!(
         copy.head_object()
             .bucket("copy")

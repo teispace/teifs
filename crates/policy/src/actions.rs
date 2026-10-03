@@ -60,6 +60,10 @@ pub struct Facts {
     pub ownership: bool,
     /// A new bucket with tags (its configuration's `Tags`).
     pub bucket_tags: bool,
+    /// Another server replicating (`MinIO`'s `x-minio-source-replication-request`).
+    pub replication: bool,
+    /// A replicated delete marker (`MinIO`'s `x-minio-source-deletemarker`).
+    pub replica_marker: bool,
 }
 
 /// The permissions one request needs (at most six).
@@ -164,7 +168,11 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
         ),
         "GetObjectAttributes" => needs.read(facts, &[]),
         // A browser upload (a form; not in the SDK's reference) is a PutObject.
-        "PutObject" | "PostObject" | "CreateMultipartUpload" => needs.write(facts),
+        "PutObject" => {
+            needs.write(facts);
+            needs.need_if(facts.replication, "s3:ReplicateObject");
+        }
+        "PostObject" | "CreateMultipartUpload" => needs.write(facts),
         "CopyObject" => {
             needs.source(facts);
             needs.write(facts);
@@ -180,6 +188,12 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
             needs.push("s3:GetObject", Target::Source, true);
             needs.push("s3:DeleteObject", Target::Source, true);
             needs.need("s3:PutObject");
+        }
+        // A replicated delete marker names its id but removes nothing, as `MinIO` decides
+        // it: replicating it needs `s3:ReplicateDelete`.
+        "DeleteObject" if facts.replication && facts.replica_marker => {
+            needs.need("s3:DeleteObject");
+            needs.need("s3:ReplicateDelete");
         }
         "DeleteObject" | "DeleteObjects" => {
             needs.versioned(facts, "s3:DeleteObject", "s3:DeleteObjectVersion");

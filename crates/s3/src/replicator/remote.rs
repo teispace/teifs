@@ -24,7 +24,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures::TryStreamExt as _;
 use md5::{Digest as _, Md5};
-use teifs_store::{ObjectAttrs, Store};
+use teifs_store::{ObjectAttrs, Replica, Store};
 use teifs_types::{SseMode, md5_of_etag, replication::RemoteTarget};
 use tokio::io::AsyncReadExt as _;
 
@@ -96,6 +96,28 @@ impl Target {
         } else {
             self.send_whole(sending).await
         }
+    }
+
+    /// Makes a delete marker the key's current version on the target: one with the
+    /// marker's id and time where `MinIO`'s headers are taken.
+    pub(super) async fn send_marker(&self, key: &str, replica: &Replica) -> Result<(), Missed> {
+        let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
+        let mut headers = Vec::new();
+        if self.replica_headers {
+            delete = delete.version_id(&replica.version_id);
+            headers = replica_headers::of_marker(replica);
+        }
+        delete
+            .customize()
+            .mutate_request(move |request| {
+                for (name, value) in &headers {
+                    request.headers_mut().insert(*name, value.clone());
+                }
+            })
+            .send()
+            .await
+            .map_err(|err| missed(&err))?;
+        Ok(())
     }
 
     /// Sends a version in one `PutObject`, streamed.

@@ -1221,7 +1221,15 @@ target's keys may `s3:ReplicateObject` there as well as `s3:PutObject`; give the
 replicating user both. A `MinIO` replicates into TeiFS the same way, keeping its version
 ids, once `mc replicate add` on it names a TeiFS bucket. Versions encrypted with SSE-S3
 arrive encrypted as the target bucket's default says (a `MinIO` without a KMS stores
-them unencrypted); SSE-KMS versions ask for the rule's replica KMS key. Replicating deletes and existing objects is still to come.
+them unencrypted); SSE-KMS versions ask for the rule's replica KMS key.
+
+Delete markers are replicated when the rule says so (`DeleteMarkerReplication`, always
+for a rule of the configuration's first version): the destination's current version
+becomes a marker with the same id and time (on AWS, a marker of its own). Markers made
+by lifecycle expirations aren't replicated, as on S3, and neither is removing a version
+by its id. A replicating user on another TeiFS needs `s3:ReplicateDelete` and
+`s3:DeleteObject` for markers. Replicating existing objects and metadata changes is
+still to come.
 
 ### Replication targets
 

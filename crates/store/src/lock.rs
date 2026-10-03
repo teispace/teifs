@@ -12,8 +12,10 @@ use teifs_meta::Versioning;
 use teifs_types::{LockMode, ObjectKey, Retention, replication::VersionReplication};
 
 use crate::{
-    Bucket, Inner, ObjectAttrs, ObjectInfo, Store, StoreError, error::Result, now_ms,
-    objects::ObjectBucket,
+    Bucket, Inner, ObjectAttrs, ObjectInfo, Store, StoreError,
+    error::Result,
+    now_ms,
+    objects::{Marking, ObjectBucket},
 };
 
 /// What a write gets when it asks for a lock in a bucket without Object Lock.
@@ -182,6 +184,33 @@ impl Inner {
                 VersionReplication::pending(replication.destinations(key, &attrs.tags, kms));
         }
         Ok(())
+    }
+}
+
+impl Inner {
+    /// What a delete marker of `key` that `marking` makes is, in the bucket whose
+    /// version store is `versions`: waiting for the destinations of the rules that
+    /// replicate markers, when a request made it; a replica's is marked so.
+    pub(crate) fn marker_attrs(
+        &self,
+        versions: &ObjectBucket,
+        key: &str,
+        marking: &Marking,
+    ) -> Result<ObjectAttrs> {
+        let mut attrs = ObjectAttrs::default();
+        match marking {
+            Marking::Replica(_) => attrs.replication = Some(VersionReplication::replica()),
+            Marking::Request if versions.versioning == Versioning::Enabled => {
+                let json = self.system().bucket_config_by_id(&versions.id)?;
+                let config = crate::settings::read_config(json.as_deref())?;
+                if let Some(replication) = config.replication {
+                    attrs.replication =
+                        VersionReplication::pending(replication.marker_destinations(key));
+                }
+            }
+            Marking::Request | Marking::Lifecycle => {}
+        }
+        Ok(attrs)
     }
 }
 
