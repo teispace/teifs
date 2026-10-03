@@ -425,16 +425,14 @@ async fn a_user_is_added_whole_or_not_at_all() {
 /// Flips one bit of the file at `path`, keeping its size and modification time, as rot
 /// on the disk would.
 fn rot(path: &std::path::Path) {
+    use std::io::Write as _;
     let modified = fs::metadata(path).unwrap().modified().unwrap();
-    let mut bytes = fs::read(path).unwrap();
-    bytes[0] ^= 1;
-    fs::write(path, bytes).unwrap();
-    fs::File::options()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(modified)
-        .unwrap();
+    let first = fs::read(path).unwrap()[0];
+    // In place, without truncating: a scrub between a truncation and the write would
+    // find the file cut short instead.
+    let mut file = fs::File::options().write(true).open(path).unwrap();
+    file.write_all(&[first ^ 1]).unwrap();
+    file.set_modified(modified).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

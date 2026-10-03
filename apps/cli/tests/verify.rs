@@ -67,16 +67,14 @@ async fn put(store: &Store, bucket: &str, key: &str, encryption: &Encryption) {
 /// Flips one bit of the file at `path`, keeping its size and modification time, as rot
 /// on the disk would.
 fn rot(path: &Path) {
+    use std::io::{Seek as _, SeekFrom, Write as _};
     let modified = fs::metadata(path).unwrap().modified().unwrap();
-    let mut bytes = fs::read(path).unwrap();
-    bytes[100] ^= 1;
-    fs::write(path, bytes).unwrap();
-    fs::File::options()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(modified)
-        .unwrap();
+    let byte = fs::read(path).unwrap()[100];
+    // In place, without truncating: nothing reading it meanwhile sees it cut short.
+    let mut file = fs::File::options().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(100)).unwrap();
+    file.write_all(&[byte ^ 1]).unwrap();
+    file.set_modified(modified).unwrap();
 }
 
 #[tokio::test]

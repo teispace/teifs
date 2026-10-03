@@ -28,16 +28,14 @@ async fn post(server: &common::Server, path: &str, body: &[u8]) -> (u16, Value) 
 
 /// Flips one bit of a file, keeping its size and modification time: rot.
 fn rot(path: &std::path::Path) {
+    use std::io::{Seek as _, SeekFrom, Write as _};
     let modified = std::fs::metadata(path).unwrap().modified().unwrap();
-    let mut bytes = std::fs::read(path).unwrap();
-    bytes[3] ^= 1;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(modified)
-        .unwrap();
+    let byte = std::fs::read(path).unwrap()[3];
+    // In place, without truncating: nothing reading it meanwhile sees it cut short.
+    let mut file = std::fs::File::options().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(3)).unwrap();
+    file.write_all(&[byte ^ 1]).unwrap();
+    file.set_modified(modified).unwrap();
 }
 
 /// Polls a heal with its token until it's done, collecting its results.
