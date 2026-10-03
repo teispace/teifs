@@ -3,6 +3,7 @@
 #![allow(dead_code, reason = "each test binary uses a different part")]
 
 pub mod certs;
+pub mod faulty;
 pub mod idp;
 pub mod saml;
 
