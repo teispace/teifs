@@ -66,6 +66,27 @@ async fn objects_are_plain_files() {
 }
 
 #[tokio::test]
+async fn a_delete_is_durable_before_it_returns() {
+    let (_dir, store) = with_bucket().await;
+    store
+        .put_bytes("photos", "trip/a.txt", b"hello", ObjectAttrs::default())
+        .await
+        .unwrap();
+    let synced = || {
+        let times = store.stage_times();
+        let folder = times.get_or_create(&stages::Stage {
+            op: "write",
+            stage: "folder",
+        });
+        folder.count()
+    };
+    let before = synced();
+    store.delete("photos", "trip/a.txt").await.unwrap();
+    // Its folder is synced, or the file could be back after a power cut, without its row.
+    assert!(synced() > before);
+}
+
+#[tokio::test]
 async fn attributes_are_kept_beside_the_file() {
     let (_dir, store) = with_bucket().await;
     let attrs = ObjectAttrs {

@@ -834,6 +834,12 @@ behaviour; the on-disk format is always upgraded automatically.
   with a `Marker`: it skipped everything left under the prefix. A `KeyMarker` that is a
   common prefix, as `NextKeyMarker` is when a page ends on one, still resumes after
   all it holds.
+- After the index failed to commit a change (a disk failing writes, or a full disk),
+  writes that followed were acknowledged without being saved: SQLite can leave a
+  failed commit's transaction open, and they were made inside it. A failed commit is
+  now rolled back, and each write after it is saved or fails.
+- A delete in a folder bucket is saved for good before it's acknowledged: the file's
+  folder is synced, so after a power cut the file can't be back without its record.
 - A configuration value that starts or ends with a quote (`mc admin config set`) is
   kept as given: it read back without its quotes, or empty, once the server restarted.
   A value holding another of its sub-system's keys followed by `=`, which would read

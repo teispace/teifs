@@ -36,6 +36,8 @@ uuid.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# Histograms' counts, for tests that check a stage ran.
+prometheus-client = { workspace = true, features = ["test-util"] }
 proptest.workspace = true
 tempfile.workspace = true
 tar = "0.4"

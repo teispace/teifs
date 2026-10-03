@@ -1054,7 +1054,7 @@ impl Store {
                                 Found::Missing | Found::Other => None,
                             };
                             if precondition.check_delete(current.as_ref())? {
-                                Inner::delete_folder_object(
+                                inner.delete_folder_object(
                                     &conn,
                                     &bucket.name,
                                     &bucket.dir,
@@ -1315,10 +1315,11 @@ impl Inner {
         stages::time(&self.stages, "write", "sync", || staged::sync_file(path))
     }
 
-    /// Syncs a folder so a new entry in it survives a power cut, in strict mode.
+    /// Syncs a folder so a new entry in it, or one removed, survives a power cut, in
+    /// strict mode.
     fn sync_folder(&self, dir: &Path) -> io::Result<()> {
         if self.durability == Durability::Strict {
-            sync_dir(dir)
+            stages::time(&self.stages, "write", "folder", || sync_dir(dir))
         } else {
             Ok(())
         }

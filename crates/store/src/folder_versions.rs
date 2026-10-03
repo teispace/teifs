@@ -248,7 +248,7 @@ impl Inner {
         };
         let exists = precondition.check_delete(current.as_ref())?;
         if let Found::Folder(..) = found {
-            Inner::delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
+            self.delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
             return Ok(Deleted::default());
         }
         if (!exists && precondition.is_conditional()) || matches!(found, Found::Other) {
@@ -284,7 +284,7 @@ impl Inner {
         let replaced = conn.put_version(&marker, now)?;
         Inner::remove_data_files(conn, versions, &replaced);
         if matches!(found, Found::File(..)) {
-            Inner::delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
+            self.delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
         }
         Ok(Deleted {
             version_id: Some(marker.version_id),
@@ -313,7 +313,7 @@ impl Inner {
             if current_id(&current) == version_id {
                 precondition.check_delete(Some(&current))?;
                 check_removal(&current.attrs, bypass, now_ms())?;
-                Inner::delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
+                self.delete_folder_object(conn, &bucket.name, &bucket.dir, key)?;
                 if let Some(versions) = &bucket.versions {
                     self.restore_newest(conn, bucket, versions, key)?;
                 }

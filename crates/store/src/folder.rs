@@ -150,7 +150,11 @@ impl Inner {
 
     /// Deletes the object at `key`. Folders left empty by it go too, unless they were
     /// created on purpose. Holds the commit lock (`conn`).
+    ///
+    /// The file is gone for good before its row: in strict mode its folder is synced, or
+    /// after a power cut the file could be back, without its row.
     pub(crate) fn delete_folder_object(
+        &self,
         conn: &Index,
         bucket: &str,
         dir: &Path,
@@ -162,6 +166,7 @@ impl Inner {
                     Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err.into()),
                     _ => {}
                 }
+                self.sync_folder(path.parent().unwrap_or(dir))?;
                 conn.delete(bucket, key.as_str())?;
             }
             Found::Folder(path, _) => {

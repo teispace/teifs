@@ -12,14 +12,27 @@ use crate::{MetaError, Result, db};
 /// An open transaction or savepoint ([`Index::begin`]).
 pub(crate) struct Tx<'a> {
     conn: &'a Connection,
+    /// Whether it began the transaction (it isn't a savepoint inside another).
+    outermost: bool,
     done: bool,
 }
 
 impl Tx<'_> {
     /// Keeps its writes (commits them, when it's the outermost).
+    ///
+    /// A commit that fails (an I/O error, a full disk) can leave SQLite's transaction
+    /// open; it's rolled back then, or every later batch would be a savepoint inside it
+    /// that "commits" without writing anything, and be acknowledged and lost.
     pub(crate) fn commit(mut self) -> Result<()> {
         self.done = true;
-        self.conn.execute_batch("RELEASE tx")?;
+        if let Err(err) = self.conn.execute_batch("RELEASE tx") {
+            if self.outermost && !self.conn.is_autocommit() {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            } else if !self.outermost {
+                let _ = self.conn.execute_batch("ROLLBACK TO tx; RELEASE tx");
+            }
+            return Err(err.into());
+        }
         Ok(())
     }
 }
@@ -311,9 +324,11 @@ impl Index {
     /// made of several writes can be part of a larger one ([`Index::batch`]). Dropped
     /// without [`Tx::commit`], its writes are undone.
     pub(crate) fn begin(&self) -> Result<Tx<'_>> {
+        let outermost = self.conn.is_autocommit();
         self.conn.execute_batch("SAVEPOINT tx")?;
         Ok(Tx {
             conn: &self.conn,
+            outermost,
             done: false,
         })
     }
@@ -783,6 +798,41 @@ mod tests {
         assert_eq!(index.completed_upload("nested").unwrap(), None);
         // And the connection is back outside any transaction.
         assert!(index.conn.is_autocommit());
+    }
+
+    #[test]
+    fn a_commit_that_fails_leaves_no_transaction_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let index = Index::open(&path).unwrap();
+        // A deferred foreign key fails the commit and, as an I/O error or a full disk
+        // can, leaves SQLite's transaction open.
+        index
+            .conn
+            .execute_batch(
+                "CREATE TEMP TABLE parent (id INTEGER PRIMARY KEY);
+                 CREATE TEMP TABLE child (
+                    parent INTEGER REFERENCES parent (id) DEFERRABLE INITIALLY DEFERRED
+                 );",
+            )
+            .unwrap();
+        let failed = index.batch(|index| {
+            index.conn.execute("INSERT INTO child VALUES (1)", [])?;
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert!(index.conn.is_autocommit());
+        // So what follows is committed, not left inside the failed transaction.
+        let done = CompletedUpload {
+            bucket: "b".into(),
+            key: "k".into(),
+            result: "{}".into(),
+        };
+        index
+            .batch(|index| index.record_completed("after", &done, 1_000, 0))
+            .unwrap();
+        let other = Index::open_reader(&path).unwrap();
+        assert!(other.completed_upload("after").unwrap().is_some());
     }
 
     #[test]

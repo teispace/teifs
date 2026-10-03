@@ -229,6 +229,30 @@ jobs:
       - if: always()
         run: fusermount3 -u "$RUNNER_TEMP/lazyfs.mnt" || true
 
+  failing-disk:
+    # The same writes on a disk that starts failing every write partway through each
+    # round (device-mapper: dm-flakey, or the error target): every acknowledged write
+    # must be there once the disk is whole and mounted again.
+    name: Failing disk (device-mapper)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: sudo modprobe dm-flakey || true
+      - run: >-
+          crates/store/tests/failing-disk.sh setup
+          "$RUNNER_TEMP/disk.img" "$RUNNER_TEMP/disk"
+      - run: cargo test --locked --release -p teifs-store --test crash -- --nocapture
+        env:
+          TEIFS_CRASH_ROUNDS: 200
+          TEIFS_CRASH_DIR: ${{ runner.temp }}/disk/run
+          TEIFS_CRASH_DISK: ${{ github.workspace }}/crates/store/tests/failing-disk.sh
+      - if: failure()
+        run: sudo dmesg | grep -iE 'ext4|jbd2|flakey|I/O error' | tail -40
+      - if: always()
+        run: crates/store/tests/failing-disk.sh teardown
+
   external-kms:
     # Encryption with real external KMSes: an OpenBao transit engine, KES, and Moto for
     # AWS KMS (LocalStack needs an account since March 2026).

@@ -137,7 +137,9 @@ before its row, so a crash between the two leaves the new file with the old row:
 read as a file changed outside TeiFS (a provisional ETag) until the index pass hashes
 it. `crates/store/tests/crash.rs` kills a writing process at many moments and checks
 all of this; the nightly run also runs it on [LazyFS](https://github.com/dsrhaslab/lazyfs),
-which drops everything not yet synced at each kill, as a power cut would.
+which drops everything not yet synced at each kill, as a power cut would, and on a disk
+that starts failing every write with an I/O error: a write that fails may have happened
+or not, and every one acknowledged must still be there once the disk works again.
 
 ### `index.db`
 

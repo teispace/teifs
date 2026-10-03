@@ -75,7 +75,9 @@ edit a released migration.
 - A change to how a write reaches the disk keeps `crates/store/tests/crash.rs` passing:
   a child process writes until it's killed, and every acknowledged write must be there
   after. The nightly run kills it 200 times (`TEIFS_CRASH_ROUNDS`), and 200 more on a
-  LazyFS mount where each kill also drops unsynced data (`TEIFS_CRASH_POWER`).
+  LazyFS mount where each kill also drops unsynced data (`TEIFS_CRASH_POWER`), and 200
+  on a disk that starts failing every write partway through each round
+  (`TEIFS_CRASH_DISK`, with `crates/store/tests/failing-disk.sh`).
 
 ## Commits and pull requests
 

@@ -11,6 +11,12 @@
 //! [LazyFS](https://github.com/dsrhaslab/lazyfs) mount, and after the kill the test writes
 //! `lazyfs::clear-cache` to its fault FIFO and waits for the reply on the DONE FIFO, which
 //! throws away everything not yet synced to disk.
+//!
+//! With `TEIFS_CRASH_DISK=SCRIPT`, the disk fails instead: the drive is on a disk set up by
+//! `failing-disk.sh`, each round runs `SCRIPT fail` where it would have killed the child,
+//! so every write fails from then on, and kills the child once all its writers' writes
+//! fail. `SCRIPT heal` mounts the disk again whole, and every acknowledged write must
+//! still be there; a write that failed may have happened or not.
 
 #![allow(
     clippy::unwrap_used,
@@ -269,7 +275,8 @@ async fn apply(store: &Store, op: &Op) -> Result<(), StoreError> {
     }
 }
 
-/// The child: writes until it's killed, printing `ack WORKER SEQ` after each write.
+/// The child: writes until it's killed, printing `ack WORKER SEQ` after each write. On a
+/// failing disk it prints `err WORKER SEQ` for a write that fails, and goes on.
 #[test]
 fn crash_child() {
     let Ok(setting) = std::env::var(CHILD) else {
@@ -278,6 +285,7 @@ fn crash_child() {
     let mut parts = setting.split('|');
     let (drive, keys) = (parts.next().unwrap(), parts.next().unwrap());
     let first: u64 = parts.next().unwrap().parse().unwrap();
+    let failing = parts.next() == Some("failing");
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let store = Arc::new(open(Path::new(drive), Path::new(keys)));
@@ -288,10 +296,19 @@ fn crash_child() {
             writers.push(tokio::spawn(async move {
                 let mut seq = first;
                 while started.elapsed() < CHILD_DEADLINE {
-                    apply(&store, &Op::of(worker, seq)).await.unwrap();
-                    let mut out = std::io::stdout().lock();
-                    writeln!(out, "ack {worker} {seq}").unwrap();
-                    out.flush().unwrap();
+                    let done = match apply(&store, &Op::of(worker, seq)).await {
+                        Ok(()) => "ack",
+                        Err(_) if failing => "err",
+                        Err(err) => panic!("write {worker} {seq} failed: {err}"),
+                    };
+                    {
+                        let mut out = std::io::stdout().lock();
+                        writeln!(out, "{done} {worker} {seq}").unwrap();
+                        out.flush().unwrap();
+                    }
+                    if done == "err" {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
                     seq += 1;
                 }
             }));
@@ -333,21 +350,22 @@ struct Last {
 
 type Model = BTreeMap<(&'static str, String), Last>;
 
-/// Every object as the writes acknowledged left it, or as the one in flight would have.
+/// Every object as the writes acknowledged left it, or as one of the writes that may have
+/// happened or not (`maybe`: those in flight, and those that failed since) would have.
 ///
 /// After a power loss, a folder bucket's file can also hold its last acknowledged write
 /// with a provisional ETag: `LazyFS` reports the time of the last write as a file's mtime
 /// until the cache is cleared and the time it synced the file afterwards, which no real
 /// file system does, so the row no longer matches the file.
-async fn check(store: &Store, model: &mut Model, next: &[Op], power_loss: bool) {
-    for op in next {
+async fn check(store: &Store, model: &mut Model, maybe: &[Op], power_loss: bool) {
+    for op in maybe {
         model.entry((op.bucket, op.key())).or_default();
     }
     for ((bucket, key), last) in model.iter_mut() {
         let found = read(store, bucket, key).await;
-        let in_flight = next
+        let maybe = maybe
             .iter()
-            .find(|op| op.bucket == *bucket && op.key() == *key);
+            .filter(|op| op.bucket == *bucket && op.key() == *key);
         // A write's ETag is its MD5 (an upload's is the parts').
         let matches = |op: &Option<Op>, provisional_too: bool| match (&found, op) {
             (None, None) => true,
@@ -367,7 +385,7 @@ async fn check(store: &Store, model: &mut Model, next: &[Op], power_loss: bool) 
             last.provisional = true;
             continue;
         }
-        let Some(op) = in_flight.filter(|op| matches(&Some(**op), true)) else {
+        let Some(op) = maybe.clone().find(|op| matches(&Some(**op), true)) else {
             let detail = found.as_ref().map(|(bytes, etag)| {
                 let same = |op: Option<&Op>| op.and_then(Op::body).as_ref() == Some(bytes);
                 (
@@ -375,11 +393,12 @@ async fn check(store: &Store, model: &mut Model, next: &[Op], power_loss: bool) 
                     etag.clone(),
                     hex(&Md5::digest(bytes)),
                     same(last.op.as_ref()),
-                    same(in_flight),
+                    maybe.clone().any(|op| same(Some(op))),
                 )
             });
+            let maybe: Vec<_> = maybe.collect();
             panic!(
-                "{bucket}/{key} holds (size, etag, md5, last's bytes, in flight's bytes) {detail:?}: neither its last acknowledged write {last:?} nor the one in flight {in_flight:?}",
+                "{bucket}/{key} holds (size, etag, md5, last's bytes, other bytes it may hold) {detail:?}: neither its last acknowledged write {last:?} nor one that may have happened {maybe:?}",
             );
         };
         *last = Last {
@@ -448,6 +467,90 @@ impl PowerLoss {
     }
 }
 
+/// The disk under the drive, which `failing-disk.sh` makes fail every write and heals.
+struct FailingDisk(std::path::PathBuf);
+
+impl FailingDisk {
+    fn run(&self, what: &str) {
+        let status = Command::new(&self.0).arg(what).status().unwrap();
+        assert!(status.success(), "failing-disk.sh {what}: {status}");
+    }
+}
+
+/// What the parent saw of a round's writes.
+struct Followed {
+    /// Writes acknowledged.
+    seen: u64,
+    /// Each writer's last write acknowledged or failed.
+    last: BTreeMap<u64, u64>,
+    /// The writes that failed: each may have happened or not, unless a later one to the
+    /// same key was acknowledged.
+    failed: Vec<Op>,
+}
+
+/// Puts each write the child acknowledges in `model`, and kills the child after
+/// `kill_after`. On a failing disk, that's when the disk starts failing, and the child is
+/// killed once every writer's writes fail.
+fn follow(
+    child: &mut std::process::Child,
+    kill_after: u64,
+    disk: Option<&FailingDisk>,
+    model: &mut Model,
+    waiting: &Waiting,
+    round: u64,
+) -> Followed {
+    let lines = BufReader::new(child.stdout.take().unwrap());
+    let mut followed = Followed {
+        seen: 0,
+        last: BTreeMap::new(),
+        failed: Vec::new(),
+    };
+    let mut failing = std::collections::BTreeSet::new();
+    for line in lines.lines() {
+        let Ok(line) = line else { break };
+        // The first may follow libtest's `test crash_child ... ` on its line.
+        let Some((done, at)) = ["ack ", "err "]
+            .into_iter()
+            .find_map(|done| line.find(done).map(|at| (done, at)))
+        else {
+            continue;
+        };
+        let mut words = line[at + 4..].split(' ');
+        let worker: u64 = words.next().unwrap().parse().unwrap();
+        let seq: u64 = words.next().unwrap().parse().unwrap();
+        wait_for(waiting, format!("round {round}'s acknowledgements"));
+        let op = Op::of(worker, seq);
+        followed.last.insert(worker, seq);
+        if done == "err " {
+            assert!(
+                followed.seen >= kill_after,
+                "write {worker} {seq} failed on a healthy disk"
+            );
+            followed.failed.push(op);
+            if failing.insert(worker) && failing.len() as u64 == WORKERS {
+                child.kill().unwrap();
+            }
+            continue;
+        }
+        followed
+            .failed
+            .retain(|maybe| (maybe.bucket, maybe.key()) != (op.bucket, op.key()));
+        let state = Last {
+            op: op.body().map(|_| op),
+            provisional: false,
+        };
+        model.insert((op.bucket, op.key()), state);
+        followed.seen += 1;
+        if followed.seen == kill_after {
+            match disk {
+                Some(disk) => disk.run("fail"),
+                None => child.kill().unwrap(),
+            }
+        }
+    }
+    followed
+}
+
 #[test]
 fn writes_survive_a_kill_at_any_moment() {
     if std::env::var_os(CHILD).is_some() {
@@ -468,6 +571,7 @@ fn writes_survive_a_kill_at_any_moment() {
     let mut power = std::env::var("TEIFS_CRASH_POWER")
         .ok()
         .map(|fifos| PowerLoss::open(&fifos));
+    let disk = std::env::var_os("TEIFS_CRASH_DISK").map(|script| FailingDisk(script.into()));
     let waiting = watchdog();
     let mut model = Model::new();
     let mut acks = 0;
@@ -479,40 +583,28 @@ fn writes_survive_a_kill_at_any_moment() {
             .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
             .env(
                 CHILD,
-                format!("{}|{}|{first}", drive.display(), keys.display()),
+                format!(
+                    "{}|{}|{first}|{}",
+                    drive.display(),
+                    keys.display(),
+                    if disk.is_some() { "failing" } else { "" }
+                ),
             )
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         CHILD_PID.store(child.id(), std::sync::atomic::Ordering::Relaxed);
-        let lines = BufReader::new(child.stdout.take().unwrap());
         // Killed after a number of writes that differs every round, mid-write somewhere.
         let kill_after = 20 + mix(round) % 300;
-        let mut last: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut seen = 0;
-        for line in lines.lines() {
-            let Ok(line) = line else { break };
-            // The first may follow libtest's `test crash_child ... ` on its line.
-            let Some(at) = line.find("ack ") else {
-                continue;
-            };
-            let mut words = line[at + 4..].split(' ');
-            let worker: u64 = words.next().unwrap().parse().unwrap();
-            let seq: u64 = words.next().unwrap().parse().unwrap();
-            wait_for(&waiting, format!("round {round}'s acknowledgements"));
-            let op = Op::of(worker, seq);
-            let state = Last {
-                op: op.body().map(|_| op),
-                provisional: false,
-            };
-            model.insert((op.bucket, op.key()), state);
-            last.insert(worker, seq);
-            seen += 1;
-            if seen == kill_after {
-                child.kill().unwrap();
-            }
-        }
+        let Followed { seen, last, failed } = follow(
+            &mut child,
+            kill_after,
+            disk.as_ref(),
+            &mut model,
+            &waiting,
+            round,
+        );
         wait_for(&waiting, format!("round {round}'s child to exit"));
         let status = child.wait().unwrap();
         assert!(!status.success(), "the child was killed");
@@ -525,14 +617,19 @@ fn writes_survive_a_kill_at_any_moment() {
             );
             power.cut();
         }
+        if let Some(disk) = &disk {
+            wait_for(&waiting, format!("the disk to heal after round {round}"));
+            disk.run("heal");
+        }
         wait_for(&waiting, format!("round {round}'s check"));
         // Each writer's next write may have happened or not.
-        let next: Vec<Op> = (0..WORKERS)
+        let maybe: Vec<Op> = (0..WORKERS)
             .map(|worker| Op::of(worker, last.get(&worker).map_or(first, |seq| seq + 1)))
+            .chain(failed)
             .collect();
         runtime.block_on(async {
             let store = open(&drive, &keys);
-            check(&store, &mut model, &next, power.is_some()).await;
+            check(&store, &mut model, &maybe, power.is_some()).await;
         });
         if round % 25 == 0 {
             eprintln!("{round} of {rounds} rounds checked");

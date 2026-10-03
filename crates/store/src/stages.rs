@@ -3,8 +3,9 @@
 //! can be told apart from a slow network.
 //!
 //! Writes: `key` (a new data key from the KMS, for encrypted objects), `lock` (waiting
-//! for the commit lock), `sync` (the data made durable), `commit` (everything under the
-//! lock: the sync, the rename and the index). Reads: `locate` (finding the version and
+//! for the commit lock), `sync` (the data made durable), `folder` (a folder synced, in
+//! strict mode, so an entry added to it or removed survives a power cut), `commit`
+//! (everything under the lock: the sync, the rename and the index). Reads: `locate` (finding the version and
 //! opening its file), `key` (its data key from the KMS).
 
 use std::time::Instant;
