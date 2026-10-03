@@ -16,6 +16,50 @@ pub const LOCAL_ARN: &str = "arn:aws:s3:::";
 /// What a destination's ARN starts with when it names a remote target (`MinIO`'s form).
 pub const TARGET_ARN: &str = "arn:minio:replication:";
 
+/// Another S3 service's bucket a bucket replicates to (`MinIO`'s remote target): where it
+/// is and the access key that signs there. Its secret key is kept apart, sealed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTarget {
+    /// Its ARN, which a rule's destination names: `arn:minio:replication:REGION:ID:BUCKET`.
+    pub arn: String,
+    /// The bucket on this drive that replicates to it.
+    pub source_bucket: String,
+    /// The service's host and port (`s3.example.com:9000`).
+    pub endpoint: String,
+    /// Whether it's reached over HTTPS.
+    pub secure: bool,
+    /// The bucket there.
+    pub target_bucket: String,
+    /// Its region (requests are signed for it; `us-east-1` when empty).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    /// The access key requests there are signed with.
+    pub access_key: String,
+    /// The storage class replicas get there, if not the source's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub storage_class: String,
+    /// The most bytes a second it's sent (0: no limit).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bandwidth_limit: u64,
+    /// Whether writes wait until the replica is made (`MinIO`'s synchronous mode).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync: bool,
+    /// How often it's checked to be reachable, in seconds (0: the default).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub health_check_secs: u64,
+    /// When it was added (Unix milliseconds).
+    pub created_ms: i64,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// A bucket's replication configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

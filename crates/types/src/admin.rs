@@ -70,6 +70,18 @@ pub const MINIO_SET_BUCKET_QUOTA: &str = "/minio/admin/v3/set-bucket-quota";
 /// as `mc quota info` reads it.
 pub const MINIO_GET_BUCKET_QUOTA: &str = "/minio/admin/v3/get-bucket-quota";
 
+/// `MinIO`'s admin API: `PUT` adds a replication target to `?bucket=NAME`
+/// (`admin:SetBucketTarget`) and answers its ARN, as `mc replicate add` does.
+pub const MINIO_SET_REMOTE_TARGET: &str = "/minio/admin/v3/set-remote-target";
+
+/// `MinIO`'s admin API: `GET` answers `?bucket=NAME`'s replication targets
+/// (`admin:GetBucketTarget`).
+pub const MINIO_LIST_REMOTE_TARGETS: &str = "/minio/admin/v3/list-remote-targets";
+
+/// `MinIO`'s admin API: `DELETE` removes `?bucket=NAME`'s target `&arn=ARN`
+/// (`admin:SetBucketTarget`).
+pub const MINIO_REMOVE_REMOTE_TARGET: &str = "/minio/admin/v3/remove-remote-target";
+
 /// `MinIO`'s admin API: `POST ?action=restart|stop|freeze|unfreeze` asks the server to
 /// restart, stop, hold S3's requests or let them go, as `mc admin service` does.
 pub const MINIO_SERVICE: &str = "/minio/admin/v3/service";

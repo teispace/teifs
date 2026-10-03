@@ -22,7 +22,8 @@ use teifs_store::Store;
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_INVENTORY,
     ADMIN_LDAP_ATTACH, ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_PREFIX, ADMIN_ROOT_KEY,
-    ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_SET_BUCKET_QUOTA, ServerConfig,
+    ADMIN_SNAPSHOTS, ADMIN_TRACE, MINIO_GET_BUCKET_QUOTA, MINIO_LIST_REMOTE_TARGETS,
+    MINIO_REMOVE_REMOTE_TARGET, MINIO_SET_BUCKET_QUOTA, MINIO_SET_REMOTE_TARGET, ServerConfig,
 };
 
 use crate::{
@@ -37,9 +38,25 @@ use crate::{
     minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
     minio_speedtest,
     observe::{self, Seen},
-    quota,
+    quota, replication_targets,
     trace::Tracers,
 };
+
+/// What `set-remote-target` may say beside the bucket: `MinIO`'s edit of a target
+/// (`update=true`) and what it changes.
+const TARGET_EDITS: [&str; 11] = [
+    "update",
+    "creds",
+    "sync",
+    "proxy",
+    "tls",
+    "bandwidth",
+    "healthcheck",
+    "path",
+    "edge",
+    "edgeSyncBeforeExpiry",
+    "syncBeforeExpiryDisabled",
+];
 
 /// Which API a request is for, told apart before anything else is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +89,8 @@ pub(crate) enum Needs {
     /// This action on the bucket the query names (`?bucket=NAME`), decided with the
     /// caller's policies (as `MinIO` decides its admin actions).
     OnQueryBucket(&'static str),
+    /// As [`Needs::OnQueryBucket`], where the query may also have these parameters.
+    OnQueryBucketWith(&'static str, &'static [&'static str]),
     /// This action, decided with the caller's policies; or, on the caller's own access
     /// key (`?accessKey=` names the key that signed), anything but an explicit deny (as
     /// `MinIO` lets a user read itself and change its own secret).
@@ -140,6 +159,9 @@ enum Handler {
     Trace,
     SetBucketQuota,
     GetBucketQuota,
+    SetRemoteTarget,
+    ListRemoteTargets,
+    RemoveRemoteTarget,
     AddUser,
     ChangeMyPassword,
     RemoveUser,
@@ -216,6 +238,9 @@ impl Handler {
             Self::Trace => "ServerTrace",
             Self::SetBucketQuota => "SetBucketQuota",
             Self::GetBucketQuota => "GetBucketQuota",
+            Self::SetRemoteTarget => "SetRemoteTargetHandler",
+            Self::ListRemoteTargets => "ListTargetsHandler",
+            Self::RemoveRemoteTarget => "RemoveRemoteTargetHandler",
             Self::AddUser => "AddUser",
             Self::ChangeMyPassword => "ChangeMyPassword",
             Self::RemoveUser => "RemoveUser",
@@ -475,6 +500,30 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         needs: Needs::OnQueryBucket("admin:GetBucketQuota"),
         handler: Handler::GetBucketQuota,
         about: "`?bucket=NAME`'s quota (`quota` and `size` in bytes, `0` for none): `mc quota info`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Put,
+        path: MINIO_SET_REMOTE_TARGET,
+        needs: Needs::OnQueryBucketWith("admin:SetBucketTarget", &TARGET_EDITS),
+        handler: Handler::SetRemoteTarget,
+        about: "Adds a replication target to `?bucket=NAME` (`madmin.BucketTarget`, encrypted with the caller's secret key) and answers its ARN, which replication rules name; `&update=true` changes the one the body's `arn` names, its secret key only with `&creds=true`: madmin-go's `SetRemoteTarget` and `UpdateRemoteTarget`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Get,
+        path: MINIO_LIST_REMOTE_TARGETS,
+        needs: Needs::OnQueryBucketWith("admin:GetBucketTarget", &["type"]),
+        handler: Handler::ListRemoteTargets,
+        about: "`?bucket=NAME`'s replication targets, without their secret keys: madmin-go's `ListRemoteTargets`",
+    },
+    Endpoint {
+        api: Api::Minio,
+        verb: Verb::Delete,
+        path: MINIO_REMOVE_REMOTE_TARGET,
+        needs: Needs::OnQueryBucketWith("admin:SetBucketTarget", &["arn"]),
+        handler: Handler::RemoveRemoteTarget,
+        about: "Removes `?bucket=NAME`'s replication target `&arn=ARN`, unless a replication rule names it: madmin-go's `RemoveRemoteTarget`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1316,6 +1365,7 @@ pub fn endpoints() -> impl Iterator<Item = EndpointInfo> {
             Needs::Action(action, _)
             | Needs::OnBucket(action)
             | Needs::OnQueryBucket(action)
+            | Needs::OnQueryBucketWith(action, _)
             | Needs::OrOwnKey(action)
             | Needs::NotDenied(action)
             | Needs::OrOwnAccount(action)
@@ -1554,8 +1604,12 @@ impl Routes {
                 on_bucket = Some((bucket, call));
                 allowed
             }
-            Needs::OnQueryBucket(action) => {
-                let bucket = admin::query_bucket(req.uri.query())?;
+            Needs::OnQueryBucket(action) | Needs::OnQueryBucketWith(action, _) => {
+                let extras = match endpoint.needs {
+                    Needs::OnQueryBucketWith(_, extras) => extras,
+                    _ => &[],
+                };
+                let bucket = admin::query_bucket_with(req.uri.query(), extras)?;
                 let allowed = identity
                     .decide(&context(), action, &teifs_policy::bucket_arn(&bucket), None)
                     .is_allowed();
@@ -1681,6 +1735,15 @@ impl Routes {
             Handler::SetBucketQuota => quota::set(&self.store, &query_bucket.expect(ON), req).await,
             Handler::RunInventory => admin::run_inventory(&self.inventory, &req).await,
             Handler::GetBucketQuota => quota::get(&self.store, &query_bucket.expect(ON)).await,
+            Handler::SetRemoteTarget => {
+                replication_targets::set(&self.store, &query_bucket.expect(ON), req).await
+            }
+            Handler::ListRemoteTargets => {
+                replication_targets::list(&self.store, &query_bucket.expect(ON), &req).await
+            }
+            Handler::RemoveRemoteTarget => {
+                replication_targets::remove(&self.store, &query_bucket.expect(ON), &req).await
+            }
             Handler::AddUser => minio_iam::add_user(&self.iam, req).await,
             Handler::ChangeMyPassword => minio_iam::change_my_password(&self.iam, req).await,
             Handler::RemoveUser => minio_iam::remove_user(&self.iam, &req),
@@ -2090,6 +2153,7 @@ mod tests {
                     assert!(matches!(e.handler, Handler::MinioKms(_)), "{e:?}");
                 }
                 Needs::OnQueryBucket(action)
+                | Needs::OnQueryBucketWith(action, _)
                 | Needs::OrOwnKey(action)
                 | Needs::NotDenied(action)
                 | Needs::OrOwnAccount(action) => {

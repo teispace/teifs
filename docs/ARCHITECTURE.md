@@ -358,10 +358,11 @@ Access checks), and forgets the bucket's cached access rules after each change t
 feeds them. Requests s3s refuses before the route (a signature that doesn't match,
 an unknown key) get S3's XML errors, everything after the admin API's JSON;
 `teifs-client` reads both. The few calls of `MinIO`'s admin API TeiFS serves (bucket
-quotas, `quota.rs`) are `Api::Minio` routes at `MinIO`'s exact paths
+quotas, `quota.rs`; replication targets, `replication_targets.rs`) are `Api::Minio` routes at `MinIO`'s exact paths
 (`/minio/admin/v3/…`, and `v4` taken as `v3`), matched only path-style, so a bucket named
 `minio` keeps its keys; they're decided with `MinIO`'s `admin:*` actions on the bucket
-their query names (`Needs::OnQueryBucket`) and answer `MinIO`'s JSON errors. Users,
+their query names (`Needs::OnQueryBucket`, or `Needs::OnQueryBucketWith` naming the other
+parameters the query may have) and answer `MinIO`'s JSON errors. Users,
 groups and canned policies (`minio_iam.rs`) are decided with `MinIO`'s admin actions
 (`Needs::Action`, or `Needs::OrOwnKey` and `Needs::NotDenied` for a call on the caller's
 own key, `Needs::Signed` for `accountinfo`, which answers about the caller alone) and

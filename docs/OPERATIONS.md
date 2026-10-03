@@ -1199,6 +1199,24 @@ dropped, with a warning, as other refused deliveries are. Setting and reading qu
 take `MinIO`'s actions, `admin:SetBucketQuota` and `admin:GetBucketQuota`, on the bucket
 (see [ADMIN_API.md](ADMIN_API.md)); admin exports and imports carry them.
 
+## Replication targets
+
+A bucket's replication rules name where its objects go: another bucket on the same drive
+(`arn:aws:s3:::NAME`), or a *target*, a bucket on another S3 service (another TeiFS,
+MinIO, AWS…). Targets are added, listed and removed through `MinIO`'s admin API
+(`set-remote-target`, `list-remote-targets` and `remove-remote-target`, as madmin-go
+calls them), which answers the ARN the rules name.
+
+A target's ARN is `arn:minio:replication:REGION:ID:BUCKET`; adding the same endpoint and
+bucket again changes that target (its settings and secret key) and keeps the ARN. The
+secret key comes encrypted with the caller's, is kept sealed by the drive's KMS (so a
+target needs one) and is never answered. A target is removed only once no rule of the
+bucket's replication configuration names it (`400 XMinioAdminRemoteRemoveDisallowed`).
+Certificates are always checked (`insecureTLS` is refused). Adding, changing and removing
+targets take `admin:SetBucketTarget` on the bucket, listing them `admin:GetBucketTarget`.
+Admin exports don't carry targets, as they'd carry their secrets: a configuration naming
+one is imported once the target is added on the other server.
+
 ## Migrating from MinIO or another S3 service
 
 `teifs migrate SOURCE DEST` moves buckets from any S3 service to another, through the S3

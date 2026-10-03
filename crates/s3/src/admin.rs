@@ -102,17 +102,29 @@ pub(crate) fn only_bucket(query: Option<&str>) -> S3Result<Option<String>> {
     Ok(only)
 }
 
-/// The bucket a `MinIO` admin call's query names: `bucket=NAME`.
-pub(crate) fn query_bucket(query: Option<&str>) -> S3Result<String> {
-    only_bucket(query)?
-        .filter(|bucket| !bucket.is_empty())
-        .ok_or_else(|| {
-            error(
-                StatusCode::BAD_REQUEST,
-                "InvalidArgument",
-                "A bucket is needed: bucket=NAME.",
-            )
-        })
+/// The bucket a `MinIO` admin call's query names (`bucket=NAME`), beside which it may
+/// have the parameters `extras` names.
+pub(crate) fn query_bucket_with(query: Option<&str>, extras: &[&str]) -> S3Result<String> {
+    let mut bucket = None;
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if name == "bucket" && bucket.is_none() {
+            bucket = Some(value.into_owned());
+        } else if name == "bucket" || !extras.contains(&name.as_ref()) {
+            let message = if extras.is_empty() {
+                "The only parameter is bucket=NAME.".to_owned()
+            } else {
+                format!("The parameters are bucket=NAME and {}.", extras.join(", "))
+            };
+            return Err(error(StatusCode::BAD_REQUEST, "InvalidArgument", message));
+        }
+    }
+    bucket.filter(|bucket| !bucket.is_empty()).ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "A bucket is needed: bucket=NAME.",
+        )
+    })
 }
 
 /// An error of `MinIO`'s admin API, as JSON its clients read.

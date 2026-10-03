@@ -32,6 +32,7 @@ mod objects;
 mod readers;
 mod reconcile;
 mod repair;
+mod replication_targets;
 mod rewrap;
 mod settings;
 mod snapshots;
@@ -70,6 +71,7 @@ pub use lock::{
 };
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
+pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
 pub use settings::{
     BucketAccess, BucketEncryption, BucketSettings, CorsRule, DefaultEncryption, NewBucket,
@@ -301,7 +303,10 @@ struct Inner {
     logging: cache::SettingCache<teifs_types::logging::LoggingConfig>,
     /// Buckets' website configurations, read once.
     websites: cache::SettingCache<teifs_types::website::WebsiteConfig>,
+    /// Buckets' replication configurations, read once.
     replications: cache::SettingCache<teifs_types::replication::ReplicationConfig>,
+    /// The key sealing replication targets' secrets, unsealed once.
+    targets_key: std::sync::OnceLock<teifs_crypto::DataKey>,
     /// Buckets' quotas, read once.
     quotas: cache::SettingCache<u64>,
     /// Buckets' Requester Pays and reporting configurations, read once.
@@ -423,6 +428,7 @@ impl Store {
             logging: cache::SettingCache::default(),
             websites: cache::SettingCache::default(),
             replications: cache::SettingCache::default(),
+            targets_key: std::sync::OnceLock::new(),
             quotas: cache::SettingCache::default(),
             configurations: cache::SettingCache::default(),
             stages: stages::new(),

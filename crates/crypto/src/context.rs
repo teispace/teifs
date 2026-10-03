@@ -28,6 +28,15 @@ impl Context {
         ]))
     }
 
+    /// The context of the key that seals replication targets' secret keys.
+    #[must_use]
+    pub fn replication(drive: &str) -> Self {
+        Self(BTreeMap::from([
+            ("teifs:drive".to_owned(), drive.to_owned()),
+            ("teifs:purpose".to_owned(), "replication".to_owned()),
+        ]))
+    }
+
     /// The context of DSSE-KMS's second data key: this one, marked as the outer layer's,
     /// so neither sealed key opens as the other.
     #[must_use]

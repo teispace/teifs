@@ -316,9 +316,13 @@ pub(crate) async fn check(store: &Store, bucket: &str, config: &ReplicationConfi
                 Err(err) => return Err(err).s3(),
             }
         } else if arn.starts_with(TARGET_ARN) {
-            return Err(invalid_request(format!(
-                "{arn} isn't a replication target of this server"
-            )));
+            // A remote target, which must be the source bucket's.
+            let target = store.replication_target(arn).await.s3()?;
+            if target.is_none_or(|t| t.source_bucket != bucket) {
+                return Err(invalid_request(format!(
+                    "{arn} isn't a replication target of this bucket"
+                )));
+            }
         } else {
             return Err(invalid_argument("Invalid ARN"));
         }

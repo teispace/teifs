@@ -71,7 +71,7 @@ pub(crate) fn required(req: &S3Request<Body>, name: &str) -> S3Result<String> {
 }
 
 /// Whether query parameter `name` is `true`.
-fn flag(req: &S3Request<Body>, name: &str) -> bool {
+pub(crate) fn flag(req: &S3Request<Body>, name: &str) -> bool {
     query(req).iter().any(|(n, v)| n == name && v == "true")
 }
 
