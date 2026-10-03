@@ -1802,7 +1802,8 @@ them against the new server's targets.
 | `s3:ObjectAccessed:Get`, `:Head`, `:Attributes`, `:GetRetention`, `:GetLegalHold` | An object was read (MinIO's) |
 | `s3:Replication:OperationCompletedReplication` | A version or delete marker reached a replication destination (MinIO's) |
 | `s3:Replication:OperationFailedReplication` | One can't reach a destination (`FAILED`) |
-| `s3:Replication:OperationReplicatedAfterThreshold` | One reached it more than 15 minutes after it was made, under a rule with Replication Time Control |
+| `s3:Replication:OperationMissedThreshold` | One hadn't reached it 15 minutes after it was made, under a rule with Replication Time Control: once per version and destination, when it's next tried |
+| `s3:Replication:OperationReplicatedAfterThreshold` | One reached it more than 15 minutes after it was made, under a rule with Replication Time Control (a resync's or a metadata change's sends aren't timed) |
 
 MinIO's `s3:ObjectCreated:PutTagging`, `:DeleteTagging` and `:PutRetention` name the
 tagging and retention events too.

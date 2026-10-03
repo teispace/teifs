@@ -76,6 +76,12 @@ impl Listeners {
         self.heard.receiver_count() > 0
     }
 
+    /// What's heard from now on.
+    #[cfg(test)]
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<Heard>> {
+        self.heard.subscribe()
+    }
+
     /// Tells whoever is listening.
     pub(crate) fn tell(&self, heard: Heard) {
         let _ = self.heard.send(Arc::new(heard));

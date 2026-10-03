@@ -31,7 +31,8 @@ behaviour; the on-disk format is always upgraded automatically.
   say whether they're online. `MinIO`'s replication check (`GET ?replication-check`)
   asks each target whether it can take replicas without writing, and TeiFS answers
   `MinIO`'s. Replication sends events: `s3:Replication:OperationFailedReplication`,
-  `OperationReplicatedAfterThreshold` and `MinIO`'s `OperationCompletedReplication`.
+  `OperationMissedThreshold`, `OperationReplicatedAfterThreshold` (neither for a
+  resync's or a metadata change's sends) and `MinIO`'s `OperationCompletedReplication`.
   Lifecycle rules don't expire versions still waiting for replication or that failed
   it, as on S3. Two-way replication: a replica's metadata changes go back where a rule
   has `ReplicaModifications` enabled, and a version is found by its id with or without

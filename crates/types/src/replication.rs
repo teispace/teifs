@@ -228,6 +228,10 @@ pub struct VersionReplication {
     /// The waiting destinations a resync sends it to again ([`ReplicationResync`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub resync: BTreeSet<String>,
+    /// The destinations it didn't reach within its rule's Replication Time Control
+    /// threshold, which were told so once (`OperationMissedThreshold`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub missed: BTreeSet<String>,
 }
 
 impl VersionReplication {
@@ -243,6 +247,7 @@ impl VersionReplication {
             targets,
             metadata: BTreeSet::new(),
             resync: BTreeSet::new(),
+            missed: BTreeSet::new(),
         })
     }
 
@@ -254,6 +259,7 @@ impl VersionReplication {
             targets: BTreeMap::new(),
             metadata: BTreeSet::new(),
             resync: BTreeSet::new(),
+            missed: BTreeSet::new(),
         }
     }
 
@@ -268,6 +274,13 @@ impl VersionReplication {
             self.resync.remove(arn);
         }
         self.overall()
+    }
+
+    /// With `arn` told it missed the Replication Time Control threshold.
+    #[must_use]
+    pub fn missed_at(mut self, arn: &str) -> Self {
+        self.missed.insert(arn.to_owned());
+        self
     }
 
     /// Waiting again for all of it at `arn`, as a resync sends it ([`ReplicationResync`]);

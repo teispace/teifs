@@ -26,6 +26,8 @@ pub struct Waiting {
     pub metadata: Vec<String>,
     /// Those of them a resync sends it to again.
     pub resync: Vec<String>,
+    /// Those of them told it missed the Replication Time Control threshold.
+    pub missed: Vec<String>,
     /// Whether it's a delete marker.
     pub delete_marker: bool,
     /// Its size in bytes.
@@ -146,6 +148,11 @@ impl Store {
                             .filter(|arn| replication.resync.contains(*arn))
                             .cloned()
                             .collect(),
+                        missed: destinations
+                            .iter()
+                            .filter(|arn| replication.missed.contains(*arn))
+                            .cloned()
+                            .collect(),
                         size: version.info.size,
                         destinations,
                         delete_marker: version.delete_marker,
@@ -226,6 +233,22 @@ impl Store {
         let arn = arn.to_owned();
         self.change_replication(bucket, key, version_id, move |replication| {
             replication.map(|replication| replication.with(&arn, status))
+        })
+        .await
+    }
+
+    /// Records that `key`'s version `version_id` was reported as missing its Replication
+    /// Time Control threshold for `arn`, so it's reported once.
+    pub async fn set_replication_missed(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        arn: &str,
+    ) -> Result<()> {
+        let arn = arn.to_owned();
+        self.change_replication(bucket, key, version_id, move |replication| {
+            replication.map(|replication| replication.missed_at(&arn))
         })
         .await
     }

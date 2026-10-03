@@ -54,6 +54,8 @@ pub(crate) struct Worker {
     stats: Arc<Stats>,
     /// Where replication events go.
     events: Option<Events>,
+    /// How far its clock is ahead of the system's (tests' time travel).
+    ahead: Duration,
 }
 
 /// Why a version didn't reach a destination.
@@ -90,6 +92,7 @@ impl Worker {
             targets: Mutex::default(),
             stats: Arc::default(),
             events: None,
+            ahead: Duration::ZERO,
         }
     }
 
@@ -97,6 +100,17 @@ impl Worker {
     pub(crate) fn with_events(mut self, events: Events) -> Self {
         self.events = Some(events);
         self
+    }
+
+    /// Its clock `by` ahead of the system's.
+    #[cfg(test)]
+    pub(crate) const fn ahead(mut self, by: Duration) -> Self {
+        self.ahead = by;
+        self
+    }
+
+    fn now(&self) -> SystemTime {
+        SystemTime::now() + self.ahead
     }
 
     /// Records what it does in `stats`.
@@ -303,6 +317,7 @@ impl Worker {
             if held.contains(arn) {
                 continue;
             }
+            self.missed(bucket, config, (version, arn)).await;
             let started = Instant::now();
             let size = if version.delete_marker {
                 0
@@ -366,36 +381,16 @@ impl Worker {
         let Some(events) = &self.events else {
             return;
         };
-        let rule = config
-            .rules
-            .iter()
-            .find(|rule| rule.enabled && rule.destination.bucket == arn);
+        let rule = rule_to(config, arn);
         let failed = why.is_some();
-        let happened = Happened {
-            key: version.key.clone(),
-            size: (!version.delete_marker).then_some(version.size),
-            etag: None,
-            version_id: Some(version.version_id.clone()),
-            replication: Some(ReplicationEventData {
-                replication_rule_id: rule.map(|rule| rule.id.clone()).unwrap_or_default(),
-                destination_bucket: arn.to_owned(),
-                s3_operation: if version.delete_marker {
-                    "DELETE_MARKER_PUT"
-                } else {
-                    "OBJECT_PUT"
-                }
-                .to_owned(),
-                request_time: event_time(version.modified),
-                failure_reason: why,
-            }),
-        };
+        let happened = happened((version, arn), rule, why);
         if failed {
             events
                 .replicated("Replication:OperationFailedReplication", bucket, happened)
                 .await;
             return;
         }
-        if late(rule, version.modified, SystemTime::now()) {
+        if timed(version, arn) && late(rule, version.modified, self.now()) {
             events
                 .replicated(
                     "Replication:OperationReplicatedAfterThreshold",
@@ -409,6 +404,41 @@ impl Worker {
                 "Replication:OperationCompletedReplication",
                 bucket,
                 happened,
+            )
+            .await;
+    }
+
+    /// Tells `bucket`'s event rules, once, that `version` hasn't reached `arn` within its
+    /// rule's Replication Time Control threshold.
+    async fn missed(
+        &self,
+        bucket: &str,
+        config: &ReplicationConfig,
+        (version, arn): (&Waiting, &str),
+    ) {
+        let Some(events) = &self.events else {
+            return;
+        };
+        let rule = rule_to(config, arn);
+        if !timed(version, arn)
+            || version.missed.iter().any(|told| told == arn)
+            || !late(rule, version.modified, self.now())
+        {
+            return;
+        }
+        if let Err(err) = self
+            .store
+            .set_replication_missed(bucket, &version.key, &version.version_id, arn)
+            .await
+        {
+            tracing::warn!(bucket, key = %version.key, error = %err, "couldn't record a version's missed threshold");
+            return;
+        }
+        events
+            .replicated(
+                "Replication:OperationMissedThreshold",
+                bucket,
+                happened((version, arn), rule, None),
             )
             .await;
     }
@@ -625,6 +655,47 @@ impl Sending<'_> {
 }
 
 /// A time as Unix milliseconds.
+/// The enabled rule that sends to `arn`.
+fn rule_to<'a>(config: &'a ReplicationConfig, arn: &str) -> Option<&'a ReplicationRule> {
+    config
+        .rules
+        .iter()
+        .find(|rule| rule.enabled && rule.destination.bucket == arn)
+}
+
+/// What an event about `version` reaching `arn` (or not, `why`) says.
+fn happened(
+    (version, arn): (&Waiting, &str),
+    rule: Option<&ReplicationRule>,
+    why: Option<String>,
+) -> Happened {
+    Happened {
+        key: version.key.clone(),
+        size: (!version.delete_marker).then_some(version.size),
+        etag: None,
+        version_id: Some(version.version_id.clone()),
+        replication: Some(ReplicationEventData {
+            replication_rule_id: rule.map(|rule| rule.id.clone()).unwrap_or_default(),
+            destination_bucket: arn.to_owned(),
+            s3_operation: if version.delete_marker {
+                "DELETE_MARKER_PUT"
+            } else {
+                "OBJECT_PUT"
+            }
+            .to_owned(),
+            request_time: event_time(version.modified),
+            failure_reason: why,
+        }),
+    }
+}
+
+/// Whether sending `version` to `arn` is the replication Replication Time Control
+/// times: the version's first, not a resync's or a metadata change's, which come later
+/// by design.
+fn timed(version: &Waiting, arn: &str) -> bool {
+    !version.resync.iter().any(|a| a == arn) && !version.metadata.iter().any(|a| a == arn)
+}
+
 /// Whether a version made at `made` and replicated `now` by `rule` came after the 15
 /// minutes its Replication Time Control promises.
 fn late(rule: Option<&ReplicationRule>, made: SystemTime, now: SystemTime) -> bool {
@@ -944,6 +1015,106 @@ mod tests {
         assert!(!late(None, made, after(60)));
         // A clock that went back isn't late.
         assert!(!late(Some(&rule), made, made - Duration::from_secs(1)));
+    }
+
+    /// The events heard so far.
+    fn heard(
+        heard: &mut tokio::sync::broadcast::Receiver<Arc<crate::listen::Heard>>,
+    ) -> Vec<String> {
+        std::iter::from_fn(|| heard.try_recv().ok())
+            .map(|heard| heard.event.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_version_late_for_its_threshold_is_told_once_and_resyncs_never_are() {
+        let (_dir, store) = replicating().await;
+        let mut config = everything_to("copy");
+        config.rules[0].existing_objects = Some(true);
+        config.rules[0].destination.replication_time = Some(teifs_types::replication::Switch {
+            enabled: true,
+            minutes: Some(15),
+        });
+        store
+            .set_bucket_replication("source", Some(config))
+            .await
+            .unwrap();
+        let events = Events::new(store.clone(), Arc::new(teifs_notify::Notifier::none()));
+        let mut listening = events.listeners().subscribe();
+        let stopping = CancellationToken::new();
+        // On time, nothing's late.
+        put(&store, "on-time.txt", b"one").await;
+        let worker = Worker::new(store.clone(), Arc::new(Notify::new())).with_events(events);
+        worker.pass(&stopping).await;
+        assert_eq!(
+            heard(&mut listening),
+            ["s3:Replication:OperationCompletedReplication"]
+        );
+        // Twenty minutes later, a version that waited that long missed it, and is told so
+        // once however often it's sent.
+        let worker = worker.ahead(Duration::from_mins(20));
+        let id = put(&store, "late.txt", b"two").await;
+        worker.pass(&stopping).await;
+        assert_eq!(
+            heard(&mut listening),
+            [
+                "s3:Replication:OperationMissedThreshold",
+                "s3:Replication:OperationReplicatedAfterThreshold",
+                "s3:Replication:OperationCompletedReplication",
+            ]
+        );
+        store
+            .set_replication_status(
+                "source",
+                "late.txt",
+                &id,
+                &format!("{LOCAL_ARN}copy"),
+                ReplicationStatus::Pending,
+            )
+            .await
+            .unwrap();
+        worker.pass(&stopping).await;
+        assert_eq!(
+            heard(&mut listening),
+            [
+                "s3:Replication:OperationReplicatedAfterThreshold",
+                "s3:Replication:OperationCompletedReplication",
+            ]
+        );
+        // A resync sends old versions again by design: they aren't late.
+        store
+            .start_resync(
+                "source",
+                &format!("{LOCAL_ARN}copy"),
+                "again".to_owned(),
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        worker.pass(&stopping).await;
+        let resent = heard(&mut listening);
+        assert!(!resent.is_empty());
+        assert!(
+            resent
+                .iter()
+                .all(|event| event == "s3:Replication:OperationCompletedReplication"),
+            "{resent:?}"
+        );
+        // Nor is a change of an old version's tags.
+        store
+            .set_tags(
+                "source",
+                "late.txt",
+                Some(&id),
+                [("k".to_owned(), "v".to_owned())].into(),
+            )
+            .await
+            .unwrap();
+        worker.pass(&stopping).await;
+        assert_eq!(
+            heard(&mut listening),
+            ["s3:Replication:OperationCompletedReplication"]
+        );
     }
 
     #[tokio::test]
