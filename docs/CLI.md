@@ -1435,6 +1435,155 @@ teifs quota clear [OPTIONS] <BUCKET>
 |---|---|
 | `<BUCKET>` | `ALIAS/BUCKET`. |
 
+## teifs replicate
+
+Replicate a bucket's versions to another bucket, on the same server or another service (`mc replicate`): rules, status, checks and resyncs.
+
+```
+teifs replicate [OPTIONS] <COMMAND>
+```
+
+## teifs replicate add
+
+Replicate `ALIAS/BUCKET`'s versions to `--remote-bucket`: a bucket on the same server when it's under the same alias, otherwise on the service its alias names, signing with that alias's keys. Both buckets must keep versions.
+
+```
+teifs replicate add [OPTIONS] --remote-bucket <REMOTE_BUCKET> <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--remote-bucket <REMOTE_BUCKET>` | Where versions go: `ALIAS/BUCKET`. |
+| `--id <ID>` | The rule's id: `to-ALIAS-BUCKET` when not given. |
+| `--priority <PRIORITY>` | Which rule wins when several match an object: higher first. |
+| `--prefix <PREFIX>` | Only objects whose keys start with this. |
+| `--tag <TAGS>` | Only objects with this tag, as `KEY=VALUE`; repeat for several. |
+| `--replicate <REPLICATE>` | What's replicated besides new versions, comma-separated: `delete-marker`, `delete` (removals of versions), `existing-objects`, `metadata-sync` (changes to replicas come back); `none` for nothing else. A new rule replicates all of them when it isn't given (without `delete-marker` when it has tags, which S3 doesn't allow). |
+| `--storage-class <STORAGE_CLASS>` | The storage class replicas get. |
+| `--sync` | Make writes wait until the replica is made (another service only). |
+| `--bandwidth <BANDWIDTH>` | The most sent there a second: bytes, or with KiB, MiB or GiB (another service only). |
+| `--disable` | Add the rule turned off. |
+
+## teifs replicate update
+
+Change a rule: what it applies to, what it replicates, or whether it's on.
+
+```
+teifs replicate update [OPTIONS] --id <ID> <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--id <ID>` | The rule's id. |
+| `--priority <PRIORITY>` | Which rule wins when several match an object: higher first. |
+| `--prefix <PREFIX>` | Only objects whose keys start with this. |
+| `--tag <TAGS>` | Only objects with this tag, as `KEY=VALUE`; repeat for several. |
+| `--replicate <REPLICATE>` | What's replicated besides new versions, comma-separated: `delete-marker`, `delete` (removals of versions), `existing-objects`, `metadata-sync` (changes to replicas come back); `none` for nothing else. A new rule replicates all of them when it isn't given (without `delete-marker` when it has tags, which S3 doesn't allow). |
+| `--storage-class <STORAGE_CLASS>` | The storage class replicas get. |
+| `--enable` | Turn the rule on. |
+| `--disable` | Turn the rule off: versions written meanwhile aren't replicated. |
+
+## teifs replicate ls
+
+List a bucket's replication rules.
+
+```
+teifs replicate ls [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+
+## teifs replicate rm
+
+Remove a rule (with its target, when no other rule names it), or every one.
+
+```
+teifs replicate rm [OPTIONS] <--id <ID>|--all> <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--id <ID>` | The rule's id. |
+| `--all` | Every rule. |
+| `--force` | Don't ask before removing every rule. |
+
+## teifs replicate status
+
+Show what replication did for each destination: replicated, waiting and failed.
+
+```
+teifs replicate status [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+
+## teifs replicate check
+
+Check that replication can work: each destination is there, keeps versions, and takes the replicator's writes and deletes, without writing anything.
+
+```
+teifs replicate check [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+
+## teifs replicate resync
+
+Send versions a destination already had again, as when it lost them.
+
+```
+teifs replicate resync [OPTIONS] <COMMAND>
+```
+
+## teifs replicate resync start
+
+Send every version from before now (or `--older-than` ago) that the rules send to a destination again. Its rules must replicate existing objects.
+
+```
+teifs replicate resync start [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--remote-bucket <REMOTE_BUCKET>` | The destination: `ALIAS/BUCKET` (needed when there are several). |
+| `--older-than <OLDER_THAN>` | Only versions at least this old: `30d`, `12h`. |
+
+## teifs replicate resync status
+
+Show where resyncs stand.
+
+```
+teifs replicate resync status [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--remote-bucket <REMOTE_BUCKET>` | Only this destination's: `ALIAS/BUCKET`. |
+
+## teifs replicate resync cancel
+
+Stop the resync going on.
+
+```
+teifs replicate resync cancel [OPTIONS] <BUCKET>
+```
+
+| Argument | |
+|---|---|
+| `<BUCKET>` | `ALIAS/BUCKET`. |
+| `--remote-bucket <REMOTE_BUCKET>` | The destination: `ALIAS/BUCKET` (needed when there are several). |
+
 ## teifs presign
 
 Make a link that gets (or, with `--put`, uploads) an object without keys.

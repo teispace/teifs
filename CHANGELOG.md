@@ -40,6 +40,10 @@ behaviour; the on-disk format is always upgraded automatically.
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,
   kept while a rule names them.
+- Replication from the command line, with mc's names: `teifs replicate
+  add|update|ls|rm|status|check` and `resync start|status|cancel`. Destinations are
+  named as `ALIAS/BUCKET`: the same alias for a bucket on the same server, another for a
+  target that signs with that alias's keys, so no secret is given on the command line.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`
   and minio-go's empty filter elements, and `DeleteBucketReplication` answering `200`;
   MinIO's lifecycle and versioning extensions (`DelMarkerExpiration`,

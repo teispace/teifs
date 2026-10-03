@@ -2333,3 +2333,338 @@ async fn quotas_are_set_shown_and_cleared() {
     cli.ok(&["cp", small.to_str().unwrap(), "t/photos/small"])
         .await;
 }
+
+/// The replication targets of `server`'s `src`.
+async fn admin_targets(server: &common::Server) -> Vec<teifs_client::ReplicationTarget> {
+    teifs_client::Client::new(
+        &server.endpoint,
+        ACCESS_KEY,
+        teifs_client::Zeroizing::new(SECRET_KEY.to_owned()),
+    )
+    .unwrap()
+    .replication_targets("src")
+    .await
+    .unwrap()
+}
+
+/// The replication status of `bucket/key`, once it's no longer pending.
+async fn replicated(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) -> String {
+    for _ in 0..400 {
+        let status = s3
+            .head_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap()
+            .replication_status
+            .map(|s| s.as_str().to_owned())
+            .unwrap_or_default();
+        if status != "PENDING" {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    "PENDING".to_owned()
+}
+
+/// Two servers and `teifs` with aliases `t` (the first) and `r` (the second), with
+/// versioned buckets `t/src`, `t/near` and `r/far`.
+async fn replicating_cli() -> (common::Server, common::Server, Client) {
+    let (server, other) = (start().await, start().await);
+    let mut cli = Client::new(&server);
+    cli.env.push((
+        "TEIFS_ALIAS_R".to_owned(),
+        other
+            .endpoint
+            .replace("http://", &format!("http://{ACCESS_KEY}:{SECRET_KEY}@")),
+    ));
+    for bucket in ["t/src", "t/near", "r/far"] {
+        cli.ok(&["mb", bucket]).await;
+        cli.ok(&["version", "enable", bucket]).await;
+    }
+    (server, other, cli)
+}
+
+#[tokio::test]
+async fn replication_rules_are_added_listed_changed_and_removed() {
+    let (server, other, cli) = replicating_cli().await;
+    let text = cli.run(&["replicate", "ls", "t/src"]).await.stderr;
+    assert!(text.contains("has no replication rules"), "{text}");
+    // A bucket under the same alias is on the same server; under another, it's a target
+    // signing with that alias's keys.
+    let text = cli
+        .ok(&["replicate", "add", "t/src", "--remote-bucket", "t/near"])
+        .await;
+    assert!(
+        text.contains("t/src replicates to t/near: rule to-t-near (delete-marker,delete,existing-objects,metadata-sync)"),
+        "{text}"
+    );
+    // A target added for a rule the server refuses goes again.
+    let err = cli
+        .fails(
+            &[
+                "replicate",
+                "add",
+                "t/src",
+                "--remote-bucket",
+                "r/far",
+                "--storage-class",
+                "NOPE",
+            ],
+            1,
+        )
+        .await;
+    assert!(err.contains("can't change the replication rules"), "{err}");
+    assert!(admin_targets(&server).await.is_empty());
+    let text = cli
+        .ok(&[
+            "replicate",
+            "add",
+            "t/src",
+            "--remote-bucket",
+            "r/far",
+            "--prefix",
+            "docs/",
+            "--replicate",
+            "delete,existing-objects",
+        ])
+        .await;
+    assert!(
+        text.contains("rule to-r-far (delete,existing-objects)"),
+        "{text}"
+    );
+    let targets = admin_targets(&server).await;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].bucket, "far");
+    let rules = records(&cli.ok(&["--json", "replicate", "ls", "t/src"]).await);
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0]["destination"], "t/near");
+    assert_eq!(rules[0]["rule"]["priority"], 1);
+    let far = &rules[1];
+    assert_eq!(far["destination"], format!("{}/far", other.endpoint));
+    assert_eq!(far["rule"]["priority"], 2);
+    assert_eq!(far["rule"]["filter"]["prefix"], "docs/");
+    assert_eq!(far["rule"]["deleteReplication"], true);
+    assert_eq!(far["rule"]["deleteMarkers"], false);
+    // Changes and removals.
+    cli.ok(&[
+        "replicate",
+        "update",
+        "t/src",
+        "--id",
+        "to-r-far",
+        "--disable",
+        "--priority",
+        "7",
+    ])
+    .await;
+    let rules = records(&cli.ok(&["--json", "replicate", "ls", "t/src"]).await);
+    assert_eq!(rules[1]["rule"]["enabled"], false);
+    assert_eq!(rules[1]["rule"]["priority"], 7);
+    cli.fails(
+        &[
+            "replicate",
+            "update",
+            "t/src",
+            "--id",
+            "nothing",
+            "--enable",
+        ],
+        2,
+    )
+    .await;
+    let text = cli
+        .ok(&["replicate", "rm", "t/src", "--id", "to-r-far"])
+        .await;
+    assert!(
+        text.contains("Removed 1 replication rule from t/src"),
+        "{text}"
+    );
+    // Its target went with it.
+    assert!(admin_targets(&server).await.is_empty());
+    cli.fails(&["replicate", "rm", "t/src", "--all"], 2).await;
+    cli.ok(&["replicate", "rm", "t/src", "--all", "--force"])
+        .await;
+    let text = cli.run(&["replicate", "ls", "t/src"]).await.stderr;
+    assert!(text.contains("has no replication rules"), "{text}");
+}
+
+#[tokio::test]
+async fn replication_rules_with_tags_or_mistakes() {
+    let (_server, _other, cli) = replicating_cli().await;
+    cli.ok(&["replicate", "add", "t/src", "--remote-bucket", "t/near"])
+        .await;
+    // A rule with tags leaves delete markers out, which S3 doesn't allow it.
+    cli.ok(&[
+        "replicate",
+        "add",
+        "t/src",
+        "--remote-bucket",
+        "t/near",
+        "--id",
+        "tagged",
+        "--tag",
+        "keep=yes",
+    ])
+    .await;
+    let rules = records(&cli.ok(&["--json", "replicate", "ls", "t/src"]).await);
+    assert_eq!(rules[1]["rule"]["deleteMarkers"], false);
+    assert_eq!(rules[1]["rule"]["deleteReplication"], true);
+    cli.ok(&["replicate", "rm", "t/src", "--id", "tagged"])
+        .await;
+    // The same rule twice, a bucket to itself and unknown words are refused.
+    cli.fails(
+        &["replicate", "add", "t/src", "--remote-bucket", "t/near"],
+        2,
+    )
+    .await;
+    cli.fails(
+        &["replicate", "add", "t/src", "--remote-bucket", "t/src"],
+        2,
+    )
+    .await;
+    cli.fails(
+        &[
+            "replicate",
+            "add",
+            "t/src",
+            "--remote-bucket",
+            "t/near",
+            "--id",
+            "x",
+            "--replicate",
+            "all",
+        ],
+        2,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn replicated_versions_show_in_the_status_and_resync() {
+    let (server, other, cli) = replicating_cli().await;
+    cli.fails(&["replicate", "check", "t/src"], 5).await;
+    cli.ok(&["replicate", "add", "t/src", "--remote-bucket", "t/near"])
+        .await;
+    cli.ok(&["replicate", "add", "t/src", "--remote-bucket", "r/far"])
+        .await;
+    let text = cli.ok(&["replicate", "check", "t/src"]).await;
+    assert!(text.contains("Replication of t/src can work"), "{text}");
+    std::fs::write(cli.path("a"), b"replicated").unwrap();
+    let a = cli.path("a");
+    cli.ok(&["cp", a.to_str().unwrap(), "t/src/docs/a"]).await;
+    let s3 = client(&server, SECRET_KEY);
+    assert_eq!(replicated(&s3, "src", "docs/a").await, "COMPLETED");
+    for (s3, bucket) in [(&s3, "near"), (&client(&other, SECRET_KEY), "far")] {
+        let got = s3
+            .get_object()
+            .bucket(bucket)
+            .key("docs/a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            got.body.collect().await.unwrap().into_bytes().as_ref(),
+            b"replicated"
+        );
+    }
+    let status = records(&cli.ok(&["--json", "replicate", "status", "t/src"]).await);
+    assert_eq!(status.len(), 2);
+    assert!(
+        status
+            .iter()
+            .all(|s| s["replicated"] == 1 && s["failed"] == 0),
+        "{status:?}"
+    );
+    assert_eq!(status[1]["online"], true);
+    let text = cli.ok(&["replicate", "status", "t/src"]).await;
+    assert!(text.contains("REPLICATED"), "{text}");
+    // A resync of the target.
+    let text = cli
+        .ok(&[
+            "replicate",
+            "resync",
+            "start",
+            "t/src",
+            "--remote-bucket",
+            "r/far",
+        ])
+        .await;
+    assert!(text.contains("Resync of t/src to"), "{text}");
+    let resyncs = records(
+        &cli.ok(&[
+            "--json",
+            "replicate",
+            "resync",
+            "status",
+            "t/src",
+            "--remote-bucket",
+            "r/far",
+        ])
+        .await,
+    );
+    assert_eq!(resyncs.len(), 1);
+    cli.fails(
+        &[
+            "replicate",
+            "resync",
+            "start",
+            "t/src",
+            "--remote-bucket",
+            "r/nothing",
+        ],
+        2,
+    )
+    .await;
+    // A destination that can't take versions is added, with a warning.
+    cli.ok(&["mb", "r/plain"]).await;
+    let run = cli
+        .run(&["replicate", "add", "t/src", "--remote-bucket", "r/plain"])
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("replication can't work yet"),
+        "{}",
+        run.stderr
+    );
+    cli.fails(&["replicate", "check", "t/src"], 1).await;
+}
+
+#[tokio::test]
+async fn a_first_version_rule_is_written_back_in_the_later_shape() {
+    let (server, _other, cli) = replicating_cli().await;
+    // No priority, and a prefix of its own (the SDK's deprecated rule-level prefix).
+    #[expect(deprecated, reason = "the first version's shape is what's tested")]
+    let rule = aws_sdk_s3::types::ReplicationRule::builder()
+        .id("old")
+        .prefix("logs/")
+        .status(aws_sdk_s3::types::ReplicationRuleStatus::Enabled)
+        .destination(
+            aws_sdk_s3::types::Destination::builder()
+                .bucket("arn:aws:s3:::near")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    client(&server, SECRET_KEY)
+        .put_bucket_replication()
+        .bucket("src")
+        .replication_configuration(
+            aws_sdk_s3::types::ReplicationConfiguration::builder()
+                .role("")
+                .rules(rule)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    cli.ok(&["replicate", "update", "t/src", "--id", "old", "--disable"])
+        .await;
+    let rules = records(&cli.ok(&["--json", "replicate", "ls", "t/src"]).await);
+    assert_eq!(rules[0]["rule"]["filter"]["prefix"], "logs/");
+    assert_eq!(rules[0]["rule"]["priority"], 0);
+    assert_eq!(rules[0]["rule"]["enabled"], false);
+}

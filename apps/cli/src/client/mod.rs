@@ -18,6 +18,7 @@ mod metrics;
 mod migrate;
 mod pages;
 mod quota;
+mod replicate;
 mod requester_pays;
 mod service_policy;
 mod sse;
@@ -215,6 +216,12 @@ pub enum Command {
     Quota {
         #[command(subcommand)]
         action: QuotaAction,
+    },
+    /// Replicate a bucket's versions to another bucket, on the same server or another
+    /// service (`mc replicate`): rules, status, checks and resyncs.
+    Replicate {
+        #[command(subcommand)]
+        action: replicate::ReplicateAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {

@@ -304,6 +304,35 @@ pub(crate) fn checked(config: &ReplicationConfig) -> S3Result<ReplicationConfig>
     from_dto(to_dto(config))
 }
 
+/// The configuration as `PutBucketReplication`'s body, as `teifs replicate` sends it.
+#[must_use]
+pub fn to_xml(config: &ReplicationConfig) -> Vec<u8> {
+    use s3s::xml::Serialize;
+    let mut xml = Vec::new();
+    to_dto(config)
+        .serialize(&mut s3s::xml::Serializer::new(&mut xml))
+        .expect("a replication configuration serializes");
+    xml
+}
+
+/// A configuration from `GetBucketReplication`'s answer, checked as a request's would be.
+///
+/// # Errors
+///
+/// Why it isn't a configuration S3 would take.
+pub fn from_xml(xml: &[u8]) -> Result<ReplicationConfig, String> {
+    use s3s::xml::Deserialize;
+    let mut d = s3s::xml::Deserializer::new(xml);
+    let config = dto::ReplicationConfiguration::deserialize(&mut d)
+        .and_then(|config| d.expect_eof().map(|()| config))
+        .map_err(|_| "the answer isn't a replication configuration".to_owned())?;
+    from_dto(config).map_err(|err| {
+        err.message()
+            .unwrap_or("the replication configuration isn't valid")
+            .to_owned()
+    })
+}
+
 /// Checks what `config` names on the drive: the bucket keeps every version, and each
 /// destination is a bucket that does too.
 pub(crate) async fn check(store: &Store, bucket: &str, config: &ReplicationConfig) -> S3Result<()> {
@@ -450,5 +479,53 @@ fn rule_dto(rule: &ReplicationRule) -> dto::ReplicationRule {
         priority: rule.priority,
         source_selection_criteria: criteria,
         status: dto::ReplicationRuleStatus::from_static(status(rule.enabled)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_configuration_goes_to_xml_and_back_with_minios_elements() {
+        let config = ReplicationConfig {
+            role: String::new(),
+            rules: vec![ReplicationRule {
+                id: "to-backup".to_owned(),
+                priority: Some(3),
+                enabled: true,
+                filter: ReplicationFilter::And {
+                    prefix: Some("photos/".to_owned()),
+                    tags: vec![Tag {
+                        key: "keep".to_owned(),
+                        value: "yes".to_owned(),
+                    }],
+                },
+                delete_markers: Some(false),
+                delete_replication: Some(true),
+                existing_objects: Some(false),
+                sse_kms_objects: None,
+                replica_modifications: Some(true),
+                destination: ReplicationDestination {
+                    bucket: format!("{TARGET_ARN}us-east-1:1:backup"),
+                    account: None,
+                    storage_class: Some("STANDARD_IA".to_owned()),
+                    owner_override: false,
+                    encryption: None,
+                    replication_time: None,
+                    metrics: None,
+                },
+            }],
+        };
+        let xml = to_xml(&config);
+        let text = String::from_utf8_lossy(&xml);
+        assert!(text.contains("<DeleteReplication>"), "{text}");
+        assert_eq!(from_xml(&xml).as_ref(), Ok(&config));
+        // S3's checks apply: a rule with a tag can't replicate delete markers.
+        let mut tagged = config;
+        tagged.rules[0].delete_markers = Some(true);
+        let err = from_xml(&to_xml(&tagged)).unwrap_err();
+        assert!(err.contains("Delete marker replication"), "{err}");
+        assert!(from_xml(b"not xml").is_err());
     }
 }

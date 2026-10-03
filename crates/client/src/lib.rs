@@ -34,6 +34,11 @@ use rustls::{
 use serde::de::DeserializeOwned;
 pub use zeroize::Zeroizing;
 
+mod replication;
+pub use replication::{
+    NewReplicationTarget, ReplicationCounts, ReplicationMetrics, ReplicationTarget, Resync,
+};
+
 use teifs_types::admin::{
     ADMIN_BUCKETS, ADMIN_CONFIG, ADMIN_IAM, ADMIN_IAM_SECRETS, ADMIN_INFO, ADMIN_INVENTORY,
     ADMIN_LDAP_ATTACH, ADMIN_LDAP_DETACH, ADMIN_LDAP_POLICIES, ADMIN_ROOT_KEY, ADMIN_SNAPSHOTS,

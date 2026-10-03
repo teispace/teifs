@@ -1325,6 +1325,30 @@ mc replicate rm local/photos --id RULE_ID      # the rule, then its target
 mc replicate rm local/photos --all --force     # every rule (targets stay)
 ```
 
+`teifs replicate` does the same with destinations named as aliases, so no secret key is
+given on the command line: under the source's own alias, `--remote-bucket` is a bucket
+on the same server; under another alias, it's that service's bucket, added as a target
+that signs with the alias's keys (`teifs alias set` first).
+
+```sh
+teifs replicate add local/photos --remote-bucket local/photos-copy    # same server
+teifs replicate add local/photos --remote-bucket backup/photos --prefix docs/ \
+  --replicate delete,delete-marker,existing-objects                  # another service
+teifs replicate ls local/photos
+teifs replicate check local/photos       # each destination is there and takes writes
+teifs replicate status local/photos      # replicated, waiting and failed, by destination
+teifs replicate update local/photos --id to-backup-photos --disable
+teifs replicate resync start local/photos --remote-bucket backup/photos --older-than 30d
+teifs replicate rm local/photos --id to-backup-photos    # the rule, then its target
+```
+
+A rule's id is `to-ALIAS-BUCKET` unless `--id` names it, and its priority is one above
+the bucket's highest. `--replicate` takes mc's words (`delete-marker`, `delete`,
+`existing-objects`, `metadata-sync`, or `none`); a new rule replicates all of them
+unless told otherwise (no delete markers for a rule with `--tag`, which S3 doesn't
+allow). `add` checks the bucket's replication right after, and warns when it can't
+work yet; removing rules removes the targets no rule names any more.
+
 A target's ARN is `arn:minio:replication:REGION:ID:BUCKET`; adding the same endpoint and
 bucket again changes that target (its settings and secret key) and keeps the ARN. The
 secret key comes encrypted with the caller's, is kept sealed by the drive's KMS (so a

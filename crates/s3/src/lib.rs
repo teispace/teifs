@@ -94,6 +94,7 @@ pub use minio_config::{CheckConfig, ConfigSettings};
 pub use minio_health::ServingCertificates;
 pub use minio_service::{Control, Stop};
 pub use proxy::{ProxyHeader, TrustedProxies};
+pub use replication::{from_xml as replication_from_xml, to_xml as replication_to_xml};
 pub use routes::{Api, EndpointInfo, endpoints};
 pub use workers::Workers;
 

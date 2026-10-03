@@ -47,6 +47,7 @@ pub use teifs_notify::{
 };
 pub use teifs_s3::{
     ConsoleLayer, Control, HEALTH_PATH, LAYOUT_HEADER, ProxyHeader, Stop, TrustedProxies,
+    replication_from_xml, replication_to_xml,
 };
 pub use teifs_store::{Durability, JobOptions, KeyRules};
 pub use tls::{Tls, TlsError, TlsSource, read_authorities};

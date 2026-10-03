@@ -107,6 +107,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::RequesterPays { action } => super::requester_pays::run(action, &aliases).await,
         Command::Website { action } => super::website::website(action, &aliases).await,
         Command::Quota { action } => super::quota::quota(action, &aliases).await,
+        Command::Replicate { action } => super::replicate::run(action, &aliases).await,
         Command::Presign {
             target,
             expires,
