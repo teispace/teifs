@@ -588,7 +588,7 @@ impl Store {
     /// with every version of each key in it: one key with more versions than a page
     /// comes whole, and a key the page cuts short is left for the next. Whether more
     /// keys follow.
-    pub(crate) async fn whole_keys(
+    pub async fn whole_keys(
         &self,
         bucket: &str,
         prefix: &str,

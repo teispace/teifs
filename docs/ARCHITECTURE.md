@@ -553,15 +553,22 @@ the id on `CreateMultipartUpload` (`?versionId`), taken by `Store::create_replic
 (`uploads.replica_version`), and the time and ETag on Complete (`CompleteWith.replica`).
 Batch jobs (`minio_batch.rs`, `batch_jobs.rs`): `start-job` reads `MinIO`'s YAML
 (serde-saphyr) into a `teifs_types::batch::BatchJob` and records it in the system
-database's `batch_jobs` table (`Store::add_batch_job`; a notify token sealed apart with
-the replication targets' key, bound to the job's id). The batch worker, one of the
+database's `batch_jobs` table (`Store::add_batch_job`; its secrets, `JobSecrets`: a
+notify token, another service's keys, sealed apart as JSON with the replication
+targets' key, bound to the job's id). The batch worker, one of the
 `Workers` (woken by a start, else every 30 seconds), takes the running job, else the
 oldest by priority, and runs one page of it: for `expire`, `Store::expire_batch_page`
 reads whole keys (`Store::whole_keys`, which the lifecycle job uses too), matches each
 key's newest version against the rules, and removes versions with
 `Marking::Lifecycle` (never replicated); for `keyrotate`, `Store::rotate_batch_page` filters
 each version and `Store::rotate_key` unseals its data key and seals it again
-(`write_resealed`, as `UpdateObjectEncryption` does). The progress (prefix, last key, counts,
+(`write_resealed`, as `UpdateObjectEncryption` does); for `replicate`,
+`batch_replicate::page` connects to the other end as replication does
+(`replicator::Remote::connect`) with the job's sealed secrets (`Store::batch_job_secrets`):
+pushed, it walks whole keys here and sends each version the filter
+(`teifs_store::filter_takes`) takes with `Remote::send`/`send_marker`; pulled, it pages
+the other service's `ListObjectVersions` (`ListObjectsV2` with plain S3), reads each
+version and writes it with `Store::commit_replica`/`commit_replica_marker`. The progress (prefix, last key, counts,
 failures) is written back with `Store::update_batch_job`, which leaves a job cancelled
 meanwhile alone, so a restart resumes from the last page; an ended job's result is
 posted to its webhook.

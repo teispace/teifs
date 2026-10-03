@@ -54,9 +54,27 @@ const CONNECT: Duration = Duration::from_secs(10);
 /// system bucket's name: a receiver refuses them without writing).
 const CHECKED_KEY: &str = ".minio.sys/teifs/deleteme";
 
+/// How to reach a bucket on another S3 service.
+pub(crate) struct Connection<'a> {
+    /// Its URL (`http[s]://HOST[:PORT]`).
+    pub(crate) endpoint: String,
+    /// The region requests are signed for.
+    pub(crate) region: String,
+    pub(crate) access_key: &'a str,
+    pub(crate) secret_key: &'a str,
+    pub(crate) session_token: Option<&'a str>,
+    pub(crate) bucket: String,
+    /// Whether buckets are named in the path, rather than the host.
+    pub(crate) path_style: bool,
+    /// Its storage class for replicas, when it names one.
+    pub(crate) storage_class: Option<String>,
+    /// Whether it may be sent `MinIO`'s replica headers.
+    pub(crate) replica_headers: bool,
+}
+
 /// A target, with a client signed in to it.
 #[derive(Debug)]
-pub(super) struct Target {
+pub(crate) struct Target {
     client: Client,
     bucket: String,
     /// Its storage class for replicas, when it names one.
@@ -73,34 +91,56 @@ impl Target {
             .await?
             .ok_or_else(|| Missed::Failed(format!("the replication target {arn} was removed")))?;
         let secrets = store.replication_target_secrets(arn).await?;
+        Ok(Self::connect(Connection {
+            endpoint: endpoint(&target),
+            region: region(&target),
+            access_key: &target.access_key,
+            secret_key: secrets.secret_key.as_str(),
+            session_token: secrets.session_token.as_ref().map(|token| token.as_str()),
+            bucket: target.target_bucket.clone(),
+            path_style: true,
+            storage_class: Some(target.storage_class.clone()).filter(|class| !class.is_empty()),
+            replica_headers: !is_aws(&target.endpoint),
+        }))
+    }
+
+    /// A client for the bucket `to` names, signed in with its keys.
+    pub(crate) fn connect(to: Connection<'_>) -> Self {
         let credentials = Credentials::new(
-            target.access_key.clone(),
-            secrets.secret_key.as_str(),
-            secrets
-                .session_token
-                .as_ref()
-                .map(|token| token.as_str().to_owned()),
+            to.access_key,
+            to.secret_key,
+            to.session_token.map(str::to_owned),
             None,
             "teifs-replication",
         );
         let config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(region(&target)))
-            .endpoint_url(endpoint(&target))
+            .region(Region::new(to.region))
+            .endpoint_url(to.endpoint)
             .credentials_provider(credentials)
-            .force_path_style(true)
+            .force_path_style(to.path_style)
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
             // A failed send is tried again on a later pass, with the body read again.
             .retry_config(RetryConfig::disabled())
             .timeout_config(TimeoutConfig::builder().connect_timeout(CONNECT).build())
             .build();
-        Ok(Self {
+        Self {
             client: Client::from_conf(config),
-            replica_headers: !is_aws(&target.endpoint),
-            storage_class: Some(target.storage_class.clone()).filter(|class| !class.is_empty()),
-            bucket: target.target_bucket,
-        })
+            replica_headers: to.replica_headers,
+            storage_class: to.storage_class,
+            bucket: to.bucket,
+        }
+    }
+
+    /// The client, signed in.
+    pub(crate) const fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// The bucket.
+    pub(crate) fn bucket(&self) -> &str {
+        &self.bucket
     }
 
     /// Checks that the target can take replicas: its bucket is versioned, has Object
@@ -226,7 +266,7 @@ impl Target {
     }
 
     /// Sends a version.
-    pub(super) async fn send(&self, sending: Sending<'_>) -> Result<(), Missed> {
+    pub(crate) async fn send(&self, sending: Sending<'_>) -> Result<(), Missed> {
         if sending.info.size > MULTIPART_ABOVE || !sending.info.parts.is_empty() {
             self.send_parts(sending).await
         } else {
@@ -236,7 +276,7 @@ impl Target {
 
     /// Makes a delete marker the key's current version on the target: one with the
     /// marker's id and time where `MinIO`'s headers are taken.
-    pub(super) async fn send_marker(&self, key: &str, replica: &Replica) -> Result<(), Missed> {
+    pub(crate) async fn send_marker(&self, key: &str, replica: &Replica) -> Result<(), Missed> {
         let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
         let mut headers = Vec::new();
         if self.replica_headers {
@@ -377,7 +417,7 @@ impl Target {
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(sending.key)
+            .key(sending.target_key)
             .content_length(i64::try_from(size).unwrap_or(i64::MAX))
             .content_md5(STANDARD.encode(md5))
             .body(body)
@@ -447,7 +487,7 @@ impl Target {
             .client
             .create_multipart_upload()
             .bucket(&self.bucket)
-            .key(sending.key)
+            .key(sending.target_key)
             .set_content_type(what.content_type)
             .set_content_encoding(what.content_encoding)
             .set_content_disposition(what.content_disposition)
@@ -487,7 +527,7 @@ impl Target {
                 .client
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
-                .key(sending.key)
+                .key(sending.target_key)
                 .upload_id(&upload_id)
                 .multipart_upload(
                     CompletedMultipartUpload::builder()
@@ -512,7 +552,7 @@ impl Target {
                 .client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
-                .key(sending.key)
+                .key(sending.target_key)
                 .upload_id(&upload_id)
                 .send()
                 .await;
@@ -544,7 +584,7 @@ impl Target {
                 .client
                 .upload_part()
                 .bucket(&self.bucket)
-                .key(sending.key)
+                .key(sending.target_key)
                 .upload_id(upload_id)
                 .part_number(number)
                 .content_md5(STANDARD.encode(md5))
@@ -761,7 +801,7 @@ fn endpoint(target: &RemoteTarget) -> String {
 }
 
 /// Whether an endpoint is AWS's S3, which is sent nothing but S3's own headers.
-fn is_aws(endpoint: &str) -> bool {
+pub(crate) fn is_aws(endpoint: &str) -> bool {
     let host = endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host);
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     host == "amazonaws.com"
@@ -771,7 +811,7 @@ fn is_aws(endpoint: &str) -> bool {
 
 /// What a target answered, short: its error's code and message (or why there was no
 /// answer).
-fn said<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
+pub(crate) fn said<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
     err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
 ) -> String {
     match (err.code(), err.message()) {
@@ -790,7 +830,7 @@ fn refused_check<E: ProvideErrorMetadata>(
 
 /// What a target's answer means for the version: refused for good (it answered no, or
 /// said the request is wrong), or worth trying again (it couldn't answer, or was busy).
-fn missed<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
+pub(crate) fn missed<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
     err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
 ) -> Missed {
     let status = err.raw_response().map(|r| r.status().as_u16());

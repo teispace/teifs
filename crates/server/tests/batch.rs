@@ -291,12 +291,12 @@ async fn jobs_that_cant_run_are_refused_and_kinds_are_told() {
     assert!(body.contains("NoSuchSourceBucket"), "{body}");
     let (status, body) = start_job("replicate:\n  apiVersion: v1\n").await;
     assert_eq!(status, 400, "{body}");
-    assert!(body.contains("replicate"), "{body}");
+    assert!(body.contains("replication"), "{body}");
     let (status, body) = start_job("expire: [").await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(
         json(&server, "list-supported-job-types").await,
-        serde_json::json!(["expire", "keyrotate"])
+        serde_json::json!(["replicate", "keyrotate", "expire"])
     );
     let (status, template) = admin(&server, "GET", "generate-job?jobType=expire", "").await;
     assert_eq!(status, 200);

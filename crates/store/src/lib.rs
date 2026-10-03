@@ -57,6 +57,7 @@ use std::{
 
 use teifs_meta::{BucketRecord, Index, System};
 
+pub use batch::{JobSecrets, takes as filter_takes};
 pub use body::{BodyReader, ObjectBody};
 pub use config_kv::{ConfigChange, ConfigFiles};
 pub use diagnose::{Database, Diagnosis, diagnose};

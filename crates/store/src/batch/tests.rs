@@ -8,11 +8,12 @@ use teifs_types::{
     LockMode, ObjectAttrs, Retention,
     batch::{
         BatchJob, ExpireJob, ExpireKind, ExpireRule, JobProgress, JobRetry, JobSpec, JobStatus,
-        KeyRotateJob, KeyValue, RotateFilter, RotateTo,
+        KeyRotateJob, KeyValue, RotateTo, VersionFilter,
     },
 };
 use tempfile::TempDir;
 
+use super::JobSecrets;
 use crate::{
     Durability, Encryption, Layout, NewBucket, Precondition, Store, StoreError, StoreOptions,
     Versioning, VersionsQuery, now_ms, test_util::in_both_layouts,
@@ -26,6 +27,7 @@ in_both_layouts!(
 );
 
 const TOKEN: &str = "dummy-notify-token-0001";
+const SECRET: &str = "dummy-secret-key-0001";
 
 async fn bucket(layout: Layout, lock: bool) -> (TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -314,26 +316,40 @@ async fn jobs_are_kept_changed_until_finished_and_forgotten() {
     second.id = "job-2".to_owned();
     second.created_ms = 20;
     store
-        .add_batch_job(&first, Some(zeroize::Zeroizing::new(TOKEN.to_owned())))
+        .add_batch_job(
+            &first,
+            &JobSecrets {
+                notify_token: Some(zeroize::Zeroizing::new(TOKEN.to_owned())),
+                secret_key: Some(zeroize::Zeroizing::new(SECRET.to_owned())),
+                session_token: None,
+            },
+        )
         .await
         .unwrap();
-    store.add_batch_job(&second, None).await.unwrap();
+    store
+        .add_batch_job(&second, &JobSecrets::default())
+        .await
+        .unwrap();
     let ids = |jobs: Vec<BatchJob>| jobs.into_iter().map(|j| j.id).collect::<Vec<_>>();
     assert_eq!(ids(store.batch_jobs().await.unwrap()), ["job-1", "job-2"]);
+    let secrets = store.batch_job_secrets("job-1").await.unwrap();
+    let shown = |s: &Option<zeroize::Zeroizing<String>>| s.as_deref().cloned();
+    assert_eq!(shown(&secrets.notify_token).as_deref(), Some(TOKEN));
+    assert_eq!(shown(&secrets.secret_key).as_deref(), Some(SECRET));
+    assert_eq!(shown(&secrets.session_token), None);
     assert_eq!(
-        store
-            .batch_job_token("job-1")
-            .await
-            .unwrap()
-            .as_deref()
-            .map(String::as_str),
-        Some(TOKEN)
+        format!("{secrets:?}"),
+        "JobSecrets { notify_token: true, secret_key: true, session_token: false }"
     );
-    assert_eq!(store.batch_job_token("job-2").await.unwrap(), None);
-    assert_eq!(store.batch_job_token("missing").await.unwrap(), None);
-    // The token is kept sealed.
+    for none in ["job-2", "missing"] {
+        let secrets = store.batch_job_secrets(none).await.unwrap();
+        assert!(secrets.notify_token.is_none() && secrets.secret_key.is_none());
+    }
+    // The secrets are kept sealed.
     let system = std::fs::read(dir.path().join(".teifs/system.db")).unwrap();
-    assert!(!system.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()));
+    for secret in [TOKEN, SECRET] {
+        assert!(!system.windows(secret.len()).any(|w| w == secret.as_bytes()));
+    }
 
     let changed = store
         .update_batch_job("job-1", |job| {
@@ -409,7 +425,7 @@ fn sse_kms(key: &str) -> Encryption {
     }
 }
 
-fn rotation(to: RotateTo, filter: RotateFilter) -> (BatchJob, KeyRotateJob) {
+fn rotation(to: RotateTo, filter: VersionFilter) -> (BatchJob, KeyRotateJob) {
     let rotate = KeyRotateJob {
         bucket: "vault".to_owned(),
         prefix: String::new(),
@@ -495,7 +511,7 @@ async fn keys_are_rotated_to_the_managed_keys_newest_version_or_another_kms_key(
     let (_dir, _keys, store) = sealed_versions().await;
 
     // SSE-S3: under the managed key's newest version; SSE-KMS can't go back.
-    let (mut job, to_s3) = rotation(RotateTo::S3, RotateFilter::default());
+    let (mut job, to_s3) = rotation(RotateTo::S3, VersionFilter::default());
     rotate(&store, &mut job, &to_s3).await;
     assert_eq!(stale(&store).await, 0);
     let p = &job.progress;
@@ -510,9 +526,9 @@ async fn keys_are_rotated_to_the_managed_keys_newest_version_or_another_kms_key(
         key: "new".to_owned(),
         context: context.clone(),
     };
-    let filter = RotateFilter {
+    let filter = VersionFilter {
         kms_key: Some("other".to_owned()),
-        ..RotateFilter::default()
+        ..VersionFilter::default()
     };
     let (mut job, rotate_job) = rotation(to_new.clone(), filter);
     rotate(&store, &mut job, &rotate_job).await;
@@ -528,7 +544,7 @@ async fn keys_are_rotated_to_the_managed_keys_newest_version_or_another_kms_key(
             .as_deref(),
         Some("old")
     );
-    let (mut job, rotate_job) = rotation(to_new, RotateFilter::default());
+    let (mut job, rotate_job) = rotation(to_new, VersionFilter::default());
     rotate(&store, &mut job, &rotate_job).await;
     assert_eq!((job.progress.objects, job.progress.objects_failed), (3, 0));
     for key in ["a", "b"] {
@@ -558,14 +574,14 @@ async fn locked_versions_keep_their_mode_but_follow_the_managed_key() {
     };
     put_sealed(&store, "held", &Encryption::S3, held).await;
     kms.rotate_key(teifs_crypto::DEFAULT_KEY).await.unwrap();
-    let (mut job, to_s3) = rotation(RotateTo::S3, RotateFilter::default());
+    let (mut job, to_s3) = rotation(RotateTo::S3, VersionFilter::default());
     rotate(&store, &mut job, &to_s3).await;
     assert_eq!((job.progress.objects, job.progress.objects_failed), (1, 0));
     let to_new = RotateTo::Kms {
         key: "new".to_owned(),
         context: std::collections::BTreeMap::new(),
     };
-    let (mut job, rotate_job) = rotation(to_new, RotateFilter::default());
+    let (mut job, rotate_job) = rotation(to_new, VersionFilter::default());
     rotate(&store, &mut job, &rotate_job).await;
     assert_eq!((job.progress.objects, job.progress.objects_failed), (0, 1));
     assert!(
@@ -621,83 +637,83 @@ fn rotation_filters_take_ages_any_tag_any_metadata_and_the_kms_key() {
     let now = now_ms();
     let made = |ago_ms, mode, key| filtered_version(now, ago_ms, mode, key);
     let s3 = made(10_000, teifs_types::SseMode::S3, None);
-    let takes = |filter: RotateFilter, v: &super::ObjectVersion| super::rotates(&filter, v, now);
+    let takes = |filter: VersionFilter, v: &super::ObjectVersion| super::rotates(&filter, v, now);
     let kv = |k: &str, v: &str| KeyValue {
         key: k.to_owned(),
         value: v.to_owned(),
     };
-    assert!(takes(RotateFilter::default(), &s3));
+    assert!(takes(VersionFilter::default(), &s3));
     assert!(takes(
-        RotateFilter {
+        VersionFilter {
             older_than_secs: Some(10),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(!takes(
-        RotateFilter {
+        VersionFilter {
             older_than_secs: Some(11),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(takes(
-        RotateFilter {
+        VersionFilter {
             newer_than_secs: Some(11),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(!takes(
-        RotateFilter {
+        VersionFilter {
             newer_than_secs: Some(10),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(takes(
-        RotateFilter {
+        VersionFilter {
             created_after_ms: Some(now - 10_001),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(!takes(
-        RotateFilter {
+        VersionFilter {
             created_after_ms: Some(now - 10_000),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(takes(
-        RotateFilter {
+        VersionFilter {
             created_before_ms: Some(now - 9_999),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
     assert!(!takes(
-        RotateFilter {
+        VersionFilter {
             created_before_ms: Some(now - 10_000),
-            ..RotateFilter::default()
+            ..VersionFilter::default()
         },
         &s3
     ));
-    let tags = |t: Vec<KeyValue>| RotateFilter {
+    let tags = |t: Vec<KeyValue>| VersionFilter {
         tags: t,
-        ..RotateFilter::default()
+        ..VersionFilter::default()
     };
     assert!(takes(tags(vec![kv("team", "dev"), kv("team", "o*")]), &s3));
     assert!(!takes(tags(vec![kv("team", "dev")]), &s3));
-    let meta = |m: Vec<KeyValue>| RotateFilter {
+    let meta = |m: Vec<KeyValue>| VersionFilter {
         metadata: m,
-        ..RotateFilter::default()
+        ..VersionFilter::default()
     };
     assert!(takes(meta(vec![kv("content-type", "image/*")]), &s3));
     assert!(!takes(meta(vec![kv("content-type", "text/*")]), &s3));
-    let by_key = RotateFilter {
+    let by_key = VersionFilter {
         kms_key: Some("a".to_owned()),
-        ..RotateFilter::default()
+        ..VersionFilter::default()
     };
     assert!(takes(by_key.clone(), &s3));
     assert!(takes(
@@ -709,12 +725,31 @@ fn rotation_filters_take_ages_any_tag_any_metadata_and_the_kms_key() {
         &made(1, teifs_types::SseMode::Kms, Some("b"))
     ));
     for unrotated in [teifs_types::SseMode::Customer, teifs_types::SseMode::Dsse] {
-        assert!(!takes(RotateFilter::default(), &made(1, unrotated, None)));
+        assert!(!takes(VersionFilter::default(), &made(1, unrotated, None)));
     }
     let mut marker = s3.clone();
     marker.delete_marker = true;
-    assert!(!takes(RotateFilter::default(), &marker));
+    assert!(!takes(VersionFilter::default(), &marker));
     let mut plain = s3;
     plain.info.sse = None;
-    assert!(!takes(RotateFilter::default(), &plain));
+    assert!(!takes(VersionFilter::default(), &plain));
+}
+
+#[test]
+fn secrets_sealed_by_the_first_jobs_are_their_notify_token() {
+    let old = super::JobSecrets::from_json(&zeroize::Zeroizing::new(TOKEN.to_owned())).unwrap();
+    assert_eq!(old.notify_token.as_deref().map(String::as_str), Some(TOKEN));
+    assert!(old.secret_key.is_none());
+    let json = JobSecrets {
+        session_token: Some(zeroize::Zeroizing::new(SECRET.to_owned())),
+        ..JobSecrets::default()
+    }
+    .to_json()
+    .unwrap();
+    let back = super::JobSecrets::from_json(&json).unwrap();
+    assert_eq!(
+        back.session_token.as_deref().map(String::as_str),
+        Some(SECRET)
+    );
+    assert!(back.notify_token.is_none());
 }

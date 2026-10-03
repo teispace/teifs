@@ -50,7 +50,11 @@ behaviour; the on-disk format is always upgraded automatically.
   its rules matches (by name, age, date, tags, metadata, size, or a delete marker),
   keeping the newest versions the rule says; a `keyrotate` job seals the data keys of
   SSE-S3 and SSE-KMS versions again, under the managed key's newest version or another
-  KMS key and context, without touching the data. Jobs run in the background one at a time,
+  KMS key and context, without touching the data; a `replicate` job copies objects
+  between a bucket here and one on another S3 service, either way, every version and
+  delete marker keeping its id and time between two of `MinIO`'s kind (each key's
+  current object with plain S3), filtered by age, date, tags and metadata, with the other
+  service's keys sealed by the KMS. Jobs run in the background one at a time,
   carry on after a restart, are retried as they say, and post their result to a
   webhook whose token is kept sealed by the KMS and hidden when a job is described.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`

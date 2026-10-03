@@ -8,6 +8,7 @@ mod admin;
 mod analytics;
 mod audit;
 mod batch_jobs;
+mod batch_replicate;
 mod bucket_access;
 mod bucket_export;
 mod caps;

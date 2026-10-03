@@ -4,8 +4,9 @@
 //! client what it may start. The jobs run in the background ([`crate::batch_jobs`]), one
 //! at a time, and survive a restart.
 //!
-//! The kinds TeiFS runs: `expire` (removes the objects and versions its rules match) and
-//! `keyrotate` (seals encrypted versions' data keys again, under another KMS key).
+//! The kinds TeiFS runs: `expire` (removes the objects and versions its rules match),
+//! `keyrotate` (seals encrypted versions' data keys again, under another KMS key) and
+//! `replicate` (copies objects between a bucket here and one on another S3 service).
 
 use std::time::Duration;
 
@@ -13,11 +14,12 @@ use http::StatusCode;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
 use teifs_iam::Identity;
-use teifs_store::{Store, StoreError};
+use teifs_store::{JobSecrets, Store, StoreError};
 use teifs_types::{
     batch::{
-        BatchJob, ExpireJob, ExpireKind, ExpireRule, JobNotify, JobProgress, JobRetry, JobSpec,
-        JobStatus, KeyRotateJob, KeyValue, RotateFilter, RotateTo,
+        BatchJob, EndKind, ExpireJob, ExpireKind, ExpireRule, JobNotify, JobProgress, JobRetry,
+        JobSpec, JobStatus, KeyRotateJob, KeyValue, RemoteEnd, ReplicateEnd, ReplicateJob,
+        RotateTo, VersionFilter,
     },
     config_kv::go_duration,
 };
@@ -40,8 +42,8 @@ const MAX_RULES: usize = 100;
 /// What a job's secret is shown as.
 const REDACTED: &str = "**REDACTED**";
 
-/// The kinds of job TeiFS runs.
-const KINDS: [&str; 2] = ["expire", "keyrotate"];
+/// The kinds of job TeiFS runs, in `MinIO`'s order.
+const KINDS: [&str; 3] = ["replicate", "keyrotate", "expire"];
 
 /// One of the batch calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +128,7 @@ impl Call {
                 match kind.as_str() {
                     "expire" => Ok(text(EXPIRE_TEMPLATE.to_owned())),
                     "keyrotate" => Ok(text(KEYROTATE_TEMPLATE.to_owned())),
+                    "replicate" => Ok(text(REPLICATE_TEMPLATE.to_owned())),
                     _ => Err(not_runnable(&kind)),
                 }
             }
@@ -166,19 +169,23 @@ async fn start(store: &Store, mut req: S3Request<Body>, user: String) -> S3Resul
     let body = signed_body(&mut req, MAX_JOB_BYTES)
         .await
         .map_err(s3_refusal)?;
-    let (spec, token) = read(&body)?;
+    let (spec, secrets) = read(&body)?;
     if let JobSpec::KeyRotate(rotate) = &spec {
         check_rotation(store, &rotate.encryption).await?;
     }
-    match store.head_bucket(spec.bucket()).await {
-        Err(StoreError::NoSuchBucket) => {
-            return Err(admin::error(
-                StatusCode::NOT_FOUND,
-                "NoSuchSourceBucket",
-                "The specified source bucket does not exist",
-            ));
+    if let JobSpec::Replicate(replicate) = &spec {
+        crate::batch_replicate::check(store, replicate, &secrets).await?;
+    } else {
+        match store.head_bucket(spec.bucket()).await {
+            Err(StoreError::NoSuchBucket) => {
+                return Err(admin::error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchSourceBucket",
+                    "The specified source bucket does not exist",
+                ));
+            }
+            other => drop(other.s3()?),
         }
-        other => drop(other.s3()?),
     }
     let job = BatchJob {
         id: format!("{}-{}", spec.kind(), uuid::Uuid::new_v4().simple()),
@@ -191,13 +198,14 @@ async fn start(store: &Store, mut req: S3Request<Body>, user: String) -> S3Resul
         failures: Vec::new(),
     };
     store
-        .add_batch_job(&job, token)
+        .add_batch_job(&job, &secrets)
         .await
         .map_err(|err| match err {
             StoreError::NoKms => admin::error(
                 StatusCode::NOT_IMPLEMENTED,
                 "XMinioAdminNoKMS",
-                "A job's notification token is kept sealed by the KMS, and none is configured",
+                "A job's secrets (its notification token, the other service's secret key) \
+                 are kept sealed by the KMS, and none is configured",
             ),
             err => from_store(err),
         })?;
@@ -305,6 +313,22 @@ pub(crate) struct Metric {
     expired: Option<Counts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rotation: Option<RotationCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replicate: Option<ReplicateCounts>,
+}
+
+/// `madmin.ReplicateInfo`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplicateCounts {
+    last_bucket: String,
+    last_object: String,
+    objects: u64,
+    objects_failed: u64,
+    delete_markers: u64,
+    delete_markers_failed: u64,
+    bytes_transferred: u64,
+    bytes_failed: u64,
 }
 
 /// `madmin.KeyRotationInfo`.
@@ -352,7 +376,7 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 delete_markers: p.delete_markers,
                 delete_markers_failed: p.delete_markers_failed,
             }),
-            JobSpec::KeyRotate(_) => None,
+            JobSpec::KeyRotate(_) | JobSpec::Replicate(_) => None,
         },
         rotation: match &job.spec {
             JobSpec::KeyRotate(rotate) => Some(RotationCounts {
@@ -361,7 +385,20 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 objects: p.objects,
                 objects_failed: p.objects_failed,
             }),
-            JobSpec::Expire(_) => None,
+            JobSpec::Expire(_) | JobSpec::Replicate(_) => None,
+        },
+        replicate: match &job.spec {
+            JobSpec::Replicate(replicate) => Some(ReplicateCounts {
+                last_bucket: replicate.target.bucket.clone(),
+                last_object: p.last_key.clone().unwrap_or_default(),
+                objects: p.objects,
+                objects_failed: p.objects_failed,
+                delete_markers: p.delete_markers,
+                delete_markers_failed: p.delete_markers_failed,
+                bytes_transferred: p.bytes,
+                bytes_failed: p.bytes_failed,
+            }),
+            JobSpec::Expire(_) | JobSpec::KeyRotate(_) => None,
         },
     }
 }
@@ -436,8 +473,8 @@ struct Request {
     started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expire: Option<ExpireYaml>,
-    #[serde(default, skip_serializing)]
-    replicate: Option<serde::de::IgnoredAny>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replicate: Option<ReplicateYaml>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keyrotate: Option<KeyRotateYaml>,
 }
@@ -568,6 +605,82 @@ struct RetryYaml {
     delay: Option<String>,
 }
 
+/// `MinIO`'s `replicate` job.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReplicateYaml {
+    #[serde(default)]
+    api_version: String,
+    #[serde(default)]
+    source: SourceYaml,
+    #[serde(default)]
+    target: TargetYaml,
+    #[serde(default)]
+    flags: FlagsYaml,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceYaml {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default, skip_serializing_if = "Prefixes::is_empty")]
+    prefix: Prefixes,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    path: String,
+    #[serde(default, skip_serializing_if = "CredentialsYaml::is_empty")]
+    credentials: CredentialsYaml,
+    /// `MinIO`'s archives of small objects: TeiFS sends each object on its own.
+    #[expect(dead_code, reason = "taken, so MinIO's jobs run, and not used")]
+    #[serde(default, skip_serializing)]
+    snowball: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetYaml {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prefix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    path: String,
+    #[serde(default, skip_serializing_if = "CredentialsYaml::is_empty")]
+    credentials: CredentialsYaml,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialsYaml {
+    #[serde(default)]
+    access_key: String,
+    #[serde(default)]
+    secret_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    session_token: String,
+}
+
+impl CredentialsYaml {
+    const fn is_empty(&self) -> bool {
+        self.access_key.is_empty() && self.secret_key.is_empty() && self.session_token.is_empty()
+    }
+}
+
+impl Drop for CredentialsYaml {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.secret_key);
+        zeroize::Zeroize::zeroize(&mut self.session_token);
+    }
+}
+
 /// `MinIO`'s `keyrotate` job.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -637,7 +750,7 @@ fn kms_key(given: &str) -> String {
     crate::sse::kms_key_name(given.strip_prefix("arn:aws:kms:").unwrap_or(given))
 }
 
-fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
+fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, JobSecrets)> {
     if given.api_version != "v1" {
         return Err(invalid("Unsupported batch key rotation API version"));
     }
@@ -675,8 +788,31 @@ fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, Option<Zeroizi
         }
         other => return Err(wrong(format!("the type `{other}` isn't sse-s3 or sse-kms"))),
     };
-    let flags = std::mem::take(&mut given.flags);
-    let filter = flags.filter;
+    let mut flags = std::mem::take(&mut given.flags);
+    let filter = read_filter(std::mem::take(&mut flags.filter), &wrong)?;
+    let (notify, token) = read_notify(flags.notify.take())?;
+    let retry = read_retry(flags.retry.take(), ROTATE_RETRY, "key rotation")?;
+    let rotate = KeyRotateJob {
+        bucket: std::mem::take(&mut given.bucket),
+        prefix: std::mem::take(&mut given.prefix),
+        encryption: to,
+        filter,
+        notify,
+        retry,
+    };
+    Ok((JobSpec::KeyRotate(rotate), notified(token)))
+}
+
+/// Secrets with only a notify token.
+fn notified(token: Option<Zeroizing<String>>) -> JobSecrets {
+    JobSecrets {
+        notify_token: token,
+        ..JobSecrets::default()
+    }
+}
+
+/// The versions a `keyrotate` or `replicate` job's filter takes; `wrong` says why not.
+fn read_filter(filter: FilterYaml, wrong: &impl Fn(String) -> S3Error) -> S3Result<VersionFilter> {
     let seconds = |field: &str, text: Option<String>| {
         text.map(|text| minio_duration(&text).map(|d| d.as_secs()))
             .transpose()
@@ -691,7 +827,7 @@ fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, Option<Zeroizi
             })
             .collect()
     };
-    let filter = RotateFilter {
+    let filter = VersionFilter {
         newer_than_secs: seconds("newerThan", filter.newer_than)?,
         older_than_secs: seconds("olderThan", filter.older_than)?,
         created_after_ms: filter
@@ -708,17 +844,7 @@ fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, Option<Zeroizi
         metadata: pairs(filter.metadata),
         kms_key: (!filter.kms_key.is_empty()).then(|| kms_key(&filter.kms_key)),
     };
-    let (notify, token) = read_notify(flags.notify)?;
-    let retry = read_retry(flags.retry, ROTATE_RETRY, "key rotation")?;
-    let rotate = KeyRotateJob {
-        bucket: std::mem::take(&mut given.bucket),
-        prefix: std::mem::take(&mut given.prefix),
-        encryption: to,
-        filter,
-        notify,
-        retry,
-    };
-    Ok((JobSpec::KeyRotate(rotate), token))
+    Ok(filter)
 }
 
 /// Whether the drive can rotate keys to `to`: it has a KMS, and the key seals a data key
@@ -746,8 +872,8 @@ async fn check_rotation(store: &Store, to: &RotateTo) -> S3Result<()> {
     Ok(())
 }
 
-/// The job a YAML body describes, checked, and the token its result is sent with.
-fn read(body: &[u8]) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
+/// The job a YAML body describes, checked, and its secrets.
+fn read(body: &[u8]) -> S3Result<(JobSpec, JobSecrets)> {
     let text = std::str::from_utf8(body).map_err(|_| invalid("A job is YAML, in UTF-8"))?;
     let request: Request = serde_saphyr::from_str(text)
         .map_err(|e| invalid(format!("The job isn't valid YAML: {e}")))?;
@@ -759,11 +885,11 @@ fn read(body: &[u8]) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
             ..
         } => read_expire(expire),
         Request {
-            replicate: Some(_),
+            replicate: Some(replicate),
             expire: None,
             keyrotate: None,
             ..
-        } => Err(not_runnable("replicate")),
+        } => read_replicate(replicate),
         Request {
             keyrotate: Some(rotate),
             expire: None,
@@ -776,7 +902,7 @@ fn read(body: &[u8]) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
     }
 }
 
-fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
+fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, JobSecrets)> {
     if given.api_version != "v1" {
         return Err(invalid("Unsupported batch expire API version"));
     }
@@ -803,7 +929,148 @@ fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, Option<Zeroizing<Str
         notify,
         retry,
     };
-    Ok((JobSpec::Expire(expire), token))
+    Ok((JobSpec::Expire(expire), notified(token)))
+}
+
+/// The other end's access key, secret key and session token: `far`'s, as `here` (the
+/// bucket here) has none.
+fn read_credentials(
+    far: &mut CredentialsYaml,
+    here: &CredentialsYaml,
+    wrong: &impl Fn(String) -> S3Error,
+) -> S3Result<(String, Zeroizing<String>, Option<Zeroizing<String>>)> {
+    if !here.is_empty() {
+        return Err(wrong(
+            "only the end with an endpoint takes credentials".to_owned(),
+        ));
+    }
+    if far.access_key.len() < 3 || far.secret_key.len() < 8 {
+        return Err(wrong(
+            "the other end's credentials need an access key (3 or more characters) and a \
+             secret key (8 or more)"
+                .to_owned(),
+        ));
+    }
+    if far.secret_key == REDACTED || far.session_token == REDACTED {
+        return Err(wrong(
+            "the credentials were hidden when the job was described: give them again".to_owned(),
+        ));
+    }
+    let secret_key = Zeroizing::new(std::mem::take(&mut far.secret_key));
+    let session_token = (!far.session_token.is_empty())
+        .then(|| Zeroizing::new(std::mem::take(&mut far.session_token)));
+    Ok((
+        std::mem::take(&mut far.access_key),
+        secret_key,
+        session_token,
+    ))
+}
+
+/// A `replicate` job's retries when it gives none, as `MinIO`'s.
+const REPLICATE_RETRY: JobRetry = JobRetry {
+    attempts: 3,
+    delay_ms: 1_000,
+};
+
+fn read_replicate(mut given: ReplicateYaml) -> S3Result<(JobSpec, JobSecrets)> {
+    if given.api_version != "v1" {
+        return Err(invalid("Unsupported batch replication API version"));
+    }
+    let wrong = |why: String| invalid(format!("Invalid batch replication: {why}"));
+    let (source, target) = (&mut given.source, &mut given.target);
+    if source.bucket.is_empty() || target.bucket.is_empty() {
+        return Err(wrong(
+            "the source and the target each name a bucket".to_owned(),
+        ));
+    }
+    let remote_source = !source.endpoint.is_empty();
+    if remote_source != target.endpoint.is_empty() {
+        return Err(wrong(
+            "one end is a bucket here and the other has an endpoint".to_owned(),
+        ));
+    }
+    let kind = |side: &str, kind: &str| match kind {
+        "minio" => Ok(EndKind::Minio),
+        "s3" => Ok(EndKind::S3),
+        other => Err(wrong(format!(
+            "the {side}'s type `{other}` isn't minio or s3"
+        ))),
+    };
+    let path = |side: &str, path: &str| match path {
+        "" | "auto" => Ok(None),
+        "on" => Ok(Some(true)),
+        "off" => Ok(Some(false)),
+        other => Err(wrong(format!(
+            "the {side}'s path `{other}` isn't on, off or auto"
+        ))),
+    };
+    let (source_kind, target_kind) = (kind("source", &source.kind)?, kind("target", &target.kind)?);
+    let (source_path, target_path) = (path("source", &source.path)?, path("target", &target.path)?);
+    let (access_key, secret_key, session_token) = if remote_source {
+        read_credentials(&mut source.credentials, &target.credentials, &wrong)?
+    } else {
+        read_credentials(&mut target.credentials, &source.credentials, &wrong)?
+    };
+    let remote = |endpoint: &str, path_style| -> S3Result<RemoteEnd> {
+        let uri = endpoint
+            .parse::<http::Uri>()
+            .ok()
+            .filter(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https"))
+                    && uri.host().is_some_and(|host| !host.is_empty())
+                    && uri.path_and_query().is_none_or(|p| p.as_str() == "/")
+            })
+            .ok_or_else(|| {
+                wrong(format!(
+                    "the endpoint `{endpoint}` isn't an http:// or https:// URL"
+                ))
+            })?;
+        Ok(RemoteEnd {
+            endpoint: uri.to_string().trim_end_matches('/').to_owned(),
+            access_key: access_key.clone(),
+            path_style,
+            session_token: session_token.is_some(),
+        })
+    };
+    let source_end = ReplicateEnd {
+        kind: source_kind,
+        bucket: std::mem::take(&mut source.bucket),
+        prefixes: std::mem::take(&mut source.prefix).into_vec(),
+        remote: remote_source
+            .then(|| remote(&source.endpoint, source_path))
+            .transpose()?,
+    };
+    let target_end = ReplicateEnd {
+        kind: target_kind,
+        bucket: std::mem::take(&mut target.bucket),
+        prefixes: Some(std::mem::take(&mut target.prefix))
+            .filter(|p| !p.is_empty())
+            .into_iter()
+            .collect(),
+        remote: (!remote_source)
+            .then(|| remote(&target.endpoint, target_path))
+            .transpose()?,
+    };
+    let mut flags = std::mem::take(&mut given.flags);
+    if !flags.filter.kms_key.is_empty() {
+        return Err(wrong("kmskeyid filters keyrotate jobs only".to_owned()));
+    }
+    let filter = read_filter(std::mem::take(&mut flags.filter), &wrong)?;
+    let (notify, notify_token) = read_notify(flags.notify.take())?;
+    let retry = read_retry(flags.retry.take(), REPLICATE_RETRY, "replication")?;
+    let replicate = ReplicateJob {
+        source: source_end,
+        target: target_end,
+        filter,
+        notify,
+        retry,
+    };
+    let secrets = JobSecrets {
+        notify_token,
+        secret_key: Some(secret_key),
+        session_token,
+    };
+    Ok((JobSpec::Replicate(replicate), secrets))
 }
 
 /// Where a job's result goes, and the token it's sent with.
@@ -1007,6 +1274,7 @@ fn describe(job: &BatchJob) -> S3Result<String> {
     match &job.spec {
         JobSpec::Expire(expire) => request.expire = Some(expire_yaml(expire)),
         JobSpec::KeyRotate(rotate) => request.keyrotate = Some(keyrotate_yaml(rotate)),
+        JobSpec::Replicate(replicate) => request.replicate = Some(replicate_yaml(replicate)),
     }
     serde_saphyr::to_string(&request).map_err(S3Error::internal_error)
 }
@@ -1091,6 +1359,20 @@ fn keyrotate_yaml(rotate: &KeyRotateJob) -> KeyRotateYaml {
             },
         },
     };
+    KeyRotateYaml {
+        api_version: "v1".to_owned(),
+        bucket: rotate.bucket.clone(),
+        prefix: rotate.prefix.clone(),
+        encryption,
+        flags: FlagsYaml {
+            filter: filter_yaml(&rotate.filter),
+            notify: notify_yaml(rotate.notify.as_ref()),
+            retry: Some(retry_yaml(rotate.retry)),
+        },
+    }
+}
+
+fn filter_yaml(f: &VersionFilter) -> FilterYaml {
     let pairs = |given: &[KeyValue]| {
         given
             .iter()
@@ -1100,24 +1382,74 @@ fn keyrotate_yaml(rotate: &KeyRotateJob) -> KeyRotateYaml {
             })
             .collect()
     };
-    let f = &rotate.filter;
-    KeyRotateYaml {
+    FilterYaml {
+        newer_than: f.newer_than_secs.map(|secs| format!("{secs}s")),
+        older_than: f.older_than_secs.map(|secs| format!("{secs}s")),
+        created_after: f.created_after_ms.map(rfc3339),
+        created_before: f.created_before_ms.map(rfc3339),
+        tags: pairs(&f.tags),
+        metadata: pairs(&f.metadata),
+        kms_key: f.kms_key.clone().unwrap_or_default(),
+    }
+}
+
+fn replicate_yaml(replicate: &ReplicateJob) -> ReplicateYaml {
+    let kind = |end: &ReplicateEnd| {
+        match end.kind {
+            EndKind::Minio => "minio",
+            EndKind::S3 => "s3",
+        }
+        .to_owned()
+    };
+    let path = |end: &ReplicateEnd| match end.remote.as_ref().and_then(|r| r.path_style) {
+        None => String::new(),
+        Some(true) => "on".to_owned(),
+        Some(false) => "off".to_owned(),
+    };
+    let credentials = |end: &ReplicateEnd| {
+        end.remote
+            .as_ref()
+            .map(|remote| CredentialsYaml {
+                access_key: remote.access_key.clone(),
+                secret_key: REDACTED.to_owned(),
+                session_token: if remote.session_token {
+                    REDACTED.to_owned()
+                } else {
+                    String::new()
+                },
+            })
+            .unwrap_or_default()
+    };
+    let endpoint = |end: &ReplicateEnd| {
+        end.remote
+            .as_ref()
+            .map(|remote| remote.endpoint.clone())
+            .unwrap_or_default()
+    };
+    let (source, target) = (&replicate.source, &replicate.target);
+    ReplicateYaml {
         api_version: "v1".to_owned(),
-        bucket: rotate.bucket.clone(),
-        prefix: rotate.prefix.clone(),
-        encryption,
+        source: SourceYaml {
+            kind: kind(source),
+            bucket: source.bucket.clone(),
+            prefix: Prefixes::Many(source.prefixes.clone()),
+            endpoint: endpoint(source),
+            path: path(source),
+            credentials: credentials(source),
+            snowball: None,
+        },
+        target: TargetYaml {
+            kind: kind(target),
+            bucket: target.bucket.clone(),
+            prefix: target.prefixes.first().cloned().unwrap_or_default(),
+            endpoint: endpoint(target),
+            path: path(target),
+            credentials: credentials(target),
+        },
         flags: FlagsYaml {
-            filter: FilterYaml {
-                newer_than: f.newer_than_secs.map(|secs| format!("{secs}s")),
-                older_than: f.older_than_secs.map(|secs| format!("{secs}s")),
-                created_after: f.created_after_ms.map(rfc3339),
-                created_before: f.created_before_ms.map(rfc3339),
-                tags: pairs(&f.tags),
-                metadata: pairs(&f.metadata),
-                kms_key: f.kms_key.clone().unwrap_or_default(),
-            },
-            notify: notify_yaml(rotate.notify.as_ref()),
-            retry: Some(retry_yaml(rotate.retry)),
+            filter: filter_yaml(&replicate.filter),
+            notify: notify_yaml(replicate.notify.as_ref()),
+            retry: Some(retry_yaml(replicate.retry)),
         },
     }
 }
@@ -1151,6 +1483,47 @@ keyrotate:
     retry:                  # how often a version that fails is tried
       attempts: 3
       delay: 25ms
+";
+
+/// What `generate-job?jobType=replicate` answers.
+const REPLICATE_TEMPLATE: &str = "\
+replicate:
+  apiVersion: v1
+  # One end is a bucket here (no endpoint, no credentials); the other is on another
+  # S3 service. Between two of type minio (MinIO, TeiFS) every version and delete
+  # marker goes, keeping its id and time; with s3, each key's current object.
+  source:
+    type: minio             # minio or s3
+    bucket: mybucket
+    prefix: myprefix        # (optional) only keys under it; a list of prefixes works too
+  target:
+    type: minio             # minio or s3
+    bucket: backup
+    prefix: copies          # (optional) the keys go under it
+    endpoint: https://backup.example.com:9000
+    path: auto              # on: buckets in the path; off: in the host; auto: as suits
+    credentials:
+      accessKey: ACCESS-KEY
+      secretKey: SECRET-KEY
+      # sessionToken: SESSION-TOKEN
+  flags:
+    filter:                 # (optional) every condition given must hold
+      newerThan: 7d         # made less than this long ago (s, m, h, d, w)
+      olderThan: 1d         # made at least this long ago
+      createdAfter: \"2026-01-01T00:00:00Z\"
+      createdBefore: \"2026-12-31T00:00:00Z\"
+      tags:                 # with any one of these tags
+        - key: team
+          value: o*
+      metadata:             # with any one of these headers or x-amz-meta-* metadata
+        - key: content-type
+          value: image/*
+    notify:                 # (optional) where the result is POSTed when the job ends
+      endpoint: https://example.com/batch
+      token: Bearer TOKEN
+    retry:                  # how often a version that fails is tried
+      attempts: 3
+      delay: 1s
 ";
 
 /// What `generate-job?jobType=expire` answers.
@@ -1192,10 +1565,154 @@ expire:
 mod tests {
     use super::*;
 
+    /// A `replicate` job pushing `here` to `there`, with `extra` YAML in its source and
+    /// target.
+    fn replicate(source: &str, target: &str) -> String {
+        format!(
+            "replicate:\n  apiVersion: v1\n  source:\n    type: minio\n    bucket: here\n{source}  target:\n    type: minio\n    bucket: there\n{target}"
+        )
+    }
+
+    const FAR: &str = "    endpoint: http://127.0.0.1:9000\n    credentials:\n      accessKey: dummy-access\n      secretKey: dummy-secret-0001\n";
+
+    #[test]
+    fn the_replicate_template_is_a_job_this_server_runs() {
+        let (spec, secrets) = read(REPLICATE_TEMPLATE.as_bytes()).unwrap();
+        let shown =
+            |s: &Option<Zeroizing<String>>| s.as_deref().map(String::as_str).map(str::to_owned);
+        assert_eq!(
+            shown(&secrets.notify_token).as_deref(),
+            Some("Bearer TOKEN")
+        );
+        assert_eq!(shown(&secrets.secret_key).as_deref(), Some("SECRET-KEY"));
+        assert_eq!(shown(&secrets.session_token), None);
+        let JobSpec::Replicate(replicate) = spec else {
+            panic!("a replicate job: {spec:?}");
+        };
+        assert_eq!(replicate.source.bucket, "mybucket");
+        assert_eq!(replicate.source.prefixes, ["myprefix"]);
+        assert_eq!(replicate.source.remote, None);
+        assert_eq!(replicate.target.prefixes, ["copies"]);
+        assert_eq!(
+            replicate.target.remote,
+            Some(RemoteEnd {
+                endpoint: "https://backup.example.com:9000".to_owned(),
+                access_key: "ACCESS-KEY".to_owned(),
+                path_style: None,
+                session_token: false,
+            })
+        );
+        assert!(replicate.keeps_versions());
+        assert_eq!(replicate.filter.newer_than_secs, Some(7 * 86_400));
+        assert_eq!(replicate.filter.tags[0].value, "o*");
+        assert_eq!(replicate.retry, REPLICATE_RETRY);
+    }
+
+    #[test]
+    fn a_described_replicate_job_hides_its_keys_and_reads_back_the_same() {
+        let yaml = replicate(
+            "    prefix: [a/, b/]\n",
+            "    type: s3\n    prefix: copies\n    path: on\n    endpoint: https://s3.eu-west-2.amazonaws.com/\n    credentials:\n      accessKey: dummy-access\n      secretKey: dummy-secret-0001\n      sessionToken: dummy-session-0001\n",
+        )
+        .replace("  target:\n    type: minio\n", "  target:\n");
+        let (spec, secrets) = read(yaml.as_bytes()).unwrap();
+        assert!(secrets.session_token.is_some());
+        let JobSpec::Replicate(replicate) = &spec else {
+            panic!("a replicate job");
+        };
+        assert!(!replicate.keeps_versions());
+        assert_eq!(replicate.source.prefixes, ["a/", "b/"]);
+        let remote = replicate.target.remote.as_ref().unwrap();
+        assert_eq!(remote.endpoint, "https://s3.eu-west-2.amazonaws.com");
+        assert_eq!(remote.path_style, Some(true));
+        assert!(remote.session_token);
+        let job = BatchJob {
+            id: "replicate-1".to_owned(),
+            user: "admin".to_owned(),
+            created_ms: 0,
+            priority: 0,
+            status: JobStatus::Ready,
+            spec: spec.clone(),
+            progress: JobProgress::default(),
+            failures: Vec::new(),
+        };
+        let described = describe(&job).unwrap();
+        for secret in ["dummy-secret-0001", "dummy-session-0001"] {
+            assert!(!described.contains(secret), "{described}");
+        }
+        assert!(described.contains("accessKey: dummy-access"), "{described}");
+        let refused = read(described.as_bytes()).unwrap_err();
+        assert!(refused.message().unwrap_or_default().contains("hidden"));
+        // The session token hidden alone is refused too.
+        let half = described.replacen(REDACTED, "dummy-secret-0002", 1);
+        let refused = read(half.as_bytes()).unwrap_err();
+        assert!(refused.message().unwrap_or_default().contains("hidden"));
+        let given = half.replacen(REDACTED, "dummy-session-0002", 1);
+        let (again, secrets) = read(given.as_bytes()).unwrap();
+        assert_eq!(again, spec);
+        assert_eq!(
+            secrets.secret_key.as_deref().map(String::as_str),
+            Some("dummy-secret-0002")
+        );
+    }
+
+    #[test]
+    fn replicate_mistakes_are_refused_with_why() {
+        let refused = |yaml: &str| {
+            let err = read(yaml.as_bytes()).unwrap_err();
+            err.message().unwrap_or_default().to_owned()
+        };
+        assert!(read(replicate("", FAR).as_bytes()).is_ok());
+        assert!(read(replicate(FAR, "").as_bytes()).is_ok());
+        assert!(refused(&replicate("", "")).contains("one end"));
+        assert!(refused(&replicate(FAR, FAR)).contains("one end"));
+        let here_keys =
+            "    credentials:\n      accessKey: dummy-access\n      secretKey: dummy-secret-0001\n";
+        assert!(refused(&replicate(here_keys, FAR)).contains("only the end"));
+        assert!(
+            refused(&replicate("", &FAR.replace("dummy-secret-0001", "short")))
+                .contains("secret key")
+        );
+        assert!(refused(&replicate("", &FAR.replace("dummy-access", "ab"))).contains("access key"));
+        assert!(
+            refused(&replicate(
+                "",
+                &FAR.replace("http://127.0.0.1:9000", "ftp://h")
+            ))
+            .contains("isn't an http")
+        );
+        assert!(
+            refused(&replicate(
+                "",
+                &FAR.replace("http://127.0.0.1:9000", "http://h/x")
+            ))
+            .contains("isn't an http")
+        );
+        assert!(refused(&replicate("    path: maybe\n", FAR)).contains("path `maybe`"));
+        assert!(
+            refused(&replicate("", FAR).replacen("type: minio", "type: gcs", 1))
+                .contains("source's type `gcs`")
+        );
+        assert!(refused(&replicate("", FAR).replace("    bucket: there\n", "")).contains("bucket"));
+        assert!(
+            refused(&format!(
+                "{}  flags:\n    filter:\n      kmskeyid: k\n",
+                replicate("", FAR)
+            ))
+            .contains("kmskeyid")
+        );
+        assert!(refused(&replicate("", FAR).replace("v1", "v2")).contains("API version"));
+        // MinIO's snowball settings are taken (and each object sent on its own).
+        assert!(read(replicate("    snowball:\n      disable: true\n", FAR).as_bytes()).is_ok());
+    }
+
     #[test]
     fn the_template_is_a_job_this_server_runs() {
         let (spec, token) = read(EXPIRE_TEMPLATE.as_bytes()).unwrap();
-        assert_eq!(token.as_deref().map(String::as_str), Some("Bearer TOKEN"));
+        assert_eq!(
+            token.notify_token.as_deref().map(String::as_str),
+            Some("Bearer TOKEN")
+        );
         let JobSpec::Expire(expire) = spec else {
             panic!("an expire job: {spec:?}");
         };
@@ -1231,7 +1748,10 @@ mod tests {
     #[test]
     fn the_keyrotate_template_is_a_job_this_server_runs_and_describes() {
         let (spec, token) = read(KEYROTATE_TEMPLATE.as_bytes()).unwrap();
-        assert_eq!(token.as_deref().map(String::as_str), Some("Bearer TOKEN"));
+        assert_eq!(
+            token.notify_token.as_deref().map(String::as_str),
+            Some("Bearer TOKEN")
+        );
         let JobSpec::KeyRotate(rotate) = &spec else {
             panic!("a keyrotate job: {spec:?}");
         };
@@ -1319,7 +1839,10 @@ mod tests {
         let yaml = yaml.replace(REDACTED, "Bearer AGAIN");
         let (again, token) = read(yaml.as_bytes()).unwrap();
         assert_eq!(again, spec);
-        assert_eq!(token.as_deref().map(String::as_str), Some("Bearer AGAIN"));
+        assert_eq!(
+            token.notify_token.as_deref().map(String::as_str),
+            Some("Bearer AGAIN")
+        );
     }
 
     #[test]
@@ -1332,7 +1855,7 @@ mod tests {
             |rules: &str| format!("expire:\n  apiVersion: v1\n  bucket: b\n  rules:\n{rules}");
         assert!(refused("expire:\n  apiVersion: v2\n  bucket: b\n").contains("API version"));
         assert!(refused("expire:\n  apiVersion: v1\n").contains("Bucket"));
-        assert!(refused("replicate:\n  apiVersion: v1\n").contains("replicate"));
+        assert!(refused("replicate:\n  apiVersion: v1\n").contains("each name a bucket"));
         let rotate = |encryption: &str| {
             format!("keyrotate:\n  apiVersion: v1\n  bucket: b\n  encryption:\n{encryption}")
         };

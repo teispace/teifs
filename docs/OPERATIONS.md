@@ -1363,8 +1363,9 @@ one is imported once the target is added on the other server.
 
 A batch job does one thing to many objects in the background, as `MinIO`'s do, and `mc
 batch` drives them. TeiFS runs `expire` jobs, which remove, under a bucket's prefixes, the
-objects whose newest version a rule matches, and their older versions, and `keyrotate`
-jobs, which seal encrypted versions' keys again under another KMS key.
+objects whose newest version a rule matches, and their older versions, `keyrotate`
+jobs, which seal encrypted versions' keys again under another KMS key, and `replicate`
+jobs, which copy objects between a bucket here and one on another S3 service.
 
 ```sh
 mc batch generate local expire > expire.yaml   # a template to fill in
@@ -1414,6 +1415,37 @@ keyrotate:
       kmskeyid: reports-2025   # only versions sealed by the old key (SSE-S3 ones too)
       olderThan: 1d
 ```
+
+A `replicate` job copies the versions under the source's prefixes that its filter takes
+to the target, under the target's prefix. One end is a bucket here (no `endpoint`); the
+other is on another S3 service, reached with the keys given (kept sealed by the KMS, and
+hidden when the job is described):
+
+```yaml
+replicate:
+  apiVersion: v1
+  source:
+    type: minio
+    bucket: photos
+    prefix: 2026/
+  target:
+    type: minio              # minio: MinIO or TeiFS; s3: any other S3 service
+    bucket: photos-backup
+    endpoint: https://backup.example.com:9000
+    credentials:
+      accessKey: BACKUP-KEY
+      secretKey: BACKUP-SECRET
+  flags:
+    filter:
+      newerThan: 30d
+```
+
+Between two `minio` ends every version and delete marker goes with its id and time, so
+the copy is the same history; when either end is `s3`, each key's current object goes,
+as a new version. Swap the ends to pull from the other service into a bucket here. A
+job is refused before it starts when a bucket is missing, the keys don't work, or a
+versioned source would go to an unversioned target. Running a job again copies each
+version once.
 
 For `expire` jobs, the first rule that matches a key's newest version decides; every condition a rule gives
 must hold (`createdBefore`, `tags`, `metadata` such as `content-type` or

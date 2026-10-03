@@ -11,6 +11,7 @@ mod remote;
 mod stats;
 
 pub(crate) use check::{Unready, check};
+pub(crate) use remote::{Connection, Target as Remote, is_aws, missed, said};
 pub(crate) use stats::{Bucket, Rates, Stats, Target, Timed};
 
 use std::{
@@ -38,7 +39,7 @@ const EVERY: Duration = Duration::from_secs(60);
 /// How many waiting versions of a bucket one pass takes.
 const BATCH: usize = 1_000;
 /// How much of a version is read at a time.
-const CHUNK: usize = 256 * 1024;
+pub(crate) const CHUNK: usize = 256 * 1024;
 /// How soon Replication Time Control replicates a version.
 const THRESHOLD: Duration = Duration::from_mins(15);
 
@@ -60,7 +61,7 @@ pub(crate) struct Worker {
 
 /// Why a version didn't reach a destination.
 #[derive(Debug)]
-enum Missed {
+pub(crate) enum Missed {
     /// It never will as things are: the destination is missing or doesn't take replicas.
     Failed(String),
     /// It may later: tried again on the next pass.
@@ -492,6 +493,7 @@ impl Worker {
             store: &self.store,
             bucket,
             key: &version.key,
+            target_key: &version.key,
             info,
             body,
             replica,
@@ -501,7 +503,7 @@ impl Worker {
             storage_class: destination.and_then(|d| d.storage_class.clone()),
         };
         if let Some(local) = arn.strip_prefix(LOCAL_ARN) {
-            self.local(local, sending).await?;
+            write_local(&self.store, local, sending).await?;
         } else {
             self.remote(arn).await?.send(sending).await?;
         }
@@ -584,64 +586,89 @@ impl Worker {
         lock(&self.targets).insert(arn.to_owned(), Arc::clone(&target));
         Ok(target)
     }
+}
 
-    /// Writes a replica into `destination`, a bucket on this drive.
-    async fn local(&self, destination: &str, sending: Sending<'_>) -> Result<(), Missed> {
-        let encryption = match sending.info.sse.as_ref().map(|sse| sse.mode) {
-            // The destination's default, as a write without encryption headers gets.
-            None => {
-                let default = self.store.bucket_encryption(destination).await?;
-                crate::sse::for_write(crate::sse::WriteRequest::default(), default.as_ref())
-                    .unwrap_or_default()
+/// Writes a replica into `destination`, a bucket on this drive.
+pub(crate) async fn write_local(
+    store: &Store,
+    destination: &str,
+    sending: Sending<'_>,
+) -> Result<(), Missed> {
+    let mode = sending.info.sse.as_ref().map(|sse| sse.mode);
+    let encryption = replica_encryption(store, destination, mode, sending.replica_key).await?;
+    let mut staged = store.stage_for(destination, &encryption).await?;
+    if let Some(body) = sending.body {
+        let mut reader = body.all().await?;
+        let mut chunk = vec![0; CHUNK];
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .await
+                .map_err(|err| Missed::Later(err.to_string()))?;
+            if read == 0 {
+                break;
             }
-            Some(SseMode::S3) => Encryption::S3,
-            Some(SseMode::Kms) => Encryption::Kms {
-                key: sending.replica_key,
-                context: std::collections::BTreeMap::new(),
-                bucket_key: false,
-            },
-            Some(SseMode::Dsse | SseMode::Customer) => Encryption::Dsse {
-                key: sending.replica_key,
-                context: std::collections::BTreeMap::new(),
-            },
-        };
-        let mut staged = self.store.stage_for(destination, &encryption).await?;
-        if let Some(body) = sending.body {
-            let mut reader = body.all().await?;
-            let mut chunk = vec![0; CHUNK];
-            loop {
-                let read = reader
-                    .read(&mut chunk)
-                    .await
-                    .map_err(|err| Missed::Later(err.to_string()))?;
-                if read == 0 {
-                    break;
-                }
-                staged.write(&chunk[..read]).await?;
-            }
+            staged.write(&chunk[..read]).await?;
         }
-        let mut attrs = sending.info.attrs;
-        attrs.replication = None;
-        self.store
-            .commit_replica(destination, sending.key, staged, attrs, sending.replica)
-            .await?;
-        Ok(())
     }
+    let mut attrs = sending.info.attrs;
+    attrs.replication = None;
+    store
+        .commit_replica(
+            destination,
+            sending.target_key,
+            staged,
+            attrs,
+            sending.replica,
+        )
+        .await?;
+    Ok(())
+}
+
+/// How a replica of a version encrypted with `mode` is encrypted in `destination`, a
+/// bucket on this drive: as the version was (SSE-KMS under `replica_key`), or as the
+/// destination's default when the version wasn't.
+pub(crate) async fn replica_encryption(
+    store: &Store,
+    destination: &str,
+    mode: Option<SseMode>,
+    replica_key: Option<String>,
+) -> Result<Encryption, Missed> {
+    Ok(match mode {
+        // The destination's default, as a write without encryption headers gets.
+        None => {
+            let default = store.bucket_encryption(destination).await?;
+            crate::sse::for_write(crate::sse::WriteRequest::default(), default.as_ref())
+                .unwrap_or_default()
+        }
+        Some(SseMode::S3) => Encryption::S3,
+        Some(SseMode::Kms) => Encryption::Kms {
+            key: replica_key,
+            context: std::collections::BTreeMap::new(),
+            bucket_key: false,
+        },
+        Some(SseMode::Dsse | SseMode::Customer) => Encryption::Dsse {
+            key: replica_key,
+            context: std::collections::BTreeMap::new(),
+        },
+    })
 }
 
 /// A version on its way to a destination.
-struct Sending<'a> {
-    store: &'a Store,
-    bucket: &'a str,
-    key: &'a str,
-    info: ObjectInfo,
-    body: Option<ObjectBody>,
+pub(crate) struct Sending<'a> {
+    pub(crate) store: &'a Store,
+    pub(crate) bucket: &'a str,
+    pub(crate) key: &'a str,
+    /// Its key at the destination.
+    pub(crate) target_key: &'a str,
+    pub(crate) info: ObjectInfo,
+    pub(crate) body: Option<ObjectBody>,
     /// What the replica keeps of the version.
-    replica: Replica,
+    pub(crate) replica: Replica,
     /// The KMS key the rule names for replicas of SSE-KMS versions.
-    replica_key: Option<String>,
+    pub(crate) replica_key: Option<String>,
     /// The storage class the rule names for replicas.
-    storage_class: Option<String>,
+    pub(crate) storage_class: Option<String>,
 }
 
 impl Sending<'_> {

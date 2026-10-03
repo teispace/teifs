@@ -8,7 +8,7 @@ use teifs_types::{
     SseMode,
     batch::{
         BatchJob, ExpireJob, ExpireKind, ExpireRule, JobProgress, JobRetry, KeyRotateJob, KeyValue,
-        RotateFilter,
+        VersionFilter,
     },
 };
 use zeroize::Zeroizing;
@@ -26,6 +26,82 @@ fn bound(id: &str) -> String {
     format!("batch-job:{id}")
 }
 
+/// A job's secrets, kept sealed apart from it.
+#[derive(Default)]
+pub struct JobSecrets {
+    /// The token its result is sent with.
+    pub notify_token: Option<Zeroizing<String>>,
+    /// The secret key of the other service a `replicate` job copies from or to.
+    pub secret_key: Option<Zeroizing<String>>,
+    /// The session token that goes with it.
+    pub session_token: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for JobSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobSecrets")
+            .field("notify_token", &self.notify_token.is_some())
+            .field("secret_key", &self.secret_key.is_some())
+            .field("session_token", &self.session_token.is_some())
+            .finish()
+    }
+}
+
+/// [`JobSecrets`] as they're sealed: JSON.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Sealed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notify_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_token: Option<String>,
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.notify_token);
+        zeroize::Zeroize::zeroize(&mut self.secret_key);
+        zeroize::Zeroize::zeroize(&mut self.session_token);
+    }
+}
+
+impl JobSecrets {
+    const fn is_empty(&self) -> bool {
+        self.notify_token.is_none() && self.secret_key.is_none() && self.session_token.is_none()
+    }
+
+    fn to_json(&self) -> Result<Zeroizing<String>> {
+        let owned = |s: &Option<Zeroizing<String>>| s.as_ref().map(|s| s.as_str().to_owned());
+        let sealed = Sealed {
+            notify_token: owned(&self.notify_token),
+            secret_key: owned(&self.secret_key),
+            session_token: owned(&self.session_token),
+        };
+        serde_json::to_string(&sealed)
+            .map(Zeroizing::new)
+            .map_err(|_| StoreError::CorruptMetadata)
+    }
+
+    /// What was sealed: JSON, or (as the first jobs kept it) the notify token alone.
+    fn from_json(plain: &Zeroizing<String>) -> Result<Self> {
+        if !plain.starts_with('{') {
+            return Ok(Self {
+                notify_token: Some(plain.clone()),
+                ..Self::default()
+            });
+        }
+        let mut sealed: Sealed =
+            serde_json::from_str(plain).map_err(|_| StoreError::CorruptMetadata)?;
+        Ok(Self {
+            notify_token: sealed.notify_token.take().map(Zeroizing::new),
+            secret_key: sealed.secret_key.take().map(Zeroizing::new),
+            session_token: sealed.session_token.take().map(Zeroizing::new),
+        })
+    }
+}
+
 fn parse(json: &str) -> Result<BatchJob> {
     serde_json::from_str(json).map_err(|_| StoreError::CorruptMetadata)
 }
@@ -35,15 +111,13 @@ fn json(job: &BatchJob) -> Result<String> {
 }
 
 impl Store {
-    /// Records a new job, with the token its result is sent with, sealed.
-    pub async fn add_batch_job(
-        &self,
-        job: &BatchJob,
-        token: Option<Zeroizing<String>>,
-    ) -> Result<()> {
-        let sealed = match token {
-            Some(token) => Some(seal(&self.targets_key().await?, &bound(&job.id), &token)),
-            None => None,
+    /// Records a new job, with its secrets, sealed.
+    pub async fn add_batch_job(&self, job: &BatchJob, secrets: &JobSecrets) -> Result<()> {
+        let sealed = if secrets.is_empty() {
+            None
+        } else {
+            let json = secrets.to_json()?;
+            Some(seal(&self.targets_key().await?, &bound(&job.id), &json))
         };
         let (id, created_ms, json) = (job.id.clone(), job.created_ms, json(job)?);
         self.blocking(move |inner| {
@@ -103,15 +177,17 @@ impl Store {
         .await
     }
 
-    /// The token the result of job `id` is sent with, if it has one.
-    pub async fn batch_job_token(&self, id: &str) -> Result<Option<Zeroizing<String>>> {
+    /// The secrets of job `id` (none when it has none, or there's no such job).
+    pub async fn batch_job_secrets(&self, id: &str) -> Result<JobSecrets> {
         let owned = id.to_owned();
         let sealed = self
             .blocking(move |inner| Ok(inner.system().batch_job(&owned)?.and_then(|(_, s)| s)))
             .await?;
         match sealed {
-            Some(sealed) => Ok(Some(open(&self.targets_key().await?, &bound(id), &sealed)?)),
-            None => Ok(None),
+            Some(sealed) => {
+                JobSecrets::from_json(&open(&self.targets_key().await?, &bound(id), &sealed)?)
+            }
+            None => Ok(JobSecrets::default()),
         }
     }
 
@@ -309,17 +385,21 @@ impl Store {
 }
 
 /// Whether a `keyrotate` job's `filter` takes `version` at `now`: an SSE-S3 or SSE-KMS
-/// version (not a delete marker) of the age, tags (any one), metadata (any one) and KMS
-/// key (for SSE-KMS versions) it gives.
-fn rotates(filter: &RotateFilter, version: &ObjectVersion, now: i64) -> bool {
-    let info = &version.info;
-    let Some(sse) = info
+/// version (not a delete marker) the filter takes.
+fn rotates(filter: &VersionFilter, version: &ObjectVersion, now: i64) -> bool {
+    let encrypted = version
+        .info
         .sse
         .as_ref()
-        .filter(|s| matches!(s.mode, SseMode::S3 | SseMode::Kms))
-    else {
-        return false;
-    };
+        .is_some_and(|s| matches!(s.mode, SseMode::S3 | SseMode::Kms));
+    encrypted && !version.delete_marker && takes(filter, version, now)
+}
+
+/// Whether `filter` takes `version` at `now`: it's of the age, tags (any one), metadata
+/// (any one) and KMS key (when it's SSE-KMS) the filter gives.
+#[must_use]
+pub fn takes(filter: &VersionFilter, version: &ObjectVersion, now: i64) -> bool {
+    let info = &version.info;
     let modified = millis(info.modified);
     let age = now.saturating_sub(modified);
     let secs = |s: u64| i64::try_from(s).unwrap_or(i64::MAX).saturating_mul(1000);
@@ -327,8 +407,7 @@ fn rotates(filter: &RotateFilter, version: &ObjectVersion, now: i64) -> bool {
         wanted.is_empty() || given.any(|(k, v)| wanted.iter().any(|kv| kv.matches(&k, v)))
     };
     let tags = info.attrs.tags.iter().map(|(k, v)| (k.clone(), v.as_str()));
-    !version.delete_marker
-        && filter.newer_than_secs.is_none_or(|s| age < secs(s))
+    filter.newer_than_secs.is_none_or(|s| age < secs(s))
         && filter.older_than_secs.is_none_or(|s| age >= secs(s))
         && filter.created_after_ms.is_none_or(|after| modified > after)
         && filter
@@ -336,10 +415,11 @@ fn rotates(filter: &RotateFilter, version: &ObjectVersion, now: i64) -> bool {
             .is_none_or(|before| modified < before)
         && any(&filter.tags, Box::new(tags))
         && any(&filter.metadata, Box::new(headers(version)))
-        && filter
-            .kms_key
-            .as_ref()
-            .is_none_or(|wanted| sse.mode != SseMode::Kms || sse.kms_key.as_ref() == Some(wanted))
+        && filter.kms_key.as_ref().is_none_or(|wanted| {
+            info.sse
+                .as_ref()
+                .is_none_or(|sse| sse.mode != SseMode::Kms || sse.kms_key.as_ref() == Some(wanted))
+        })
 }
 
 /// Runs `attempt` until it succeeds, fails for a reason that won't pass, or has been tried

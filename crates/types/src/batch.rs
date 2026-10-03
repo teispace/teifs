@@ -107,6 +107,9 @@ pub enum JobSpec {
     /// Seals encrypted versions' data keys again, under another KMS key (`MinIO`'s
     /// `keyrotate`).
     KeyRotate(KeyRotateJob),
+    /// Copies objects between a bucket here and one on another S3 service, either way
+    /// (`MinIO`'s `replicate`).
+    Replicate(ReplicateJob),
 }
 
 impl JobSpec {
@@ -116,15 +119,17 @@ impl JobSpec {
         match self {
             Self::Expire(_) => "expire",
             Self::KeyRotate(_) => "keyrotate",
+            Self::Replicate(_) => "replicate",
         }
     }
 
-    /// The bucket it works on.
+    /// The bucket it works on: a `replicate` job's here.
     #[must_use]
     pub fn bucket(&self) -> &str {
         match self {
             Self::Expire(job) => &job.bucket,
             Self::KeyRotate(job) => &job.bucket,
+            Self::Replicate(job) => &job.here().bucket,
         }
     }
 
@@ -134,6 +139,7 @@ impl JobSpec {
         match self {
             Self::Expire(job) => job.notify.as_ref(),
             Self::KeyRotate(job) => job.notify.as_ref(),
+            Self::Replicate(job) => job.notify.as_ref(),
         }
     }
 
@@ -143,6 +149,7 @@ impl JobSpec {
         match self {
             Self::Expire(job) => job.retry,
             Self::KeyRotate(job) => job.retry,
+            Self::Replicate(job) => job.retry,
         }
     }
 }
@@ -226,7 +233,7 @@ pub struct KeyRotateJob {
     pub encryption: RotateTo,
     /// Which versions.
     #[serde(default)]
-    pub filter: RotateFilter,
+    pub filter: VersionFilter,
     /// Where its result is sent, if anywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<JobNotify>,
@@ -251,10 +258,10 @@ pub enum RotateTo {
     },
 }
 
-/// Which versions a `keyrotate` job takes; every condition given must hold.
+/// Which versions a `keyrotate` or `replicate` job takes; every condition given must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RotateFilter {
+pub struct VersionFilter {
     /// Made less than this many seconds ago.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub newer_than_secs: Option<u64>,
@@ -273,9 +280,95 @@ pub struct RotateFilter {
     /// With any of these metadata (values with `*` and `?`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata: Vec<KeyValue>,
-    /// Sealed by this KMS key now.
+    /// Sealed by this KMS key now (`keyrotate` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kms_key: Option<String>,
+}
+
+/// `MinIO`'s `replicate` job: copies each version under the source's prefixes that the
+/// filter takes to the target, under its prefix. One end is a bucket here, the other a
+/// bucket on another S3 service. Between two that keep versions (`MinIO`'s and TeiFS's
+/// kind), every version and delete marker goes, keeping its id and time; when either is
+/// plain S3, each key's current object, as a new version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicateJob {
+    /// Where the objects are.
+    pub source: ReplicateEnd,
+    /// Where they go.
+    pub target: ReplicateEnd,
+    /// Which versions.
+    #[serde(default)]
+    pub filter: VersionFilter,
+    /// Where its result is sent, if anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<JobNotify>,
+    /// How often a version that fails is tried again.
+    #[serde(default)]
+    pub retry: JobRetry,
+}
+
+impl ReplicateJob {
+    /// The end that's a bucket here.
+    #[must_use]
+    pub const fn here(&self) -> &ReplicateEnd {
+        if self.source.remote.is_some() {
+            &self.target
+        } else {
+            &self.source
+        }
+    }
+
+    /// Whether versions go as they are, with their ids, times and delete markers: both
+    /// ends keep them so.
+    #[must_use]
+    pub fn keeps_versions(&self) -> bool {
+        self.source.kind == EndKind::Minio && self.target.kind == EndKind::Minio
+    }
+}
+
+/// An end of a `replicate` job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicateEnd {
+    /// What kind of service it is.
+    pub kind: EndKind,
+    /// The bucket.
+    pub bucket: String,
+    /// The source's prefixes (none: the whole bucket); the target's one, which the keys
+    /// go under.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
+    /// The service, when it isn't this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteEnd>,
+}
+
+/// What kind of service an end of a `replicate` job is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EndKind {
+    /// One that keeps versions' ids and times when told (`MinIO`, TeiFS).
+    Minio,
+    /// Plain S3.
+    S3,
+}
+
+/// Another S3 service an end of a `replicate` job is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEnd {
+    /// Its URL (`http[s]://HOST[:PORT]`).
+    pub endpoint: String,
+    /// The access key; its secret is kept sealed apart.
+    pub access_key: String,
+    /// Whether buckets are named in the path (`true`), the host (`false`), or as suits
+    /// the service (`None`: in the host on AWS, else the path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_style: Option<bool>,
+    /// Whether a session token goes with the keys; it's kept sealed apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_token: bool,
 }
 
 /// A key and a value a condition needs.
@@ -339,6 +432,10 @@ pub struct JobProgress {
     /// The key it finished last: it goes on after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_key: Option<String>,
+    /// With `last_key`, the version it finished last, where a listing goes on from a
+    /// version (another service's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
     /// The prefix it's working under (an index into the job's prefixes).
     #[serde(default)]
     pub prefix: usize,
@@ -437,5 +534,47 @@ mod tests {
         assert!(!JobStatus::Active.finished());
         assert!(!JobStatus::Cancelling.finished());
         assert_eq!(JobStatus::Suspended.as_str(), "Suspended");
+    }
+
+    #[test]
+    fn a_replicate_job_works_on_its_local_end_and_keeps_versions_between_minios() {
+        let end = |bucket: &str, kind, remote: bool| ReplicateEnd {
+            kind,
+            bucket: bucket.to_owned(),
+            prefixes: Vec::new(),
+            remote: remote.then(|| RemoteEnd {
+                endpoint: "https://backup.example.com".to_owned(),
+                access_key: "AKIAEXAMPLE".to_owned(),
+                path_style: None,
+                session_token: false,
+            }),
+        };
+        let job = |source, target| ReplicateJob {
+            source,
+            target,
+            filter: VersionFilter::default(),
+            notify: None,
+            retry: JobRetry::default(),
+        };
+        let push = job(
+            end("here", EndKind::Minio, false),
+            end("there", EndKind::Minio, true),
+        );
+        assert_eq!(push.here().bucket, "here");
+        assert!(push.keeps_versions());
+        let pull = job(
+            end("there", EndKind::Minio, true),
+            end("here", EndKind::S3, false),
+        );
+        assert_eq!(pull.here().bucket, "here");
+        assert!(!pull.keeps_versions());
+        assert!(
+            !job(
+                end("here", EndKind::S3, false),
+                end("there", EndKind::Minio, true)
+            )
+            .keeps_versions()
+        );
+        assert_eq!(JobSpec::Replicate(pull).bucket(), "here");
     }
 }

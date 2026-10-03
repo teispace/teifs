@@ -1079,7 +1079,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: "/minio/admin/v3/start-job",
         needs: Needs::Action("admin:StartBatchJob", ANY),
         handler: Handler::MinioBatch(minio_batch::Call::Start),
-        about: "Starts the batch job the body describes in `MinIO`'s YAML (`expire` or `keyrotate`; at most 4 MiB) and answers its id: `mc batch start`",
+        about: "Starts the batch job the body describes in `MinIO`'s YAML (`expire`, `keyrotate` or `replicate`; at most 4 MiB) and answers its id: `mc batch start`",
     },
     Endpoint {
         api: Api::Minio,

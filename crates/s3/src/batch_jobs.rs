@@ -86,6 +86,18 @@ impl Worker {
         let result = match job.spec.clone() {
             JobSpec::Expire(expire) => self.store.expire_batch_page(&mut job, &expire).await,
             JobSpec::KeyRotate(rotate) => self.store.rotate_batch_page(&mut job, &rotate).await,
+            JobSpec::Replicate(replicate) => match self.store.batch_job_secrets(&job.id).await {
+                Ok(secrets) => {
+                    Box::pin(crate::batch_replicate::page(
+                        &self.store,
+                        &mut job,
+                        &replicate,
+                        &secrets,
+                    ))
+                    .await
+                }
+                Err(err) => Err(err),
+            },
         };
         let retry = job.spec.retry();
         let (attempts, delay) = (retry.attempts.max(1), retry.delay_ms);
@@ -170,8 +182,8 @@ impl Worker {
             return;
         };
         let token = if notify.token {
-            match self.store.batch_job_token(&job.id).await {
-                Ok(token) => token,
+            match self.store.batch_job_secrets(&job.id).await {
+                Ok(mut secrets) => secrets.notify_token.take(),
                 Err(err) => {
                     tracing::warn!(job = job.id, error = %err, "couldn't open a batch job's notify token");
                     return;
