@@ -92,7 +92,7 @@ async fn mc_support_diag_gets_the_report_part_by_part() {
 #[tokio::test]
 async fn a_strict_report_names_the_server_server1() {
     let server = start().await;
-    let path = format!("/minio/admin/v3/healthinfo?{EVERY_PART}&anonymize=strict");
+    let path = format!("/minio/admin/v3/healthinfo?{EVERY_PART}&deadline=1h0m0s&anonymize=strict");
     let reports = reports(&server, &path).await;
     let last = reports.last().unwrap();
     let node = server.endpoint.trim_start_matches("http://");
