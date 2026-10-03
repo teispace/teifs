@@ -582,3 +582,82 @@ impl Cursor {
         }
     }
 }
+
+impl Store {
+    /// The next page of `bucket`'s versions under `prefix` after the key `after_key`,
+    /// with every version of each key in it: one key with more versions than a page
+    /// comes whole, and a key the page cuts short is left for the next. Whether more
+    /// keys follow.
+    pub(crate) async fn whole_keys(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        after_key: Option<String>,
+        max: usize,
+    ) -> Result<(Vec<ObjectVersion>, bool)> {
+        let page = self
+            .list_versions(
+                bucket,
+                VersionsQuery {
+                    prefix: prefix.to_owned(),
+                    key_marker: after_key,
+                    max_keys: max,
+                    ..VersionsQuery::default()
+                },
+            )
+            .await?;
+        let mut versions = page.versions;
+        let mut more = page.truncated;
+        if more && let Some(last) = versions.last().map(|v| v.info.key.clone()) {
+            if versions.iter().any(|v| v.info.key != last) {
+                // The last key may have more versions on the next page: next time.
+                versions.retain(|v| v.info.key != last);
+            } else {
+                // One key with more versions than a page: all of them, before any
+                // change (a change would move the listing under its markers).
+                more = self
+                    .rest_of_key(bucket, prefix, page.next, max, &mut versions)
+                    .await?;
+            }
+        }
+        Ok((versions, more))
+    }
+
+    /// Reads the rest of the versions of the one key in `versions`, from `next` on;
+    /// whether other keys follow.
+    async fn rest_of_key(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        mut next: Option<(String, Option<String>)>,
+        max: usize,
+        versions: &mut Vec<ObjectVersion>,
+    ) -> Result<bool> {
+        let key = versions[0].info.key.clone();
+        while let Some((key_marker, version_marker)) = next {
+            let page = self
+                .list_versions(
+                    bucket,
+                    VersionsQuery {
+                        prefix: prefix.to_owned(),
+                        key_marker: Some(key_marker),
+                        version_marker,
+                        max_keys: max,
+                        ..VersionsQuery::default()
+                    },
+                )
+                .await?;
+            let before = versions.len();
+            versions.extend(page.versions.iter().filter(|v| v.info.key == key).cloned());
+            if versions.len() - before < page.versions.len() {
+                // Another key started.
+                return Ok(true);
+            }
+            if !page.truncated {
+                return Ok(false);
+            }
+            next = page.next;
+        }
+        Ok(false)
+    }
+}

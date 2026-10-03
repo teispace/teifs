@@ -10,6 +10,7 @@
 //! it, as nothing refers to it until it's recorded), so every object is either its old
 //! or its new version, and its recorded ETag always belongs to its bytes.
 
+mod batch;
 mod body;
 mod cache;
 pub mod checksum;

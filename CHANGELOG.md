@@ -45,6 +45,12 @@ behaviour; the on-disk format is always upgraded automatically.
   add|update|ls|rm|status|check` and `resync start|status|cancel`. Destinations are
   named as `ALIAS/BUCKET`: the same alias for a bucket on the same server, another for a
   target that signs with that alias's keys, so no secret is given on the command line.
+- Batch jobs, as `MinIO`'s (`mc batch start|list|status|describe|cancel|generate`):
+  an `expire` job removes, under its prefixes, the objects whose newest version one of
+  its rules matches (by name, age, date, tags, metadata, size, or a delete marker),
+  keeping the newest versions the rule says. Jobs run in the background one at a time,
+  carry on after a restart, are retried as they say, and post their result to a
+  webhook whose token is kept sealed by the KMS and hidden when a job is described.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`
   and minio-go's empty filter elements, and `DeleteBucketReplication` answering `200`;
   MinIO's lifecycle and versioning extensions (`DelMarkerExpiration`,

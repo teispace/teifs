@@ -111,6 +111,8 @@ httpdate = "1"
 quick-xml = "0.42"
 x509-parser = { version = "0.18", default-features = false }
 prometheus-client = "0.25"
+# MinIO's batch jobs are YAML (serde_yml and serde_yaml are unmaintained).
+serde-saphyr = { version = "1.3", default-features = false, features = ["serialize", "deserialize"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -18,8 +18,7 @@ use teifs_types::replication::ReplicationStatus;
 
 use super::{BATCH, Job, Step, millis};
 use crate::{
-    Inner, Lifecycle, Match, ObjectVersion, Precondition, Store, StoreError, VersionsQuery,
-    error::Result,
+    Inner, Lifecycle, Match, ObjectVersion, Precondition, Store, StoreError, error::Result,
 };
 
 /// What the lifecycle job removed, told to whoever wants to know (bucket notifications),
@@ -178,33 +177,11 @@ impl ApplyLifecycle {
         now: i64,
         step: &Step,
     ) -> Result<usize> {
-        let prefix = lifecycle.common_prefix().to_owned();
-        let page = self
+        let prefix = lifecycle.common_prefix();
+        let (versions, more) = self
             .store
-            .list_versions(
-                &cursor.bucket,
-                VersionsQuery {
-                    prefix: prefix.clone(),
-                    key_marker: cursor.after_key.clone(),
-                    max_keys: BATCH,
-                    ..VersionsQuery::default()
-                },
-            )
+            .whole_keys(&cursor.bucket, prefix, cursor.after_key.clone(), BATCH)
             .await?;
-        let mut versions = page.versions;
-        let mut more = page.truncated;
-        if more && let Some(last) = versions.last().map(|v| v.info.key.clone()) {
-            if versions.iter().any(|v| v.info.key != last) {
-                // The last key may have more versions on the next page: next time.
-                versions.retain(|v| v.info.key != last);
-            } else {
-                // One key with more versions than a page: all of them, before any
-                // change (a change would move the listing under its markers).
-                more = self
-                    .rest_of_key(&cursor.bucket, &prefix, page.next, &mut versions)
-                    .await?;
-            }
-        }
         let looked = versions.len();
         for key_versions in versions.chunk_by(|a, b| a.info.key == b.info.key) {
             if step.cancel.is_cancelled() {
@@ -216,44 +193,6 @@ impl ApplyLifecycle {
         }
         cursor.finished = !more;
         Ok(looked)
-    }
-
-    /// Reads the rest of the versions of the one key in `versions`, from `next` on;
-    /// whether other keys follow.
-    async fn rest_of_key(
-        &self,
-        bucket: &str,
-        prefix: &str,
-        mut next: Option<(String, Option<String>)>,
-        versions: &mut Vec<ObjectVersion>,
-    ) -> Result<bool> {
-        let key = versions[0].info.key.clone();
-        while let Some((key_marker, version_marker)) = next {
-            let page = self
-                .store
-                .list_versions(
-                    bucket,
-                    VersionsQuery {
-                        prefix: prefix.to_owned(),
-                        key_marker: Some(key_marker),
-                        version_marker,
-                        max_keys: BATCH,
-                        ..VersionsQuery::default()
-                    },
-                )
-                .await?;
-            let before = versions.len();
-            versions.extend(page.versions.iter().filter(|v| v.info.key == key).cloned());
-            if versions.len() - before < page.versions.len() {
-                // Another key started.
-                return Ok(true);
-            }
-            if !page.truncated {
-                return Ok(false);
-            }
-            next = page.next;
-        }
-        Ok(false)
     }
 
     /// Applies the rules to one key's versions (newest first).

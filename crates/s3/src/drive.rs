@@ -82,6 +82,8 @@ pub struct Drive {
     replication: Arc<tokio::sync::Notify>,
     /// What replication did, and the replicas other servers sent.
     replication_stats: Arc<crate::replicator::Stats>,
+    /// Wakes the batch worker as a job starts.
+    batch: Arc<tokio::sync::Notify>,
 }
 
 impl Drive {
@@ -106,6 +108,7 @@ impl Drive {
             request_metrics: None,
             replication: Arc::new(tokio::sync::Notify::new()),
             replication_stats: Arc::default(),
+            batch: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -126,6 +129,11 @@ impl Drive {
     /// What wakes the replication worker.
     pub(crate) fn replication_wake(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.replication)
+    }
+
+    /// What wakes the batch worker.
+    pub(crate) fn batch_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.batch)
     }
 
     /// What replication did, and the replicas other servers sent.

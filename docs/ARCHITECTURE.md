@@ -551,6 +551,18 @@ only for the change
 multipart uploads (`Target::send_parts`, the version's own parts per `part_layout`) with
 the id on `CreateMultipartUpload` (`?versionId`), taken by `Store::create_replica_upload`
 (`uploads.replica_version`), and the time and ETag on Complete (`CompleteWith.replica`).
+Batch jobs (`minio_batch.rs`, `batch_jobs.rs`): `start-job` reads `MinIO`'s YAML
+(serde-saphyr) into a `teifs_types::batch::BatchJob` and records it in the system
+database's `batch_jobs` table (`Store::add_batch_job`; a notify token sealed apart with
+the replication targets' key, bound to the job's id). The batch worker, one of the
+`Workers` (woken by a start, else every 30 seconds), takes the running job, else the
+oldest by priority, and runs one page of it: for `expire`, `Store::expire_batch_page`
+reads whole keys (`Store::whole_keys`, which the lifecycle job uses too), matches each
+key's newest version against the rules, and removes versions with
+`Marking::Lifecycle` (never replicated). The progress (prefix, last key, counts,
+failures) is written back with `Store::update_batch_job`, which leaves a job cancelled
+meanwhile alone, so a restart resumes from the last page; an ended job's result is
+posted to its webhook.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

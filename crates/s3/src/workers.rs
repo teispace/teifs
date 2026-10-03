@@ -1,6 +1,6 @@
 //! The jobs the server runs beside the S3 service: delivering buckets' access logs,
 //! making their inventory reports, counting their request metrics and exporting their
-//! storage class analyses.
+//! storage class analyses, replicating, and running batch jobs.
 
 use std::{sync::Arc, time::Duration};
 
@@ -12,6 +12,7 @@ use crate::{
     AccessLogWorker,
     access_log::{AccessLog, Record},
     analytics::{self, Activity},
+    batch_jobs,
     drive::Drive,
     inventory, replicator,
     request_metrics::{self, Done, RequestMetrics},
@@ -25,6 +26,7 @@ pub struct Workers {
     pub(crate) request_metrics: request_metrics::Worker,
     pub(crate) analytics: analytics::Worker,
     pub(crate) replicator: replicator::Worker,
+    pub(crate) batch: batch_jobs::Worker,
 }
 
 impl Workers {
@@ -50,6 +52,7 @@ impl Workers {
             replicator: replicator::Worker::new(store.clone(), drive.replication_wake())
                 .with_stats(drive.replication_stats())
                 .with_events(drive.events()),
+            batch: batch_jobs::Worker::new(store.clone(), drive.batch_wake()),
         }
     }
 
@@ -67,6 +70,7 @@ impl Workers {
             self.request_metrics.run(stopping.clone()),
             self.analytics.run(stopping.clone()),
             self.replicator.run(stopping.clone()),
+            self.batch.run(stopping.clone()),
         );
     }
 }

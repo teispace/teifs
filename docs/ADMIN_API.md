@@ -158,6 +158,13 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/minio/admin/v3/speedtest/net` | 501 NotImplemented: a server is one node, with no network between nodes to measure | `admin:OBDInfo` |
 | `POST` | `/minio/admin/v3/speedtest/site` | 501 NotImplemented: there are no other sites to measure the network to | `admin:OBDInfo` |
 | `POST` | `/minio/admin/v3/background-heal/status` | The background heal's status as `madmin.BgHealState`: the drive's scrub, with the versions it checked and the drive's disks: `mc admin heal` with no target | `admin:Heal` |
+| `POST` | `/minio/admin/v3/start-job` | Starts the batch job the body describes in `MinIO`'s YAML (`expire`; at most 4 MiB) and answers its id: `mc batch start` | `admin:StartBatchJob` |
+| `GET` | `/minio/admin/v3/list-jobs` | The batch jobs, oldest first, `&jobType=` and `&bucket=` narrowing them, as `madmin.ListBatchJobsResult`: `mc batch list` | `admin:ListBatchJobs` |
+| `GET` | `/minio/admin/v3/status-job` | How far batch job `?jobId=` got, as `madmin.BatchJobStatus`: `mc batch status` | `admin:ListBatchJobs` |
+| `GET` | `/minio/admin/v3/describe-job` | Batch job `?jobId=` in `MinIO`'s YAML, its notification token hidden: `mc batch describe` | `admin:DescribeBatchJob` |
+| `DELETE` | `/minio/admin/v3/cancel-job` | Cancels batch job `?id=`; what it did stays done: `mc batch cancel` | `admin:CancelBatchJob` |
+| `GET` | `/minio/admin/v3/list-supported-job-types` | The kinds of batch job the server runs | `admin:ListBatchJobs` |
+| `GET` | `/minio/admin/v3/generate-job` | A template of batch job kind `?jobType=`, in `MinIO`'s YAML: `mc batch generate` | `admin:GenerateBatchJob` |
 | `POST` | `/minio/admin/v3/kms/status` | The KMS as `madmin.KMSStatus`: its kind, default key, and whether each of its endpoints answers (older clients; newer ones call `/minio/kms/v1/status`) | `admin:KMSKeyStatus` |
 | `POST` | `/minio/admin/v3/kms/key/create` | Creates the KMS key `?key-id=` (older clients; newer ones call `/minio/kms/v1/key/create`) | `admin:KMSCreateKey` |
 | `GET` | `/minio/admin/v3/kms/key/status` | Whether KMS key `?key-id=` (the default key by default) seals a new data key and unseals it again, as `madmin.KMSKeyStatus` (older clients; newer ones call `/minio/kms/v1/key/status`) | `admin:KMSKeyStatus` |

@@ -7,6 +7,7 @@ mod acl;
 mod admin;
 mod analytics;
 mod audit;
+mod batch_jobs;
 mod bucket_access;
 mod bucket_export;
 mod caps;
@@ -30,6 +31,7 @@ mod lines;
 mod listen;
 mod logging;
 mod metrics;
+mod minio_batch;
 mod minio_bucket_metadata;
 mod minio_config;
 mod minio_heal;
@@ -188,6 +190,21 @@ fn set_host(
     Ok(Some(MultiDomain::new(domains)?))
 }
 
+/// What the store's lifecycle job removes, told to the bucket's notifications and access
+/// log. A store serves one service: a second is told nothing new.
+fn tell_expirations(
+    store: &Store,
+    events: &events::Events,
+    log: &Arc<access_log::AccessLog>,
+) -> Arc<dyn teifs_store::Expirations> {
+    let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
+        events: events.clone(),
+        log: Arc::clone(log),
+    });
+    let _ = store.tell_expirations(&expirations);
+    expirations
+}
+
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
     let notifier = options
@@ -218,12 +235,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     );
     let inventory = Arc::new(inventory::Worker::new(drive.clone(), store.clone()));
     let events = drive.events();
-    // A store serves one service: a second is told nothing new.
-    let expirations: Arc<dyn teifs_store::Expirations> = Arc::new(access_log::Expired {
-        events: events.clone(),
-        log: Arc::clone(&access_log),
-    });
-    let _ = store.tell_expirations(&expirations);
+    let expirations = tell_expirations(&store, &events, &access_log);
     let rules = drive.rules();
     let scrapers = match &options.iam {
         Some(iam) if !options.public_metrics => metrics::Scrapers::Allowed(Arc::clone(iam)),
@@ -239,7 +251,11 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         (Arc::clone(&access_log), Arc::clone(&request_metrics)),
     );
     let control = Arc::new(Control::default());
-    let (replication, replication_stats) = (drive.replication_wake(), drive.replication_stats());
+    let (replication, replication_stats, batch) = (
+        drive.replication_wake(),
+        drive.replication_stats(),
+        drive.batch_wake(),
+    );
     let mut builder = S3ServiceBuilder::new(drive);
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(s3_config(
         options.allow_sig_v2,
@@ -275,6 +291,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
                 .map(|settings| Arc::new(minio_config::Configs::new(settings))),
             replication,
             replication_stats,
+            batch,
         });
     }
     let host = set_host(&mut builder, &options.domains)?;

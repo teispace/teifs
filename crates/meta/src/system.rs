@@ -51,6 +51,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::iam::REVOCATIONS_MIGRATION,
     // 14: service accounts of OpenID Connect users.
     crate::iam::OPENID_SERVICE_ACCOUNTS_MIGRATION,
+    // 15: batch jobs: each one's JSON (what it does, where it stands, how far it got),
+    //     and its secrets sealed apart.
+    "CREATE TABLE batch_jobs (
+        id         TEXT    PRIMARY KEY,
+        created_ms INTEGER NOT NULL,
+        job        TEXT    NOT NULL,
+        secrets    TEXT
+     ) WITHOUT ROWID;",
 ];
 
 /// How a bucket stores its objects.
@@ -260,6 +268,60 @@ impl System {
         };
         Ok(())
     }
+
+    /// Records a new batch job: its JSON and its sealed secrets.
+    pub fn add_batch_job(
+        &self,
+        id: &str,
+        created_ms: i64,
+        job: &str,
+        secrets: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT INTO batch_jobs (id, created_ms, job, secrets) VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![id, created_ms, job, secrets])?;
+        Ok(())
+    }
+
+    /// Replaces a batch job's JSON, keeping its secrets; whether it was there.
+    pub fn set_batch_job(&self, id: &str, job: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("UPDATE batch_jobs SET job = ?2 WHERE id = ?1")?
+            .execute([id, job])?
+            > 0)
+    }
+
+    /// A batch job's JSON and sealed secrets.
+    pub fn batch_job(&self, id: &str) -> Result<Option<(String, Option<String>)>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT job, secrets FROM batch_jobs WHERE id = ?1")?
+            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    }
+
+    /// Every batch job's JSON, oldest first.
+    pub fn batch_jobs(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT job FROM batch_jobs ORDER BY created_ms, id")?;
+        let jobs = statement
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(jobs)
+    }
+
+    /// Removes a batch job; whether it was there.
+    pub fn remove_batch_job(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("DELETE FROM batch_jobs WHERE id = ?1")?
+            .execute([id])?
+            > 0)
+    }
 }
 
 /// The columns [`record_from_row`] reads.
@@ -342,5 +404,30 @@ mod tests {
         system.set_setting("missing", None).unwrap();
         assert_eq!(system.setting("a").unwrap(), None);
         assert_eq!(system.setting("b").unwrap().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn batch_jobs_are_added_changed_listed_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.db");
+        let system = System::open(&path).unwrap();
+        system.add_batch_job("b", 20, "{\"n\":1}", None).unwrap();
+        system
+            .add_batch_job("a", 30, "{\"n\":2}", Some("sealed"))
+            .unwrap();
+        assert!(system.add_batch_job("a", 40, "{}", None).is_err());
+        assert!(system.set_batch_job("b", "{\"n\":3}").unwrap());
+        assert!(!system.set_batch_job("missing", "{}").unwrap());
+        drop(system);
+        let system = System::open(&path).unwrap();
+        assert_eq!(system.batch_jobs().unwrap(), ["{\"n\":3}", "{\"n\":2}"]);
+        assert_eq!(
+            system.batch_job("a").unwrap(),
+            Some(("{\"n\":2}".to_owned(), Some("sealed".to_owned())))
+        );
+        assert_eq!(system.batch_job("missing").unwrap(), None);
+        assert!(system.remove_batch_job("a").unwrap());
+        assert!(!system.remove_batch_job("a").unwrap());
+        assert_eq!(system.batch_jobs().unwrap(), ["{\"n\":3}"]);
     }
 }

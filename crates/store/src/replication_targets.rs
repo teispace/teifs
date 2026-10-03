@@ -88,11 +88,11 @@ fn read(json: Option<&str>) -> Result<Vec<Kept>> {
     )
 }
 
-fn seal(key: &DataKey, arn: &str, secret: &str) -> String {
+pub(crate) fn seal(key: &DataKey, arn: &str, secret: &str) -> String {
     STANDARD.encode(key.seal_secret(arn.as_bytes(), secret.as_bytes()))
 }
 
-fn open(key: &DataKey, arn: &str, sealed: &str) -> Result<Zeroizing<String>> {
+pub(crate) fn open(key: &DataKey, arn: &str, sealed: &str) -> Result<Zeroizing<String>> {
     let sealed = STANDARD
         .decode(sealed)
         .map_err(|_| StoreError::CorruptMetadata)?;
@@ -103,8 +103,9 @@ fn open(key: &DataKey, arn: &str, sealed: &str) -> Result<Zeroizing<String>> {
 }
 
 impl Store {
-    /// The key that seals targets' secrets, made (and sealed by the KMS) on first use.
-    async fn targets_key(&self) -> Result<DataKey> {
+    /// The key that seals targets' secrets (and batch jobs', bound to their ids), made
+    /// (and sealed by the KMS) on first use.
+    pub(crate) async fn targets_key(&self) -> Result<DataKey> {
         if let Some(key) = self.inner.targets_key.get() {
             return Ok(key.clone());
         }

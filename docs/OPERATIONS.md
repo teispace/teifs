@@ -1359,6 +1359,54 @@ targets take `admin:SetBucketTarget` on the bucket, listing them `admin:GetBucke
 Admin exports don't carry targets, as they'd carry their secrets: a configuration naming
 one is imported once the target is added on the other server.
 
+## Batch jobs
+
+A batch job does one thing to many objects in the background, as `MinIO`'s do, and `mc
+batch` drives them. TeiFS runs `expire` jobs: they remove, under a bucket's prefixes, the
+objects whose newest version a rule matches, and their older versions.
+
+```sh
+mc batch generate local expire > expire.yaml   # a template to fill in
+mc batch start local expire.yaml               # answers the job's id
+mc batch list local
+mc batch status local expire-…                 # how far it got
+mc batch describe local expire-…               # the job, its token hidden
+mc batch cancel local expire-…
+```
+
+```yaml
+expire:
+  apiVersion: v1
+  bucket: logs
+  prefix: app/              # or a list; none for the whole bucket
+  rules:
+    - type: object          # the newest version is an object
+      name: "*.log"
+      olderThan: 30d
+      purge:
+        retainVersions: 1   # keep the newest; 0 removes every version
+    - type: deleted         # the newest version is a delete marker
+      olderThan: 7d
+  notify:
+    endpoint: https://example.com/batch
+    token: Bearer TOKEN
+  retry:
+    attempts: 3
+    delay: 500ms
+```
+
+The first rule that matches a key's newest version decides; every condition a rule gives
+must hold (`createdBefore`, `tags`, `metadata` such as `content-type` or
+`x-amz-meta-owner`, and `size` with `lessThan` and `greaterThan` too). Object Lock is
+honoured: a protected version stays, and is counted as failed with the reason. A job runs
+one page of keys at a time and keeps how far it got, so a server that restarts goes on
+where it was; jobs run one after another. When a job ends, `MinIO`'s result (what it
+removed and what it couldn't) is `POST`ed to `notify.endpoint`; the token is kept sealed
+by the KMS, so a server without one refuses a job that has a token. Ended jobs are kept
+for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
+`admin:ListBatchJobs`, describing it `admin:DescribeBatchJob`, cancelling it
+`admin:CancelBatchJob`.
+
 ## Migrating from MinIO or another S3 service
 
 `teifs migrate SOURCE DEST` moves buckets from any S3 service to another, through the S3
