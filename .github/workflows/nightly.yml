@@ -197,7 +197,10 @@ jobs:
           logfile=""
           EOF
           cd "$RUNNER_TEMP/lazyfs/lazyfs"
-          ./scripts/mount-lazyfs.sh -c "$RUNNER_TEMP/lazyfs.toml" \
+          # One FUSE thread: with several, LazyFS's cache locks can deadlock under the
+          # writers' mix of creates, writes and lookups (an lfs_create waiting for a
+          # file's lock while lfs_write and lfs_getattr calls wait for the cache's).
+          ./scripts/mount-lazyfs.sh -s -c "$RUNNER_TEMP/lazyfs.toml" \
             -m "$RUNNER_TEMP/lazyfs.mnt" -r "$RUNNER_TEMP/lazyfs.root"
           for _ in $(seq 30); do mountpoint -q "$RUNNER_TEMP/lazyfs.mnt" && break; sleep 1; done
           mountpoint "$RUNNER_TEMP/lazyfs.mnt"

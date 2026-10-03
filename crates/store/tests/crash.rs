@@ -66,11 +66,55 @@ fn watchdog() -> Waiting {
             let (since, what) = &*watched.lock().unwrap();
             if since.elapsed() > STALL {
                 eprintln!("waited {STALL:?} for {what}");
+                eprint!("{}", stalled_threads());
                 std::process::exit(1);
             }
         }
     });
     waiting
+}
+
+/// The child writing this round, for [`stalled_threads`].
+static CHILD_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Where the child's threads and `LazyFS`'s wait, from `/proc`: threads in
+/// `request_wait_answer` wait for a FUSE answer, threads in `futex_*` for a lock.
+#[cfg(target_os = "linux")]
+fn stalled_threads() -> String {
+    use std::fmt::Write;
+    let read = |path: std::path::PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    let lazyfs = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| read(entry.path().join("comm")).trim() == "lazyfs")
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    let child = CHILD_PID
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .to_string();
+    let mut out = String::new();
+    for pid in std::iter::once(child).chain(lazyfs) {
+        let _ = writeln!(out, "process {pid}:");
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task"));
+        for task in tasks.into_iter().flatten().flatten() {
+            let stat = read(task.path().join("stat"));
+            // The state follows the command's closing parenthesis.
+            let state = stat.rsplit_once(") ").map_or("?", |(_, rest)| &rest[..1]);
+            let _ = writeln!(
+                out,
+                "  {} {} {state} in {}",
+                task.file_name().to_string_lossy(),
+                read(task.path().join("comm")).trim(),
+                read(task.path().join("wchan")),
+            );
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stalled_threads() -> String {
+    String::new()
 }
 
 fn wait_for(waiting: &Waiting, what: impl Into<String>) {
@@ -441,6 +485,7 @@ fn writes_survive_a_kill_at_any_moment() {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        CHILD_PID.store(child.id(), std::sync::atomic::Ordering::Relaxed);
         let lines = BufReader::new(child.stdout.take().unwrap());
         // Killed after a number of writes that differs every round, mid-write somewhere.
         let kill_after = 20 + mix(round) % 300;
