@@ -369,9 +369,9 @@ anybody read, with S3's index and error documents, redirects and error pages. Se
 `mc quota set`) refuses writes that would take a bucket past it. See
 [OPERATIONS.md](docs/OPERATIONS.md#bucket-quotas).
 
-**Not yet:** SAML federation (`AssumeRoleWithSAML`), lifecycle transitions to other
-storage classes (every object is `STANDARD`), replication, several disks or
-machines.
+**Not yet:** lifecycle transitions to other storage classes (every object is
+`STANDARD`), replicating objects (replication configurations are kept and checked),
+several disks or machines.
 [COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks what's proven.
 
 **Two kinds of bucket.** An *object bucket* (the default) stores objects by id under

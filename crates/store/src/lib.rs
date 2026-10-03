@@ -301,6 +301,7 @@ struct Inner {
     logging: cache::SettingCache<teifs_types::logging::LoggingConfig>,
     /// Buckets' website configurations, read once.
     websites: cache::SettingCache<teifs_types::website::WebsiteConfig>,
+    replications: cache::SettingCache<teifs_types::replication::ReplicationConfig>,
     /// Buckets' quotas, read once.
     quotas: cache::SettingCache<u64>,
     /// Buckets' Requester Pays and reporting configurations, read once.
@@ -421,6 +422,7 @@ impl Store {
             notifications: cache::SettingCache::default(),
             logging: cache::SettingCache::default(),
             websites: cache::SettingCache::default(),
+            replications: cache::SettingCache::default(),
             quotas: cache::SettingCache::default(),
             configurations: cache::SettingCache::default(),
             stages: stages::new(),

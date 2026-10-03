@@ -9,6 +9,7 @@ use teifs_types::{
     configs::{Configurations, Kind, MAX_CONFIGURATIONS},
     logging::LoggingConfig,
     notify::NotificationConfig,
+    replication::ReplicationConfig,
     website::WebsiteConfig,
 };
 
@@ -61,6 +62,9 @@ pub(crate) struct BucketConfig {
     /// How its website endpoint answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     website: Option<WebsiteConfig>,
+    /// Where its objects are replicated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replication: Option<ReplicationConfig>,
     /// The most bytes it may hold (`MinIO`'s hard quota).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quota: Option<u64>,
@@ -116,6 +120,9 @@ pub struct BucketSettings {
     /// How its website endpoint answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<WebsiteConfig>,
+    /// Where its objects are replicated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication: Option<ReplicationConfig>,
     /// The most bytes it may hold (`MinIO`'s hard quota).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<u64>,
@@ -400,6 +407,7 @@ impl Store {
             notifications: config.notifications,
             logging: config.logging,
             website: config.website,
+            replication: config.replication,
             quota: config.quota,
             configurations: config.configurations,
         })
@@ -525,6 +533,32 @@ impl Store {
         website: Option<WebsiteConfig>,
     ) -> Result<()> {
         self.change_config(bucket, move |config| config.website = website)
+            .await
+    }
+
+    /// Where a bucket's objects are replicated, if anywhere; from memory once read.
+    pub async fn bucket_replication(&self, bucket: &str) -> Result<Option<Arc<ReplicationConfig>>> {
+        if let Some(found) = self.inner.replications.cached(bucket) {
+            return Ok(found);
+        }
+        let name = bucket.to_owned();
+        self.blocking(move |inner| {
+            inner.bucket(&name)?;
+            inner.replications.get(&name, || {
+                Ok(read_config(inner.system().bucket_config(&name)?.as_deref())?.replication)
+            })
+        })
+        .await
+    }
+
+    /// Replaces a bucket's replication configuration (checked by the caller); `None`
+    /// removes it.
+    pub async fn set_bucket_replication(
+        &self,
+        bucket: &str,
+        replication: Option<ReplicationConfig>,
+    ) -> Result<()> {
+        self.change_config(bucket, move |config| config.replication = replication)
             .await
     }
 
@@ -912,6 +946,7 @@ impl Inner {
         self.notifications.clear();
         self.logging.clear();
         self.websites.clear();
+        self.replications.clear();
         self.quotas.clear();
         self.configurations.clear();
     }

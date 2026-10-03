@@ -110,7 +110,7 @@ here come only from tests; nothing is listed as supported because it "should wor
 | MinIO's bucket metadata export and import (`mc admin cluster bucket export\|import`): `GET export-bucket-metadata[?bucket=NAME]`, `PUT import-bucket-metadata` | Supported, with MinIO's zip of `<bucket>/<file>`: `policy.json`, `notification.xml`, `lifecycle.xml`, `bucket-encryption.xml`, `tagging.xml`, `quota.json`, `object-lock.xml` and `versioning.xml` as S3's calls take them, plus `cors.xml` (which MinIO's import passes over), so buckets' settings move between TeiFS and MinIO either way. An import makes each bucket that isn't there (an object bucket, versioned when it has Object Lock), checks each file as S3's call checks it and answers `madmin.BucketMetaImportErrs`, each file's outcome under its bucket; replication and its targets are passed over, as MinIO's import does, and a quota of none is too. Needs `admin:ExportBucketMetadata` or `admin:ImportBucketMetadata`. TeiFS's own settings MinIO has no file for (ACL, Object Ownership, Block Public Access, ABAC, website, logging, Requester Pays and reporting configurations) move with `teifs admin bucket export` | `crates/server/tests/minio_bucket_metadata.rs`, `tests/clients/go` |
 | MinIO's notification and audit targets: `MINIO_NOTIFY_<KIND>_<KEY>[_<ID>]`, `MINIO_AUDIT_WEBHOOK_<KEY>[_<ID>]` and the same set with `mc admin config` | Supported for webhooks, Elasticsearch, Redis, NSQ, NATS, MQTT, Kafka, AMQP, PostgreSQL and MySQL, with MinIO's keys and defaults: targets found as MinIO finds them (stored ones, and those the environment turns on by `ENABLE`), a variable over the stored value. Their values become the matching `--notify-*` flag's, checked the same way; PostgreSQL's connection string (keywords or URL) and MySQL's DSN are read for their parts. Not supported: `tls_skip_verify=on` (refused), NATS Streaming (refused), Unix sockets; `queue_dir` and `queue_limit` are kept but the server's own queue is used | `apps/cli/src/minio_targets.rs`, `apps/cli/tests/minio_targets.rs` |
 | MinIO's admin and KMS actions in policies (its policy-based access control: `admin:*`, `admin:ServerInfo`, `kms:*`…, as in its `consoleAdmin` and `diagnostics` policies) | Supported: an identity policy's statement of `admin:` and `kms:` actions alone may leave out `Resource`, as MinIO's do, and an admin action that isn't a bucket's ignores the statement's `Resource`; `admin:SetBucketQuota` and the other bucket admin actions are matched against the bucket's ARN. TeiFS's admin actions answer to MinIO's names of the same permission (`teifs:GetServerInfo` to `admin:ServerInfo`, `teifs:GetServerConfig` to `admin:ConfigUpdate`, `teifs:ServerTrace` to `admin:ServerTrace`, `teifs:GetMetrics` to `admin:Prometheus`, `teifs:ExportIAM` to `admin:ExportIAM`, bucket metadata export and import to `admin:ExportBucketMetadata` and `admin:ImportBucketMetadata`, LDAP policy attach and detach to `admin:UpdatePolicyAssociation`, their listing to `admin:ListUserPolicies`, `admin:ListUsers` or `admin:ListGroups`); a `Deny` by either name denies. Statements mixing MinIO's and S3's actions are taken (as AWS takes any mix), and an S3 statement's `Resource` still bounds everything else, so `"Action": "*"` on a bucket grants no admin action | `crates/policy/tests/minio.rs`, `crates/policy/src/minio.rs`, `crates/server/tests/admin.rs` |
-| Replication | Planned |
+| Replication configuration: Put/Get/DeleteBucketReplication | Kept and answered as given, both versions of the configuration (a rule's `Prefix`, or a `Filter` with its priority and `DeleteMarkerReplication`), with S3's checks: 1 to 1,000 rules, unique ids (one is made up when none is given; 255 characters at most) and priorities, the two versions not mixed, no delete marker replication with a tag filter, Replication Time Control of 15 minutes with metrics, a replica KMS key with `SseKmsEncryptedObjects`, storage classes. The source and each destination must keep versions (`400 InvalidRequest`), and while a bucket has a configuration its versioning can't be suspended (`409 InvalidBucketState`). A destination is a bucket on the same drive, `arn:aws:s3:::NAME`, which must exist and isn't the source. Admin exports and imports carry it, applied once every bucket is there. Copying objects: planned. Proven by `crates/server/tests/replication.rs` |
 | S3 Select, Glacier restore, torrents, Object Lambda, accelerate | Not planned for now |
 
 ### Every S3 operation
@@ -144,7 +144,7 @@ TeiFS does.
 | DeleteBucketMetricsConfiguration | Served |
 | DeleteBucketOwnershipControls | Served |
 | DeleteBucketPolicy | Served |
-| DeleteBucketReplication | Not served |
+| DeleteBucketReplication | Served |
 | DeleteBucketTagging | Served |
 | DeleteBucketWebsite | Served |
 | DeleteObject | Served |
@@ -172,7 +172,7 @@ TeiFS does.
 | GetBucketOwnershipControls | Served |
 | GetBucketPolicy | Served |
 | GetBucketPolicyStatus | Served |
-| GetBucketReplication | Not served |
+| GetBucketReplication | Served |
 | GetBucketRequestPayment | Served |
 | GetBucketTagging | Served |
 | GetBucketVersioning | Served |
@@ -218,7 +218,7 @@ TeiFS does.
 | PutBucketNotificationConfiguration | Served |
 | PutBucketOwnershipControls | Served |
 | PutBucketPolicy | Served |
-| PutBucketReplication | Not served |
+| PutBucketReplication | Served |
 | PutBucketRequestPayment | Served |
 | PutBucketTagging | Served |
 | PutBucketVersioning | Served |

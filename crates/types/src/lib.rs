@@ -11,6 +11,7 @@ pub mod logging;
 mod names;
 pub mod notify;
 mod object;
+pub mod replication;
 pub mod verify;
 pub mod website;
 

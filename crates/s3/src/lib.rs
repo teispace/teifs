@@ -56,6 +56,7 @@ mod operations_doc;
 mod post_form;
 mod proxy;
 mod quota;
+mod replication;
 mod request_metrics;
 mod routes;
 mod sig_v2;

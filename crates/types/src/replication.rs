@@ -1,0 +1,242 @@
+//! Bucket replication: which of a bucket's objects are copied to which buckets, as S3's
+//! `PutBucketReplication` sets it. Kept as it was given, so `GetBucketReplication`
+//! answers the same.
+
+use serde::{Deserialize, Serialize};
+
+/// The most rules a configuration may have.
+pub const MAX_RULES: usize = 1_000;
+
+/// The longest a rule's id may be.
+pub const MAX_ID: usize = 255;
+
+/// What a destination's ARN starts with when it names a bucket on the same drive.
+pub const LOCAL_ARN: &str = "arn:aws:s3:::";
+
+/// What a destination's ARN starts with when it names a remote target (`MinIO`'s form).
+pub const TARGET_ARN: &str = "arn:minio:replication:";
+
+/// A bucket's replication configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicationConfig {
+    /// The role replication acts as (`Role`), as given.
+    pub role: String,
+    /// The rules, in the order given.
+    pub rules: Vec<ReplicationRule>,
+}
+
+/// One rule: which objects, to where, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicationRule {
+    /// Its id (one is made up when none is given).
+    pub id: String,
+    /// Which rule wins when several match (`None` in the first version of the
+    /// configuration, which has no `Filter`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Whether it's on.
+    pub enabled: bool,
+    /// Which objects it covers.
+    pub filter: ReplicationFilter,
+    /// Whether delete markers are replicated (`DeleteMarkerReplication`; `None` when not
+    /// given, as in the first version, which replicates them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_markers: Option<bool>,
+    /// Whether objects from before the rule are replicated (`ExistingObjectReplication`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_objects: Option<bool>,
+    /// Whether SSE-KMS objects are replicated (`SseKmsEncryptedObjects`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_kms_objects: Option<bool>,
+    /// Whether changes to replicas' metadata come back (`ReplicaModifications`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_modifications: Option<bool>,
+    /// Where objects go.
+    pub destination: ReplicationDestination,
+}
+
+/// Which objects a rule covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplicationFilter {
+    /// The first version's `Prefix`, beside the rule's other elements.
+    V1Prefix(String),
+    /// `Filter` with nothing in it: every object.
+    All,
+    /// `Filter` with a `Prefix`.
+    Prefix(String),
+    /// `Filter` with one `Tag`.
+    Tag(Tag),
+    /// `Filter` with `And`: a prefix (if any) and every tag.
+    And {
+        /// The prefix, if given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// The tags.
+        tags: Vec<Tag>,
+    },
+}
+
+/// A tag a filter needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    /// Its key.
+    pub key: String,
+    /// Its value.
+    pub value: String,
+}
+
+/// Where a rule's objects go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicationDestination {
+    /// The bucket's ARN: `arn:aws:s3:::NAME` on the same drive, or a remote target's.
+    pub bucket: String,
+    /// The account that owns it (`Account`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The replicas' storage class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
+    /// Whether replicas belong to the destination's owner (`AccessControlTranslation`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_override: bool,
+    /// How replicas are encrypted (`EncryptionConfiguration`), if given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<ReplicaEncryption>,
+    /// S3 Replication Time Control: on or off, and its minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_time: Option<Switch>,
+    /// Replication metrics: on or off, and the event threshold's minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Switch>,
+}
+
+/// How replicas are encrypted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaEncryption {
+    /// The KMS key replicas of SSE-KMS objects are encrypted with (`ReplicaKmsKeyID`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key: Option<String>,
+}
+
+/// A setting that's on or off, with minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Switch {
+    /// Whether it's on.
+    pub enabled: bool,
+    /// Its minutes, if given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i32>,
+}
+
+impl ReplicationRule {
+    /// Whether the rule replicates delete markers: the first version always does (for
+    /// deletes people make); later ones when `DeleteMarkerReplication` is enabled.
+    #[must_use]
+    pub fn replicates_delete_markers(&self) -> bool {
+        match self.filter {
+            ReplicationFilter::V1Prefix(_) => true,
+            _ => self.delete_markers == Some(true),
+        }
+    }
+
+    /// The prefix keys must start with (empty: every key).
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        match &self.filter {
+            ReplicationFilter::V1Prefix(prefix)
+            | ReplicationFilter::Prefix(prefix)
+            | ReplicationFilter::And {
+                prefix: Some(prefix),
+                ..
+            } => prefix,
+            _ => "",
+        }
+    }
+
+    /// The tags an object must have.
+    #[must_use]
+    pub fn tags(&self) -> &[Tag] {
+        match &self.filter {
+            ReplicationFilter::Tag(tag) => std::slice::from_ref(tag),
+            ReplicationFilter::And { tags, .. } => tags,
+            _ => &[],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(filter: ReplicationFilter, delete_markers: Option<bool>) -> ReplicationRule {
+        ReplicationRule {
+            id: "r".to_owned(),
+            priority: Some(1),
+            enabled: true,
+            filter,
+            delete_markers,
+            existing_objects: None,
+            sse_kms_objects: None,
+            replica_modifications: None,
+            destination: ReplicationDestination {
+                bucket: "arn:aws:s3:::copy".to_owned(),
+                account: None,
+                storage_class: None,
+                owner_override: false,
+                encryption: None,
+                replication_time: None,
+                metrics: None,
+            },
+        }
+    }
+
+    #[test]
+    fn configurations_round_trip_as_given() {
+        let tag = Tag {
+            key: "team".to_owned(),
+            value: "red".to_owned(),
+        };
+        let config = ReplicationConfig {
+            role: "arn:aws:iam::123456789012:role/replication".to_owned(),
+            rules: vec![rule(
+                ReplicationFilter::And {
+                    prefix: Some("docs/".to_owned()),
+                    tags: vec![tag],
+                },
+                Some(false),
+            )],
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        assert_eq!(
+            text,
+            r#"{"role":"arn:aws:iam::123456789012:role/replication","rules":[{"id":"r","priority":1,"enabled":true,"filter":{"and":{"prefix":"docs/","tags":[{"key":"team","value":"red"}]}},"deleteMarkers":false,"destination":{"bucket":"arn:aws:s3:::copy"}}]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ReplicationConfig>(&text).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn the_first_version_replicates_delete_markers_and_later_ones_when_asked() {
+        let v1 = rule(ReplicationFilter::V1Prefix("a/".to_owned()), None);
+        assert!(v1.replicates_delete_markers());
+        assert_eq!(v1.prefix(), "a/");
+        assert!(!rule(ReplicationFilter::All, None).replicates_delete_markers());
+        assert!(!rule(ReplicationFilter::All, Some(false)).replicates_delete_markers());
+        assert!(rule(ReplicationFilter::All, Some(true)).replicates_delete_markers());
+        let tag = Tag {
+            key: "k".to_owned(),
+            value: "v".to_owned(),
+        };
+        let tagged = rule(ReplicationFilter::Tag(tag.clone()), None);
+        assert_eq!(tagged.tags(), [tag]);
+        assert_eq!(tagged.prefix(), "");
+    }
+}

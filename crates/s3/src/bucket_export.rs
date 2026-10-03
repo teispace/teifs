@@ -21,6 +21,7 @@ use teifs_types::{
     configs::Configurations,
     logging::LoggingConfig,
     notify::NotificationConfig,
+    replication::ReplicationConfig,
     website::WebsiteConfig,
 };
 
@@ -30,15 +31,16 @@ use crate::{
     bucket_access::{Rules, parse_policy, public_policy_blocked},
     configs, cors,
     errors::StoreResultExt,
-    lifecycle, logging, object_lock, quota,
+    lifecycle, logging, object_lock, quota, replication,
     request_metrics::RequestMetrics,
     routes::{s3_refusal, signed_body},
     tagging, website,
 };
 
 /// The settings an import knows, in the order it applies them: Block Public Access
-/// before what it refuses, Object Ownership with the ACL, tags before ABAC. Logging goes
-/// last, once every bucket is there: its target may come later in the export.
+/// before what it refuses, Object Ownership with the ACL, tags before ABAC. Logging and
+/// replication go last, once every bucket is there: their targets may come later in the
+/// export.
 const SETTINGS: &[&str] = &[
     "objectLock",
     "publicAccessBlock",
@@ -55,6 +57,7 @@ const SETTINGS: &[&str] = &[
     "quota",
     "configurations",
     "logging",
+    "replication",
 ];
 
 /// `GET buckets`: every bucket, or `?bucket=NAME`'s alone.
@@ -182,6 +185,20 @@ pub(crate) async fn apply(
             access_log.turn_on();
         }
         import.report("logging", result.map(|()| APPLIED));
+    }
+    for bucket in buckets {
+        let Some(value) = bucket.settings.get("replication") else {
+            continue;
+        };
+        let mut import = Import {
+            store,
+            rules,
+            notifier,
+            bucket: &bucket.name,
+            items: &mut report.items,
+        };
+        let result = import.replication(value).await;
+        import.report("replication", result.map(|()| APPLIED));
     }
     tracing::info!(
         items = report.items.len(),
@@ -559,6 +576,17 @@ impl Import<'_> {
             .s3()
     }
 
+    /// Checked as `PutBucketReplication` checks it.
+    async fn replication(&self, value: &Value) -> S3Result<()> {
+        let config: ReplicationConfig = parse("replication", value)?;
+        let config = replication::checked(&config)?;
+        replication::check(self.store, self.bucket, &config).await?;
+        self.store
+            .set_bucket_replication(self.bucket, Some(config))
+            .await
+            .s3()
+    }
+
     async fn encryption(&self, value: &Value) -> S3Result<()> {
         let encryption: BucketEncryption = parse("encryption", value)?;
         self.store
@@ -664,6 +692,10 @@ mod tests {
             website: Some(WebsiteConfig::RedirectAll {
                 host_name: String::new(),
                 protocol: None,
+            }),
+            replication: Some(ReplicationConfig {
+                role: String::new(),
+                rules: Vec::new(),
             }),
             quota: Some(1),
             configurations: Some(Configurations::default()),

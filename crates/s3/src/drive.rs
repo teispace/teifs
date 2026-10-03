@@ -37,7 +37,7 @@ use crate::{
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     observe,
     post_form::{self, Form},
-    quota,
+    quota, replication,
     request_metrics::RequestMetrics,
     sse::{self, set_sse},
     tagging, website,
@@ -1333,6 +1333,22 @@ impl S3 for Drive {
             }
             Some(_) => return Err(s3_error!(MalformedXML)),
         };
+        // Replication copies every version, so it needs them kept.
+        if versioning == Versioning::Suspended
+            && self
+                .store
+                .bucket_replication(&input.bucket)
+                .await
+                .s3()?
+                .is_some()
+        {
+            return Err(s3_error!(
+                InvalidBucketState,
+                "A replication configuration is present on this bucket, so you cannot change \
+                 the versioning state. To change the versioning state, first delete the \
+                 replication configuration."
+            ));
+        }
         self.store
             .set_bucket_versioning(&input.bucket, versioning)
             .await
@@ -2445,6 +2461,48 @@ impl S3 for Drive {
             .await
             .s3()?;
         Ok(S3Response::new(dto::DeleteBucketWebsiteOutput::default()))
+    }
+
+    async fn get_bucket_replication(
+        &self,
+        req: S3Request<dto::GetBucketReplicationInput>,
+    ) -> S3Result<S3Response<dto::GetBucketReplicationOutput>> {
+        let config = self
+            .store
+            .bucket_replication(&req.input.bucket)
+            .await
+            .s3()?;
+        let config = config.ok_or_else(replication::not_found)?;
+        Ok(S3Response::new(dto::GetBucketReplicationOutput {
+            replication_configuration: Some(replication::to_dto(&config)),
+        }))
+    }
+
+    async fn put_bucket_replication(
+        &self,
+        req: S3Request<dto::PutBucketReplicationInput>,
+    ) -> S3Result<S3Response<dto::PutBucketReplicationOutput>> {
+        let input = req.input;
+        let config = replication::from_dto(input.replication_configuration)?;
+        replication::check(&self.store, &input.bucket, &config).await?;
+        self.store
+            .set_bucket_replication(&input.bucket, Some(config))
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::PutBucketReplicationOutput::default()))
+    }
+
+    async fn delete_bucket_replication(
+        &self,
+        req: S3Request<dto::DeleteBucketReplicationInput>,
+    ) -> S3Result<S3Response<dto::DeleteBucketReplicationOutput>> {
+        self.store
+            .set_bucket_replication(&req.input.bucket, None)
+            .await
+            .s3()?;
+        Ok(S3Response::new(
+            dto::DeleteBucketReplicationOutput::default(),
+        ))
     }
 
     async fn get_bucket_cors(

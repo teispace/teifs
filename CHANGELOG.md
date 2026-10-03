@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Replication configurations: `PutBucketReplication`, `GetBucketReplication` and
+  `DeleteBucketReplication`, kept as given and checked as S3 checks them, naming
+  buckets on the same drive; a replicating bucket's versioning can't be suspended.
+  Admin exports and imports carry them. Objects aren't copied yet.
 - `docs/COMPATIBILITY.md` lists every operation of AWS's S3 API and whether TeiFS serves
   it, generated from the code.
 - `docs/CLI.md`: every command and option, with its default, choices and environment
