@@ -20,6 +20,11 @@ pub(crate) const MTIME: &str = "x-minio-source-mtime";
 pub(crate) const ETAG: &str = "x-minio-source-etag";
 /// Says a replicated delete makes a delete marker (with the `versionId` given).
 pub(crate) const DELETE_MARKER: &str = "x-minio-source-deletemarker";
+/// When the replicated version's tags, retention and legal hold were last changed: a
+/// `MinIO` replica takes each only with its time.
+pub(crate) const TAGGING_TIMESTAMP: &str = "x-minio-source-replication-tagging-timestamp";
+pub(crate) const RETENTION_TIMESTAMP: &str = "x-minio-source-replication-retention-timestamp";
+pub(crate) const LEGAL_HOLD_TIMESTAMP: &str = "x-minio-source-replication-legalhold-timestamp";
 /// What minio-go also sends with a replica: its status there.
 pub(crate) const STATUS: &str = "x-amz-replication-status";
 /// The query parameter naming the replicated version.
@@ -120,6 +125,22 @@ pub(crate) fn of(replica: &Replica) -> Vec<(&'static str, String)> {
     }
     if let Some(etag) = &replica.etag {
         headers.push((ETAG, etag.clone()));
+    }
+    headers
+}
+
+/// The headers that make a copy of `replica` onto itself a change of its metadata,
+/// which changed at `changed_ms` (sent with the version's tags, retention and legal
+/// hold).
+pub(crate) fn of_metadata(replica: &Replica, changed_ms: i64) -> Vec<(&'static str, String)> {
+    let mut headers = of(replica);
+    let nanos = i128::from(changed_ms) * 1_000_000;
+    if let Ok(time) = OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        && let Ok(time) = time.format(&Rfc3339)
+    {
+        for name in [TAGGING_TIMESTAMP, RETENTION_TIMESTAMP, LEGAL_HOLD_TIMESTAMP] {
+            headers.push((name, time.clone()));
+        }
     }
     headers
 }
@@ -280,6 +301,29 @@ mod tests {
         map.insert(DELETE_MARKER, HeaderValue::from_static("true"));
         assert_eq!(removal(&map, Some(MINIO_ID)).unwrap(), None);
         assert_eq!(removal(&HeaderMap::new(), Some(MINIO_ID)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_metadata_change_says_when_each_part_changed() {
+        let replica = Replica {
+            version_id: MINIO_ID.to_owned(),
+            modified_ms: 1_700_000_000_123,
+            etag: None,
+        };
+        let headers = of_metadata(&replica, 1_700_000_100_000);
+        for name in [TAGGING_TIMESTAMP, RETENTION_TIMESTAMP, LEGAL_HOLD_TIMESTAMP] {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(n, v)| *n == name && v == "2023-11-14T22:15:00Z"),
+                "{name}: {headers:?}"
+            );
+        }
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(name, HeaderValue::from_str(&value).unwrap());
+        }
+        assert_eq!(super::replica(&map, Some(MINIO_ID)).unwrap(), Some(replica));
     }
 
     #[test]

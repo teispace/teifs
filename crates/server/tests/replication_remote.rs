@@ -416,3 +416,78 @@ async fn removed_versions_leave_another_teifs_too() {
         .unwrap();
     assert_eq!(versions.versions().len(), 1);
 }
+
+#[tokio::test]
+async fn changed_tags_reach_another_teifs_in_place() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    // A replication user as `MinIO` documents one: no `s3:PutObjectTagging`.
+    to.iam.create_user("replicator", None, &[], None).unwrap();
+    to.iam
+        .put_inline(
+            teifs_iam::Owner::User("replicator"),
+            "policy",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":[
+                "s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:ReplicateObject",
+                "s3:ReplicateTags","s3:DeleteObject","s3:ReplicateDelete",
+                "s3:GetBucketVersioning","s3:ListBucket"],"Resource":"*"}]}"#,
+        )
+        .unwrap();
+    let key = to.iam.create_access_key("replicator").unwrap();
+    let arn = target(&from, &to, (key.info.id.as_str(), key.secret.as_str())).await;
+    replicate(&source, &arn).await;
+    let put = source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .tagging("team=red")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    source
+        .put_object_tagging()
+        .bucket("source")
+        .key("a.txt")
+        .tagging(
+            aws_sdk_s3::types::Tagging::builder()
+                .tag_set(
+                    aws_sdk_s3::types::Tag::builder()
+                        .key("team")
+                        .value("blue")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    let tags = copy
+        .get_object_tagging()
+        .bucket("copy")
+        .key("a.txt")
+        .version_id(put.version_id().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tag_set()[0].value(), "blue");
+    let versions = copy
+        .list_object_versions()
+        .bucket("copy")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 1);
+}

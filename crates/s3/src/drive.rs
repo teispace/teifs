@@ -107,9 +107,15 @@ impl Drive {
     }
 
     /// Wakes the replication worker when `name` happened to a version it may send: one
-    /// was written, a delete marker made, or a version removed.
+    /// was written (or its legal hold changed), its tags or retention changed, a delete
+    /// marker was made, or a version removed.
     fn wake_replication(&self, name: &str) {
-        if name.starts_with("ObjectCreated:") || name == MARKED || name == REMOVED {
+        if name.starts_with("ObjectCreated:")
+            || name.starts_with("ObjectTagging:")
+            || name.starts_with("ObjectRetention:")
+            || name == MARKED
+            || name == REMOVED
+        {
             self.replication.notify_one();
         }
     }
@@ -117,6 +123,46 @@ impl Drive {
     /// What wakes the replication worker.
     pub(crate) fn replication_wake(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.replication)
+    }
+
+    /// Changes a replica's metadata as `MinIO` replicates a change of its source's: a
+    /// copy of the version `version_id` onto itself, with its tags (when the tagging
+    /// directive replaces them), retention and legal hold. Nothing else changes, and no
+    /// version is made.
+    async fn replica_metadata(
+        &self,
+        input: dto::CopyObjectInput,
+        version_id: &str,
+    ) -> S3Result<S3Response<dto::CopyObjectOutput>> {
+        let replace_tags = input
+            .tagging_directive
+            .as_ref()
+            .is_some_and(|d| d.as_str() == dto::TaggingDirective::REPLACE);
+        let lock = write_lock!(input)?;
+        let update = teifs_store::ReplicaMetadata {
+            tags: if replace_tags {
+                Some(header_tags(input.tagging.as_deref())?)
+            } else {
+                None
+            },
+            retention: lock.retention,
+            legal_hold: lock.legal_hold,
+        };
+        let info = self
+            .store
+            .update_replica_metadata(&input.bucket, &input.key, version_id, update)
+            .await
+            .s3()?;
+        Ok(S3Response::new(dto::CopyObjectOutput {
+            copy_object_result: Some(dto::CopyObjectResult {
+                e_tag: Some(etag(&info.etag)),
+                last_modified: Some(info.modified.into()),
+                ..Default::default()
+            }),
+            version_id: written_version(&info),
+            copy_source_version_id: written_version(&info),
+            ..Default::default()
+        }))
     }
 
     /// The drive with its access log.
@@ -489,6 +535,26 @@ fn with_customer_md5(info: Option<SseInfo>, md5: Option<String>) -> Option<SseIn
 }
 
 /// A copy's source: its bucket, key and version, if it names one.
+/// The version a copy changes the metadata of, when it's another server's replication
+/// of such a change: a copy of that version onto itself.
+fn replicated_copy(
+    headers: &http::HeaderMap,
+    input: &dto::CopyObjectInput,
+    (bucket, key, version): (&str, &str, Option<&str>),
+) -> S3Result<Option<String>> {
+    let Some(replica) = replica_headers::replica(headers, input.version_id.as_deref())? else {
+        return Ok(None);
+    };
+    if bucket == input.bucket && key == input.key && version == Some(&replica.version_id) {
+        Ok(Some(replica.version_id))
+    } else {
+        Err(s3_error!(
+            InvalidRequest,
+            "a replicated copy changes its own version's metadata"
+        ))
+    }
+}
+
 fn copied_from(source: &CopySource) -> S3Result<(String, String, Option<String>)> {
     let CopySource::Bucket {
         bucket,
@@ -3136,6 +3202,16 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::CopyObjectOutput>> {
         let mut input = req.input;
         let (src_bucket, src_key, src_version) = copied_from(&input.copy_source)?;
+        // Another server replicating a change of its version's metadata (the access
+        // check made sure the caller may `s3:ReplicateObject`).
+        let source = (
+            src_bucket.as_str(),
+            src_key.as_str(),
+            src_version.as_deref(),
+        );
+        if let Some(version_id) = replicated_copy(&req.headers, &input, source)? {
+            return self.replica_metadata(input, &version_id).await;
+        }
         let src_version = src_version.as_deref();
         let source_key = sse::customer_key(
             input.copy_source_sse_customer_algorithm.as_deref(),

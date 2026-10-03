@@ -291,6 +291,7 @@ impl Store {
         self.change_attrs(bucket, key, version_id, move |attrs| {
             check_retention_change(attrs.retention.as_ref(), retention.as_ref(), bypass, now)?;
             attrs.retention = retention;
+            crate::replicating::changed(attrs);
             Ok(())
         })
         .await
@@ -307,6 +308,7 @@ impl Store {
         self.require_lock(bucket).await?;
         self.change_attrs(bucket, key, version_id, move |attrs| {
             attrs.legal_hold = Some(on);
+            crate::replicating::changed(attrs);
             Ok(())
         })
         .await
@@ -314,7 +316,7 @@ impl Store {
 
     /// Fails unless the bucket has Object Lock, as S3 does for a version's retention or
     /// legal hold.
-    async fn require_lock(&self, bucket: &str) -> Result<()> {
+    pub(crate) async fn require_lock(&self, bucket: &str) -> Result<()> {
         match self.bucket_object_lock(bucket).await? {
             Some(_) => Ok(()),
             None => Err(StoreError::InvalidRequest(NO_LOCK)),

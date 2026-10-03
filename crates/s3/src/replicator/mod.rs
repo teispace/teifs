@@ -15,7 +15,8 @@ use std::{
 };
 
 use teifs_store::{
-    Encryption, ObjectBody, ObjectInfo, QueuedDelete, Replica, Store, StoreError, Waiting,
+    Encryption, ObjectBody, ObjectInfo, QueuedDelete, Replica, ReplicaMetadata, Store, StoreError,
+    Waiting,
 };
 use teifs_types::{
     SseMode,
@@ -251,6 +252,11 @@ impl Worker {
         if version.delete_marker {
             return self.send_marker(version, arn).await;
         }
+        if version.metadata.iter().any(|m| m == arn)
+            && self.send_metadata(bucket, version, arn).await?
+        {
+            return Ok(());
+        }
         let (info, body) = match self
             .store
             .read_with(bucket, &version.key, Some(&version.version_id), None)
@@ -298,6 +304,52 @@ impl Worker {
             self.remote(arn).await?.send(sending).await?;
         }
         Ok(())
+    }
+
+    /// Sends what changed in a version's metadata to the destination `arn`, which had
+    /// the version; whether it did (`false`: the destination hasn't it now, so it all
+    /// goes).
+    async fn send_metadata(
+        &self,
+        bucket: &str,
+        version: &Waiting,
+        arn: &str,
+    ) -> Result<bool, Missed> {
+        let info = match self
+            .store
+            .head_version(bucket, &version.key, Some(&version.version_id))
+            .await
+        {
+            Ok(info) => info,
+            // Removed meanwhile: there's nothing left to send.
+            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => return Ok(true),
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(local) = arn.strip_prefix(LOCAL_ARN) {
+            let update = ReplicaMetadata {
+                tags: Some(info.attrs.tags.clone()),
+                retention: info.attrs.retention,
+                legal_hold: info.attrs.legal_hold,
+            };
+            return match self
+                .store
+                .update_replica_metadata(local, &version.key, &version.version_id, update)
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(false),
+                Err(err) => Err(err.into()),
+            };
+        }
+        let replica = Replica {
+            version_id: version.version_id.clone(),
+            modified_ms: millis(info.modified),
+            etag: Some(info.etag.clone()),
+        };
+        self.remote(arn)
+            .await?
+            .send_metadata(&version.key, &replica, &info.attrs)
+            .await
     }
 
     /// Copies a delete marker to the destination `arn`: there too, the key's current
@@ -642,6 +694,58 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_metadata_follows_the_version_in_either_layout() {
+        for layout in [Layout::Object, Layout::Folder] {
+            let (_dir, store) = replicating_in(layout).await;
+            let id = put(&store, "a.txt", b"one").await;
+            let other = put(&store, "b.txt", b"two").await;
+            let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
+            let stopping = CancellationToken::new();
+            worker.pass(&stopping).await;
+            let tags = std::collections::BTreeMap::from([("team".to_owned(), "red".to_owned())]);
+            for (key, version) in [("a.txt", &id), ("b.txt", &other)] {
+                store
+                    .set_tags("source", key, Some(version), tags.clone())
+                    .await
+                    .unwrap();
+            }
+            // One the destination lost goes again whole.
+            store
+                .delete_if("copy", "b.txt", Some(&other), Precondition::default())
+                .await
+                .unwrap();
+            worker.pass(&stopping).await;
+            assert!(
+                store
+                    .waiting_replication("source", BATCH)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{layout:?}"
+            );
+            for (key, version) in [("a.txt", &id), ("b.txt", &other)] {
+                let replica = store
+                    .head_version("copy", key, Some(version))
+                    .await
+                    .unwrap();
+                assert_eq!(replica.attrs.tags, tags, "{layout:?} {key}");
+            }
+            // Changed in place: no new version.
+            let versions = store
+                .list_versions(
+                    "copy",
+                    teifs_store::VersionsQuery {
+                        max_keys: 100,
+                        ..teifs_store::VersionsQuery::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(versions.versions.len(), 2, "{layout:?}");
         }
     }
 }

@@ -2,7 +2,7 @@
 //! `PutBucketReplication` sets it. Kept as it was given, so `GetBucketReplication`
 //! answers the same.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -221,6 +221,10 @@ pub struct VersionReplication {
     /// Each destination's status.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, ReplicationStatus>,
+    /// The waiting destinations that have the version and wait only for what changed
+    /// in its metadata since (tags, retention, legal hold).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub metadata: BTreeSet<String>,
 }
 
 impl VersionReplication {
@@ -234,6 +238,7 @@ impl VersionReplication {
         (!targets.is_empty()).then_some(Self {
             status: ReplicationStatus::Pending,
             targets,
+            metadata: BTreeSet::new(),
         })
     }
 
@@ -243,6 +248,7 @@ impl VersionReplication {
         Self {
             status: ReplicationStatus::Replica,
             targets: BTreeMap::new(),
+            metadata: BTreeSet::new(),
         }
     }
 
@@ -252,6 +258,31 @@ impl VersionReplication {
         if let Some(target) = self.targets.get_mut(arn) {
             *target = status;
         }
+        if status != ReplicationStatus::Pending {
+            self.metadata.remove(arn);
+        }
+        self.overall()
+    }
+
+    /// After its metadata changed: waiting again for every destination (those that have
+    /// the version, for the change alone; those that failed, for all of it). A replica's
+    /// is as it was.
+    #[must_use]
+    pub fn changed(mut self) -> Self {
+        if self.status == ReplicationStatus::Replica {
+            return self;
+        }
+        for (arn, status) in &mut self.targets {
+            if *status == ReplicationStatus::Completed {
+                self.metadata.insert(arn.clone());
+            }
+            *status = ReplicationStatus::Pending;
+        }
+        self.overall()
+    }
+
+    /// With the overall status matching each destination's.
+    fn overall(mut self) -> Self {
         let statuses = || self.targets.values().copied();
         self.status = if statuses().any(|s| s == ReplicationStatus::Failed) {
             ReplicationStatus::Failed
@@ -519,5 +550,32 @@ mod tests {
             config.removal_destinations("docs/a", (&none, false), &["arn:aws:s3:::copy"]),
             ["arn:aws:s3:::copy", "arn:aws:s3:::deletes"]
         );
+    }
+
+    #[test]
+    fn a_metadata_change_waits_for_the_change_alone_where_the_version_is() {
+        let arns = ["arn:a", "arn:b", "arn:c"].map(str::to_owned);
+        let replication = VersionReplication::pending(arns.clone())
+            .unwrap()
+            .with("arn:a", ReplicationStatus::Completed)
+            .with("arn:b", ReplicationStatus::Failed);
+        let changed = replication.changed();
+        assert_eq!(changed.status, ReplicationStatus::Pending);
+        assert_eq!(changed.waiting().count(), 3);
+        // Only where it arrived does the change go alone.
+        assert_eq!(changed.metadata, BTreeSet::from(["arn:a".to_owned()]));
+        let sent = changed.with("arn:a", ReplicationStatus::Completed);
+        assert!(sent.metadata.is_empty());
+        // A replica's changes aren't sent back.
+        assert_eq!(
+            VersionReplication::replica().changed(),
+            VersionReplication::replica()
+        );
+        // Written before there was a `metadata`, it reads as empty.
+        let old: VersionReplication =
+            serde_json::from_str(r#"{"status":"COMPLETED","targets":{"arn:a":"COMPLETED"}}"#)
+                .unwrap();
+        assert!(old.metadata.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("metadata"));
     }
 }

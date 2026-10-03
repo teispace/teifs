@@ -17,7 +17,7 @@ use aws_sdk_s3::{
     primitives::{ByteStream, DateTime},
     types::{
         CompletedMultipartUpload, CompletedPart, ObjectLockLegalHoldStatus, ObjectLockMode,
-        ServerSideEncryption, StorageClass,
+        ServerSideEncryption, StorageClass, TaggingDirective,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,7 +29,15 @@ use teifs_types::{SseMode, md5_of_etag, replication::RemoteTarget};
 use tokio::io::AsyncReadExt as _;
 
 use super::{CHUNK, Missed, Sending};
-use crate::replica_headers;
+use crate::{inventory::now_ms, replica_headers};
+
+/// What a copy source's key escapes: all but S3's unreserved characters and `/`.
+const COPY_SOURCE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'/');
 
 /// Larger versions go as multipart uploads (S3's largest `PutObject`).
 const MULTIPART_ABOVE: u64 = 5 * 1024 * 1024 * 1024;
@@ -118,6 +126,65 @@ impl Target {
             .await
             .map_err(|err| missed(&err))?;
         Ok(())
+    }
+
+    /// Sends what changed in the metadata of the version `replica` names (now `attrs`) to
+    /// the target, which has it: `MinIO`'s copy of the version onto itself with its
+    /// tags, retention and legal hold. Whether it did (`false`: the target doesn't have
+    /// the version, so it all goes). AWS (whose versions have ids of their own) gets
+    /// nothing.
+    pub(super) async fn send_metadata(
+        &self,
+        key: &str,
+        replica: &Replica,
+        attrs: &ObjectAttrs,
+    ) -> Result<bool, Missed> {
+        if !self.replica_headers {
+            return Ok(true);
+        }
+        let source = format!(
+            "{}/{}?versionId={}",
+            self.bucket,
+            percent_encoding::utf8_percent_encode(key, COPY_SOURCE),
+            replica.version_id
+        );
+        let (lock_mode, retain_until, legal_hold) = lock_of(attrs);
+        let headers = replica_headers::of_metadata(replica, now_ms());
+        let version_id = replica.version_id.clone();
+        let sent = self
+            .client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .copy_source(source)
+            .tagging_directive(TaggingDirective::Replace)
+            .tagging(tagging_of(attrs).unwrap_or_default())
+            .set_object_lock_mode(lock_mode)
+            .set_object_lock_retain_until_date(retain_until)
+            .set_object_lock_legal_hold_status(legal_hold)
+            .customize()
+            .mutate_request(move |request| {
+                for (name, value) in &headers {
+                    request.headers_mut().insert(*name, value.clone());
+                }
+                let uri = request.uri().to_owned();
+                let sep = if uri.contains('?') { '&' } else { '?' };
+                // Ids are hex and dashes: nothing to encode.
+                let _ = request.set_uri(format!("{uri}{sep}versionId={version_id}"));
+            })
+            .send()
+            .await;
+        match sent {
+            Ok(_) => Ok(true),
+            Err(err)
+                if err
+                    .raw_response()
+                    .is_some_and(|r| r.status().as_u16() == 404) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(missed(&err)),
+        }
     }
 
     /// Removes the version `version_id` of `key` from the target, as a replicated
@@ -394,11 +461,8 @@ struct Described {
 
 impl Described {
     fn of(attrs: &ObjectAttrs, sending: &Sending<'_>, target: &Target) -> Self {
-        let tagging = (!attrs.tags.is_empty()).then(|| {
-            form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(&attrs.tags)
-                .finish()
-        });
+        let tagging = tagging_of(attrs);
+        let (lock_mode, retain_until, legal_hold) = lock_of(attrs);
         // Only a KMS key is asked for: for the rest the target's default decides, as for
         // a write without encryption headers, since not every service has SSE-S3 (a
         // `MinIO` without a KMS refuses it).
@@ -431,21 +495,9 @@ impl Described {
                     .collect()
             }),
             tagging,
-            lock_mode: attrs
-                .retention
-                .as_ref()
-                .map(|r| ObjectLockMode::from(r.mode.as_str())),
-            retain_until: attrs
-                .retention
-                .as_ref()
-                .map(|r| DateTime::from_millis(r.until_ms)),
-            legal_hold: attrs.legal_hold.map(|on| {
-                if on {
-                    ObjectLockLegalHoldStatus::On
-                } else {
-                    ObjectLockLegalHoldStatus::Off
-                }
-            }),
+            lock_mode,
+            retain_until,
+            legal_hold,
             sse,
             kms_key,
             storage_class: sending
@@ -455,6 +507,43 @@ impl Described {
                 .map(|class| StorageClass::from(class.as_str())),
         }
     }
+}
+
+/// A version's tags as the `x-amz-tagging` header says them.
+fn tagging_of(attrs: &ObjectAttrs) -> Option<String> {
+    (!attrs.tags.is_empty()).then(|| {
+        form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&attrs.tags)
+            .finish()
+    })
+}
+
+/// A version's retention and legal hold, as the `x-amz-object-lock-*` headers say them.
+fn lock_of(
+    attrs: &ObjectAttrs,
+) -> (
+    Option<ObjectLockMode>,
+    Option<DateTime>,
+    Option<ObjectLockLegalHoldStatus>,
+) {
+    let legal_hold = attrs.legal_hold.map(|on| {
+        if on {
+            ObjectLockLegalHoldStatus::On
+        } else {
+            ObjectLockLegalHoldStatus::Off
+        }
+    });
+    (
+        attrs
+            .retention
+            .as_ref()
+            .map(|r| ObjectLockMode::from(r.mode.as_str())),
+        attrs
+            .retention
+            .as_ref()
+            .map(|r| DateTime::from_millis(r.until_ms)),
+        legal_hold,
+    )
 }
 
 /// The MD5 of a version's bytes, when its ETag is it: a single upload's, unencrypted

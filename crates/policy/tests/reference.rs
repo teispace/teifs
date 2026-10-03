@@ -247,6 +247,28 @@ fn replicas_from_another_server_need_minios_replication_actions() {
             ("s3:ReplicateObject", Target::Object, true)
         ]
     );
+    // Its tags are replicated ones; a change of its metadata comes as a copy onto itself.
+    let tagged = Facts {
+        tagging: true,
+        ..replication
+    };
+    assert_eq!(
+        actions("PutObject", tagged),
+        [
+            ("s3:PutObject", Target::Object, true),
+            ("s3:ReplicateTags", Target::Object, true),
+            ("s3:ReplicateObject", Target::Object, true)
+        ]
+    );
+    assert_eq!(
+        actions("CopyObject", tagged),
+        [
+            ("s3:GetObject", Target::Source, true),
+            ("s3:PutObject", Target::Object, true),
+            ("s3:ReplicateTags", Target::Object, true),
+            ("s3:ReplicateObject", Target::Object, true)
+        ]
+    );
     // A replicated delete marker names its id, and a replicated removal the version it
     // removes: both need `s3:ReplicateDelete`, as in `MinIO`.
     assert_eq!(

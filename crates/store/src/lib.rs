@@ -72,7 +72,7 @@ pub use lock::{
 };
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
-pub use replicating::Waiting;
+pub use replicating::{ReplicaMetadata, Waiting};
 pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
 pub use settings::{
@@ -997,6 +997,7 @@ impl Store {
     ) -> Result<ObjectInfo> {
         self.change_attrs(bucket, key, version_id, move |attrs| {
             attrs.tags = tags;
+            crate::replicating::changed(attrs);
             Ok(())
         })
         .await

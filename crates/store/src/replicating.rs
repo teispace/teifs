@@ -1,10 +1,15 @@
 //! Where versions stand in replication: which still wait (found again after a restart,
 //! since the status is kept with each version), and each destination's outcome.
 
-use teifs_meta::QueuedDelete;
-use teifs_types::replication::{ReplicationConfig, ReplicationStatus};
+use std::collections::BTreeMap;
 
-use crate::{ObjectAttrs, Store, StoreError, VersionsQuery, error::Result};
+use teifs_meta::QueuedDelete;
+use teifs_types::{
+    Retention,
+    replication::{ReplicationConfig, ReplicationStatus, VersionReplication},
+};
+
+use crate::{ObjectAttrs, ObjectInfo, Store, StoreError, VersionsQuery, error::Result, now_ms};
 
 /// A version waiting to be replicated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +20,8 @@ pub struct Waiting {
     pub version_id: String,
     /// The destinations (ARNs) it still waits for.
     pub destinations: Vec<String>,
+    /// Those of them that have it, and wait only for what changed in its metadata.
+    pub metadata: Vec<String>,
     /// Whether it's a delete marker.
     pub delete_marker: bool,
     /// When it was made.
@@ -52,6 +59,23 @@ pub(crate) fn removal(
     }
 }
 
+/// Records that a version's metadata changed: it waits again for its destinations.
+pub(crate) fn changed(attrs: &mut ObjectAttrs) {
+    attrs.replication = attrs.replication.take().map(VersionReplication::changed);
+}
+
+/// What a replica's metadata becomes when its source's changed; `None` leaves a part as
+/// it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplicaMetadata {
+    /// Its tags.
+    pub tags: Option<BTreeMap<String, String>>,
+    /// Its retention.
+    pub retention: Option<Retention>,
+    /// Its legal hold.
+    pub legal_hold: Option<bool>,
+}
+
 /// How many versions a page of the search reads.
 const PAGE: usize = 1_000;
 
@@ -82,6 +106,11 @@ impl Store {
                     found.push(Waiting {
                         key: key.clone(),
                         version_id: version_id.clone(),
+                        metadata: destinations
+                            .iter()
+                            .filter(|arn| replication.metadata.contains(*arn))
+                            .cloned()
+                            .collect(),
                         destinations,
                         delete_marker: version.delete_marker,
                         modified: version.info.modified,
@@ -157,6 +186,49 @@ impl Store {
             if let (true, Some(replication)) = (row.delete_marker, row.attrs.replication.take()) {
                 row.attrs.replication = Some(replication.with(&arn, status));
                 conn.set_version_attrs(&versions.id, &key, &version_id, &row.attrs, None)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Changes the metadata of the replica `version_id` of `key` as its source's
+    /// changed. Only a replica's metadata changes so; a retention is changed as by one
+    /// who may bypass governance (the source's was), never shortening a compliance one.
+    pub async fn update_replica_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        update: ReplicaMetadata,
+    ) -> Result<ObjectInfo> {
+        if update.retention.is_some() || update.legal_hold.is_some() {
+            self.require_lock(bucket).await?;
+        }
+        let now = now_ms();
+        self.change_attrs(bucket, key, Some(version_id), move |attrs| {
+            let replica = attrs.replication.as_ref().map(|r| r.status);
+            if replica != Some(ReplicationStatus::Replica) {
+                return Err(StoreError::InvalidRequest(
+                    "only a replica's metadata changes as its source's",
+                ));
+            }
+            if let Some(tags) = update.tags {
+                attrs.tags = tags;
+            }
+            if let Some(retention) = update.retention
+                && attrs.retention.as_ref() != Some(&retention)
+            {
+                crate::lock::check_retention_change(
+                    attrs.retention.as_ref(),
+                    Some(&retention),
+                    true,
+                    now,
+                )?;
+                attrs.retention = Some(retention);
+            }
+            if let Some(on) = update.legal_hold {
+                attrs.legal_hold = Some(on);
             }
             Ok(())
         })

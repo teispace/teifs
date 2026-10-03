@@ -2,7 +2,10 @@
 //! marked a replica and never replicated again, is written once however often it's
 //! sent, and only goes where versions are kept.
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use teifs_types::replication::{
     ReplicationConfig, ReplicationDestination, ReplicationFilter, ReplicationRule,
@@ -407,4 +410,112 @@ async fn removals_people_make_are_queued_as_the_rules_say_in_either_layout() {
             "{layout:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn metadata_changes_wait_again_where_the_version_arrived_in_either_layout() {
+    for layout in [Layout::Object, Layout::Folder] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create_bucket("source", layout).await.unwrap();
+        store
+            .set_bucket_versioning("source", Versioning::Enabled)
+            .await
+            .unwrap();
+        store
+            .set_bucket_replication("source", Some(everything_to("copy")))
+            .await
+            .unwrap();
+        let id = store
+            .put_bytes("source", "a.txt", b"hello", ObjectAttrs::default())
+            .await
+            .unwrap()
+            .version_id
+            .unwrap();
+        store
+            .set_replication_status(
+                "source",
+                "a.txt",
+                &id,
+                "arn:aws:s3:::copy",
+                ReplicationStatus::Completed,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .waiting_replication("source", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let tags = BTreeMap::from([("team".to_owned(), "red".to_owned())]);
+        store
+            .set_tags("source", "a.txt", Some(&id), tags)
+            .await
+            .unwrap();
+        let waiting = store.waiting_replication("source", 10).await.unwrap();
+        assert_eq!(waiting.len(), 1, "{layout:?}");
+        assert_eq!(waiting[0].metadata, ["arn:aws:s3:::copy"], "{layout:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_replicas_metadata_follows_its_sources_but_never_weakens_a_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let locked = NewBucket {
+        object_lock: true,
+        ..NewBucket::default()
+    };
+    store
+        .create_bucket_with("copy", Layout::Object, locked)
+        .await
+        .unwrap();
+    send(&store, "copy", b"hello").await.unwrap();
+    let until = now_ms() + 3_600_000;
+    let compliance = |until_ms| Retention {
+        mode: teifs_types::LockMode::Compliance,
+        until_ms,
+    };
+    let update = ReplicaMetadata {
+        tags: Some(BTreeMap::from([("team".to_owned(), "red".to_owned())])),
+        retention: Some(compliance(until)),
+        legal_hold: Some(true),
+    };
+    let info = store
+        .update_replica_metadata("copy", "a.txt", VERSION, update)
+        .await
+        .unwrap();
+    assert_eq!(info.attrs.tags.get("team").map(String::as_str), Some("red"));
+    assert_eq!(info.attrs.retention, Some(compliance(until)));
+    assert_eq!(info.attrs.legal_hold, Some(true));
+    // Still a replica, sent nowhere.
+    assert_eq!(
+        info.attrs.replication.map(|r| r.status),
+        Some(ReplicationStatus::Replica)
+    );
+    let shorter = ReplicaMetadata {
+        retention: Some(compliance(until - 60_000)),
+        ..ReplicaMetadata::default()
+    };
+    assert!(
+        store
+            .update_replica_metadata("copy", "a.txt", VERSION, shorter)
+            .await
+            .is_err()
+    );
+
+    // A version written here isn't a replica.
+    let own = store
+        .put_bytes("copy", "b.txt", b"mine", ObjectAttrs::default())
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    let err = store
+        .update_replica_metadata("copy", "b.txt", &own, ReplicaMetadata::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::InvalidRequest(_)), "{err:?}");
 }

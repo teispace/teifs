@@ -228,8 +228,10 @@ its version id and time, `MinIO`'s `x-minio-source-*` headers) needs
 `s3:ReplicateObject` on the object besides `s3:PutObject`, and a delete that asks to
 make a replicated delete marker with a given id, or to remove a version as a replicated
 removal, needs `s3:ReplicateDelete` besides `s3:DeleteObject` (as in `MinIO`, instead of
-`s3:DeleteObjectVersion`), so ordinary writers can't forge a version's identity or
-history.
+`s3:DeleteObjectVersion`), and a copy that changes a replica's metadata needs
+`s3:ReplicateObject`, so ordinary writers can't forge a version's identity or history.
+A replicated retention change is applied as a governance bypass would be, but never
+shortens a compliance retention.
 A SAML response is read without a document type declaration or entities (no XXE or
 entity expansion), and only what a verified signature covers is used: the signature must
 be in the element it signs and reference that element's `ID`, which no other element may

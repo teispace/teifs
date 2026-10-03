@@ -1236,9 +1236,17 @@ every destination has it, so a target that's down gets it later; a target that r
 it is logged and skipped. Removals by lifecycle rules aren't replicated, and AWS targets
 (whose versions have ids of their own) get none.
 
-A replicating user on another TeiFS needs `s3:ReplicateDelete` and `s3:DeleteObject` for
-markers and removals. Replicating existing objects and metadata changes is still to
-come.
+Changing a replicated version's tags, retention or legal hold sends the change: the
+version shows `PENDING` again until every destination has it, and the copy there changes
+in place (no new version), on the same drive, another TeiFS or a `MinIO`. AWS targets,
+whose versions have ids of their own, don't get changes. A destination that lost the
+version gets all of it again.
+
+A replicating user on another TeiFS needs `s3:PutObject` and `s3:ReplicateObject` for
+versions (`s3:ReplicateTags` for their tags, and `s3:PutObjectRetention` and
+`s3:PutObjectLegalHold` for locked ones), `s3:GetObject` for metadata changes, and
+`s3:ReplicateDelete` and `s3:DeleteObject` for markers and removals, as `MinIO`
+documents for its replication users. Replicating existing objects is still to come.
 
 ### Replication targets
 

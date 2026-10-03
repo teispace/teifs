@@ -122,7 +122,14 @@ impl Authorizations {
     /// What writing an object with these headers needs.
     fn write(&mut self, facts: &Facts) {
         self.need("s3:PutObject");
-        self.need_if(facts.tagging, "s3:PutObjectTagging");
+        // A replica's tags are replicated ones (`s3:ReplicateTags`, as S3 and `MinIO`
+        // ask of a destination).
+        let tags = if facts.replication {
+            "s3:ReplicateTags"
+        } else {
+            "s3:PutObjectTagging"
+        };
+        self.need_if(facts.tagging, tags);
         self.need_if(facts.acl, "s3:PutObjectAcl");
         self.need_if(facts.retention, "s3:PutObjectRetention");
         self.need_if(facts.legal_hold, "s3:PutObjectLegalHold");
@@ -174,6 +181,8 @@ pub fn authorizations(operation: &str, facts: &Facts) -> Option<Authorizations> 
         "CopyObject" => {
             needs.source(facts);
             needs.write(facts);
+            // `MinIO`'s replication of a version's changed metadata (a copy onto itself).
+            needs.need_if(facts.replication, "s3:ReplicateObject");
         }
         "UploadPartCopy" => {
             needs.source(facts);
