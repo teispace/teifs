@@ -560,3 +560,109 @@ async fn changed_tags_reach_another_teifs_in_place() {
         .unwrap();
     assert_eq!(versions.versions().len(), 1);
 }
+
+/// `MinIO`'s resync call `query` on `source`, signed by the root user: its status and
+/// answer.
+async fn resync(server: &Server, method: &str, query: &str) -> (u16, String) {
+    signed(
+        server,
+        (ACCESS_KEY, SECRET_KEY),
+        method,
+        &format!("/source?{query}"),
+        &[],
+        b"",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_resync_sends_again_what_a_target_lost() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    let arn = target(&from, &to, (ACCESS_KEY, SECRET_KEY)).await;
+    replicate(&source, &arn).await;
+    let put = source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&source, "a.txt").await,
+        Some(ReplicationStatus::Completed)
+    );
+    // The target loses it.
+    copy.delete_object()
+        .bucket("copy")
+        .key("a.txt")
+        .set_version_id(put.version_id().map(str::to_owned))
+        .send()
+        .await
+        .unwrap();
+
+    // Only to a destination of the rules, and one of a rule with existing objects.
+    let (status, text) = resync(
+        &from,
+        "PUT",
+        "replication-reset&arn=arn:minio:replication::x:other",
+    )
+    .await;
+    assert_eq!(status, 404, "{text}");
+    assert!(
+        text.contains("XMinioAdminRemoteTargetNotFoundError"),
+        "{text}"
+    );
+    let start = format!("replication-reset&arn={arn}&reset-id=again");
+    let (status, text) = resync(&from, "PUT", &start).await;
+    assert_eq!(status, 400, "{text}");
+    assert!(
+        text.contains("XMinioReplicationNoExistingObjects"),
+        "{text}"
+    );
+    // Callers who don't sign may not.
+    assert_eq!(
+        common::anonymous(&from, reqwest::Method::PUT, &format!("/source?{start}")).await,
+        403
+    );
+
+    replicate_with(&source, &arn, true).await;
+    let (status, text) = resync(&from, "PUT", &start).await;
+    assert_eq!(status, 200, "{text}");
+    let started: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(started["target"][0]["arn"], arn.as_str());
+    assert_eq!(started["target"][0]["resetid"], "again");
+
+    let mut found = serde_json::Value::Null;
+    for _ in 0..400 {
+        let (status, text) =
+            resync(&from, "GET", &format!("replication-reset-status&arn={arn}")).await;
+        assert_eq!(status, 200, "{text}");
+        found = serde_json::from_str(&text).unwrap();
+        if found["target"][0]["resyncStatus"] == "Completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let found = &found["target"][0];
+    assert_eq!(found["resyncStatus"], "Completed", "{found}");
+    assert_eq!(found["resetid"], "again");
+    assert_eq!(found["replicationCount"], 1);
+    assert_eq!(found["completedReplicationSize"], 5);
+    assert_eq!(found["object"], "a.txt");
+    let replica = copy
+        .head_object()
+        .bucket("copy")
+        .key("a.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replica.version_id(), put.version_id());
+
+    // Nothing goes on to cancel now.
+    let (status, text) = resync(&from, "PUT", &format!("replication-reset-cancel&arn={arn}")).await;
+    assert_eq!(status, 400, "{text}");
+}

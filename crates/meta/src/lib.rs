@@ -16,6 +16,7 @@ mod db;
 mod iam;
 mod index;
 mod replicated_deletes;
+mod replication_resyncs;
 #[cfg(test)]
 mod schemas;
 mod system;

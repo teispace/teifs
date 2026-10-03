@@ -24,8 +24,12 @@ pub struct Waiting {
     pub destinations: Vec<String>,
     /// Those of them that have it, and wait only for what changed in its metadata.
     pub metadata: Vec<String>,
+    /// Those of them a resync sends it to again.
+    pub resync: Vec<String>,
     /// Whether it's a delete marker.
     pub delete_marker: bool,
+    /// Its size in bytes.
+    pub size: u64,
     /// When it was made.
     pub modified: std::time::SystemTime,
 }
@@ -128,6 +132,12 @@ impl Store {
                             .filter(|arn| replication.metadata.contains(*arn))
                             .cloned()
                             .collect(),
+                        resync: destinations
+                            .iter()
+                            .filter(|arn| replication.resync.contains(*arn))
+                            .cloned()
+                            .collect(),
+                        size: version.info.size,
                         destinations,
                         delete_marker: version.delete_marker,
                         modified: version.info.modified,
@@ -204,17 +214,29 @@ impl Store {
         arn: &str,
         status: ReplicationStatus,
     ) -> Result<()> {
-        let record = {
-            let arn = arn.to_owned();
-            move |attrs: &mut ObjectAttrs| {
-                if let Some(replication) = attrs.replication.take() {
-                    attrs.replication = Some(replication.with(&arn, status));
-                }
-            }
-        };
+        let arn = arn.to_owned();
+        self.change_replication(bucket, key, version_id, move |replication| {
+            replication.map(|replication| replication.with(&arn, status))
+        })
+        .await
+    }
+
+    /// Changes the replication of `key`'s version `version_id`, an object or a delete
+    /// marker, with `change`; one gone meanwhile is left alone.
+    pub(crate) async fn change_replication(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        change: impl Fn(Option<VersionReplication>) -> Option<VersionReplication>
+        + Clone
+        + Send
+        + 'static,
+    ) -> Result<()> {
+        let on_object = change.clone();
         let changed = self
             .change_attrs(bucket, key, Some(version_id), move |attrs| {
-                record(attrs);
+                attrs.replication = on_object(attrs.replication.take());
                 Ok(())
             })
             .await;
@@ -222,25 +244,23 @@ impl Store {
             // Gone meanwhile: nothing to record.
             Ok(_) | Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(()),
             Err(StoreError::DeleteMarker { .. }) => {
-                self.set_marker_replication(bucket, key, version_id, arn, status)
+                self.change_marker_replication(bucket, key, version_id, change)
                     .await
             }
             Err(err) => Err(err),
         }
     }
 
-    /// Records where the delete marker `version_id` of `key` stands with `arn` (a
-    /// marker's attributes are in the version store, in either layout).
-    async fn set_marker_replication(
+    /// Changes the replication of the delete marker `version_id` of `key` with `change`
+    /// (a marker's attributes are in the version store, in either layout).
+    async fn change_marker_replication(
         &self,
         bucket: &str,
         key: &str,
         version_id: &str,
-        arn: &str,
-        status: ReplicationStatus,
+        change: impl FnOnce(Option<VersionReplication>) -> Option<VersionReplication> + Send + 'static,
     ) -> Result<()> {
-        let (bucket, key) = (bucket.to_owned(), key.to_owned());
-        let (version_id, arn) = (version_id.to_owned(), arn.to_owned());
+        let (bucket, key, version_id) = (bucket.to_owned(), key.to_owned(), version_id.to_owned());
         self.blocking(move |inner| {
             let found = inner.bucket(&bucket)?;
             let Some(versions) = found.versions() else {
@@ -250,8 +270,8 @@ impl Store {
             let Some(mut row) = conn.version(&versions.id, &key, &version_id)? else {
                 return Ok(());
             };
-            if let (true, Some(replication)) = (row.delete_marker, row.attrs.replication.take()) {
-                row.attrs.replication = Some(replication.with(&arn, status));
+            if row.delete_marker {
+                row.attrs.replication = change(row.attrs.replication.take());
                 conn.set_version_attrs(&versions.id, &key, &version_id, &row.attrs, None)?;
             }
             Ok(())

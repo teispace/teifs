@@ -454,6 +454,7 @@ fn target(action: &str) -> Target {
 pub const MINIO_ACTIONS: &[(&str, Target)] = &[
     ("s3:ListenBucketNotification", Target::Bucket),
     ("s3:ListenNotification", Target::Other),
+    ("s3:ResetBucketReplicationState", Target::Bucket),
 ];
 
 /// Every S3 action, sorted, with what it applies to.

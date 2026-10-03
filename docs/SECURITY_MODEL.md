@@ -231,7 +231,10 @@ removal, needs `s3:ReplicateDelete` besides `s3:DeleteObject` (as in `MinIO`, in
 `s3:DeleteObjectVersion`), and a copy that changes a replica's metadata needs
 `s3:ReplicateObject`, so ordinary writers can't forge a version's identity or history.
 A replicated retention change is applied as a governance bypass would be, but never
-shortens a compliance retention.
+shortens a compliance retention. Starting, reading or canceling a resync (sending a
+bucket's versions to a destination again) needs a signed caller allowed
+`s3:ResetBucketReplicationState` on the bucket; it only sends to destinations the bucket's
+rules already name.
 A SAML response is read without a document type declaration or entities (no XXE or
 entity expansion), and only what a verified signature covers is used: the signature must
 be in the element it signs and reference that element's `ID`, which no other element may

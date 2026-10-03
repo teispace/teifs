@@ -116,45 +116,77 @@ impl Worker {
                     continue;
                 }
             };
-            let waiting = match self.store.waiting_replication(&bucket.name, BATCH).await {
-                Ok(waiting) => waiting,
-                Err(err) => {
-                    tracing::warn!(bucket = %bucket.name, error = %err, "couldn't find the versions waiting to be replicated");
-                    continue;
-                }
-            };
-            let full = waiting.len() >= BATCH;
-            let mut through = false;
-            // A key's versions go oldest first, so the destination's current version is
-            // the source's; one held back holds back the newer ones too.
-            for versions in waiting.chunk_by(|a, b| a.key == b.key) {
-                let mut held = Vec::new();
-                for version in versions.iter().rev() {
-                    if stopping.is_cancelled() {
-                        return false;
-                    }
-                    through |= self
-                        .version(&bucket.name, &config, version, &mut held)
-                        .await;
-                }
+            let marking = self
+                .store
+                .mark_resyncs(&bucket.name, &config, BATCH)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::warn!(bucket = %bucket.name, error = %err, "couldn't mark the versions a resync sends");
+                    false
+                });
+            match self.bucket(&bucket.name, &config, stopping).await {
+                Some(more) => again |= more || marking,
+                None => return false,
             }
-            let removals = match self.store.waiting_removals(&bucket.name, BATCH).await {
-                Ok(removals) => removals,
-                Err(err) => {
-                    tracing::warn!(bucket = %bucket.name, error = %err, "couldn't find the removals waiting to be replicated");
-                    Vec::new()
-                }
-            };
-            let full = full || removals.len() >= BATCH;
-            for removal in &removals {
-                if stopping.is_cancelled() {
-                    return false;
-                }
-                through |= self.removal(&bucket.name, removal).await;
-            }
-            again |= full && through;
         }
         again
+    }
+
+    /// Sends what waits in `bucket`: `None` when stopping, else whether it had more
+    /// waiting than it took and got some through (so another pass should follow).
+    async fn bucket(
+        &self,
+        bucket: &str,
+        config: &ReplicationConfig,
+        stopping: &CancellationToken,
+    ) -> Option<bool> {
+        let waiting = match self.store.waiting_replication(bucket, BATCH).await {
+            Ok(waiting) => waiting,
+            Err(err) => {
+                tracing::warn!(bucket, error = %err, "couldn't find the versions waiting to be replicated");
+                return Some(false);
+            }
+        };
+        let full = waiting.len() >= BATCH;
+        let mut through = false;
+        // The destinations a resync still waits for, once this pass is over.
+        let mut unsettled = Vec::new();
+        // A key's versions go oldest first, so the destination's current version is
+        // the source's; one held back holds back the newer ones too.
+        for versions in waiting.chunk_by(|a, b| a.key == b.key) {
+            let mut held = Vec::new();
+            for version in versions.iter().rev() {
+                if stopping.is_cancelled() {
+                    return None;
+                }
+                through |= self.version(bucket, config, version, &mut held).await;
+                unsettled.extend(
+                    version
+                        .resync
+                        .iter()
+                        .filter(|arn| held.contains(arn))
+                        .cloned(),
+                );
+            }
+        }
+        if let Err(err) = self.store.settle_resyncs(bucket, &unsettled, full).await {
+            tracing::warn!(bucket, error = %err, "couldn't settle the bucket's resyncs");
+        }
+        let removals = match self.store.waiting_removals(bucket, BATCH).await {
+            Ok(removals) => removals,
+            Err(err) => {
+                tracing::warn!(bucket, error = %err, "couldn't find the removals waiting to be replicated");
+                Vec::new()
+            }
+        };
+        let full = full || removals.len() >= BATCH;
+        for removal in &removals {
+            if stopping.is_cancelled() {
+                return None;
+            }
+            through |= self.removal(bucket, removal).await;
+        }
+        Some(full && through)
     }
 
     /// Sends a version's removal to each destination it's still to reach; whether any
@@ -232,7 +264,17 @@ impl Worker {
                 .set_replication_status(bucket, &version.key, &version.version_id, arn, status)
                 .await
             {
-                Ok(()) => settled = true,
+                Ok(()) => {
+                    settled = true;
+                    if version.resync.contains(arn)
+                        && let Err(err) = self
+                            .store
+                            .count_resync(bucket, arn, (&version.key, version.size), status)
+                            .await
+                    {
+                        tracing::warn!(bucket, key = %version.key, error = %err, "couldn't count a resync's version");
+                    }
+                }
                 Err(err) => {
                     tracing::warn!(bucket, key = %version.key, error = %err, "couldn't record a version's replication");
                 }
@@ -474,7 +516,9 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests fail on any error")]
 
     use teifs_store::{Layout, ObjectAttrs, Precondition, Versioning};
-    use teifs_types::replication::{ReplicationDestination, ReplicationFilter, ReplicationRule};
+    use teifs_types::replication::{
+        ReplicationDestination, ReplicationFilter, ReplicationRule, ResyncStatus,
+    };
 
     use super::*;
 
@@ -582,6 +626,59 @@ mod tests {
             );
         }
         assert!(store.head_version("copy", "b.txt", None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_resync_sends_what_a_destination_lost_again_in_either_layout() {
+        for layout in [Layout::Object, Layout::Folder] {
+            let (_dir, store) = replicating_in(layout).await;
+            let first = put(&store, "a.txt", b"one").await;
+            let second = put(&store, "b.txt", b"three").await;
+            let worker = Worker::new(store.clone(), Arc::new(Notify::new()));
+            let stopping = CancellationToken::new();
+            while worker.pass(&stopping).await {}
+            // The destination loses them.
+            for (key, id) in [("a.txt", &first), ("b.txt", &second)] {
+                store
+                    .delete_if("copy", key, Some(id), Precondition::default())
+                    .await
+                    .unwrap();
+            }
+            let arn = format!("{LOCAL_ARN}copy");
+            let mut config = everything_to("copy");
+            config.rules[0].existing_objects = Some(true);
+            store
+                .set_bucket_replication("source", Some(config))
+                .await
+                .unwrap();
+            store
+                .start_resync("source", &arn, "again".to_owned(), now() + 1)
+                .await
+                .unwrap();
+            // Made since: sent as new, not by the resync.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            put(&store, "c.txt", b"later").await;
+            while worker.pass(&stopping).await {}
+            worker.pass(&stopping).await;
+
+            for (key, id) in [("a.txt", &first), ("b.txt", &second)] {
+                let copy = store.head_version("copy", key, Some(id)).await;
+                assert!(copy.is_ok(), "{layout:?} {key}");
+            }
+            let resyncs = store.resyncs("source").await.unwrap();
+            assert_eq!(resyncs.len(), 1, "{layout:?}");
+            let (of, resync) = &resyncs[0];
+            assert_eq!(of, &arn);
+            assert_eq!(
+                (resync.status, resync.replicated, resync.failed),
+                (ResyncStatus::Completed, (2, 8), (0, 0)),
+                "{layout:?}"
+            );
+        }
+    }
+
+    fn now() -> i64 {
+        millis(std::time::SystemTime::now())
     }
 
     #[tokio::test]

@@ -225,6 +225,9 @@ pub struct VersionReplication {
     /// in its metadata since (tags, retention, legal hold).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub metadata: BTreeSet<String>,
+    /// The waiting destinations a resync sends it to again ([`ReplicationResync`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub resync: BTreeSet<String>,
 }
 
 impl VersionReplication {
@@ -239,6 +242,7 @@ impl VersionReplication {
             status: ReplicationStatus::Pending,
             targets,
             metadata: BTreeSet::new(),
+            resync: BTreeSet::new(),
         })
     }
 
@@ -249,6 +253,7 @@ impl VersionReplication {
             status: ReplicationStatus::Replica,
             targets: BTreeMap::new(),
             metadata: BTreeSet::new(),
+            resync: BTreeSet::new(),
         }
     }
 
@@ -260,8 +265,26 @@ impl VersionReplication {
         }
         if status != ReplicationStatus::Pending {
             self.metadata.remove(arn);
+            self.resync.remove(arn);
         }
         self.overall()
+    }
+
+    /// Waiting again for all of it at `arn`, as a resync sends it ([`ReplicationResync`]);
+    /// `None` (no replication yet) becomes waiting for `arn` alone. A replica's is as it
+    /// was.
+    #[must_use]
+    pub fn resent(this: Option<Self>, arn: &str) -> Option<Self> {
+        let mut this = match this {
+            Some(this) if this.status == ReplicationStatus::Replica => return Some(this),
+            Some(this) => this,
+            None => Self::pending([arn.to_owned()])?,
+        };
+        this.targets
+            .insert(arn.to_owned(), ReplicationStatus::Pending);
+        this.metadata.remove(arn);
+        this.resync.insert(arn.to_owned());
+        Some(this.overall())
     }
 
     /// After its metadata changed: waiting again for every destination (those that have
@@ -303,7 +326,97 @@ impl VersionReplication {
     }
 }
 
+/// Where a resync of one destination stands (`MinIO`'s `mc replicate resync`): every
+/// version from before it that the rules send there, sent there again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicationResync {
+    /// Its id (`reset-id`).
+    pub id: String,
+    /// Versions last modified before this (milliseconds since the Unix epoch) are sent.
+    pub before_ms: i64,
+    /// When it started.
+    pub started_ms: i64,
+    /// When it last changed.
+    pub updated_ms: i64,
+    /// Where it stands.
+    pub status: ResyncStatus,
+    /// Whether every version has been looked at, so it's done once none waits.
+    #[serde(default)]
+    pub marked: bool,
+    /// The key (and version id) after which versions are still to be looked at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<(String, Option<String>)>,
+    /// How many versions, and of how many bytes, it sent.
+    #[serde(default)]
+    pub replicated: (u64, u64),
+    /// How many versions, and of how many bytes, failed.
+    #[serde(default)]
+    pub failed: (u64, u64),
+    /// The key it last sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_key: Option<String>,
+}
+
+/// Where a resync stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResyncStatus {
+    /// Sending.
+    Ongoing,
+    /// Every version it took was sent (or failed).
+    Completed,
+    /// Stopped by request.
+    Canceled,
+}
+
+impl ResyncStatus {
+    /// As `MinIO` names it.
+    #[must_use]
+    pub const fn as_minio(self) -> &'static str {
+        match self {
+            Self::Ongoing => "Ongoing",
+            Self::Completed => "Completed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+
 impl ReplicationConfig {
+    /// Whether a resync can send to `arn`: an enabled rule sends there and replicates
+    /// existing objects (as `MinIO` requires). `None` when no rule sends there.
+    #[must_use]
+    pub fn resyncs(&self, arn: &str) -> Option<bool> {
+        let mut rules = self
+            .rules
+            .iter()
+            .filter(|rule| rule.destination.bucket == arn)
+            .peekable();
+        rules.peek()?;
+        Some(rules.any(|rule| rule.enabled && rule.existing_objects == Some(true)))
+    }
+
+    /// Whether a resync to `arn` sends `key`'s version (a delete marker or one with
+    /// `tags`; SSE-KMS, `kms`): an enabled rule that replicates existing objects sends it
+    /// there.
+    #[must_use]
+    pub fn resends(
+        &self,
+        arn: &str,
+        key: &str,
+        (delete_marker, tags, kms): (bool, &BTreeMap<String, String>, bool),
+    ) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.destination.bucket == arn
+                && rule.existing_objects == Some(true)
+                && if delete_marker {
+                    rule.replicates_delete_markers() && rule.matches(key, &BTreeMap::new(), false)
+                } else {
+                    rule.matches(key, tags, kms)
+                }
+        })
+    }
+
     /// The destinations a new version of `key` with `tags` goes to: those of the enabled
     /// rules it matches (SSE-KMS versions, `kms`, only by rules that take them), each
     /// once.

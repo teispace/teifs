@@ -1257,6 +1257,17 @@ and times as new versions. Only versions with an id are: a `null` version (writt
 before versioning was enabled) isn't, and neither are existing delete markers, since
 those lifecycle rules made can't be told from the others.
 
+When a target lost what it had (its disks were replaced, say), a resync sends everything
+from before it there again: `mc replicate resync start ALIAS/BUCKET --remote-bucket ARN`
+(`--older-than 30d` for versions older than that alone), as `MinIO` does it. The
+destination's rule must replicate existing objects, and one resync of a destination goes
+on at a time. `mc replicate resync status ALIAS/BUCKET` shows where it stands
+(`Ongoing`, `Completed` or `Canceled`) with how many versions and bytes it sent or
+failed, and the key it sent last; `PUT /BUCKET?replication-reset-cancel&arn=ARN` stops
+it (what it marked already is still sent). Versions it takes show `PENDING` until
+they're sent, and are marked a thousand at a time, so a resync of a big bucket starts at
+once. A caller needs `s3:ResetBucketReplicationState` on the bucket.
+
 ### Replication targets
 
 A bucket's replication rules name where its objects go: another bucket on the same drive

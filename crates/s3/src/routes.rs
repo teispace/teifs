@@ -35,8 +35,8 @@ use crate::{
     events::Events,
     iam_api, listen, minio_bucket_metadata, minio_config, minio_heal, minio_iam,
     minio_iam_transfer, minio_idp_config, minio_info, minio_inspect, minio_kms, minio_ldap,
-    minio_metrics, minio_pools, minio_profile, minio_service, minio_service_accounts,
-    minio_speedtest,
+    minio_metrics, minio_pools, minio_profile, minio_replication, minio_service,
+    minio_service_accounts, minio_speedtest,
     observe::{self, Seen},
     quota, replication_targets,
     trace::Tracers,
@@ -1470,6 +1470,8 @@ pub(crate) struct Routes {
     pub(crate) inventory: Arc<crate::inventory::Worker>,
     /// Where `mc admin config` keeps what it sets, if the drive keeps it.
     pub(crate) configs: Option<Arc<minio_config::Configs>>,
+    /// What wakes the replication job (a resync started).
+    pub(crate) replication: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
@@ -1482,6 +1484,7 @@ impl S3Route for Routes {
         _: &mut http::Extensions,
     ) -> bool {
         listen::Request::of(method, uri, headers, &self.domains).is_some()
+            || minio_replication::Call::of(method, uri, headers, &self.domains).is_some()
             || api_of(method, uri, headers, &self.domains).is_some()
     }
 
@@ -1494,6 +1497,11 @@ impl S3Route for Routes {
         if let Some(scope) = listen::Request::of(&req.method, &req.uri, &req.headers, &self.domains)
         {
             return self.listen(scope, req).await;
+        }
+        if let Some(call) =
+            minio_replication::Call::of(&req.method, &req.uri, &req.headers, &self.domains)
+        {
+            return self.resync(call, req).await;
         }
         let api = api_of(&req.method, &req.uri, &req.headers, &self.domains)
             .expect("matched by is_match");
@@ -1857,6 +1865,41 @@ impl Routes {
             .listeners()
             .follow(request, self.tracers.stopping());
         Ok(listen::response(body))
+    }
+
+    /// Answers `MinIO`'s replication resync calls on a bucket, with
+    /// `s3:ResetBucketReplicationState` on it.
+    async fn resync(
+        &self,
+        (call, bucket): (minio_replication::Call, String),
+        req: S3Request<Body>,
+    ) -> S3Result<S3Response<Body>> {
+        observe::name(&req.extensions, call.name());
+        if let (Some(seen), Some(credentials)) =
+            (req.extensions.get::<Arc<Seen>>(), &req.credentials)
+        {
+            seen.signed_by(&credentials.access_key);
+        }
+        let identity = self.authenticate(&req)?;
+        let client = req.extensions.get::<Client>().copied().unwrap_or_default();
+        let context = base_context(&identity, &req.headers, client, &self.iam.account());
+        let rules = self.rules.of(&bucket).await?;
+        if !allows(
+            &identity,
+            &context,
+            "s3:ResetBucketReplicationState",
+            &teifs_policy::bucket_arn(&bucket),
+            Some(&rules),
+        ) {
+            return Err(denied());
+        }
+        minio_replication::serve(
+            &self.store,
+            &self.replication,
+            (call, &bucket),
+            req.uri.query().unwrap_or_default(),
+        )
+        .await
     }
 
     /// Who signed a request: refused when unsigned, or signed with a key IAM doesn't

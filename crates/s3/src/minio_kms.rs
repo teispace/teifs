@@ -304,7 +304,8 @@ struct KeyInfo {
     name: String,
 }
 
-fn rfc3339(ms: i64) -> String {
+/// A time (milliseconds since the Unix epoch) as Go writes one in JSON.
+pub(crate) fn rfc3339(ms: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
         .ok()
         .and_then(|t| {

@@ -44,6 +44,7 @@ mod minio_ldap;
 mod minio_metrics;
 mod minio_pools;
 mod minio_profile;
+mod minio_replication;
 mod minio_service;
 mod minio_service_accounts;
 mod minio_speedtest;
@@ -172,6 +173,19 @@ fn s3_config(allow_sig_v2: bool) -> S3Config {
     config
 }
 
+/// Serves virtual-hosted-style requests under `domains`, if any: the host the service
+/// tells buckets by too.
+fn set_host(
+    builder: &mut S3ServiceBuilder,
+    domains: &[String],
+) -> Result<Option<MultiDomain>, s3s::host::DomainError> {
+    if domains.is_empty() {
+        return Ok(None);
+    }
+    builder.set_host(MultiDomain::new(domains)?);
+    Ok(Some(MultiDomain::new(domains)?))
+}
+
 /// Builds the S3 service for a store, with CORS in front of it.
 pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::DomainError> {
     let notifier = options
@@ -222,6 +236,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
         (Arc::clone(&access_log), Arc::clone(&request_metrics)),
     );
     let control = Arc::new(Control::default());
+    let replication = drive.replication_wake();
     let mut builder = S3ServiceBuilder::new(drive);
     builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(s3_config(
         options.allow_sig_v2,
@@ -255,14 +270,10 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
             configs: options
                 .config_settings
                 .map(|settings| Arc::new(minio_config::Configs::new(settings))),
+            replication,
         });
     }
-    let host = if options.domains.is_empty() {
-        None
-    } else {
-        builder.set_host(MultiDomain::new(&options.domains)?);
-        Some(MultiDomain::new(&options.domains)?)
-    };
+    let host = set_host(&mut builder, &options.domains)?;
     Ok(Service::new(
         builder.build(),
         store,

@@ -143,6 +143,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::replicated_deletes::MIGRATION,
     // 12: the version id an upload replicating another server's version keeps.
     "ALTER TABLE uploads ADD COLUMN replica_version TEXT;",
+    // 13: resyncs of replication destinations.
+    crate::replication_resyncs::MIGRATION,
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.

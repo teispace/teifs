@@ -34,6 +34,7 @@ mod reconcile;
 mod repair;
 mod replicating;
 mod replication_targets;
+mod resync;
 mod rewrap;
 mod settings;
 mod snapshots;
