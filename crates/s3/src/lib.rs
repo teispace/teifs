@@ -51,6 +51,8 @@ mod minio_trace;
 mod notification;
 mod object_lock;
 mod observe;
+#[cfg(test)]
+mod operations_doc;
 mod post_form;
 mod proxy;
 mod quota;

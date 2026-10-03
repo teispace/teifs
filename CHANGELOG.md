@@ -7,6 +7,8 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `docs/COMPATIBILITY.md` lists every operation of AWS's S3 API and whether TeiFS serves
+  it, generated from the code.
 - `docs/CLI.md`: every command and option, with its default, choices and environment
   variable, generated from the command line itself so it never falls behind.
 - Versioning, with AWS's semantics, in both layouts: `PutBucketVersioning`

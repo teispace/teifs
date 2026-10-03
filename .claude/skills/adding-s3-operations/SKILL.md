@@ -80,5 +80,7 @@ An operation TeiFS doesn't implement answers `NotImplemented` automatically.
    tests that now pass into `tests/s3-tests/implemented.txt`; commit the lists with the
    change.
 8. **Docs**: the operation's row in `docs/COMPATIBILITY.md`, the README's support table
-   if it's a headline feature, `CHANGELOG.md` under "Unreleased".
+   if it's a headline feature, `CHANGELOG.md` under "Unreleased". Its "Every S3
+   operation" list marks it served once `Drive` implements it: regenerate with
+   `UPDATE_DOCS=1 cargo test -p teifs-s3 operations_doc` (a test fails until you do).
 9. Run the `verifying-changes` skill, including a real client (AWS CLI or rclone).

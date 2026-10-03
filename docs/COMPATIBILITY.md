@@ -113,6 +113,136 @@ here come only from tests; nothing is listed as supported because it "should wor
 | Replication | Planned |
 | S3 Select, Glacier restore, torrents, Object Lambda, accelerate | Not planned for now |
 
+### Every S3 operation
+
+Each operation of AWS's S3 API (as its Service Authorization Reference lists them), and
+whether TeiFS serves it; the rows above say how. An operation TeiFS doesn't serve is
+answered with an error and changes nothing. This list is generated from the code
+(`UPDATE_DOCS=1 cargo test -p teifs-s3 operations_doc`), so it can't claim more than
+TeiFS does.
+
+<!-- generated: operations -->
+| Operation | TeiFS |
+|---|---|
+| AbortMultipartUpload | Served |
+| CompleteMultipartUpload | Served |
+| CopyObject | Served |
+| CreateBucket | Served |
+| CreateBucketMetadataConfiguration | Not served |
+| CreateBucketMetadataTableConfiguration | Not served |
+| CreateMultipartUpload | Served |
+| CreateSession | Not served |
+| DeleteBucket | Served |
+| DeleteBucketAnalyticsConfiguration | Served |
+| DeleteBucketCors | Served |
+| DeleteBucketEncryption | Served |
+| DeleteBucketIntelligentTieringConfiguration | Served |
+| DeleteBucketInventoryConfiguration | Served |
+| DeleteBucketLifecycle | Served |
+| DeleteBucketMetadataConfiguration | Not served |
+| DeleteBucketMetadataTableConfiguration | Not served |
+| DeleteBucketMetricsConfiguration | Served |
+| DeleteBucketOwnershipControls | Served |
+| DeleteBucketPolicy | Served |
+| DeleteBucketReplication | Not served |
+| DeleteBucketTagging | Served |
+| DeleteBucketWebsite | Served |
+| DeleteObject | Served |
+| DeleteObjectAnnotation | Not served |
+| DeleteObjectTagging | Served |
+| DeleteObjects | Served |
+| DeletePublicAccessBlock | Served |
+| GetBucketAbac | Served |
+| GetBucketAccelerateConfiguration | Not served |
+| GetBucketAcl | Served |
+| GetBucketAnalyticsConfiguration | Served |
+| GetBucketCors | Served |
+| GetBucketEncryption | Served |
+| GetBucketIntelligentTieringConfiguration | Served |
+| GetBucketInventoryConfiguration | Served |
+| GetBucketLifecycle | Not served |
+| GetBucketLifecycleConfiguration | Served |
+| GetBucketLocation | Served |
+| GetBucketLogging | Served |
+| GetBucketMetadataConfiguration | Not served |
+| GetBucketMetadataTableConfiguration | Not served |
+| GetBucketMetricsConfiguration | Served |
+| GetBucketNotification | Not served |
+| GetBucketNotificationConfiguration | Served |
+| GetBucketOwnershipControls | Served |
+| GetBucketPolicy | Served |
+| GetBucketPolicyStatus | Served |
+| GetBucketReplication | Not served |
+| GetBucketRequestPayment | Served |
+| GetBucketTagging | Served |
+| GetBucketVersioning | Served |
+| GetBucketWebsite | Served |
+| GetObject | Served |
+| GetObjectAcl | Served |
+| GetObjectAnnotation | Not served |
+| GetObjectAttributes | Served |
+| GetObjectLegalHold | Served |
+| GetObjectLockConfiguration | Served |
+| GetObjectRetention | Served |
+| GetObjectTagging | Served |
+| GetObjectTorrent | Not served |
+| GetPublicAccessBlock | Served |
+| HeadBucket | Served |
+| HeadObject | Served |
+| ListBucketAnalyticsConfigurations | Served |
+| ListBucketIntelligentTieringConfigurations | Served |
+| ListBucketInventoryConfigurations | Served |
+| ListBucketMetricsConfigurations | Served |
+| ListBuckets | Served |
+| ListDirectoryBuckets | Not served |
+| ListMultipartUploads | Served |
+| ListObjectAnnotations | Not served |
+| ListObjectVersions | Served |
+| ListObjects | Served |
+| ListObjectsV2 | Served |
+| ListParts | Served |
+| PostObject | Served |
+| PutBucketAbac | Served |
+| PutBucketAccelerateConfiguration | Not served |
+| PutBucketAcl | Served |
+| PutBucketAnalyticsConfiguration | Served |
+| PutBucketCors | Served |
+| PutBucketEncryption | Served |
+| PutBucketIntelligentTieringConfiguration | Served |
+| PutBucketInventoryConfiguration | Served |
+| PutBucketLifecycle | Not served |
+| PutBucketLifecycleConfiguration | Served |
+| PutBucketLogging | Served |
+| PutBucketMetricsConfiguration | Served |
+| PutBucketNotification | Not served |
+| PutBucketNotificationConfiguration | Served |
+| PutBucketOwnershipControls | Served |
+| PutBucketPolicy | Served |
+| PutBucketReplication | Not served |
+| PutBucketRequestPayment | Served |
+| PutBucketTagging | Served |
+| PutBucketVersioning | Served |
+| PutBucketWebsite | Served |
+| PutObject | Served |
+| PutObjectAcl | Served |
+| PutObjectAnnotation | Not served |
+| PutObjectLegalHold | Served |
+| PutObjectLockConfiguration | Served |
+| PutObjectRetention | Served |
+| PutObjectTagging | Served |
+| PutPublicAccessBlock | Served |
+| RenameObject | Served |
+| RestoreObject | Not served |
+| SelectObjectContent | Not served |
+| UpdateBucketMetadataAnnotationTableConfiguration | Not served |
+| UpdateBucketMetadataInventoryTableConfiguration | Not served |
+| UpdateBucketMetadataJournalTableConfiguration | Not served |
+| UpdateObjectEncryption | Served |
+| UploadPart | Served |
+| UploadPartCopy | Served |
+| WriteGetObjectResponse | Not served |
+<!-- end generated -->
+
 ## Bucket layouts
 
 A bucket is either an **object bucket** (the default: objects stored by id, every key S3
