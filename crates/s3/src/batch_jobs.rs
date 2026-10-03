@@ -85,10 +85,10 @@ impl Worker {
         }
         let result = match job.spec.clone() {
             JobSpec::Expire(expire) => self.store.expire_batch_page(&mut job, &expire).await,
+            JobSpec::KeyRotate(rotate) => self.store.rotate_batch_page(&mut job, &rotate).await,
         };
-        let (attempts, delay) = match &job.spec {
-            JobSpec::Expire(expire) => (expire.retry.attempts.max(1), expire.retry.delay_ms),
-        };
+        let retry = job.spec.retry();
+        let (attempts, delay) = (retry.attempts.max(1), retry.delay_ms);
         let pause = match result {
             Ok(done) => {
                 self.errors_of(&job.id, false);
@@ -166,10 +166,7 @@ impl Worker {
 
     /// Sends a job's result where it asked, once.
     async fn notify(&self, client: &reqwest::Client, job: &BatchJob) {
-        let notify = match &job.spec {
-            JobSpec::Expire(expire) => expire.notify.as_ref(),
-        };
-        let Some(notify) = notify else {
+        let Some(notify) = job.spec.notify() else {
             return;
         };
         let token = if notify.token {

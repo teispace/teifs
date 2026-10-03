@@ -26,7 +26,7 @@ use tokio::{
 mod common;
 mod signing;
 
-use common::{ACCESS_KEY, SECRET_KEY, Server, client, restart, start};
+use common::{ACCESS_KEY, SECRET_KEY, Server, client, restart, start, start_with};
 use signing::signed;
 
 const ROOT: (&str, &str) = (ACCESS_KEY, SECRET_KEY);
@@ -296,7 +296,7 @@ async fn jobs_that_cant_run_are_refused_and_kinds_are_told() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(
         json(&server, "list-supported-job-types").await,
-        serde_json::json!(["expire"])
+        serde_json::json!(["expire", "keyrotate"])
     );
     let (status, template) = admin(&server, "GET", "generate-job?jobType=expire", "").await;
     assert_eq!(status, 200);
@@ -347,4 +347,67 @@ async fn a_job_that_couldnt_remove_everything_failed_and_says_why() {
         "{metric}"
     );
     assert_eq!(left(&root, "vault").await, [("held".to_owned(), false)]);
+}
+
+#[tokio::test]
+async fn a_keyrotate_job_seals_encrypted_versions_under_another_key() {
+    let server = start_with(|c| c.default_layout = teifs_store::Layout::Object).await;
+    let root = client(&server, SECRET_KEY);
+    versioned(&root, "vault").await;
+    let (status, body) = admin(&server, "POST", "kms/key/create?key-id=fresh", "").await;
+    assert_eq!(status, 200, "{body}");
+    for key in ["a", "b"] {
+        root.put_object()
+            .bucket("vault")
+            .key(key)
+            .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+            .body(ByteStream::from_static(b"12345"))
+            .send()
+            .await
+            .unwrap();
+    }
+    // Encrypted by the bucket's default (SSE-S3), as on AWS.
+    put(&root, "vault", "c").await;
+    // A key the KMS doesn't have is refused before the job starts.
+    let job = |key: &str| {
+        format!(
+            "keyrotate:\n  apiVersion: v1\n  bucket: vault\n  encryption:\n    type: sse-kms\n    key: {key}\n"
+        )
+    };
+    let (status, body) = admin(&server, "POST", "start-job", &job("missing")).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("can't be used"), "{body}");
+    let (status, body) = admin(&server, "POST", "start-job", &job("fresh")).await;
+    assert_eq!(status, 200, "{body}");
+    let id: Value = serde_json::from_str(&body).unwrap();
+    let metric = ended(&server, id["id"].as_str().unwrap()).await;
+    assert_eq!(metric["status"], "completed", "{metric}");
+    assert_eq!(metric["jobType"], "keyrotate");
+    assert_eq!(metric["rotation"]["objects"], 3, "{metric}");
+    assert_eq!(metric["rotation"]["objectsFailed"], 0);
+    for key in ["a", "b", "c"] {
+        let head = root
+            .head_object()
+            .bucket("vault")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            head.server_side_encryption(),
+            Some(&aws_sdk_s3::types::ServerSideEncryption::AwsKms)
+        );
+        assert!(head.ssekms_key_id().unwrap().ends_with("fresh"), "{head:?}");
+        let got = root
+            .get_object()
+            .bucket("vault")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            got.body.collect().await.unwrap().into_bytes().as_ref(),
+            b"12345"
+        );
+    }
 }

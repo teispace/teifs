@@ -4,7 +4,8 @@
 //! client what it may start. The jobs run in the background ([`crate::batch_jobs`]), one
 //! at a time, and survive a restart.
 //!
-//! The kinds TeiFS runs: `expire` (removes the objects and versions its rules match).
+//! The kinds TeiFS runs: `expire` (removes the objects and versions its rules match) and
+//! `keyrotate` (seals encrypted versions' data keys again, under another KMS key).
 
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ use teifs_store::{Store, StoreError};
 use teifs_types::{
     batch::{
         BatchJob, ExpireJob, ExpireKind, ExpireRule, JobNotify, JobProgress, JobRetry, JobSpec,
-        JobStatus, KeyValue,
+        JobStatus, KeyRotateJob, KeyValue, RotateFilter, RotateTo,
     },
     config_kv::go_duration,
 };
@@ -40,7 +41,7 @@ const MAX_RULES: usize = 100;
 const REDACTED: &str = "**REDACTED**";
 
 /// The kinds of job TeiFS runs.
-const KINDS: [&str; 1] = ["expire"];
+const KINDS: [&str; 2] = ["expire", "keyrotate"];
 
 /// One of the batch calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +125,7 @@ impl Call {
                 let kind = required(&req, "jobType")?;
                 match kind.as_str() {
                     "expire" => Ok(text(EXPIRE_TEMPLATE.to_owned())),
+                    "keyrotate" => Ok(text(KEYROTATE_TEMPLATE.to_owned())),
                     _ => Err(not_runnable(&kind)),
                 }
             }
@@ -165,6 +167,9 @@ async fn start(store: &Store, mut req: S3Request<Body>, user: String) -> S3Resul
         .await
         .map_err(s3_refusal)?;
     let (spec, token) = read(&body)?;
+    if let JobSpec::KeyRotate(rotate) = &spec {
+        check_rotation(store, &rotate.encryption).await?;
+    }
     match store.head_bucket(spec.bucket()).await {
         Err(StoreError::NoSuchBucket) => {
             return Err(admin::error(
@@ -298,6 +303,18 @@ pub(crate) struct Metric {
     last_error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     expired: Option<Counts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotation: Option<RotationCounts>,
+}
+
+/// `madmin.KeyRotationInfo`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RotationCounts {
+    last_bucket: String,
+    last_object: String,
+    objects: u64,
+    objects_failed: u64,
 }
 
 /// `madmin.ExpirationInfo`.
@@ -335,6 +352,16 @@ pub(crate) fn metric(job: &BatchJob) -> Metric {
                 delete_markers: p.delete_markers,
                 delete_markers_failed: p.delete_markers_failed,
             }),
+            JobSpec::KeyRotate(_) => None,
+        },
+        rotation: match &job.spec {
+            JobSpec::KeyRotate(rotate) => Some(RotationCounts {
+                last_bucket: rotate.bucket.clone(),
+                last_object: p.last_key.clone().unwrap_or_default(),
+                objects: p.objects,
+                objects_failed: p.objects_failed,
+            }),
+            JobSpec::Expire(_) => None,
         },
     }
 }
@@ -411,8 +438,8 @@ struct Request {
     expire: Option<ExpireYaml>,
     #[serde(default, skip_serializing)]
     replicate: Option<serde::de::IgnoredAny>,
-    #[serde(default, skip_serializing)]
-    keyrotate: Option<serde::de::IgnoredAny>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keyrotate: Option<KeyRotateYaml>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -541,6 +568,184 @@ struct RetryYaml {
     delay: Option<String>,
 }
 
+/// `MinIO`'s `keyrotate` job.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeyRotateYaml {
+    #[serde(default)]
+    api_version: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prefix: String,
+    #[serde(default)]
+    encryption: EncryptionYaml,
+    #[serde(default)]
+    flags: FlagsYaml,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptionYaml {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    key: String,
+    /// Base64 of a JSON object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    context: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlagsYaml {
+    #[serde(default)]
+    filter: FilterYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notify: Option<NotifyYaml>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry: Option<RetryYaml>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilterYaml {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    newer_than: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    older_than: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<KeyValueYaml>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    metadata: Vec<KeyValueYaml>,
+    #[serde(default, rename = "kmskeyid", skip_serializing_if = "String::is_empty")]
+    kms_key: String,
+}
+
+/// A `keyrotate` job's retries when it gives none, as `MinIO`'s.
+const ROTATE_RETRY: JobRetry = JobRetry {
+    attempts: 3,
+    delay_ms: 25,
+};
+
+/// A KMS key named directly, by `MinIO`'s `arn:aws:kms:NAME` or by AWS's key ARN.
+fn kms_key(given: &str) -> String {
+    crate::sse::kms_key_name(given.strip_prefix("arn:aws:kms:").unwrap_or(given))
+}
+
+fn read_keyrotate(mut given: KeyRotateYaml) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
+    if given.api_version != "v1" {
+        return Err(invalid("Unsupported batch key rotation API version"));
+    }
+    if given.bucket.is_empty() {
+        return Err(invalid("Bucket argument missing"));
+    }
+    let wrong = |why: String| invalid(format!("Invalid batch key rotation: {why}"));
+    let encryption = &given.encryption;
+    let to = match encryption.kind.as_str() {
+        "sse-s3" if encryption.key.is_empty() && encryption.context.is_empty() => RotateTo::S3,
+        "sse-s3" => return Err(wrong("sse-s3 takes no key or context".to_owned())),
+        "sse-kms" => {
+            if encryption.key.trim() != encryption.key {
+                return Err(wrong("the key can't start or end with a space".to_owned()));
+            }
+            let context = if encryption.context.is_empty() {
+                std::collections::BTreeMap::new()
+            } else {
+                base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &encryption.context,
+                )
+                .ok()
+                .and_then(|json| serde_json::from_slice(&json).ok())
+                .ok_or_else(|| {
+                    wrong("the context is base64 of a JSON object of strings".to_owned())
+                })?
+            };
+            let key = if encryption.key.is_empty() {
+                teifs_crypto::DEFAULT_KEY.to_owned()
+            } else {
+                kms_key(&encryption.key)
+            };
+            RotateTo::Kms { key, context }
+        }
+        other => return Err(wrong(format!("the type `{other}` isn't sse-s3 or sse-kms"))),
+    };
+    let flags = std::mem::take(&mut given.flags);
+    let filter = flags.filter;
+    let seconds = |field: &str, text: Option<String>| {
+        text.map(|text| minio_duration(&text).map(|d| d.as_secs()))
+            .transpose()
+            .map_err(|why| wrong(format!("{field}: {why}")))
+    };
+    let pairs = |given: Vec<KeyValueYaml>| {
+        given
+            .into_iter()
+            .map(|kv| KeyValue {
+                key: kv.key,
+                value: kv.value,
+            })
+            .collect()
+    };
+    let filter = RotateFilter {
+        newer_than_secs: seconds("newerThan", filter.newer_than)?,
+        older_than_secs: seconds("olderThan", filter.older_than)?,
+        created_after_ms: filter
+            .created_after
+            .map(|text| date("createdAfter", &text))
+            .transpose()
+            .map_err(wrong)?,
+        created_before_ms: filter
+            .created_before
+            .map(|text| date("createdBefore", &text))
+            .transpose()
+            .map_err(wrong)?,
+        tags: pairs(filter.tags),
+        metadata: pairs(filter.metadata),
+        kms_key: (!filter.kms_key.is_empty()).then(|| kms_key(&filter.kms_key)),
+    };
+    let (notify, token) = read_notify(flags.notify)?;
+    let retry = read_retry(flags.retry, ROTATE_RETRY, "key rotation")?;
+    let rotate = KeyRotateJob {
+        bucket: std::mem::take(&mut given.bucket),
+        prefix: std::mem::take(&mut given.prefix),
+        encryption: to,
+        filter,
+        notify,
+        retry,
+    };
+    Ok((JobSpec::KeyRotate(rotate), token))
+}
+
+/// Whether the drive can rotate keys to `to`: it has a KMS, and the key seals a data key
+/// under the context.
+async fn check_rotation(store: &Store, to: &RotateTo) -> S3Result<()> {
+    let kms = store.kms().ok_or_else(|| {
+        admin::error(
+            StatusCode::NOT_IMPLEMENTED,
+            "XMinioAdminNoKMS",
+            "Rotating keys needs the KMS, and none is configured",
+        )
+    })?;
+    if let RotateTo::Kms { key, context } = to {
+        let mut test = teifs_crypto::Context::replication(&store.format().drive)
+            .with("MinIO batch API", "batchrotate");
+        for (name, value) in context {
+            test = test.with(name.clone(), value.clone());
+        }
+        kms.generate(Some(key), &test).await.map_err(|err| {
+            invalid(format!(
+                "Invalid batch key rotation: the key `{key}` can't be used: {err}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// The job a YAML body describes, checked, and the token its result is sent with.
 fn read(body: &[u8]) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
     let text = std::str::from_utf8(body).map_err(|_| invalid("A job is YAML, in UTF-8"))?;
@@ -560,11 +765,11 @@ fn read(body: &[u8]) -> S3Result<(JobSpec, Option<Zeroizing<String>>)> {
             ..
         } => Err(not_runnable("replicate")),
         Request {
-            keyrotate: Some(_),
+            keyrotate: Some(rotate),
             expire: None,
             replicate: None,
             ..
-        } => Err(not_runnable("keyrotate")),
+        } => read_keyrotate(rotate),
         _ => Err(invalid(
             "A job has exactly one of expire, replicate or keyrotate",
         )),
@@ -589,7 +794,23 @@ fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, Option<Zeroizing<Str
         .map(read_rule)
         .collect::<Result<_, _>>()
         .map_err(|why| invalid(format!("Invalid batch expire rule: {why}")))?;
-    let (notify, token) = match given.notify.take() {
+    let (notify, token) = read_notify(given.notify.take())?;
+    let retry = read_retry(given.retry.take(), JobRetry::default(), "expire")?;
+    let expire = ExpireJob {
+        bucket: std::mem::take(&mut given.bucket),
+        prefixes: std::mem::take(&mut given.prefix).into_vec(),
+        rules,
+        notify,
+        retry,
+    };
+    Ok((JobSpec::Expire(expire), token))
+}
+
+/// Where a job's result goes, and the token it's sent with.
+fn read_notify(
+    given: Option<NotifyYaml>,
+) -> S3Result<(Option<JobNotify>, Option<Zeroizing<String>>)> {
+    Ok(match given {
         Some(mut notify) if !notify.endpoint.is_empty() => {
             teifs_notify::Webhook::new(&notify.endpoint, None)
                 .map_err(|why| invalid(format!("The notify endpoint: {why}")))?;
@@ -607,21 +828,27 @@ fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, Option<Zeroizing<Str
             (Some(notify), token)
         }
         _ => (None, None),
-    };
-    let retry = match given.retry.take() {
-        None => JobRetry::default(),
+    })
+}
+
+/// How often what fails is tried, `default` for what isn't given.
+fn read_retry(given: Option<RetryYaml>, default: JobRetry, kind: &str) -> S3Result<JobRetry> {
+    Ok(match given {
+        None => default,
         Some(retry) => {
-            let attempts = u32::try_from(retry.attempts)
-                .map_err(|_| invalid("Invalid batch expire retry configuration: attempts"))?;
+            let attempts = u32::try_from(retry.attempts).map_err(|_| {
+                invalid(format!(
+                    "Invalid batch {kind} retry configuration: attempts"
+                ))
+            })?;
             let delay = retry
                 .delay
                 .as_deref()
                 .map(go_duration)
                 .transpose()
                 .map_err(|why| {
-                    invalid(format!("Invalid batch expire retry configuration: {why}"))
+                    invalid(format!("Invalid batch {kind} retry configuration: {why}"))
                 })?;
-            let default = JobRetry::default();
             JobRetry {
                 attempts: if attempts == 0 {
                     default.attempts
@@ -633,15 +860,7 @@ fn read_expire(mut given: ExpireYaml) -> S3Result<(JobSpec, Option<Zeroizing<Str
                 }),
             }
         }
-    };
-    let expire = ExpireJob {
-        bucket: std::mem::take(&mut given.bucket),
-        prefixes: std::mem::take(&mut given.prefix).into_vec(),
-        rules,
-        notify,
-        retry,
-    };
-    Ok((JobSpec::Expire(expire), token))
+    })
 }
 
 fn read_rule(given: RuleYaml) -> Result<ExpireRule, String> {
@@ -661,13 +880,7 @@ fn read_rule(given: RuleYaml) -> Result<ExpireRule, String> {
     let created_before_ms = given
         .created_before
         .as_deref()
-        .map(|text| {
-            time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-                .map(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX))
-                .map_err(|_| {
-                    format!("createdBefore `{text}` isn't a date like 2006-01-02T15:04:05Z")
-                })
-        })
+        .map(|text| date("createdBefore", text))
         .transpose()?;
     let pairs = |given: Vec<KeyValueYaml>| -> Result<Vec<KeyValue>, String> {
         given
@@ -697,6 +910,13 @@ fn read_rule(given: RuleYaml) -> Result<ExpireRule, String> {
         retain_versions: u32::try_from(retain)
             .map_err(|_| "retainVersions must be 0 or more".to_owned())?,
     })
+}
+
+/// A date in RFC 3339, as Unix milliseconds; `field` names it when it isn't one.
+fn date(field: &str, text: &str) -> Result<i64, String> {
+    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .map(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX))
+        .map_err(|_| format!("{field} `{text}` isn't a date like 2006-01-02T15:04:05Z"))
 }
 
 /// A duration as `MinIO`'s batch jobs take it: Go's (`10h`, `1h30m`), with days and
@@ -778,15 +998,16 @@ fn bytes(size: Size) -> Result<u64, String> {
 
 /// A job as `describe-job` answers it: `MinIO`'s YAML, its token hidden.
 fn describe(job: &BatchJob) -> S3Result<String> {
-    let request = match &job.spec {
-        JobSpec::Expire(expire) => Request {
-            id: Some(job.id.clone()),
-            user: Some(job.user.clone()),
-            started: Some(rfc3339(job.created_ms)),
-            expire: Some(expire_yaml(expire)),
-            ..Request::default()
-        },
+    let mut request = Request {
+        id: Some(job.id.clone()),
+        user: Some(job.user.clone()),
+        started: Some(rfc3339(job.created_ms)),
+        ..Request::default()
     };
+    match &job.spec {
+        JobSpec::Expire(expire) => request.expire = Some(expire_yaml(expire)),
+        JobSpec::KeyRotate(rotate) => request.keyrotate = Some(keyrotate_yaml(rotate)),
+    }
     serde_saphyr::to_string(&request).map_err(S3Error::internal_error)
 }
 
@@ -830,20 +1051,107 @@ fn expire_yaml(expire: &ExpireJob) -> ExpireYaml {
         bucket: expire.bucket.clone(),
         prefix: Prefixes::Many(expire.prefixes.clone()),
         rules,
-        notify: expire.notify.as_ref().map(|notify| NotifyYaml {
-            endpoint: notify.endpoint.clone(),
-            token: if notify.token {
-                REDACTED.to_owned()
-            } else {
-                String::new()
-            },
-        }),
-        retry: Some(RetryYaml {
-            attempts: i64::from(expire.retry.attempts),
-            delay: Some(format!("{}ms", expire.retry.delay_ms)),
-        }),
+        notify: notify_yaml(expire.notify.as_ref()),
+        retry: Some(retry_yaml(expire.retry)),
     }
 }
+
+fn notify_yaml(notify: Option<&JobNotify>) -> Option<NotifyYaml> {
+    notify.map(|notify| NotifyYaml {
+        endpoint: notify.endpoint.clone(),
+        token: if notify.token {
+            REDACTED.to_owned()
+        } else {
+            String::new()
+        },
+    })
+}
+
+fn retry_yaml(retry: JobRetry) -> RetryYaml {
+    RetryYaml {
+        attempts: i64::from(retry.attempts),
+        delay: Some(format!("{}ms", retry.delay_ms)),
+    }
+}
+
+fn keyrotate_yaml(rotate: &KeyRotateJob) -> KeyRotateYaml {
+    let encryption = match &rotate.encryption {
+        RotateTo::S3 => EncryptionYaml {
+            kind: "sse-s3".to_owned(),
+            ..EncryptionYaml::default()
+        },
+        RotateTo::Kms { key, context } => EncryptionYaml {
+            kind: "sse-kms".to_owned(),
+            key: key.clone(),
+            context: if context.is_empty() {
+                String::new()
+            } else {
+                let json = serde_json::to_vec(context).expect("a context serializes");
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json)
+            },
+        },
+    };
+    let pairs = |given: &[KeyValue]| {
+        given
+            .iter()
+            .map(|kv| KeyValueYaml {
+                key: kv.key.clone(),
+                value: kv.value.clone(),
+            })
+            .collect()
+    };
+    let f = &rotate.filter;
+    KeyRotateYaml {
+        api_version: "v1".to_owned(),
+        bucket: rotate.bucket.clone(),
+        prefix: rotate.prefix.clone(),
+        encryption,
+        flags: FlagsYaml {
+            filter: FilterYaml {
+                newer_than: f.newer_than_secs.map(|secs| format!("{secs}s")),
+                older_than: f.older_than_secs.map(|secs| format!("{secs}s")),
+                created_after: f.created_after_ms.map(rfc3339),
+                created_before: f.created_before_ms.map(rfc3339),
+                tags: pairs(&f.tags),
+                metadata: pairs(&f.metadata),
+                kms_key: f.kms_key.clone().unwrap_or_default(),
+            },
+            notify: notify_yaml(rotate.notify.as_ref()),
+            retry: Some(retry_yaml(rotate.retry)),
+        },
+    }
+}
+
+/// What `generate-job?jobType=keyrotate` answers.
+const KEYROTATE_TEMPLATE: &str = "\
+keyrotate:
+  apiVersion: v1
+  bucket: mybucket          # the bucket whose encrypted versions get a new key
+  prefix: myprefix          # (optional) only keys under it
+  encryption:
+    type: sse-kms           # sse-s3: the managed key's newest version; sse-kms: a KMS key
+    key: my-key             # sse-kms only: the key (none: the managed key)
+    context: eyJ0ZWFtIjoib3BzIn0= # (optional, sse-kms) base64 of a JSON object
+  flags:
+    filter:                 # (optional) every condition given must hold
+      newerThan: 7d         # made less than this long ago (s, m, h, d, w)
+      olderThan: 1d         # made at least this long ago
+      createdAfter: \"2026-01-01T00:00:00Z\"
+      createdBefore: \"2026-12-31T00:00:00Z\"
+      tags:                 # with any one of these tags
+        - key: team
+          value: o*
+      metadata:             # with any one of these headers or x-amz-meta-* metadata
+        - key: content-type
+          value: image/*
+      kmskeyid: old-key     # SSE-KMS versions only when sealed by this key now
+    notify:                 # (optional) where the result is POSTed when the job ends
+      endpoint: https://example.com/batch
+      token: Bearer TOKEN
+    retry:                  # how often a version that fails is tried
+      attempts: 3
+      delay: 25ms
+";
 
 /// What `generate-job?jobType=expire` answers.
 const EXPIRE_TEMPLATE: &str = "\
@@ -888,7 +1196,9 @@ mod tests {
     fn the_template_is_a_job_this_server_runs() {
         let (spec, token) = read(EXPIRE_TEMPLATE.as_bytes()).unwrap();
         assert_eq!(token.as_deref().map(String::as_str), Some("Bearer TOKEN"));
-        let JobSpec::Expire(expire) = spec;
+        let JobSpec::Expire(expire) = spec else {
+            panic!("an expire job: {spec:?}");
+        };
         assert_eq!(expire.bucket, "mybucket");
         assert_eq!(expire.prefixes, ["myprefix"]);
         assert_eq!(expire.rules.len(), 2);
@@ -916,6 +1226,75 @@ mod tests {
                 delay_ms: 500
             }
         );
+    }
+
+    #[test]
+    fn the_keyrotate_template_is_a_job_this_server_runs_and_describes() {
+        let (spec, token) = read(KEYROTATE_TEMPLATE.as_bytes()).unwrap();
+        assert_eq!(token.as_deref().map(String::as_str), Some("Bearer TOKEN"));
+        let JobSpec::KeyRotate(rotate) = &spec else {
+            panic!("a keyrotate job: {spec:?}");
+        };
+        assert_eq!(
+            (rotate.bucket.as_str(), rotate.prefix.as_str()),
+            ("mybucket", "myprefix")
+        );
+        assert_eq!(
+            rotate.encryption,
+            RotateTo::Kms {
+                key: "my-key".to_owned(),
+                context: [("team".to_owned(), "ops".to_owned())].into()
+            }
+        );
+        let f = &rotate.filter;
+        assert_eq!(
+            (f.newer_than_secs, f.older_than_secs),
+            (Some(7 * 86_400), Some(86_400))
+        );
+        assert_eq!(f.created_after_ms, Some(1_767_225_600_000));
+        assert_eq!(f.created_before_ms, Some(1_798_675_200_000));
+        assert_eq!((f.tags.len(), f.metadata.len()), (1, 1));
+        assert_eq!(f.kms_key.as_deref(), Some("old-key"));
+        assert_eq!(
+            rotate.retry,
+            JobRetry {
+                attempts: 3,
+                delay_ms: 25
+            }
+        );
+        let job = BatchJob {
+            id: "keyrotate-1".to_owned(),
+            user: "admin".to_owned(),
+            created_ms: 0,
+            priority: 0,
+            status: JobStatus::Ready,
+            spec: spec.clone(),
+            progress: JobProgress::default(),
+            failures: Vec::new(),
+        };
+        let yaml = describe(&job).unwrap().replace(REDACTED, "Bearer AGAIN");
+        let (again, _) = read(yaml.as_bytes()).unwrap();
+        assert_eq!(again, spec);
+        // MinIO's and AWS's ARNs name keys too; no key is the managed one.
+        for (given, name) in [
+            ("arn:aws:kms:my-key", "my-key"),
+            ("arn:aws:kms:us-east-1:123456789012:key/my-key", "my-key"),
+            ("", teifs_crypto::DEFAULT_KEY),
+        ] {
+            let yaml = format!(
+                "keyrotate:\n  apiVersion: v1\n  bucket: b\n  encryption:\n    type: sse-kms\n    key: \"{given}\"\n"
+            );
+            let (JobSpec::KeyRotate(rotate), _) = read(yaml.as_bytes()).unwrap() else {
+                panic!("a keyrotate job");
+            };
+            assert_eq!(
+                rotate.encryption,
+                RotateTo::Kms {
+                    key: name.to_owned(),
+                    context: std::collections::BTreeMap::new()
+                }
+            );
+        }
     }
 
     #[test]
@@ -954,7 +1333,16 @@ mod tests {
         assert!(refused("expire:\n  apiVersion: v2\n  bucket: b\n").contains("API version"));
         assert!(refused("expire:\n  apiVersion: v1\n").contains("Bucket"));
         assert!(refused("replicate:\n  apiVersion: v1\n").contains("replicate"));
-        assert!(refused("keyrotate:\n  apiVersion: v1\n").contains("keyrotate"));
+        let rotate = |encryption: &str| {
+            format!("keyrotate:\n  apiVersion: v1\n  bucket: b\n  encryption:\n{encryption}")
+        };
+        assert!(refused("keyrotate:\n  apiVersion: v0\n").contains("API version"));
+        assert!(refused(&rotate("    type: sse-c\n")).contains("sse-c"));
+        assert!(refused(&rotate("    type: sse-s3\n    key: k\n")).contains("no key"));
+        assert!(refused(&rotate("    type: sse-kms\n    key: \" k\"\n")).contains("space"));
+        assert!(refused(&rotate("    type: sse-kms\n    context: '!!'\n")).contains("base64"));
+        let filtered = rotate("    type: sse-s3\n  flags:\n    filter:\n      newerThan: soon\n");
+        assert!(refused(&filtered).contains("newerThan"));
         assert!(refused("nothing: 1\n").contains("exactly one"));
         assert!(refused(": : :").contains("YAML"));
         assert!(refused(&job("    - type: gone\n")).contains("unknown type"));

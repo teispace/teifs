@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use teifs_crypto::{Context, CustomerKey, DEFAULT_KEY, DataKey, Kms, SealedKey};
 use teifs_meta::VersionRow;
-use teifs_types::{SseInfo, SseMode};
+use teifs_types::{SseInfo, SseMode, batch::RotateTo};
 
 use crate::{
     Bucket, Inner, Store, StoreError,
@@ -281,6 +281,51 @@ impl Store {
             data_key,
         };
         self.write_resealed(bucket, key, row, new, true).await
+    }
+
+    /// Seals the data key of a version of an SSE-S3 or SSE-KMS object again, as a
+    /// `keyrotate` batch job does: under the managed key's newest version, or under the
+    /// KMS key `to` names with its context (an SSE-S3 object then becomes SSE-KMS). The
+    /// data, ETag, modification time and checksums stay. A version Object Lock protects
+    /// keeps its mode, so only the managed key's rotation reaches it.
+    pub async fn rotate_key(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        to: &RotateTo,
+    ) -> Result<()> {
+        let kms = self.kms().ok_or(StoreError::NoKms)?;
+        let (bucket_id, row) = self.updatable_row(bucket, key, version_id).await?;
+        let mut crypt = crypt_of(&row)?.ok_or(StoreError::CorruptMetadata)?;
+        let drive = &self.inner.format.drive;
+        let data_key = kms
+            .unseal(&crypt.sealed, &crypt.context(drive, &bucket_id))
+            .await?;
+        let (mode, kms_key) = match to {
+            RotateTo::S3 if crypt.mode == SseMode::Kms => {
+                return Err(StoreError::InvalidRequest(
+                    "an SSE-KMS object's key can't be rotated to SSE-S3",
+                ));
+            }
+            RotateTo::S3 => (SseMode::S3, DEFAULT_KEY),
+            RotateTo::Kms { key, context } => {
+                crypt.context.clone_from(context);
+                (SseMode::Kms, key.as_str())
+            }
+        };
+        let sealed = kms
+            .seal(Some(kms_key), &crypt.context(drive, &bucket_id), &data_key)
+            .await?;
+        let lock = mode != crypt.mode;
+        let new = Resealed {
+            mode,
+            bucket_key: crypt.bucket_key,
+            crypt,
+            sealed,
+            data_key,
+        };
+        self.write_resealed(bucket, key, row, new, lock).await
     }
 
     /// Records `new` for the version `row` describes, if its record is still the one

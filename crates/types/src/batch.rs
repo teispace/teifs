@@ -104,6 +104,9 @@ impl JobStatus {
 pub enum JobSpec {
     /// Removes the objects and versions its rules match (`MinIO`'s `expire`).
     Expire(ExpireJob),
+    /// Seals encrypted versions' data keys again, under another KMS key (`MinIO`'s
+    /// `keyrotate`).
+    KeyRotate(KeyRotateJob),
 }
 
 impl JobSpec {
@@ -112,6 +115,7 @@ impl JobSpec {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Expire(_) => "expire",
+            Self::KeyRotate(_) => "keyrotate",
         }
     }
 
@@ -120,6 +124,25 @@ impl JobSpec {
     pub fn bucket(&self) -> &str {
         match self {
             Self::Expire(job) => &job.bucket,
+            Self::KeyRotate(job) => &job.bucket,
+        }
+    }
+
+    /// Where its result is sent, if anywhere.
+    #[must_use]
+    pub const fn notify(&self) -> Option<&JobNotify> {
+        match self {
+            Self::Expire(job) => job.notify.as_ref(),
+            Self::KeyRotate(job) => job.notify.as_ref(),
+        }
+    }
+
+    /// How often what fails is tried again.
+    #[must_use]
+    pub const fn retry(&self) -> JobRetry {
+        match self {
+            Self::Expire(job) => job.retry,
+            Self::KeyRotate(job) => job.retry,
         }
     }
 }
@@ -186,6 +209,73 @@ pub struct ExpireRule {
     /// How many of their newest versions stay (0: the object goes, every version).
     #[serde(default)]
     pub retain_versions: u32,
+}
+
+/// `MinIO`'s `keyrotate` job: seals the data key of each SSE-S3 or SSE-KMS version under
+/// its prefix that the filter takes again, under the managed key's newest version or a
+/// KMS key it names. The data isn't touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyRotateJob {
+    /// The bucket.
+    pub bucket: String,
+    /// The prefix it looks under (empty: the whole bucket).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    /// What seals the keys from now on.
+    pub encryption: RotateTo,
+    /// Which versions.
+    #[serde(default)]
+    pub filter: RotateFilter,
+    /// Where its result is sent, if anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<JobNotify>,
+    /// How often a version that fails is tried again.
+    #[serde(default)]
+    pub retry: JobRetry,
+}
+
+/// What seals a `keyrotate` job's keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RotateTo {
+    /// The managed key (SSE-S3), its newest version; SSE-KMS versions can't go back to it.
+    S3,
+    /// A KMS key (SSE-KMS), with an encryption context of the client's.
+    Kms {
+        /// The key.
+        key: String,
+        /// The context.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        context: std::collections::BTreeMap<String, String>,
+    },
+}
+
+/// Which versions a `keyrotate` job takes; every condition given must hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotateFilter {
+    /// Made less than this many seconds ago.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_than_secs: Option<u64>,
+    /// Made at least this many seconds ago.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_than_secs: Option<u64>,
+    /// Made after this (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_after_ms: Option<i64>,
+    /// Made before this (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_before_ms: Option<i64>,
+    /// With any of these tags (values with `*` and `?`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<KeyValue>,
+    /// With any of these metadata (values with `*` and `?`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<KeyValue>,
+    /// Sealed by this KMS key now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key: Option<String>,
 }
 
 /// A key and a value a condition needs.

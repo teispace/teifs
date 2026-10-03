@@ -4,7 +4,13 @@
 
 use std::time::Duration;
 
-use teifs_types::batch::{BatchJob, ExpireJob, ExpireKind, ExpireRule};
+use teifs_types::{
+    SseMode,
+    batch::{
+        BatchJob, ExpireJob, ExpireKind, ExpireRule, JobProgress, JobRetry, KeyRotateJob, KeyValue,
+        RotateFilter,
+    },
+};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -195,27 +201,16 @@ impl Store {
                 ..Precondition::default()
             }
         };
-        let attempts = expire.retry.attempts.max(1);
-        let mut attempt = 1;
-        let result = loop {
-            let result = self
-                .delete_marking(
-                    &expire.bucket,
-                    &version.info.key,
-                    version.info.version_id.as_deref(),
-                    precondition.clone(),
-                    (false, Marking::Lifecycle),
-                )
-                .await;
-            match result {
-                Err(err) if attempt < attempts && passing(&err) => {
-                    job.progress.retry_attempts += 1;
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(expire.retry.delay_ms)).await;
-                }
-                other => break other,
-            }
-        };
+        let result = retried(expire.retry, &mut job.progress, || {
+            self.delete_marking(
+                &expire.bucket,
+                &version.info.key,
+                version.info.version_id.as_deref(),
+                precondition.clone(),
+                (false, Marking::Lifecycle),
+            )
+        })
+        .await;
         let progress = &mut job.progress;
         match result {
             Ok(_) if version.delete_marker => progress.delete_markers += 1,
@@ -237,6 +232,132 @@ impl Store {
                 let id = version.info.version_id.as_deref().unwrap_or("null");
                 job.failed_because(format!("{} ({id}): {err}", version.info.key));
             }
+        }
+    }
+}
+
+impl Store {
+    /// Runs the next page of `job`, a `keyrotate` job, from where its progress says:
+    /// seals the data keys of the SSE-S3 and SSE-KMS versions the filter takes again,
+    /// counting each; whether the job is done.
+    pub async fn rotate_batch_page(
+        &self,
+        job: &mut BatchJob,
+        rotate: &KeyRotateJob,
+    ) -> Result<bool> {
+        if job.progress.prefix > 0 {
+            return Ok(true);
+        }
+        let now = crate::now_ms();
+        let (versions, more) = self
+            .whole_keys(
+                &rotate.bucket,
+                &rotate.prefix,
+                job.progress.last_key.clone(),
+                BATCH,
+            )
+            .await?;
+        for key_versions in versions.chunk_by(|a, b| a.info.key == b.info.key) {
+            for version in key_versions
+                .iter()
+                .filter(|v| rotates(&rotate.filter, v, now))
+            {
+                self.rotate_version(job, rotate, version).await;
+            }
+            job.progress.last_key = Some(key_versions[0].info.key.clone());
+        }
+        if !more {
+            job.progress.prefix = 1;
+            job.progress.last_key = None;
+        }
+        job.progress.updated_ms = Some(now);
+        Ok(!more)
+    }
+
+    async fn rotate_version(
+        &self,
+        job: &mut BatchJob,
+        rotate: &KeyRotateJob,
+        version: &ObjectVersion,
+    ) {
+        let info = &version.info;
+        let result = retried(rotate.retry, &mut job.progress, || {
+            self.rotate_key(
+                &rotate.bucket,
+                &info.key,
+                info.version_id.as_deref(),
+                &rotate.encryption,
+            )
+        })
+        .await;
+        let progress = &mut job.progress;
+        match result {
+            Ok(()) => {
+                progress.objects += 1;
+                progress.bytes += info.size;
+            }
+            // Gone meanwhile: nothing to rotate.
+            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => {}
+            Err(err) => {
+                progress.objects_failed += 1;
+                progress.bytes_failed += info.size;
+                let id = info.version_id.as_deref().unwrap_or("null");
+                job.failed_because(format!("{} ({id}): {err}", info.key));
+            }
+        }
+    }
+}
+
+/// Whether a `keyrotate` job's `filter` takes `version` at `now`: an SSE-S3 or SSE-KMS
+/// version (not a delete marker) of the age, tags (any one), metadata (any one) and KMS
+/// key (for SSE-KMS versions) it gives.
+fn rotates(filter: &RotateFilter, version: &ObjectVersion, now: i64) -> bool {
+    let info = &version.info;
+    let Some(sse) = info
+        .sse
+        .as_ref()
+        .filter(|s| matches!(s.mode, SseMode::S3 | SseMode::Kms))
+    else {
+        return false;
+    };
+    let modified = millis(info.modified);
+    let age = now.saturating_sub(modified);
+    let secs = |s: u64| i64::try_from(s).unwrap_or(i64::MAX).saturating_mul(1000);
+    let any = |wanted: &[KeyValue], mut given: Box<dyn Iterator<Item = (String, &str)> + '_>| {
+        wanted.is_empty() || given.any(|(k, v)| wanted.iter().any(|kv| kv.matches(&k, v)))
+    };
+    let tags = info.attrs.tags.iter().map(|(k, v)| (k.clone(), v.as_str()));
+    !version.delete_marker
+        && filter.newer_than_secs.is_none_or(|s| age < secs(s))
+        && filter.older_than_secs.is_none_or(|s| age >= secs(s))
+        && filter.created_after_ms.is_none_or(|after| modified > after)
+        && filter
+            .created_before_ms
+            .is_none_or(|before| modified < before)
+        && any(&filter.tags, Box::new(tags))
+        && any(&filter.metadata, Box::new(headers(version)))
+        && filter
+            .kms_key
+            .as_ref()
+            .is_none_or(|wanted| sse.mode != SseMode::Kms || sse.kms_key.as_ref() == Some(wanted))
+}
+
+/// Runs `attempt` until it succeeds, fails for a reason that won't pass, or has been tried
+/// as often as `retry` says, counting the retries in `progress`.
+async fn retried<T, F: Future<Output = Result<T>>>(
+    retry: JobRetry,
+    progress: &mut JobProgress,
+    mut attempt: impl FnMut() -> F,
+) -> Result<T> {
+    let mut tried = 1;
+    loop {
+        match attempt().await {
+            Err(err) if tried < retry.attempts.max(1) && passing(&err) => {
+                progress.retry_attempts += 1;
+                tried += 1;
+                tokio::time::sleep(Duration::from_millis(retry.delay_ms)).await;
+            }
+            other => return other,
         }
     }
 }

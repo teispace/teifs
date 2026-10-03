@@ -1362,8 +1362,9 @@ one is imported once the target is added on the other server.
 ## Batch jobs
 
 A batch job does one thing to many objects in the background, as `MinIO`'s do, and `mc
-batch` drives them. TeiFS runs `expire` jobs: they remove, under a bucket's prefixes, the
-objects whose newest version a rule matches, and their older versions.
+batch` drives them. TeiFS runs `expire` jobs, which remove, under a bucket's prefixes, the
+objects whose newest version a rule matches, and their older versions, and `keyrotate`
+jobs, which seal encrypted versions' keys again under another KMS key.
 
 ```sh
 mc batch generate local expire > expire.yaml   # a template to fill in
@@ -1395,7 +1396,26 @@ expire:
     delay: 500ms
 ```
 
-The first rule that matches a key's newest version decides; every condition a rule gives
+A `keyrotate` job seals the data keys of encrypted versions again, without reading or
+writing their data: under the managed key's newest version (`type: sse-s3`, after `teifs
+key rotate`), or under another KMS key and encryption context (`type: sse-kms`), which
+also turns SSE-S3 versions into SSE-KMS ones:
+
+```yaml
+keyrotate:
+  apiVersion: v1
+  bucket: vault
+  prefix: reports/
+  encryption:
+    type: sse-kms
+    key: reports-2026
+  flags:
+    filter:
+      kmskeyid: reports-2025   # only versions sealed by the old key (SSE-S3 ones too)
+      olderThan: 1d
+```
+
+For `expire` jobs, the first rule that matches a key's newest version decides; every condition a rule gives
 must hold (`createdBefore`, `tags`, `metadata` such as `content-type` or
 `x-amz-meta-owner`, and `size` with `lessThan` and `greaterThan` too). Object Lock is
 honoured: a protected version stays, and is counted as failed with the reason. A job runs

@@ -3,19 +3,19 @@
 
 use std::sync::Arc;
 
-use teifs_crypto::LocalKms;
+use teifs_crypto::{Kms, LocalKms};
 use teifs_types::{
     LockMode, ObjectAttrs, Retention,
     batch::{
         BatchJob, ExpireJob, ExpireKind, ExpireRule, JobProgress, JobRetry, JobSpec, JobStatus,
-        KeyValue,
+        KeyRotateJob, KeyValue, RotateFilter, RotateTo,
     },
 };
 use tempfile::TempDir;
 
 use crate::{
-    Durability, Layout, NewBucket, Store, StoreOptions, Versioning, VersionsQuery, now_ms,
-    test_util::in_both_layouts,
+    Durability, Encryption, Layout, NewBucket, Precondition, Store, StoreError, StoreOptions,
+    Versioning, VersionsQuery, now_ms, test_util::in_both_layouts,
 };
 
 in_both_layouts!(
@@ -363,4 +363,358 @@ async fn jobs_are_kept_changed_until_finished_and_forgotten() {
     assert_eq!(store.forget_batch_jobs(31).await.unwrap(), 1);
     assert_eq!(ids(store.batch_jobs().await.unwrap()), ["job-2"]);
     assert_eq!(store.forget_batch_jobs(i64::MAX).await.unwrap(), 0);
+}
+
+/// A drive with a KMS and a versioned object bucket `vault` (with Object Lock if `lock`).
+async fn encrypted(lock: bool) -> (TempDir, TempDir, Store, Arc<LocalKms>) {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let kms = Arc::new(LocalKms::open(keys.path().join("keyring.json")).unwrap());
+    let options = StoreOptions {
+        kms: Some(kms.clone()),
+        ..StoreOptions::default()
+    };
+    let store = Store::open_with(dir.path(), options).unwrap();
+    let options = NewBucket {
+        object_lock: lock,
+        ..NewBucket::default()
+    };
+    store
+        .create_bucket_with("vault", Layout::Object, options)
+        .await
+        .unwrap();
+    if !lock {
+        store
+            .set_bucket_versioning("vault", Versioning::Enabled)
+            .await
+            .unwrap();
+    }
+    (dir, keys, store, kms)
+}
+
+async fn put_sealed(store: &Store, key: &str, encryption: &Encryption, attrs: ObjectAttrs) {
+    let mut staged = store.stage_for("vault", encryption).await.unwrap();
+    staged.write(key.as_bytes()).await.unwrap();
+    store
+        .commit("vault", key, staged, attrs, Precondition::default())
+        .await
+        .unwrap();
+}
+
+fn sse_kms(key: &str) -> Encryption {
+    Encryption::Kms {
+        key: Some(key.to_owned()),
+        context: std::collections::BTreeMap::new(),
+        bucket_key: false,
+    }
+}
+
+fn rotation(to: RotateTo, filter: RotateFilter) -> (BatchJob, KeyRotateJob) {
+    let rotate = KeyRotateJob {
+        bucket: "vault".to_owned(),
+        prefix: String::new(),
+        encryption: to,
+        filter,
+        notify: None,
+        retry: JobRetry {
+            attempts: 2,
+            delay_ms: 1,
+        },
+    };
+    let (mut job, _) = job(Vec::new(), &[]);
+    job.spec = JobSpec::KeyRotate(rotate.clone());
+    (job, rotate)
+}
+
+async fn rotate(store: &Store, job: &mut BatchJob, rotate: &KeyRotateJob) {
+    for _ in 0..100 {
+        if store.rotate_batch_page(job, rotate).await.unwrap() {
+            return;
+        }
+    }
+    panic!("the job never ended");
+}
+
+/// Every version's content, read back.
+async fn contents(store: &Store) -> Vec<String> {
+    let listing = store
+        .list_versions(
+            "vault",
+            VersionsQuery {
+                max_keys: 100,
+                ..VersionsQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut read = Vec::new();
+    for v in listing.versions.iter().filter(|v| !v.delete_marker) {
+        let (_, body) = store
+            .read_with("vault", &v.info.key, v.info.version_id.as_deref(), None)
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut body.unwrap().all().await.unwrap(), &mut out)
+            .await
+            .unwrap();
+        read.push(String::from_utf8(out).unwrap());
+    }
+    read
+}
+
+/// Versions sealed by an older version of the managed key ("a", twice), by the KMS key
+/// "old" ("b") and unencrypted ("c", removed); the KMS also has the key "new".
+async fn sealed_versions() -> (TempDir, TempDir, Store) {
+    let (dir, keys, store, kms) = encrypted(false).await;
+    kms.create_key("old").await.unwrap();
+    kms.create_key("new").await.unwrap();
+    put_sealed(&store, "a", &Encryption::S3, ObjectAttrs::default()).await;
+    put_sealed(&store, "a", &Encryption::S3, ObjectAttrs::default()).await;
+    put_sealed(&store, "b", &sse_kms("old"), ObjectAttrs::default()).await;
+    put_sealed(&store, "c", &Encryption::None, ObjectAttrs::default()).await;
+    store
+        .delete_with("vault", "c", None, Precondition::default(), false)
+        .await
+        .unwrap();
+    kms.rotate_key(teifs_crypto::DEFAULT_KEY).await.unwrap();
+    assert_eq!(stale(&store).await, 2);
+    (dir, keys, store)
+}
+
+/// How many versions an older version of the managed key seals.
+async fn stale(store: &Store) -> u64 {
+    store
+        .rewrap(teifs_crypto::DEFAULT_KEY, true)
+        .await
+        .unwrap()
+        .versions
+}
+
+#[tokio::test]
+async fn keys_are_rotated_to_the_managed_keys_newest_version_or_another_kms_key() {
+    let (_dir, _keys, store) = sealed_versions().await;
+
+    // SSE-S3: under the managed key's newest version; SSE-KMS can't go back.
+    let (mut job, to_s3) = rotation(RotateTo::S3, RotateFilter::default());
+    rotate(&store, &mut job, &to_s3).await;
+    assert_eq!(stale(&store).await, 0);
+    let p = &job.progress;
+    assert_eq!((p.objects, p.objects_failed), (2, 1));
+    assert_eq!((p.bytes, p.bytes_failed), (2, 1));
+    assert_eq!(p.retry_attempts, 0);
+    assert!(job.failures[0].starts_with("b ("), "{:?}", job.failures);
+
+    // SSE-KMS: SSE-S3 versions pass a KMS key filter; SSE-KMS ones only with that key.
+    let context: std::collections::BTreeMap<_, _> = [("team".to_owned(), "ops".to_owned())].into();
+    let to_new = RotateTo::Kms {
+        key: "new".to_owned(),
+        context: context.clone(),
+    };
+    let filter = RotateFilter {
+        kms_key: Some("other".to_owned()),
+        ..RotateFilter::default()
+    };
+    let (mut job, rotate_job) = rotation(to_new.clone(), filter);
+    rotate(&store, &mut job, &rotate_job).await;
+    assert_eq!((job.progress.objects, job.progress.objects_failed), (2, 0));
+    assert_eq!(
+        store
+            .head("vault", "b")
+            .await
+            .unwrap()
+            .sse
+            .unwrap()
+            .kms_key
+            .as_deref(),
+        Some("old")
+    );
+    let (mut job, rotate_job) = rotation(to_new, RotateFilter::default());
+    rotate(&store, &mut job, &rotate_job).await;
+    assert_eq!((job.progress.objects, job.progress.objects_failed), (3, 0));
+    for key in ["a", "b"] {
+        let (_, row) = store.updatable_row("vault", key, None).await.unwrap();
+        let crypt = crate::objects::crypt_of(&row).unwrap().unwrap();
+        assert_eq!(crypt.context, context, "the job's context binds the key");
+        let sse = store.head("vault", key).await.unwrap().sse.unwrap();
+        assert_eq!(
+            (sse.mode, sse.kms_key.as_deref()),
+            (teifs_types::SseMode::Kms, Some("new"))
+        );
+    }
+    // The data is untouched, and opens with the new key and context.
+    assert_eq!(contents(&store).await, ["a", "a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn locked_versions_keep_their_mode_but_follow_the_managed_key() {
+    let (_dir, _keys, store, kms) = encrypted(true).await;
+    kms.create_key("new").await.unwrap();
+    let held = ObjectAttrs {
+        retention: Some(Retention {
+            mode: LockMode::Compliance,
+            until_ms: now_ms() + 3_600_000,
+        }),
+        ..ObjectAttrs::default()
+    };
+    put_sealed(&store, "held", &Encryption::S3, held).await;
+    kms.rotate_key(teifs_crypto::DEFAULT_KEY).await.unwrap();
+    let (mut job, to_s3) = rotation(RotateTo::S3, RotateFilter::default());
+    rotate(&store, &mut job, &to_s3).await;
+    assert_eq!((job.progress.objects, job.progress.objects_failed), (1, 0));
+    let to_new = RotateTo::Kms {
+        key: "new".to_owned(),
+        context: std::collections::BTreeMap::new(),
+    };
+    let (mut job, rotate_job) = rotation(to_new, RotateFilter::default());
+    rotate(&store, &mut job, &rotate_job).await;
+    assert_eq!((job.progress.objects, job.progress.objects_failed), (0, 1));
+    assert!(
+        job.failures[0].contains(&StoreError::ObjectLocked.to_string()),
+        "{:?}",
+        job.failures
+    );
+    assert_eq!(
+        store.head("vault", "held").await.unwrap().sse.unwrap().mode,
+        teifs_types::SseMode::S3
+    );
+}
+
+/// A version written `ago_ms` before `now`, tagged team=ops and env=prod.
+fn filtered_version(
+    now: i64,
+    ago_ms: i64,
+    mode: teifs_types::SseMode,
+    key: Option<&str>,
+) -> super::ObjectVersion {
+    super::ObjectVersion {
+        info: teifs_types::ObjectInfo {
+            key: "k".to_owned(),
+            size: 1,
+            modified: std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(now - ago_ms).unwrap()),
+            etag: String::new(),
+            attrs: ObjectAttrs {
+                tags: [
+                    ("team".to_owned(), "ops".to_owned()),
+                    ("env".to_owned(), "prod".to_owned()),
+                ]
+                .into(),
+                content_type: Some("image/png".to_owned()),
+                ..ObjectAttrs::default()
+            },
+            sse: Some(teifs_types::SseInfo {
+                mode,
+                kms_key: key.map(str::to_owned),
+                customer_key_md5: None,
+                bucket_key: false,
+            }),
+            parts: Vec::new(),
+            version_id: Some("v".to_owned()),
+        },
+        latest: true,
+        delete_marker: false,
+    }
+}
+
+#[test]
+fn rotation_filters_take_ages_any_tag_any_metadata_and_the_kms_key() {
+    let now = now_ms();
+    let made = |ago_ms, mode, key| filtered_version(now, ago_ms, mode, key);
+    let s3 = made(10_000, teifs_types::SseMode::S3, None);
+    let takes = |filter: RotateFilter, v: &super::ObjectVersion| super::rotates(&filter, v, now);
+    let kv = |k: &str, v: &str| KeyValue {
+        key: k.to_owned(),
+        value: v.to_owned(),
+    };
+    assert!(takes(RotateFilter::default(), &s3));
+    assert!(takes(
+        RotateFilter {
+            older_than_secs: Some(10),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(!takes(
+        RotateFilter {
+            older_than_secs: Some(11),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(takes(
+        RotateFilter {
+            newer_than_secs: Some(11),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(!takes(
+        RotateFilter {
+            newer_than_secs: Some(10),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(takes(
+        RotateFilter {
+            created_after_ms: Some(now - 10_001),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(!takes(
+        RotateFilter {
+            created_after_ms: Some(now - 10_000),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(takes(
+        RotateFilter {
+            created_before_ms: Some(now - 9_999),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    assert!(!takes(
+        RotateFilter {
+            created_before_ms: Some(now - 10_000),
+            ..RotateFilter::default()
+        },
+        &s3
+    ));
+    let tags = |t: Vec<KeyValue>| RotateFilter {
+        tags: t,
+        ..RotateFilter::default()
+    };
+    assert!(takes(tags(vec![kv("team", "dev"), kv("team", "o*")]), &s3));
+    assert!(!takes(tags(vec![kv("team", "dev")]), &s3));
+    let meta = |m: Vec<KeyValue>| RotateFilter {
+        metadata: m,
+        ..RotateFilter::default()
+    };
+    assert!(takes(meta(vec![kv("content-type", "image/*")]), &s3));
+    assert!(!takes(meta(vec![kv("content-type", "text/*")]), &s3));
+    let by_key = RotateFilter {
+        kms_key: Some("a".to_owned()),
+        ..RotateFilter::default()
+    };
+    assert!(takes(by_key.clone(), &s3));
+    assert!(takes(
+        by_key.clone(),
+        &made(1, teifs_types::SseMode::Kms, Some("a"))
+    ));
+    assert!(!takes(
+        by_key,
+        &made(1, teifs_types::SseMode::Kms, Some("b"))
+    ));
+    for unrotated in [teifs_types::SseMode::Customer, teifs_types::SseMode::Dsse] {
+        assert!(!takes(RotateFilter::default(), &made(1, unrotated, None)));
+    }
+    let mut marker = s3.clone();
+    marker.delete_marker = true;
+    assert!(!takes(RotateFilter::default(), &marker));
+    let mut plain = s3;
+    plain.info.sse = None;
+    assert!(!takes(RotateFilter::default(), &plain));
 }

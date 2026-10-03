@@ -158,7 +158,7 @@ test fails when it's out of date: `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -
 | `POST` | `/minio/admin/v3/speedtest/net` | 501 NotImplemented: a server is one node, with no network between nodes to measure | `admin:OBDInfo` |
 | `POST` | `/minio/admin/v3/speedtest/site` | 501 NotImplemented: there are no other sites to measure the network to | `admin:OBDInfo` |
 | `POST` | `/minio/admin/v3/background-heal/status` | The background heal's status as `madmin.BgHealState`: the drive's scrub, with the versions it checked and the drive's disks: `mc admin heal` with no target | `admin:Heal` |
-| `POST` | `/minio/admin/v3/start-job` | Starts the batch job the body describes in `MinIO`'s YAML (`expire`; at most 4 MiB) and answers its id: `mc batch start` | `admin:StartBatchJob` |
+| `POST` | `/minio/admin/v3/start-job` | Starts the batch job the body describes in `MinIO`'s YAML (`expire` or `keyrotate`; at most 4 MiB) and answers its id: `mc batch start` | `admin:StartBatchJob` |
 | `GET` | `/minio/admin/v3/list-jobs` | The batch jobs, oldest first, `&jobType=` and `&bucket=` narrowing them, as `madmin.ListBatchJobsResult`: `mc batch list` | `admin:ListBatchJobs` |
 | `GET` | `/minio/admin/v3/status-job` | How far batch job `?jobId=` got, as `madmin.BatchJobStatus`: `mc batch status` | `admin:ListBatchJobs` |
 | `GET` | `/minio/admin/v3/describe-job` | Batch job `?jobId=` in `MinIO`'s YAML, its notification token hidden: `mc batch describe` | `admin:DescribeBatchJob` |

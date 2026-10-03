@@ -48,7 +48,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - Batch jobs, as `MinIO`'s (`mc batch start|list|status|describe|cancel|generate`):
   an `expire` job removes, under its prefixes, the objects whose newest version one of
   its rules matches (by name, age, date, tags, metadata, size, or a delete marker),
-  keeping the newest versions the rule says. Jobs run in the background one at a time,
+  keeping the newest versions the rule says; a `keyrotate` job seals the data keys of
+  SSE-S3 and SSE-KMS versions again, under the managed key's newest version or another
+  KMS key and context, without touching the data. Jobs run in the background one at a time,
   carry on after a restart, are retried as they say, and post their result to a
   webhook whose token is kept sealed by the KMS and hidden when a job is described.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`

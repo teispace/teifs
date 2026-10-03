@@ -559,7 +559,9 @@ the replication targets' key, bound to the job's id). The batch worker, one of t
 oldest by priority, and runs one page of it: for `expire`, `Store::expire_batch_page`
 reads whole keys (`Store::whole_keys`, which the lifecycle job uses too), matches each
 key's newest version against the rules, and removes versions with
-`Marking::Lifecycle` (never replicated). The progress (prefix, last key, counts,
+`Marking::Lifecycle` (never replicated); for `keyrotate`, `Store::rotate_batch_page` filters
+each version and `Store::rotate_key` unseals its data key and seals it again
+(`write_resealed`, as `UpdateObjectEncryption` does). The progress (prefix, last key, counts,
 failures) is written back with `Store::update_batch_job`, which leaves a job cancelled
 meanwhile alone, so a restart resumes from the last page; an ended job's result is
 posted to its webhook.
