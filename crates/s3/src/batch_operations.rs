@@ -82,7 +82,7 @@ pub(crate) struct Failure {
 }
 
 impl Failure {
-    fn of<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
+    pub(crate) fn of<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
         err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
     ) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl Failure {
         }
     }
 
-    fn internal(why: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(why: impl std::fmt::Display) -> Self {
         Self {
             status: None,
             code: "InternalError".to_owned(),
@@ -532,6 +532,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .map(drop)
                 .map_err(|err| Failure::of(&err))
         }
+        Operation::PutObjectCopy(copy) => crate::batch_copy::run(client, copy, task).await,
     }
 }
 

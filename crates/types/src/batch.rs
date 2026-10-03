@@ -444,6 +444,109 @@ pub enum Operation {
         #[serde(default)]
         bypass_governance: bool,
     },
+    /// Copies it to another bucket, or the same (`S3PutObjectCopy`).
+    PutObjectCopy(Box<CopyOperation>),
+}
+
+/// How an S3 Batch Operations job copies each object, as `CopyObject` would.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyOperation {
+    /// Where copies go.
+    pub target_bucket: String,
+    /// Put before each key, with a `/` between (`Folder1` + `a/b` is `Folder1/a/b`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_prefix: Option<String>,
+    /// A canned ACL for the copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canned_acl: Option<String>,
+    /// Grants for the copies, as `x-amz-grant-*` headers take them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<CopyGrant>,
+    /// `COPY` or `REPLACE`: whether the source's metadata goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_directive: Option<String>,
+    /// Copied only if the source changed since then (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_since_ms: Option<i64>,
+    /// Copied only if the source hasn't changed since then (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmodified_since_ms: Option<i64>,
+    /// The copies' metadata, in place of the source's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<CopyMetadata>,
+    /// The copies' tags, in place of the source's (empty: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<KeyValue>>,
+    /// `x-amz-website-redirect-location`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_location: Option<String>,
+    /// Whether the role pays for requests to a Requester Pays bucket.
+    #[serde(default)]
+    pub requester_pays: bool,
+    /// The copies' storage class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
+    /// The KMS key the copies are encrypted with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key_id: Option<String>,
+    /// Whether SSE-KMS copies use an S3 Bucket Key.
+    #[serde(default)]
+    pub bucket_key_enabled: bool,
+    /// The copies' checksum algorithm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_algorithm: Option<String>,
+    /// A legal hold on the copies, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legal_hold: Option<bool>,
+    /// The copies' retention mode, `GOVERNANCE` or `COMPLIANCE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_mode: Option<String>,
+    /// Until when the copies are retained (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_until_ms: Option<i64>,
+}
+
+/// A grant a copy gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyGrant {
+    /// `id`, `emailAddress` or `uri`.
+    pub kind: String,
+    /// The canonical user id, email address or group URI.
+    pub identifier: String,
+    /// `FULL_CONTROL`, `READ`, `READ_ACP` or `WRITE_ACP`.
+    pub permission: String,
+}
+
+/// The metadata copies get in place of their source's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyMetadata {
+    /// `Cache-Control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<String>,
+    /// `Content-Disposition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_disposition: Option<String>,
+    /// `Content-Encoding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    /// `Content-Language`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_language: Option<String>,
+    /// `Content-Type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// `Expires` (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+    /// `AES256` or `KMS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_algorithm: Option<String>,
+    /// User metadata (`x-amz-meta-*`), in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user: Vec<KeyValue>,
 }
 
 impl Operation {
@@ -455,6 +558,7 @@ impl Operation {
             Self::DeleteObjectTagging => "S3DeleteObjectTagging",
             Self::PutObjectLegalHold { .. } => "S3PutObjectLegalHold",
             Self::PutObjectRetention { .. } => "S3PutObjectRetention",
+            Self::PutObjectCopy(_) => "S3PutObjectCopy",
         }
     }
 }
@@ -661,6 +765,26 @@ pub fn wildcard(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_are_kept_with_their_options() {
+        let copy = Operation::PutObjectCopy(Box::new(CopyOperation {
+            target_bucket: "copies".to_owned(),
+            target_prefix: Some("Folder1".to_owned()),
+            tags: Some(Vec::new()),
+            metadata: Some(CopyMetadata {
+                content_type: Some("image/jpeg".to_owned()),
+                ..CopyMetadata::default()
+            }),
+            ..CopyOperation::default()
+        }));
+        let json = serde_json::to_value(&copy).unwrap();
+        assert_eq!(json["type"], "putObjectCopy");
+        assert_eq!(json["targetBucket"], "copies");
+        assert_eq!(json["tags"], serde_json::json!([]));
+        assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), copy);
+        assert_eq!(copy.name(), "S3PutObjectCopy");
+    }
 
     #[test]
     fn wildcards_match_runs_and_single_characters() {

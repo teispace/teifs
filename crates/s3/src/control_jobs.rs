@@ -508,13 +508,7 @@ fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
         }
         let until = inner
             .retain_until_date
-            .map(|date| {
-                OffsetDateTime::parse(&date, &Rfc3339)
-                    .map(|t| {
-                        i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
-                    })
-                    .map_err(|_| bad_request("RetainUntilDate must be an ISO 8601 time."))
-            })
+            .map(|date| millis_of(&date, "RetainUntilDate"))
             .transpose()?;
         if mode.is_some() != until.is_some() {
             return Err(bad_request(
@@ -527,18 +521,23 @@ fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
             bypass_governance: retention.bypass_governance_retention.unwrap_or(false),
         });
     }
+    if let Some(copy) = given.copy {
+        operations.push(Operation::PutObjectCopy(Box::new(
+            crate::batch_copy::parse(*copy)?,
+        )));
+    }
     match operations.len() {
         1 => Ok(operations.remove(0)),
         0 => Err(not_implemented(
             "TeiFS runs these operations: S3PutObjectTagging, S3DeleteObjectTagging, \
-             S3PutObjectLegalHold and S3PutObjectRetention.",
+             S3PutObjectLegalHold, S3PutObjectRetention and S3PutObjectCopy.",
         )),
         _ => Err(bad_request("A job has exactly one Operation.")),
     }
 }
 
 /// Tags, checked as a job's.
-fn tags_of(given: Members<TagXml>) -> S3Result<Vec<KeyValue>> {
+pub(crate) fn tags_of(given: Members<TagXml>) -> S3Result<Vec<KeyValue>> {
     if given.member.len() > MAX_TAGS {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -753,6 +752,9 @@ fn operation_xml(operation: &Operation) -> OperationXml {
                 }),
             });
         }
+        Operation::PutObjectCopy(copy) => {
+            xml.copy = Some(Box::new(crate::batch_copy::xml(copy)));
+        }
     }
     xml
 }
@@ -876,7 +878,14 @@ fn param(req: &S3Request<Body>, name: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-fn iso(ms: i64) -> String {
+/// A time given as ISO 8601 (`name`), in Unix milliseconds.
+pub(crate) fn millis_of(date: &str, name: &str) -> S3Result<i64> {
+    OffsetDateTime::parse(date, &Rfc3339)
+        .map(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX))
+        .map_err(|_| bad_request(format!("{name} must be an ISO 8601 time.")))
+}
+
+pub(crate) fn iso(ms: i64) -> String {
     crate::minio_kms::rfc3339(ms)
 }
 
@@ -884,11 +893,11 @@ fn error(status: StatusCode, code: &str, message: impl Into<String>) -> S3Error 
     crate::admin::error(status, code, message)
 }
 
-fn bad_request(message: impl Into<String>) -> S3Error {
+pub(crate) fn bad_request(message: impl Into<String>) -> S3Error {
     error(StatusCode::BAD_REQUEST, "BadRequestException", message)
 }
 
-fn not_implemented(message: impl Into<String>) -> S3Error {
+pub(crate) fn not_implemented(message: impl Into<String>) -> S3Error {
     error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", message)
 }
 
@@ -921,7 +930,7 @@ fn xml<T: Serialize>(root: &str, value: &T) -> S3Result<S3Response<Body>> {
     Ok(response)
 }
 
-fn members<T>(items: impl Iterator<Item = T>) -> Members<T> {
+pub(crate) fn members<T>(items: impl Iterator<Item = T>) -> Members<T> {
     Members {
         member: items.collect(),
     }
@@ -929,9 +938,9 @@ fn members<T>(items: impl Iterator<Item = T>) -> Members<T> {
 
 /// A list, as S3 Control writes them: each item a `member`.
 #[derive(Debug, Serialize, Deserialize)]
-struct Members<T> {
+pub(crate) struct Members<T> {
     #[serde(default = "Vec::new")]
-    member: Vec<T>,
+    pub(crate) member: Vec<T>,
 }
 
 impl<T> Default for Members<T> {
@@ -977,6 +986,8 @@ struct OperationXml {
         skip_serializing_if = "Option::is_none"
     )]
     retention: Option<PutRetentionXml>,
+    #[serde(rename = "S3PutObjectCopy", skip_serializing_if = "Option::is_none")]
+    copy: Option<Box<crate::batch_copy::CopyXml>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1016,14 +1027,14 @@ struct RetentionXml {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct TagXml {
+pub(crate) struct TagXml {
     key: String,
     #[serde(default)]
     value: String,
 }
 
 impl TagXml {
-    fn of(tag: &KeyValue) -> Self {
+    pub(crate) fn of(tag: &KeyValue) -> Self {
         Self {
             key: tag.key.clone(),
             value: tag.value.clone(),

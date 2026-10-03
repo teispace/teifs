@@ -1456,3 +1456,419 @@ async fn cancelled_and_failed_jobs_report_what_they_ran() {
         .await;
     assert_eq!(code(manifest), "NotFound");
 }
+
+/// What the job role may do to copy photos to `copies`.
+const COPIER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:GetObjectTagging",
+    "s3:GetObjectVersionTagging"],"Resource":"arn:aws:s3:::photos/*"},
+  {"Effect":"Allow","Action":["s3:PutObject","s3:PutObjectTagging"],"Resource":"arn:aws:s3:::copies/*"}]}"#;
+
+fn copying(copy: aws_sdk_s3control::types::builders::S3CopyObjectOperationBuilder) -> JobOperation {
+    JobOperation::builder()
+        .s3_put_object_copy(copy.target_resource("arn:aws:s3:::copies").build())
+        .build()
+}
+
+async fn copy_job(
+    server: &Server,
+    root: &Client,
+    (copy, lines, fields): (JobOperation, &[&str], &[JobManifestFieldName]),
+    token: &str,
+) -> DescribeJobOutput {
+    let account = server.iam.account();
+    let etag = put(root, "manifests", token, &lines.join("\n")).await;
+    let manifest = manifest_at(token, &etag, fields);
+    let s3control = control(server, common::ACCESS_KEY, SECRET_KEY);
+    let role = format!("arn:aws:iam::{account}:role/copier");
+    let id = create(
+        &s3control,
+        &account,
+        (copy, manifest, &role),
+        (token, 1, false),
+    )
+    .await
+    .unwrap();
+    wait_for(&s3control, &account, &id, &JobStatus::Complete).await
+}
+
+#[tokio::test]
+async fn a_job_copies_objects_with_their_metadata_and_tags() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["b c.jpg"]).await;
+    root.create_bucket().bucket("copies").send().await.unwrap();
+    root.put_object()
+        .bucket("photos")
+        .key("a.jpg")
+        .content_type("image/jpeg")
+        .metadata("camera", "x100")
+        .tagging("team=blue")
+        .body(ByteStream::from_static(b"photo"))
+        .send()
+        .await
+        .unwrap();
+    role(&server, "copier", TRUST, COPIER);
+    let copy = copying(
+        aws_sdk_s3control::types::S3CopyObjectOperation::builder().target_key_prefix("Folder1"),
+    );
+    let fields = [JobManifestFieldName::Bucket, JobManifestFieldName::Key];
+    let lines = ["photos,a.jpg", "photos,b+c.jpg", "photos,missing.jpg"];
+    let done = copy_job(&server, &root, (copy, &lines, &fields), "c1").await;
+    let job = done.job.unwrap();
+    let progress = job.progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(2));
+    assert_eq!(progress.number_of_tasks_failed, Some(1));
+    let described = job.operation.unwrap().s3_put_object_copy.unwrap();
+    assert_eq!(
+        described.target_resource.as_deref(),
+        Some("arn:aws:s3:::copies")
+    );
+    assert_eq!(described.target_key_prefix.as_deref(), Some("Folder1"));
+
+    let head = root
+        .head_object()
+        .bucket("copies")
+        .key("Folder1/a.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.content_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(head.metadata.unwrap()["camera"], "x100");
+    let tags = root
+        .get_object_tagging()
+        .bucket("copies")
+        .key("Folder1/a.jpg")
+        .send()
+        .await
+        .unwrap()
+        .tag_set;
+    assert_eq!(
+        tags,
+        [aws_sdk_s3::types::Tag::builder()
+            .key("team")
+            .value("blue")
+            .build()
+            .unwrap()]
+    );
+    let copied = root
+        .head_object()
+        .bucket("copies")
+        .key("Folder1/b c.jpg")
+        .send()
+        .await;
+    assert_eq!(code(copied), "ok");
+}
+
+#[tokio::test]
+async fn copies_take_new_metadata_and_tags_and_named_versions() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &[]).await;
+    root.create_bucket().bucket("copies").send().await.unwrap();
+    root.put_bucket_versioning()
+        .bucket("photos")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let first = root
+        .put_object()
+        .bucket("photos")
+        .key("a.jpg")
+        .metadata("camera", "x100")
+        .tagging("team=blue")
+        .body(ByteStream::from_static(b"one"))
+        .send()
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    put(&root, "photos", "a.jpg", "two").await;
+    role(&server, "copier", TRUST, COPIER);
+    let metadata = aws_sdk_s3control::types::S3ObjectMetadata::builder()
+        .content_type("text/plain")
+        .cache_control("no-cache")
+        .user_metadata("kind", "first")
+        .build();
+    let copy = copying(
+        aws_sdk_s3control::types::S3CopyObjectOperation::builder()
+            .new_object_metadata(metadata)
+            .set_new_object_tagging(Some(Vec::new())),
+    );
+    let fields = [
+        JobManifestFieldName::Bucket,
+        JobManifestFieldName::Key,
+        JobManifestFieldName::VersionId,
+    ];
+    let line = format!("photos,a.jpg,{first}");
+    let done = copy_job(&server, &root, (copy, &[line.as_str()], &fields), "c2").await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(1));
+
+    let got = root
+        .get_object()
+        .bucket("copies")
+        .key("a.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(got.cache_control.as_deref(), Some("no-cache"));
+    let metadata = got.metadata.clone().unwrap();
+    assert_eq!(metadata.get("kind").map(String::as_str), Some("first"));
+    assert!(!metadata.contains_key("camera"));
+    assert_eq!(
+        got.body.collect().await.unwrap().into_bytes().as_ref(),
+        b"one"
+    );
+    let tags = root
+        .get_object_tagging()
+        .bucket("copies")
+        .key("a.jpg")
+        .send()
+        .await
+        .unwrap()
+        .tag_set;
+    assert!(tags.is_empty(), "{tags:?}");
+}
+
+#[tokio::test]
+async fn copies_may_go_only_where_the_role_may_write() {
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["a.jpg"]).await;
+    root.create_bucket().bucket("copies").send().await.unwrap();
+    // The tagger may read the photos, not write copies.
+    role(&server, "copier", TRUST, TAGGER);
+    let copy = copying(aws_sdk_s3control::types::S3CopyObjectOperation::builder());
+    let fields = [JobManifestFieldName::Bucket, JobManifestFieldName::Key];
+    let done = copy_job(&server, &root, (copy, &["photos,a.jpg"], &fields), "c3").await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_failed, Some(1));
+    let copied = root
+        .head_object()
+        .bucket("copies")
+        .key("a.jpg")
+        .send()
+        .await;
+    assert_eq!(code(copied), "NotFound");
+}
+
+#[tokio::test]
+async fn wrong_copies_are_refused() {
+    use aws_sdk_s3control::types::{
+        S3CopyObjectOperation, S3Grant, S3Grantee, S3GranteeTypeIdentifier, S3Permission,
+    };
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &[]).await;
+    let role = role(&server, "copier", TRUST, COPIER);
+    let manifest = manifest(&root, "m.csv", &["photos,a.jpg"]).await;
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let to = |target: &str| S3CopyObjectOperation::builder().target_resource(target);
+    let write = S3Grant::builder()
+        .grantee(
+            S3Grantee::builder()
+                .type_identifier(S3GranteeTypeIdentifier::Canonical)
+                .identifier("abc")
+                .build(),
+        )
+        .permission(S3Permission::Write)
+        .build();
+    let copies = "arn:aws:s3:::copies";
+    for (token, copy, expected) in [
+        ("w1", to("copies"), "BadRequestException"),
+        ("w2", to("arn:aws:s3:::copies/sub"), "BadRequestException"),
+        (
+            "w3",
+            to(copies).access_control_grants(write),
+            "BadRequestException",
+        ),
+        (
+            "w4",
+            to(copies).checksum_algorithm("CRC1".into()),
+            "BadRequestException",
+        ),
+        (
+            "w5",
+            to(copies).object_lock_mode("GOVERNANCE".into()),
+            "BadRequestException",
+        ),
+        (
+            "w6",
+            to(copies).object_lock_event_hold("ON".into()),
+            "NotImplemented",
+        ),
+        (
+            "w7",
+            to(copies).target_key_prefix(""),
+            "BadRequestException",
+        ),
+    ] {
+        let operation = JobOperation::builder()
+            .s3_put_object_copy(copy.build())
+            .build();
+        let job = (operation, manifest.clone(), role.as_str());
+        let refused = create(&s3control, &account, job, (token, 1, false)).await;
+        assert_eq!(refused, Err(expected.to_owned()), "{token}");
+    }
+}
+
+#[tokio::test]
+async fn copies_take_every_option_copy_object_takes() {
+    use aws_sdk_s3control::types::{
+        S3CopyObjectOperation, S3Grant, S3Grantee, S3GranteeTypeIdentifier, S3ObjectMetadata,
+        S3Permission,
+    };
+    // Encrypted copies need an object bucket.
+    let server =
+        common::start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["a.jpg"]).await;
+    root.create_bucket()
+        .bucket("copies")
+        .object_lock_enabled_for_bucket(true)
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    let everything = COPIER.replace(
+        r#""Action":["s3:PutObject","s3:PutObjectTagging"]"#,
+        r#""Action":"s3:*""#,
+    );
+    role(&server, "copier", TRUST, &everything);
+    let owner = root
+        .list_buckets()
+        .send()
+        .await
+        .unwrap()
+        .owner
+        .unwrap()
+        .id
+        .unwrap();
+    let until = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    let until = aws_sdk_s3control::primitives::DateTime::from_secs(until.unix_timestamp());
+    let metadata = S3ObjectMetadata::builder()
+        .content_disposition("attachment")
+        .content_encoding("identity")
+        .content_language("en")
+        .http_expires_date(until)
+        .sse_algorithm("AES256".into())
+        .build();
+    let grant = S3Grant::builder()
+        .grantee(
+            S3Grantee::builder()
+                .type_identifier(S3GranteeTypeIdentifier::Canonical)
+                .identifier(&owner)
+                .build(),
+        )
+        .permission(S3Permission::ReadAcp)
+        .build();
+    let copy = copying(
+        S3CopyObjectOperation::builder()
+            .new_object_metadata(metadata)
+            .access_control_grants(grant)
+            .storage_class("STANDARD_IA".into())
+            .redirect_location("/elsewhere")
+            .checksum_algorithm("SHA256".into())
+            .object_lock_legal_hold_status("ON".into())
+            .object_lock_mode("GOVERNANCE".into())
+            .object_lock_retain_until_date(until),
+    );
+    let fields = [JobManifestFieldName::Bucket, JobManifestFieldName::Key];
+    let done = copy_job(&server, &root, (copy, &["photos,a.jpg"], &fields), "e1").await;
+    let job = done.job.unwrap();
+    assert_eq!(
+        job.progress_summary.unwrap().number_of_tasks_succeeded,
+        Some(1)
+    );
+    let described = job.operation.unwrap().s3_put_object_copy.unwrap();
+    assert_eq!(described.storage_class.unwrap().as_str(), "STANDARD_IA");
+    assert_eq!(described.object_lock_retain_until_date, Some(until));
+    assert_eq!(described.access_control_grants.unwrap().len(), 1);
+    let described = described.new_object_metadata.unwrap();
+    assert_eq!(described.http_expires_date, Some(until));
+    assert_eq!(described.content_language.as_deref(), Some("en"));
+
+    let head = root
+        .head_object()
+        .bucket("copies")
+        .key("a.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.content_disposition.as_deref(), Some("attachment"));
+    assert_eq!(head.content_encoding.as_deref(), Some("identity"));
+    assert_eq!(head.content_language.as_deref(), Some("en"));
+    assert!(head.expires_string.is_some());
+    assert_eq!(
+        head.server_side_encryption,
+        Some(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+    );
+    // Every object is STANDARD.
+    assert_eq!(head.storage_class, None);
+    assert_eq!(
+        head.website_redirect_location.as_deref(),
+        Some("/elsewhere")
+    );
+    assert_eq!(head.object_lock_legal_hold_status.unwrap().as_str(), "ON");
+    assert_eq!(head.object_lock_mode.unwrap().as_str(), "GOVERNANCE");
+    assert_eq!(permissions(&root, "a.jpg").await, ["READ_ACP"]);
+}
+
+/// The permissions `copies/{key}`'s ACL grants.
+async fn permissions(root: &Client, key: &str) -> Vec<String> {
+    let acl = root
+        .get_object_acl()
+        .bucket("copies")
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    acl.grants()
+        .iter()
+        .filter_map(|g| g.permission.as_ref().map(|p| p.as_str().to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn copies_wait_for_their_sources_conditions() {
+    use aws_sdk_s3control::types::S3CopyObjectOperation;
+    let server = start().await;
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["a.jpg"]).await;
+    root.create_bucket().bucket("copies").send().await.unwrap();
+    role(&server, "copier", TRUST, COPIER);
+    let fields = [JobManifestFieldName::Bucket, JobManifestFieldName::Key];
+    let tomorrow = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    let until = aws_sdk_s3control::primitives::DateTime::from_secs(tomorrow.unix_timestamp());
+
+    // Sources that changed (or didn't) since a time aren't copied.
+    let past = aws_sdk_s3control::primitives::DateTime::from_secs(0);
+    for (token, copy) in [
+        (
+            "e2",
+            S3CopyObjectOperation::builder().modified_since_constraint(until),
+        ),
+        (
+            "e3",
+            S3CopyObjectOperation::builder().un_modified_since_constraint(past),
+        ),
+    ] {
+        let copy = copying(copy.target_key_prefix(token));
+        let done = copy_job(&server, &root, (copy, &["photos,a.jpg"], &fields), token).await;
+        let progress = done.job.unwrap().progress_summary.unwrap();
+        assert_eq!(progress.number_of_tasks_failed, Some(1), "{token}");
+    }
+    // Met, they copy.
+    let copy = copying(S3CopyObjectOperation::builder().un_modified_since_constraint(until));
+    let done = copy_job(&server, &root, (copy, &["photos,a.jpg"], &fields), "e4").await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(1));
+}
