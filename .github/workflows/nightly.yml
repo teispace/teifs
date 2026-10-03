@@ -207,6 +207,22 @@ jobs:
           TEIFS_CRASH_ROUNDS: 200
           TEIFS_CRASH_DIR: ${{ runner.temp }}/lazyfs.mnt/run
           TEIFS_CRASH_POWER: ${{ runner.temp }}/faults.fifo|${{ runner.temp }}/done.fifo
+      - name: Where a stalled round waits
+        # The test's watchdog exits and leaves the writer and LazyFS as they were: their
+        # threads' kernel and user stacks tell a TeiFS deadlock from a stuck FUSE call.
+        if: failure()
+        timeout-minutes: 5
+        run: |
+          sudo apt-get install -y gdb > /dev/null
+          for pid in $(pgrep -f 'deps/crash-') $(pgrep -x lazyfs); do
+            echo "== $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline")"
+            for task in /proc/"$pid"/task/*; do
+              echo "-- $(cat "$task/comm") state $(awk '{print $3}' "$task/stat") in $(sudo cat "$task/wchan")"
+              sudo cat "$task/stack" || true
+            done
+            timeout 60 sudo gdb -p "$pid" -batch -ex 'thread apply all bt' 2>/dev/null \
+              | grep -E '^Thread|^#' | head -400 || true
+          done
       - if: always()
         run: fusermount3 -u "$RUNNER_TEMP/lazyfs.mnt" || true
 
