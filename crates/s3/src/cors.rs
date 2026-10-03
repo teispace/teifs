@@ -533,7 +533,14 @@ impl Service {
         // A client waiting for `100 Continue` hasn't sent the body the answer spares it.
         let continues = header(req.headers(), "expect")
             .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"));
-        let response = self.respond(req, &seen, website).instrument(span).await?;
+        let mut response = self.respond(req, &seen, website).instrument(span).await?;
+        // `MinIO` answers a removed replication configuration with `200`, and minio-go (so
+        // `mc replicate rm`) takes nothing else; AWS's SDKs take any success.
+        if seen.operation() == "DeleteBucketReplication"
+            && response.status() == StatusCode::NO_CONTENT
+        {
+            *response.status_mut() = StatusCode::OK;
+        }
         if !continues {
             observe::drain(&seen).await;
         }

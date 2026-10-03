@@ -1307,6 +1307,7 @@ impl S3 for Drive {
     ) -> S3Result<S3Response<dto::PutBucketVersioningOutput>> {
         let input = req.input;
         let config = input.versioning_configuration;
+        versioning_extras(&config)?;
         // MFA delete needs a hardware token TeiFS has no way to check.
         if config
             .mfa_delete
@@ -3838,6 +3839,18 @@ fn check_complete(
             checksum.algorithm.to_ascii_lowercase()
         )),
     }
+}
+
+/// Refuses `MinIO`'s extensions of a versioning configuration, which TeiFS doesn't carry
+/// out yet: versioning only some prefixes, or not folders.
+pub(crate) fn versioning_extras(config: &dto::VersioningConfiguration) -> S3Result<()> {
+    if config.excluded_prefixes.is_some() || config.exclude_folders == Some(true) {
+        return Err(s3_error!(
+            NotImplemented,
+            "MinIO's ExcludedPrefixes and ExcludeFolders aren't supported yet"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

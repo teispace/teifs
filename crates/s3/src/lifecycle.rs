@@ -51,6 +51,23 @@ pub(crate) fn from_dto(
 }
 
 fn rule_from_dto(rule: dto::LifecycleRule) -> S3Result<LifecycleRule> {
+    // `MinIO`'s extensions, which TeiFS doesn't carry out yet.
+    if rule.del_marker_expiration.is_some() {
+        return Err(s3_error!(
+            NotImplemented,
+            "MinIO's DelMarkerExpiration isn't supported yet"
+        ));
+    }
+    if rule
+        .expiration
+        .as_ref()
+        .is_some_and(|e| e.expired_object_all_versions.is_some())
+    {
+        return Err(s3_error!(
+            NotImplemented,
+            "MinIO's ExpiredObjectAllVersions isn't supported yet"
+        ));
+    }
     let id = match rule.id {
         Some(id) if id.chars().count() > MAX_RULE_ID_LEN => {
             return Err(s3_error!(
@@ -389,6 +406,7 @@ fn rule_to_dto(rule: &LifecycleRule) -> dto::LifecycleRule {
         }),
         noncurrent_version_transitions: None,
         prefix,
+        del_marker_expiration: None,
         status: dto::ExpirationStatus::from_static(if rule.enabled {
             dto::ExpirationStatus::ENABLED
         } else {
@@ -430,13 +448,20 @@ mod tests {
             noncurrent_version_expiration: None,
             noncurrent_version_transitions: None,
             prefix: Some("p/".into()),
+            del_marker_expiration: None,
             status: dto::ExpirationStatus::from_static(dto::ExpirationStatus::ENABLED),
             transitions: None,
         }
     }
 
     fn from_rules(rules: Vec<dto::LifecycleRule>) -> S3Result<Lifecycle> {
-        from_dto(Some(dto::BucketLifecycleConfiguration { rules }), None)
+        from_dto(
+            Some(dto::BucketLifecycleConfiguration {
+                rules,
+                expiry_updated_at: None,
+            }),
+            None,
+        )
     }
 
     fn code(result: S3Result<Lifecycle>) -> String {
@@ -736,7 +761,8 @@ mod tests {
         assert_eq!(
             code(from_dto(
                 Some(dto::BucketLifecycleConfiguration {
-                    rules: vec![rule()]
+                    rules: vec![rule()],
+                    expiry_updated_at: None,
                 }),
                 Some(&size)
             )),
@@ -874,6 +900,7 @@ mod tests {
                     date,
                     days,
                     expired_object_delete_marker: marker,
+                    expired_object_all_versions: None,
                 });
             prop_oneof![4 => one, 1 => any_of]
         }
@@ -907,6 +934,7 @@ mod tests {
                     |(id, enabled, (filter, prefix), expiration, noncurrent, abort)| {
                         dto::LifecycleRule {
                             abort_incomplete_multipart_upload: abort,
+                            del_marker_expiration: None,
                             expiration,
                             filter,
                             id: id.map(str::to_owned),

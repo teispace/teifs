@@ -88,6 +88,10 @@ pub struct ReplicationRule {
     /// given, as in the first version, which replicates them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_markers: Option<bool>,
+    /// Whether deletes of versions by id are replicated too (`MinIO`'s
+    /// `DeleteReplication`; S3 never replicates them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_replication: Option<bool>,
     /// Whether objects from before the rule are replicated (`ExistingObjectReplication`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_objects: Option<bool>,
@@ -225,6 +229,7 @@ mod tests {
             enabled: true,
             filter,
             delete_markers,
+            delete_replication: None,
             existing_objects: None,
             sse_kms_objects: None,
             replica_modifications: None,

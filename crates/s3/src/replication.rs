@@ -161,6 +161,10 @@ fn rule(rule: dto::ReplicationRule) -> S3Result<ReplicationRule> {
         enabled: enabled(rule.status.as_str())?,
         filter,
         delete_markers,
+        delete_replication: rule
+            .delete_replication
+            .map(|d| enabled(d.status.as_str()))
+            .transpose()?,
         existing_objects: rule
             .existing_object_replication
             .map(|e| enabled(e.status.as_str()))
@@ -179,7 +183,20 @@ fn tag(tag: dto::Tag) -> S3Result<Tag> {
 }
 
 fn filter_of(filter: dto::ReplicationRuleFilter) -> S3Result<ReplicationFilter> {
-    match (filter.prefix, filter.tag, filter.and) {
+    // minio-go (`mc replicate add`) writes every element of a filter, the empty ones too:
+    // an `And` or a `Tag` with nothing in it says nothing, and an empty `Prefix` beside
+    // either says nothing more, as `MinIO` reads them.
+    let and = filter.and.filter(|a| {
+        a.prefix.as_deref().is_some_and(|p| !p.is_empty())
+            || a.tags.as_ref().is_some_and(|t| !t.is_empty())
+    });
+    let one_tag = filter
+        .tag
+        .filter(|t| t.key.as_deref().is_some_and(|k| !k.is_empty()) || t.value.is_some());
+    let prefix = filter
+        .prefix
+        .filter(|p| !p.is_empty() || (and.is_none() && one_tag.is_none()));
+    match (prefix, one_tag, and) {
         (None, None, None) => Ok(ReplicationFilter::All),
         (Some(prefix), None, None) => Ok(ReplicationFilter::Prefix(prefix)),
         (None, Some(t), None) => Ok(ReplicationFilter::Tag(tag(t)?)),
@@ -397,6 +414,9 @@ fn rule_dto(rule: &ReplicationRule) -> dto::ReplicationRule {
     dto::ReplicationRule {
         delete_marker_replication: rule.delete_markers.map(|on| dto::DeleteMarkerReplication {
             status: Some(dto::DeleteMarkerReplicationStatus::from_static(status(on))),
+        }),
+        delete_replication: rule.delete_replication.map(|on| dto::DeleteReplication {
+            status: dto::DeleteReplicationStatus::from_static(status(on)),
         }),
         destination: dto::Destination {
             access_control_translation: d.owner_override.then(|| dto::AccessControlTranslation {

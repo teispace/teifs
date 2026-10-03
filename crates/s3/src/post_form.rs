@@ -436,6 +436,7 @@ pub(crate) fn into_put(
         storage_class: x.storage_class,
         website_redirect_location: x.website_redirect_location,
         write_offset_bytes: x.write_offset_bytes,
+        version_id: None,
     }
 }
 

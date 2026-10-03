@@ -151,7 +151,10 @@ fn bucket_files(
     }
     if let Some(config) = &settings.lifecycle {
         let rules = lifecycle::to_dto(config).rules.unwrap_or_default();
-        let config = dto::BucketLifecycleConfiguration { rules };
+        let config = dto::BucketLifecycleConfiguration {
+            rules,
+            expiry_updated_at: None,
+        };
         files.push((LIFECYCLE, xml(&config)?));
     }
     if let Some(config) = &settings.encryption {
@@ -324,6 +327,7 @@ async fn setting(
         }
         VERSIONING => {
             let config: dto::VersioningConfiguration = parse_xml(bytes)?;
+            crate::drive::versioning_extras(&config)?;
             let name = match config
                 .status
                 .as_ref()

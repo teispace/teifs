@@ -508,6 +508,7 @@ impl Import<'_> {
         let config = lifecycle::from_dto(
             Some(dto::BucketLifecycleConfiguration {
                 rules: lifecycle::to_dto(&config).rules.unwrap_or_default(),
+                expiry_updated_at: None,
             }),
             size.as_ref(),
         )?;

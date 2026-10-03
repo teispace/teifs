@@ -467,6 +467,7 @@ mod tests {
                 enabled: true,
                 filter: ReplicationFilter::All,
                 delete_markers: Some(false),
+                delete_replication: None,
                 existing_objects: None,
                 sse_kms_objects: None,
                 replica_modifications: None,

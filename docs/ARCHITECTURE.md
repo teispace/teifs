@@ -362,7 +362,11 @@ quotas, `quota.rs`; replication targets, `replication_targets.rs`) are `Api::Min
 (`/minio/admin/v3/…`, and `v4` taken as `v3`), matched only path-style, so a bucket named
 `minio` keeps its keys; they're decided with `MinIO`'s `admin:*` actions on the bucket
 their query names (`Needs::OnQueryBucket`, or `Needs::OnQueryBucketWith` naming the other
-parameters the query may have) and answer `MinIO`'s JSON errors. Users,
+parameters the query may have) and answer `MinIO`'s JSON errors. s3s is built with its
+`minio` feature, so it reads `MinIO`'s extensions of S3's XML as `mc` sends them
+(`DeleteReplication`, lifecycle and versioning extras); those TeiFS doesn't carry out yet
+are refused with `501`, never ignored, and the outer service (`cors.rs`) answers
+`DeleteBucketReplication` with `MinIO`'s `200`, which minio-go needs. Users,
 groups and canned policies (`minio_iam.rs`) are decided with `MinIO`'s admin actions
 (`Needs::Action`, or `Needs::OrOwnKey` and `Needs::NotDenied` for a call on the caller's
 own key, `Needs::Signed` for `accountinfo`, which answers about the caller alone) and
