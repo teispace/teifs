@@ -100,6 +100,17 @@ pub async fn restart(server: Server, adjust: impl FnOnce(&mut Config)) -> Server
     serve(dir, keys, config).await
 }
 
+/// Stops `server` and waits until it has let go of its drive.
+pub async fn stop(server: Server) {
+    let Server {
+        _stop: stop,
+        running,
+        ..
+    } = server;
+    drop(stop);
+    let _ = running.await;
+}
+
 async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
     // Boxed: a server's start is a large future, and so would every test's be.
     let server = Box::pin(TeiFS::bind(config)).await.unwrap();

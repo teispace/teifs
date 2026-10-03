@@ -1,0 +1,520 @@
+{
+  "about": "A drive written by TeiFS format 2 through the S3 and admin APIs (tests/format_fixtures.rs), with its keyring; `description` is what those APIs said about it.",
+  "description": {
+    "buckets": {
+      "buckets": [
+        {
+          "layout": "folder",
+          "name": "files",
+          "settings": {
+            "ownership": "BucketOwnerEnforced",
+            "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"logging.s3.amazonaws.com\"},\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::files/logs/*\"}]}",
+            "publicAccessBlock": {
+              "blockPublicAcls": true,
+              "blockPublicPolicy": true,
+              "ignorePublicAcls": true,
+              "restrictPublicBuckets": true
+            }
+          },
+          "versioning": "unversioned"
+        },
+        {
+          "layout": "folder",
+          "name": "history",
+          "settings": {
+            "ownership": "BucketOwnerEnforced",
+            "publicAccessBlock": {
+              "blockPublicAcls": true,
+              "blockPublicPolicy": true,
+              "ignorePublicAcls": true,
+              "restrictPublicBuckets": true
+            }
+          },
+          "versioning": "enabled"
+        },
+        {
+          "layout": "object",
+          "name": "locked",
+          "settings": {
+            "objectLock": {
+              "defaultRetention": {
+                "mode": "GOVERNANCE",
+                "period": {
+                  "days": 1
+                }
+              }
+            },
+            "ownership": "BucketOwnerEnforced",
+            "publicAccessBlock": {
+              "blockPublicAcls": true,
+              "blockPublicPolicy": true,
+              "ignorePublicAcls": true,
+              "restrictPublicBuckets": true
+            }
+          },
+          "versioning": "enabled"
+        },
+        {
+          "layout": "object",
+          "name": "objects",
+          "settings": {
+            "cors": [
+              {
+                "allowedMethods": [
+                  "GET"
+                ],
+                "allowedOrigins": [
+                  "https://example.com"
+                ],
+                "maxAgeSeconds": 600
+              }
+            ],
+            "lifecycle": {
+              "rules": [
+                {
+                  "enabled": true,
+                  "expiration": {
+                    "days": 3650
+                  },
+                  "filter": {
+                    "filter": {
+                      "prefix": "logs/"
+                    }
+                  },
+                  "id": "old-logs"
+                }
+              ]
+            },
+            "logging": {
+              "targetBucket": "files",
+              "targetPrefix": "logs/"
+            },
+            "ownership": "BucketOwnerEnforced",
+            "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":\"*\",\"Action\":\"s3:DeleteBucket\",\"Resource\":\"arn:aws:s3:::objects\"}]}",
+            "publicAccessBlock": {
+              "blockPublicAcls": true,
+              "blockPublicPolicy": false,
+              "ignorePublicAcls": true,
+              "restrictPublicBuckets": false
+            },
+            "tags": {
+              "owner": "fixtures"
+            }
+          },
+          "versioning": "unversioned"
+        }
+      ],
+      "format": 1
+    },
+    "iam": {
+      "account": "717164912792",
+      "format": "teifs-iam/1",
+      "groups": [
+        {
+          "attached": [
+            "readers"
+          ],
+          "inline": {},
+          "name": "team",
+          "path": "/"
+        }
+      ],
+      "oidcProviders": [],
+      "policies": [
+        {
+          "description": "Reads every bucket",
+          "name": "readers",
+          "path": "/",
+          "tags": [],
+          "versions": [
+            {
+              "document": "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":\"*\"}}",
+              "isDefault": true
+            }
+          ]
+        }
+      ],
+      "roles": [],
+      "users": [
+        {
+          "accessKeys": [
+            {
+              "active": true,
+              "createdMs": 1791002305347,
+              "id": "TKIA6OUKTV3UKIP4XURX"
+            }
+          ],
+          "attached": [],
+          "boundary": null,
+          "groups": [
+            "team"
+          ],
+          "inline": {
+            "own-folder": "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"arn:aws:s3:::files/alice/*\"}}"
+          },
+          "name": "alice",
+          "path": "/",
+          "tags": []
+        }
+      ]
+    },
+    "objects": {
+      "files": [
+        {
+          "contentType": "application/x-directory",
+          "etag": "\"d41d8cd98f00b204e9800998ecf8427e\"",
+          "key": "empty/",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "1B2M2Y8AsgTpgAmY7PhCfg==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 0,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "text/plain; charset=utf-8",
+          "etag": "\"5eb63bbbe01eeed093cb22bb8f5acdc3\"",
+          "key": "notes/hello world+ü.txt",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "XrY7u+Ae7tCTyyK7j1rNww==",
+          "metadata": {
+            "topic": "fixtures"
+          },
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 11,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "application/octet-stream",
+          "etag": "\"47693b6aafc99e607a33f321da4dc903-2\"",
+          "key": "video.bin",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "0tQAkTCu8tacfNC6G/4JKA==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 5242884,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        }
+      ],
+      "history": [
+        {
+          "contentType": "text/plain",
+          "etag": "\"e9e2371570daec2e7b70faa4f0f1eab8\"",
+          "key": "a.txt",
+          "latest": false,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "6eI3FXDa7C57cPqk8PHquA==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 13,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e630f7085a607442203faa91b"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"f084be37ed84e9d0d2a02d4d4be59745\"",
+          "key": "a.txt",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "8IS+N+2E6dDSoC1NS+WXRQ==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 14,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e631a7454be4e7ebda9fbdf30"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"558a4b7410aae56d74969255b36557af\"",
+          "key": "a.txt",
+          "latest": false,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "8IS+N+2E6dDSoC1NS+WXRQ==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 17,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"da602f0b162fccbf6b150cfcfc7a7379\"",
+          "key": "b/c.txt",
+          "latest": false,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "2mAvCxYvzL9rFQz8/HpzeQ==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": null,
+          "size": 7,
+          "sse": null,
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e632a77c990f10c989c62dc10"
+        },
+        {
+          "deleteMarker": true,
+          "key": "b/c.txt",
+          "latest": true,
+          "modified": 1791002305,
+          "versionId": "01a1000e632f72cc8dc096112224268e"
+        }
+      ],
+      "locked": [
+        {
+          "contentType": "text/plain",
+          "etag": "\"f97c5d29941bfb1b2fdab0874906ab82\"",
+          "key": "doc.txt",
+          "latest": false,
+          "legalHold": "ON",
+          "lockMode": "COMPLIANCE",
+          "md5": "+XxdKZQb+xsv2rCHSQargg==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": 4070908800,
+          "size": 3,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e62d0777a95277873445956a1"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"b8a9f715dbb64fd5c56e7783c6820a61\"",
+          "key": "doc.txt",
+          "latest": false,
+          "legalHold": null,
+          "lockMode": "GOVERNANCE",
+          "md5": "uKn3Fdu2T9XFbneDxoIKYQ==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": 1791088705,
+          "size": 3,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e62d57452a0de2998196bae0c"
+        },
+        {
+          "deleteMarker": true,
+          "key": "doc.txt",
+          "latest": false,
+          "modified": 1791002305,
+          "versionId": "01a1000e62e37267a8cef5b391d4057d"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"35d6d33467aae9a2e3dccb4b6b027878\"",
+          "key": "doc.txt",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": "GOVERNANCE",
+          "md5": "NdbTNGeq6aLj3MtLawJ4eA==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": 1791088705,
+          "size": 5,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e62e774c9ba083545af9d2b9d"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"67550482e69ee112f54336cfbea52c94\"",
+          "key": "gone.txt",
+          "latest": false,
+          "legalHold": null,
+          "lockMode": "GOVERNANCE",
+          "md5": "Z1UEguae4RL1QzbPvqUslA==",
+          "metadata": {},
+          "modified": 1791002305,
+          "retainUntil": 1791088705,
+          "size": 9,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "01a1000e62ed73f59fc5210f8dad3e83"
+        },
+        {
+          "deleteMarker": true,
+          "key": "gone.txt",
+          "latest": true,
+          "modified": 1791002305,
+          "versionId": "01a1000e62f172f5a9d7949b13bd4e82"
+        }
+      ],
+      "objects": [
+        {
+          "contentType": "application/octet-stream",
+          "etag": "\"3a5f17e636614ac97a0060eb6a238202\"",
+          "key": "customer.bin",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "d2AgCh8RnRysYNFRwp20sg==",
+          "metadata": {},
+          "modified": 1791002304,
+          "retainUntil": null,
+          "size": 24,
+          "sse": null,
+          "sseCustomer": "AES256",
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "application/octet-stream",
+          "etag": "\"f8538691d5889b475519b3120a8a1281\"",
+          "key": "data/big.bin",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "+FOGkdWIm0dVGbMSCooSgQ==",
+          "metadata": {},
+          "modified": 1791002304,
+          "retainUntil": null,
+          "size": 40000,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "application/octet-stream",
+          "etag": "\"e91584068f6645005922dd8e25287754\"",
+          "key": "kms.bin",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "wdF8onLfkoX3D0UTqHHwFQ==",
+          "metadata": {},
+          "modified": 1791002304,
+          "retainUntil": null,
+          "size": 19,
+          "sse": "aws:kms",
+          "sseCustomer": null,
+          "tags": {},
+          "versionId": "null"
+        },
+        {
+          "contentType": "text/plain",
+          "etag": "\"1954de492bc4db42caefa9b4273a19ef\"",
+          "key": "small.txt",
+          "latest": true,
+          "legalHold": null,
+          "lockMode": null,
+          "md5": "GVTeSSvE20LK76m0JzoZ7w==",
+          "metadata": {
+            "author": "fixture"
+          },
+          "modified": 1791002304,
+          "retainUntil": null,
+          "size": 13,
+          "sse": "AES256",
+          "sseCustomer": null,
+          "tags": {
+            "kind": "note",
+            "team": "storage"
+          },
+          "versionId": "null"
+        }
+      ]
+    },
+    "uploads": {
+      "files": [],
+      "history": [],
+      "locked": [],
+      "objects": [
+        {
+          "key": "unfinished.bin",
+          "parts": [
+            {
+              "etag": "\"cc84343249cac6c1c6752f06a3c43a8f\"",
+              "number": 1,
+              "size": 14
+            }
+          ],
+          "uploadId": "2f071282c8924e619284199bb2ae8f26"
+        }
+      ]
+    }
+  },
+  "mtimesNs": {
+    "drive": 1791002305271211690,
+    "drive/.teifs": 1791002305558585981,
+    "drive/.teifs/access-logs": 1791002305534342515,
+    "drive/.teifs/access-logs/objects": 1791002305534413560,
+    "drive/.teifs/access-logs/objects/1791002305533-86753d9a82b4450c8e018c6505eedeba.log": 1791002305548589122,
+    "drive/.teifs/backups": 1791002304925060224,
+    "drive/.teifs/backups/auto": 1791002304946837131,
+    "drive/.teifs/backups/auto/20261003T043824.924Z": 1791002304943616426,
+    "drive/.teifs/backups/auto/20261003T043824.924Z/index.db": 1791002304929583520,
+    "drive/.teifs/backups/auto/20261003T043824.924Z/snapshot.json": 1791002304943701763,
+    "drive/.teifs/backups/auto/20261003T043824.924Z/system.db": 1791002304939558773,
+    "drive/.teifs/buckets": 1791002305295971918,
+    "drive/.teifs/buckets/42a87400bace43a187d5b8e3f2bce204": 1791002305221944327,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030": 1791002305327573946,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/03": 1791002305327637574,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/03/94": 1791002305328141093,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/03/94/01a1000e632f72cc8dc09612e11f0394": 1791002305318436101,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/5a": 1791002305296128299,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/5a/8c": 1791002305296495271,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/5a/8c/01a1000e630f7085a6074423ea0c5a8c": 1791002305280652047,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/7b": 1791002305307077588,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/7b/c7": 1791002305307410892,
+    "drive/.teifs/buckets/6892d4ad81644fbfb4d1b80385acc030/7b/c7/01a1000e631a7454be4e7ebe25907bc7": 1791002305294148265,
+    "drive/.teifs/buckets/e7f3956a72a748e0aa43014c634aedf0": 1791002304952294087,
+    "drive/.teifs/buckets/e7f3956a72a748e0aa43014c634aedf0/24": 1791002304952349298,
+    "drive/.teifs/buckets/e7f3956a72a748e0aa43014c634aedf0/24/50": 1791002304952477178,
+    "drive/.teifs/buckets/e7f3956a72a748e0aa43014c634aedf0/24/50/01a1000e61b370008c2517f2b7a42450": 1791002304949373852,
+    "drive/.teifs/format.json": 1791002304669005333,
+    "drive/.teifs/index.db": 1791002305549127725,
+    "drive/.teifs/lock": 1791002304667626030,
+    "drive/.teifs/system.db": 1791002305553836227,
+    "drive/.teifs/tmp": 1791002305322394542,
+    "drive/.teifs/tmp/73395473-0eee-4c27-a787-dcdfa3508857": 1791002305034868460,
+    "drive/.teifs/uploads": 1791002305220527731,
+    "drive/.teifs/uploads/2f071282c8924e619284199bb2ae8f26": 1791002304978111980,
+    "drive/.teifs/uploads/2f071282c8924e619284199bb2ae8f26/1": 1791002304974496010,
+    "drive/files": 1791002305209632944,
+    "drive/files/empty": 1791002305034986840,
+    "drive/files/notes": 1791002305028396090,
+    "drive/files/notes/hello world+ü.txt": 1791002305022899716,
+    "drive/files/video.bin": 1791002305205983973,
+    "drive/history": 1791002305340001416,
+    "drive/history/a.txt": 1791002305305489944,
+    "keys": 1791002304666638118,
+    "keys/keyring.json": 1791002304666713454
+  }
+}

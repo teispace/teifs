@@ -706,7 +706,10 @@ steps, items and last error are kept for `teifs status`.
 ## Tests
 
 - Unit tests sit beside the code (`#[cfg(test)] mod tests`).
-- `crates/store/tests/format.rs` opens a drive written by every earlier on-disk format.
+- `crates/store/tests/format.rs` opens a drive written by every earlier on-disk format;
+  `crates/server/tests/format_fixtures.rs` opens one written through the S3 and admin APIs
+  by each format since 2, and checks that every object, version, setting and IAM entity
+  reads back as it did.
 - `crates/server/tests/sdk.rs` runs a real server and drives it with the official AWS
   SDK for Rust: signed requests, chunked bodies with trailer checksums, multipart,
   presigned URLs.

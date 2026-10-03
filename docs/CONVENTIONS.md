@@ -50,7 +50,7 @@ in the pull request.
 Anything that changes what's written in `.teifs/` or how files are laid out is a format
 change: bump the version in `crates/store/src/format.rs`, add the upgrade, update
 [ON_DISK_FORMAT.md](ON_DISK_FORMAT.md), and add a fixture drive written by the release
-before the change. Database schema changes add a migration at the end of the list; never
+before the change (`crates/server/tests/format_fixtures.rs` writes it). Database schema changes add a migration at the end of the list; never
 edit a released migration.
 
 ## S3 behaviour

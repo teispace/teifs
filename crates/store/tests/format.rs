@@ -3,7 +3,8 @@
 //!
 //! `fixtures/format-<n>.tar.gz` holds a drive written by the release that used format
 //! `<n>`, and `format-<n>.json` what it contains. Every released format keeps its fixture,
-//! so each build proves it can still open every drive ever written.
+//! so each build proves it can still open every drive ever written. From format 2 on, the
+//! fixtures are written through the S3 API and checked in `crates/server/tests/format_fixtures.rs`.
 
 #![allow(
     clippy::unwrap_used,

@@ -2,8 +2,9 @@
 
 This is the specification of how TeiFS stores a drive. It's a contract: any change to it
 bumps the format version, and every release can open every drive any earlier release
-wrote. `crates/store/src/format.rs` enforces it and `crates/store/tests/format.rs` proves
-it against a drive written by each released format.
+wrote. `crates/store/src/format.rs` enforces it and `crates/store/tests/format.rs` and
+`crates/server/tests/format_fixtures.rs` prove it against a drive written by each released
+format.
 
 ## Current format: 2
 
