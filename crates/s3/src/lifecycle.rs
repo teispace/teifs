@@ -755,4 +755,221 @@ mod tests {
             r#"expiry-date="Sun, 23 Dec 2012 00:00:00 GMT", rule-id="a \"b\"""#
         );
     }
+
+    /// Whatever a configuration holds, once accepted it answers as it was given: a client
+    /// that gets it and puts the answer back (through s3s's XML both ways) puts the same
+    /// configuration, and the store keeps it as it was.
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        fn text() -> impl Strategy<Value = String> {
+            prop::sample::select(vec!["", "a", "a/", "logs/", "é", " ", "a b", "<&>", "k:v"])
+                .prop_map(str::to_owned)
+        }
+
+        /// Mostly valid: a key, and a value.
+        fn tag() -> impl Strategy<Value = dto::Tag> {
+            prop_oneof![
+                8 => (text(), text()).prop_map(|(key, value)| dto::Tag {
+                    key: Some(format!("k{key}")),
+                    value: Some(value),
+                }),
+                1 => (prop::option::of(text()), prop::option::of(text()))
+                    .prop_map(|(key, value)| dto::Tag { key, value }),
+            ]
+        }
+
+        fn size() -> impl Strategy<Value = Option<i64>> {
+            prop_oneof![
+                4 => Just(None),
+                4 => (0..3i64).prop_map(Some),
+                1 => prop_oneof![Just(-1i64), Just(i64::MAX)].prop_map(Some),
+            ]
+        }
+
+        /// Mostly one condition, as S3 requires; sometimes several.
+        fn filter() -> impl Strategy<Value = dto::LifecycleRuleFilter> {
+            let and = (
+                prop::option::of(text()),
+                prop::option::of(prop::collection::vec(tag(), 0..3)),
+                size(),
+                size(),
+            )
+                .prop_map(|(prefix, tags, greater, less)| dto::LifecycleRuleFilter {
+                    and: Some(dto::LifecycleRuleAndOperator {
+                        prefix,
+                        tags,
+                        object_size_greater_than: greater,
+                        object_size_less_than: less,
+                    }),
+                    ..Default::default()
+                });
+            let one = prop_oneof![
+                Just(dto::LifecycleRuleFilter::default()),
+                text().prop_map(|prefix| dto::LifecycleRuleFilter {
+                    prefix: Some(prefix),
+                    ..Default::default()
+                }),
+                tag().prop_map(|tag| dto::LifecycleRuleFilter {
+                    tag: Some(tag),
+                    ..Default::default()
+                }),
+                (size(), size()).prop_map(|(greater, less)| dto::LifecycleRuleFilter {
+                    object_size_greater_than: greater,
+                    object_size_less_than: less,
+                    ..Default::default()
+                }),
+            ];
+            let several = (prop::option::of(text()), prop::option::of(tag()), size()).prop_map(
+                |(prefix, tag, greater)| dto::LifecycleRuleFilter {
+                    prefix,
+                    tag,
+                    object_size_greater_than: greater,
+                    ..Default::default()
+                },
+            );
+            prop_oneof![4 => one, 4 => and, 1 => several]
+        }
+
+        fn days() -> impl Strategy<Value = Option<i32>> {
+            prop_oneof![
+                1 => Just(None),
+                6 => (1..4).prop_map(Some),
+                1 => prop_oneof![Just(-1), Just(0), Just(i32::MAX)].prop_map(Some),
+            ]
+        }
+
+        /// Midnight or not, before 1970 or after.
+        fn date() -> impl Strategy<Value = dto::Timestamp> {
+            (prop_oneof![-2..20_000i64], prop::bool::weighted(0.1)).prop_map(|(day, late)| {
+                let seconds = day * 86_400 + i64::from(late) * 3_600;
+                dto::Timestamp::from(time::OffsetDateTime::from_unix_timestamp(seconds).unwrap())
+            })
+        }
+
+        /// Mostly one of a date, days or the delete-marker flag.
+        fn expiration() -> impl Strategy<Value = dto::LifecycleExpiration> {
+            let one = prop_oneof![
+                date().prop_map(|date| dto::LifecycleExpiration {
+                    date: Some(date),
+                    ..Default::default()
+                }),
+                days().prop_map(|days| dto::LifecycleExpiration {
+                    days,
+                    ..Default::default()
+                }),
+                any::<bool>().prop_map(|marker| dto::LifecycleExpiration {
+                    expired_object_delete_marker: Some(marker),
+                    ..Default::default()
+                }),
+            ];
+            let any_of = (
+                prop::option::of(date()),
+                days(),
+                prop::option::of(any::<bool>()),
+            )
+                .prop_map(|(date, days, marker)| dto::LifecycleExpiration {
+                    date,
+                    days,
+                    expired_object_delete_marker: marker,
+                });
+            prop_oneof![4 => one, 1 => any_of]
+        }
+
+        fn rule() -> impl Strategy<Value = dto::LifecycleRule> {
+            let noncurrent = (prop::option::of(1..4i32), days()).prop_map(|(newer, days)| {
+                dto::NoncurrentVersionExpiration {
+                    newer_noncurrent_versions: newer,
+                    noncurrent_days: days,
+                }
+            });
+            let abort = days().prop_map(|days| dto::AbortIncompleteMultipartUpload {
+                days_after_initiation: days,
+            });
+            // A rule filters with a filter, with the older prefix, or not at all.
+            let scope = prop_oneof![
+                4 => filter().prop_map(|filter| (Some(filter), None)),
+                2 => text().prop_map(|prefix| (None, Some(prefix))),
+                1 => Just((None, None)),
+                1 => (filter(), text()).prop_map(|(filter, prefix)| (Some(filter), Some(prefix))),
+            ];
+            (
+                prop::option::of(prop::sample::select(vec!["", "r", "é <&>"])),
+                any::<bool>(),
+                scope,
+                prop::option::of(expiration()),
+                prop::option::of(noncurrent),
+                prop::option::of(abort),
+            )
+                .prop_map(
+                    |(id, enabled, (filter, prefix), expiration, noncurrent, abort)| {
+                        dto::LifecycleRule {
+                            abort_incomplete_multipart_upload: abort,
+                            expiration,
+                            filter,
+                            id: id.map(str::to_owned),
+                            noncurrent_version_expiration: noncurrent,
+                            noncurrent_version_transitions: None,
+                            prefix,
+                            status: dto::ExpirationStatus::from_static(if enabled {
+                                dto::ExpirationStatus::ENABLED
+                            } else {
+                                dto::ExpirationStatus::DISABLED
+                            }),
+                            transitions: None,
+                        }
+                    },
+                )
+        }
+
+        /// What a client puts after getting `lifecycle`: the answer's XML, read as a
+        /// request's body.
+        fn put_back(lifecycle: &Lifecycle) -> S3Result<Lifecycle> {
+            use s3s::xml::{Deserialize, Serialize};
+            let mut xml = Vec::new();
+            to_dto(lifecycle)
+                .serialize(&mut s3s::xml::Serializer::new(&mut xml))
+                .unwrap();
+            let mut d = s3s::xml::Deserializer::new(&xml);
+            let config = dto::BucketLifecycleConfiguration::deserialize(&mut d).unwrap();
+            d.expect_eof().unwrap();
+            let minimum = minimum_size(lifecycle);
+            from_dto(Some(config), Some(&minimum))
+        }
+
+        proptest! {
+            // About one in seven random configurations is valid: enough cases for a few
+            // hundred valid ones.
+            #![proptest_config(ProptestConfig::with_cases(2048))]
+
+            #[test]
+            fn an_accepted_configuration_reads_back_as_it_was_given(
+                rules in prop::collection::vec(rule(), 1..4),
+            ) {
+                // Rule ids must be unique: most get their place appended.
+                let rules = rules
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut rule)| {
+                        if let Some(id) = rule.id.as_mut().filter(|id| id.as_str() != "r") {
+                            id.push_str(&i.to_string());
+                        }
+                        rule
+                    })
+                    .collect::<Vec<_>>();
+                let Ok(lifecycle) = from_rules(rules) else { return Ok(()) };
+                let again = put_back(&lifecycle);
+                prop_assert!(again.is_ok(), "{lifecycle:?} put back: {again:?}");
+                let again = again.unwrap();
+                // Unnamed rules were named; the defaults were spelled out.
+                let lifecycle = Lifecycle { transition_minimum_size: again.transition_minimum_size.clone(), ..lifecycle };
+                prop_assert_eq!(&again, &lifecycle);
+                let json = serde_json::to_string(&lifecycle).unwrap();
+                let kept: Lifecycle = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(kept, lifecycle);
+            }
+        }
+    }
 }
