@@ -635,3 +635,47 @@ async fn versions_a_destination_cant_take_fail() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn folder_buckets_replicate_and_take_replicas() {
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    buckets(&s3).await;
+    put(&s3, config(vec![rule("r", 1).build().unwrap()]))
+        .await
+        .unwrap();
+    let mut written = Vec::new();
+    for body in [&b"one"[..], b"two"] {
+        let put = s3
+            .put_object()
+            .bucket("source")
+            .key("docs/a.txt")
+            .body(body.to_vec().into())
+            .send()
+            .await
+            .unwrap();
+        written.push(put.version_id().unwrap().to_owned());
+    }
+    assert_eq!(
+        settled(&s3, "source", "docs/a.txt").await.as_deref(),
+        Some("COMPLETED")
+    );
+    let versions = s3
+        .list_object_versions()
+        .bucket("copy")
+        .send()
+        .await
+        .unwrap();
+    let mut ids: Vec<_> = versions
+        .versions()
+        .iter()
+        .map(|v| (v.version_id().unwrap().to_owned(), v.is_latest().unwrap()))
+        .collect();
+    ids.sort();
+    let mut expected = vec![(written[0].clone(), false), (written[1].clone(), true)];
+    expected.sort();
+    assert_eq!(ids, expected);
+    // The replica is a file, its contents the latest version's.
+    let file = server.dir.path().join("copy").join("docs").join("a.txt");
+    assert_eq!(std::fs::read(file).unwrap(), b"two");
+}

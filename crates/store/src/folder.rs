@@ -17,7 +17,7 @@ use crate::{
     body::Data,
     error::{Result, not_found_as},
     md5_file,
-    objects::{ObjectBucket, PartsRecord},
+    objects::{ObjectBucket, PartsRecord, Replica},
     staged::{Publish, TmpFile, publish},
 };
 
@@ -342,9 +342,19 @@ impl Inner {
         attrs: ObjectAttrs,
         parts: Option<String>,
         precondition: &Precondition,
+        replica: Option<&Replica>,
     ) -> Result<ObjectInfo> {
-        let (info, replaced) =
-            self.place_file(conn, bucket, key, tmp, etag, attrs, parts, precondition)?;
+        let (info, replaced) = self.place_file(
+            conn,
+            bucket,
+            key,
+            tmp,
+            etag,
+            attrs,
+            parts,
+            precondition,
+            replica,
+        )?;
         if let Some(versions) = bucket.versioned() {
             Inner::remove_data_files(conn, versions, &replaced);
         }
@@ -352,7 +362,9 @@ impl Inner {
     }
 
     /// Does what [`Inner::commit_file`] does, but leaves the data files of older versions
-    /// it replaced (queued as garbage) for the caller to remove: their ids.
+    /// it replaced (queued as garbage) for the caller to remove: their ids. A `replica`
+    /// keeps the id and time of the version it copies (the file's modification time),
+    /// and needs versioning enabled.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn place_file(
         &self,
@@ -364,7 +376,13 @@ impl Inner {
         mut attrs: ObjectAttrs,
         parts: Option<String>,
         precondition: &Precondition,
+        replica: Option<&Replica>,
     ) -> Result<(ObjectInfo, Vec<String>)> {
+        if replica.is_some() && bucket.versioning() != Versioning::Enabled {
+            return Err(StoreError::InvalidRequest(
+                "a replica needs a bucket with versioning enabled",
+            ));
+        }
         let dir = &bucket.dir;
         let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
@@ -373,11 +391,14 @@ impl Inner {
             key.as_str(),
             &mut attrs,
             false,
-            false,
+            replica.is_some(),
         )?;
         let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
-        let version_id = bucket.new_version_id();
+        let version_id = match replica {
+            Some(replica) => Some(replica.version_id.clone()),
+            None => bucket.new_version_id(),
+        };
         let archived = match (&current, bucket.versioned()) {
             (Some(_), Some(_)) => {
                 let meta = fs::metadata(&path)?;
@@ -404,6 +425,14 @@ impl Inner {
             } else {
                 err.into()
             });
+        }
+        if let Some(replica) = replica {
+            // The file's time is the version's, as the index records it.
+            let millis = u64::try_from(replica.modified_ms).unwrap_or_default();
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(millis))?;
         }
         self.sync_folder(&parent)?;
         let meta = fs::metadata(&path)?;
@@ -571,6 +600,7 @@ impl Inner {
             attrs,
             parts,
             precondition,
+            None,
         )?;
         tmp.keep();
         Ok(info)

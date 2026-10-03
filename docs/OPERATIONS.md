@@ -1208,8 +1208,9 @@ version keeps where it stands, so nothing is lost). Both buckets must keep versi
 copy is a *replica*: the same version id, last-modified time, metadata, tags and Object
 Lock settings, marked `REPLICA` and not replicated again. `x-amz-replication-status`
 on the source says `PENDING` until every destination has it, then `COMPLETED`, or
-`FAILED` when a destination can't take it (it was removed, its versioning suspended, or
-it's a folder bucket, which doesn't take replicas yet). Objects encrypted with SSE-C
+`FAILED` when a destination can't take it (it was removed, or its versioning
+suspended). In a folder bucket a replica is a plain file like any other, its
+modification time the version's. Objects encrypted with SSE-C
 fail: the server never holds their keys. Destinations on other S3 services are
 replication targets (below): each version goes there as a `PutObject` signed with the
 target's keys, streamed with its `Content-MD5`, or as a multipart upload above 5 GiB. A

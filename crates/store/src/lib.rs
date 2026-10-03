@@ -818,9 +818,6 @@ impl Store {
                 parts: None,
                 replica,
             };
-            if finished.replica.is_some() && !matches!(bucket, Bucket::Object(_)) {
-                return Err(StoreError::InvalidRequest("replicas need an object bucket"));
-            }
             if let Bucket::Object(object_bucket) = &bucket {
                 // The data file goes in place (and is synced) before the commit lock;
                 // only recording it needs the lock.
@@ -831,6 +828,7 @@ impl Store {
             // A folder bucket's file is ours alone until it's renamed into place: synced
             // before the lock, then renamed and recorded with whatever else is waiting.
             if let Bucket::Folder(..) = &bucket
+                && finished.replica.is_none()
                 && finished.sealed.is_none()
                 && stored_len == finished.size
                 && !inner.new_key(&key)?.is_folder()
@@ -1525,6 +1523,12 @@ impl Inner {
                             "a folder (a key ending in `/`) can't have content",
                         ));
                     }
+                    // A folder has no versions to keep.
+                    if finished.replica.is_some() {
+                        return Err(StoreError::InvalidRequest(
+                            "a folder (a key ending in `/`) can't be a replica",
+                        ));
+                    }
                     return self.make_folder(conn, bucket, &key, finished.attrs, precondition);
                 }
                 // A copied file may have leftovers (an object bucket's footer) to cut off.
@@ -1543,6 +1547,7 @@ impl Inner {
                     finished.attrs,
                     parts,
                     precondition,
+                    finished.replica.as_ref(),
                 )
             }
             Bucket::Object(bucket) => self.commit_object(conn, bucket, key, finished, precondition),

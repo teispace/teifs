@@ -129,10 +129,6 @@ async fn replicas_go_only_where_versions_are_kept() {
     let store = Store::open(dir.path()).unwrap();
     store.create_bucket("plain", Layout::Object).await.unwrap();
     store.create_bucket("files", Layout::Folder).await.unwrap();
-    store
-        .set_bucket_versioning("files", Versioning::Enabled)
-        .await
-        .unwrap();
     for bucket in ["plain", "files"] {
         assert!(
             matches!(
@@ -142,4 +138,82 @@ async fn replicas_go_only_where_versions_are_kept() {
             "{bucket}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_folder_bucket_keeps_a_replicas_version_as_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.create_bucket("files", Layout::Folder).await.unwrap();
+    store
+        .set_bucket_versioning("files", Versioning::Enabled)
+        .await
+        .unwrap();
+    let time = |ms: i64| UNIX_EPOCH + Duration::from_millis(ms.try_into().unwrap());
+
+    // An older version first, then the version replica() names.
+    let older = Replica {
+        version_id: "7bdae243-adae-45de-9ccf-602e9882190d".to_owned(),
+        modified_ms: MODIFIED_MS - 60_000,
+        etag: None,
+    };
+    let mut staged = store.stage();
+    staged.write(b"old").await.unwrap();
+    store
+        .commit_replica(
+            "files",
+            "a.txt",
+            staged,
+            ObjectAttrs::default(),
+            older.clone(),
+        )
+        .await
+        .unwrap();
+    let info = send(&store, "files", b"hello").await.unwrap();
+    assert_eq!(info.version_id.as_deref(), Some(VERSION));
+    assert_eq!(info.etag, ETAG);
+    assert_eq!(info.modified, time(MODIFIED_MS));
+    // The file is the version, its time the version's.
+    let file = dir.path().join("files").join("a.txt");
+    assert_eq!(std::fs::read(&file).unwrap(), b"hello");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        time(MODIFIED_MS)
+    );
+    let head = store.head_version("files", "a.txt", None).await.unwrap();
+    assert_eq!(head.version_id.as_deref(), Some(VERSION));
+    assert_eq!(
+        head.attrs.replication.map(|r| r.status),
+        Some(ReplicationStatus::Replica)
+    );
+    let old = store
+        .head_version("files", "a.txt", Some(&older.version_id))
+        .await
+        .unwrap();
+    assert_eq!((old.size, old.modified), (3, time(older.modified_ms)));
+
+    // Sent again, nothing changes.
+    let again = send(&store, "files", b"hello").await.unwrap();
+    assert_eq!(again.version_id.as_deref(), Some(VERSION));
+    let versions = store
+        .list_versions(
+            "files",
+            VersionsQuery {
+                max_keys: 1000,
+                ..VersionsQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.versions.len(), 2);
+
+    // A folder has no versions to keep.
+    let staged = store.stage();
+    let folder = store
+        .commit_replica("files", "dir/", staged, ObjectAttrs::default(), older)
+        .await;
+    assert!(
+        matches!(folder, Err(StoreError::InvalidRequest(_))),
+        "{folder:?}"
+    );
 }

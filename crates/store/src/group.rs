@@ -292,7 +292,17 @@ impl Inner {
                 };
                 let key = self.new_key(&key)?;
                 let (info, replaced) = conn.try_batch(|conn| {
-                    self.place_file(conn, &bucket, &key, &tmp, etag, *attrs, None, precondition)
+                    self.place_file(
+                        conn,
+                        &bucket,
+                        &key,
+                        &tmp,
+                        etag,
+                        *attrs,
+                        None,
+                        precondition,
+                        None,
+                    )
                 })?;
                 Ok((
                     Done::Written(Box::new(info)),
