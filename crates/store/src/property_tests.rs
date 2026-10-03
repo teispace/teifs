@@ -325,3 +325,236 @@ fn listings_follow_s3s_rules_in_both_layouts() {
         })
         .unwrap();
 }
+
+/// Each key's version ids, newest first.
+type Versions = Vec<(String, Vec<String>)>;
+
+/// A versions listing as S3 defines it: versions after the key marker (and after its
+/// version marker within that key, or after all of it), rolled up like [`model`]; a key
+/// marker that is itself a common prefix resumes after all the prefix holds.
+fn versions_model(
+    versions: &Versions,
+    prefix: &str,
+    delimiter: Option<&str>,
+    marker: Option<(&str, Option<&str>)>,
+    max: usize,
+) -> (Vec<(String, String)>, Vec<String>, bool) {
+    let (mut listed, mut prefixes, mut taken) = (Vec::new(), Vec::new(), 0);
+    let mut last_prefix: Option<String> = None;
+    let common_prefix = |key: &str| {
+        let d = delimiter.filter(|d| !d.is_empty())?;
+        let rest = key.strip_prefix(prefix)?;
+        rest.find(d)
+            .map(|at| key[..prefix.len() + at + d.len()].to_owned())
+    };
+    let rolled_up = marker
+        .map(|(key, _)| key)
+        .filter(|key| common_prefix(key).as_deref() == Some(*key));
+    for (key, key_versions) in versions {
+        if !key.starts_with(prefix) {
+            continue;
+        }
+        let mut skip = match (marker, rolled_up) {
+            (_, Some(common)) if key.as_str() <= common || key.starts_with(common) => continue,
+            (Some((marker, _)), _) if key.as_str() < marker => continue,
+            // After this version of the key, or after all of it.
+            (Some((marker, version)), _) if key == marker => version
+                .and_then(|version| key_versions.iter().position(|id| id == version))
+                .map_or(key_versions.len(), |at| at + 1),
+            _ => 0,
+        };
+        for id in key_versions {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            let common = common_prefix(key);
+            if common.is_some() && common == last_prefix {
+                continue;
+            }
+            if taken == max {
+                return (listed, prefixes, true);
+            }
+            taken += 1;
+            match common {
+                Some(common) => {
+                    last_prefix = Some(common.clone());
+                    prefixes.push(common);
+                }
+                None => listed.push((key.clone(), id.clone())),
+            }
+        }
+    }
+    (listed, prefixes, false)
+}
+
+/// Writes each key once, then puts (`true`) or deletes as `writes` says, in a versioned
+/// bucket; returns each key's versions, newest first.
+async fn write_versions(
+    store: &Store,
+    bucket: &str,
+    keys: &BTreeSet<String>,
+    writes: &[Vec<bool>],
+) -> Versions {
+    let mut versions: Versions = Vec::new();
+    for (key, later) in keys.iter().zip(writes) {
+        let mut key_versions = Vec::new();
+        for put in std::iter::once(&true).chain(later) {
+            let written = if *put {
+                let info = store
+                    .put_bytes(bucket, key, b"x", ObjectAttrs::default())
+                    .await
+                    .unwrap();
+                info.version_id.unwrap()
+            } else {
+                let deleted = store
+                    .delete_if(bucket, key, None, Precondition::default())
+                    .await
+                    .unwrap();
+                deleted.version_id.unwrap()
+            };
+            key_versions.insert(0, written);
+        }
+        versions.push((key.clone(), key_versions));
+    }
+    versions
+}
+
+type VersionsCase = (
+    BTreeSet<String>,
+    Vec<Vec<bool>>,
+    String,
+    Option<String>,
+    Option<(String, Option<usize>)>,
+    usize,
+);
+
+/// Keys, the writes after each one's first, and a versions query: prefix, delimiter,
+/// key marker with the index of one of its versions, and page size.
+fn versions_case() -> impl Strategy<Value = VersionsCase> {
+    key_set().prop_flat_map(|keys| {
+        let known: Vec<String> = keys.iter().cloned().collect();
+        // After the first write, each later one a put (true) or a delete.
+        let writes = prop::collection::vec(prop::collection::vec(any::<bool>(), 0..3), keys.len());
+        let near = prop::sample::select(known).prop_flat_map(|key| {
+            (0..=key.len()).prop_map(move |cut| {
+                let mut cut = cut;
+                while !key.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                key[..cut].to_owned()
+            })
+        });
+        let prefix = prop_oneof![Just(String::new()), near.clone()];
+        let marker = prop::option::of((near, prop::option::of(0..4usize)));
+        let delimiter =
+            prop::option::of(prop::sample::select(vec!["/", "b", "a/"]).prop_map(str::to_owned));
+        (Just(keys), writes, prefix, delimiter, marker, 1..6usize)
+    })
+}
+
+#[test]
+fn version_listings_follow_s3s_rules_in_both_layouts() {
+    let (runtime, mut runner) = runner();
+    let case_strategy = versions_case();
+    let dir = tempfile::tempdir().unwrap();
+    // Listings, not durability: nothing synced.
+    let options = StoreOptions {
+        durability: Durability::None,
+        ..StoreOptions::default()
+    };
+    let store = Store::open_with(dir.path(), options).unwrap();
+    let cases = std::sync::atomic::AtomicUsize::new(0);
+    runner
+        .run(
+            &case_strategy,
+            |(keys, writes, prefix, delimiter, marker, max)| {
+                let case = cases.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                runtime.block_on(async {
+                    for layout in [Layout::Object, Layout::Folder] {
+                        let bucket = format!("v{layout:?}-{case}").to_lowercase();
+                        store.create_bucket(&bucket, layout).await.unwrap();
+                        store
+                            .set_bucket_versioning(&bucket, Versioning::Enabled)
+                            .await
+                            .unwrap();
+                        let versions = write_versions(&store, &bucket, &keys, &writes).await;
+                        // A version marker names one of the key's versions, when it has
+                        // that many; otherwise it's left out.
+                        let marker = marker.as_ref().map(|(key, nth)| {
+                            let version = nth.and_then(|nth| {
+                                versions
+                                    .iter()
+                                    .find(|(k, _)| k == key)
+                                    .and_then(|(_, v)| v.get(nth).cloned())
+                            });
+                            (key.clone(), version)
+                        });
+                        let query = |marker: Option<(String, Option<String>)>, max_keys| {
+                            let (key_marker, version_marker) = marker.unzip();
+                            VersionsQuery {
+                                prefix: prefix.clone(),
+                                delimiter: delimiter.clone(),
+                                key_marker,
+                                version_marker: version_marker.flatten(),
+                                max_keys,
+                            }
+                        };
+                        let ids = |page: &VersionListing| -> Vec<(String, String)> {
+                            page.versions
+                                .iter()
+                                .map(|v| (v.info.key.clone(), v.info.version_id.clone().unwrap()))
+                                .collect()
+                        };
+                        let page = store
+                            .list_versions(&bucket, query(marker.clone(), max))
+                            .await
+                            .unwrap();
+                        let expected = versions_model(
+                            &versions,
+                            &prefix,
+                            delimiter.as_deref(),
+                            marker.as_ref().map(|(k, v)| (k.as_str(), v.as_deref())),
+                            max,
+                        );
+                        prop_assert_eq!(
+                            (ids(&page), &page.prefixes, page.truncated),
+                            (expected.0, &expected.1, expected.2),
+                            "{} after {:?}",
+                            bucket,
+                            marker
+                        );
+                        // Page after page, the whole listing, each entry once.
+                        let (mut all, mut all_prefixes, mut next) = (Vec::new(), Vec::new(), None);
+                        for _ in 0..=keys.len() * 3 {
+                            let page = store
+                                .list_versions(&bucket, query(next, max))
+                                .await
+                                .unwrap();
+                            all.extend(ids(&page));
+                            all_prefixes.extend(page.prefixes);
+                            next = page.next;
+                            if !page.truncated {
+                                break;
+                            }
+                        }
+                        let (listed, prefixes, _) = versions_model(
+                            &versions,
+                            &prefix,
+                            delimiter.as_deref(),
+                            None,
+                            usize::MAX,
+                        );
+                        prop_assert_eq!(
+                            (all, all_prefixes),
+                            (listed, prefixes),
+                            "{} paged",
+                            bucket
+                        );
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+}

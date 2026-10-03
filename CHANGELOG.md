@@ -829,6 +829,11 @@ behaviour; the on-disk format is always upgraded automatically.
 - Listing a folder bucket with a delimiter and a `StartAfter` or `Marker` inside a
   folder no longer lists that folder's common prefix when nothing in it follows the
   marker, as object buckets and AWS already did.
+- `ListObjectVersions` with a delimiter and a `KeyMarker` inside a common prefix lists
+  that prefix again when versions under it follow the marker, as `ListObjects` does
+  with a `Marker`: it skipped everything left under the prefix. A `KeyMarker` that is a
+  common prefix, as `NextKeyMarker` is when a page ends on one, still resumes after
+  all it holds.
 - A configuration value that starts or ends with a quote (`mc admin config set`) is
   kept as given: it read back without its quotes, or empty, once the server restarted.
   A value holding another of its sub-system's keys followed by `=`, which would read

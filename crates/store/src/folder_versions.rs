@@ -20,7 +20,10 @@ use crate::{
     body::Data,
     error::Result,
     folder::{FolderBucket, Found},
-    list::{After, Cursor, ListQuery, ObjectVersion, VersionListing, VersionsQuery, common_prefix},
+    list::{
+        After, Cursor, ListQuery, ObjectVersion, VersionListing, VersionsQuery, common_prefix,
+        is_common_prefix,
+    },
     lock::check_removal,
     md5_file, now_ms,
     objects::ObjectBucket,
@@ -617,11 +620,11 @@ impl Store {
         let Some(key) = query.key_marker.clone() else {
             return Ok((None, Cursor::Start, None));
         };
-        // A marker under a common prefix: the prefix was listed, and all it holds.
-        if let Some(common) = common_prefix(&key, &query.prefix, query.delimiter.as_deref()) {
+        // A marker that is a common prefix: the prefix was listed, and all it holds.
+        if is_common_prefix(&key, &query.prefix, query.delimiter.as_deref()) {
             return Ok((
-                Some(After::Prefix(common.clone())),
-                Cursor::AfterAll(common),
+                Some(After::Prefix(key.clone())),
+                Cursor::AfterAll(key),
                 None,
             ));
         }

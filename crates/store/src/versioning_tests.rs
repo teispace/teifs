@@ -14,6 +14,7 @@ in_both_layouts!(
     suspended_writes_and_deletes_replace_the_null_version,
     copies_make_versions_and_can_restore_one,
     versions_list_in_pages_with_markers_and_common_prefixes,
+    a_key_marker_inside_a_common_prefix_rolls_up_what_follows_it,
     a_page_of_delete_markers_doesnt_end_a_listing,
     a_key_with_more_versions_than_a_batch_lists_them_all,
 );
@@ -432,6 +433,49 @@ async fn versions_list_in_pages_with_markers_and_common_prefixes(layout: Layout)
         .await
         .unwrap();
     assert_eq!(after_a.prefixes, ["dir/"]);
+}
+
+/// A client's `KeyMarker` can name a key under a common prefix: what follows it under
+/// that prefix still rolls up into the prefix, as `ListObjects` does with a marker.
+async fn a_key_marker_inside_a_common_prefix_rolls_up_what_follows_it(layout: Layout) {
+    let (_dir, store) = versioned(layout, Versioning::Enabled).await;
+    let old_x = put(&store, "dir/x", b"old x").await;
+    put(&store, "dir/x", b"x").await;
+    put(&store, "dir/y", b"y").await;
+    put(&store, "e", b"e").await;
+    let list = |key_marker: &str, version_marker: Option<&str>| {
+        store.list_versions(
+            "docs",
+            VersionsQuery {
+                delimiter: Some("/".into()),
+                key_marker: Some(key_marker.into()),
+                version_marker: version_marker.map(Into::into),
+                max_keys: 10,
+                ..VersionsQuery::default()
+            },
+        )
+    };
+    let keys = |listing: &VersionListing| {
+        listing
+            .versions
+            .iter()
+            .map(|v| v.info.key.clone())
+            .collect::<Vec<_>>()
+    };
+    for (marker, version) in [
+        ("dir/x", None),
+        ("dir/x", Some(old_x.as_str())),
+        ("dir/", None),
+    ] {
+        let listing = list(marker, version).await.unwrap();
+        let expected: &[&str] = if marker == "dir/" { &[] } else { &["dir/"] };
+        assert_eq!(listing.prefixes, expected, "after {marker} {version:?}");
+        assert_eq!(keys(&listing), ["e"], "after {marker} {version:?}");
+    }
+    // Nothing follows the last key under the prefix.
+    let listing = list("dir/y", None).await.unwrap();
+    assert!(listing.prefixes.is_empty());
+    assert_eq!(keys(&listing), ["e"]);
 }
 
 #[tokio::test]

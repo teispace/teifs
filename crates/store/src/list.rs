@@ -413,6 +413,11 @@ pub(crate) fn common_prefix(key: &str, prefix: &str, delimiter: Option<&str>) ->
     Some(key[..prefix.len() + at + delimiter.len()].to_owned())
 }
 
+/// Whether `key` is the common prefix it rolls up into: a previous page's last entry.
+pub(crate) fn is_common_prefix(key: &str, prefix: &str, delimiter: Option<&str>) -> bool {
+    common_prefix(key, prefix, delimiter).is_some_and(|common| common == key)
+}
+
 /// Lists an object bucket from the index: rows in key order, rolled up into common
 /// prefixes at the delimiter; a prefix already listed is skipped in one jump.
 fn list_index(
@@ -473,9 +478,10 @@ fn list_versions_index(
     let delimiter = query.delimiter.as_deref();
     let mut from = match (&query.key_marker, &query.version_marker) {
         (None, _) => Cursor::Start,
-        // A marker under a common prefix: the prefix was listed, and all it holds.
-        (Some(key), _) if let Some(common) = common_prefix(key, &query.prefix, delimiter) => {
-            Cursor::AfterAll(common)
+        // A marker that is a common prefix: the prefix was listed, and all it holds. A
+        // key under one resumes after that key, and what follows it rolls up again.
+        (Some(key), _) if is_common_prefix(key, &query.prefix, delimiter) => {
+            Cursor::AfterAll(key.clone())
         }
         (Some(key), None) => Cursor::AfterKey(key.clone()),
         (Some(key), Some(version)) => match conn.version(&bucket.id, key, version)? {
