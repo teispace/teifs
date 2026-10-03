@@ -20,6 +20,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use teifs_crypto::PartId;
 use teifs_meta::{Index, NULL_VERSION, VersionRow, Versioning};
+use teifs_types::SseMode;
 
 use crate::{
     Durability, Inner, ObjectAttrs, ObjectInfo, PartInfo, Precondition, StoreError,
@@ -233,6 +234,18 @@ pub(crate) struct Finished<'a> {
     pub sealed: Option<(String, Crypt)>,
     /// When uploaded in parts: the parts.
     pub parts: Option<PartsRecord>,
+    /// When it's a replica: the version id and creation time of the version it copies,
+    /// which it keeps.
+    pub replica: Option<Replica>,
+}
+
+/// What a replica keeps of the version it copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replica {
+    /// The version's id.
+    pub version_id: String,
+    /// When the version was made (Unix milliseconds).
+    pub modified_ms: i64,
 }
 
 impl<'a> Finished<'a> {
@@ -247,6 +260,7 @@ impl<'a> Finished<'a> {
             attrs,
             sealed: None,
             parts: None,
+            replica: None,
         }
     }
 }
@@ -273,6 +287,7 @@ pub(crate) struct Written {
     object_lock: Option<crate::lock::ObjectLock>,
     version_id: String,
     created_ms: i64,
+    replica: Option<Replica>,
 }
 
 impl Written {
@@ -497,7 +512,13 @@ impl Inner {
             attrs,
             sealed,
             parts,
+            replica,
         } = finished;
+        if replica.is_some() && bucket.versioning != Versioning::Enabled {
+            return Err(StoreError::InvalidRequest(
+                "a replica needs a bucket with versioning enabled",
+            ));
+        }
         let (object_id, crypt) = match sealed {
             Some((object_id, crypt)) => (object_id, Some(crypt)),
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
@@ -516,10 +537,18 @@ impl Inner {
             parts,
             versioning: bucket.versioning,
             object_lock: self.object_lock(Some(bucket))?,
-            version_id: bucket.new_version_id(),
-            created_ms: now_ms(),
+            version_id: replica
+                .as_ref()
+                .map_or_else(|| bucket.new_version_id(), |r| r.version_id.clone()),
+            created_ms: replica.as_ref().map_or_else(now_ms, |r| r.modified_ms),
+            replica,
         };
-        self.lock_new_version(Some(bucket), &mut written.attrs)?;
+        let kms = written
+            .crypt
+            .as_ref()
+            .is_some_and(|c| matches!(c.mode, SseMode::Kms | SseMode::Dsse));
+        let replica = written.replica.is_some();
+        self.settle_new_version(Some(bucket), &written.key, &mut written.attrs, kms, replica)?;
         // Small enough to keep in the row: read (only the stored bytes, never a copied
         // file's old footer), and the staged file goes.
         if written.parts.is_none() && self.inline_max > 0 && stored_len <= self.inline_max {
@@ -644,10 +673,22 @@ impl Inner {
         }
         written.versioning = bucket.versioning;
         written.object_lock = object_lock;
-        written.version_id = bucket.new_version_id();
-        written.created_ms = now_ms();
+        if written.replica.is_some() && bucket.versioning != Versioning::Enabled {
+            return Err(StoreError::InvalidRequest(
+                "a replica needs a bucket with versioning enabled",
+            ));
+        }
+        if written.replica.is_none() {
+            written.version_id = bucket.new_version_id();
+            written.created_ms = now_ms();
+        }
         written.attrs = written.asked.clone();
-        self.lock_new_version(Some(bucket), &mut written.attrs)?;
+        let kms = written
+            .crypt
+            .as_ref()
+            .is_some_and(|c| matches!(c.mode, SseMode::Kms | SseMode::Dsse));
+        let replica = written.replica.is_some();
+        self.settle_new_version(Some(bucket), &written.key, &mut written.attrs, kms, replica)?;
         if written.inline.is_some() {
             return Ok(());
         }

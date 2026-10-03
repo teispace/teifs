@@ -10,7 +10,11 @@ behaviour; the on-disk format is always upgraded automatically.
 - Replication configurations: `PutBucketReplication`, `GetBucketReplication` and
   `DeleteBucketReplication`, kept as given and checked as S3 checks them, naming
   buckets on the same drive; a replicating bucket's versioning can't be suspended.
-  Admin exports and imports carry them. Objects aren't copied yet.
+  Admin exports and imports carry them. New versions a rule takes are copied to buckets
+  on the same drive by a background job, keeping their version ids, times, metadata,
+  tags and Object Lock settings; `x-amz-replication-status` says where each stands
+  (`PENDING`, `COMPLETED`, `FAILED`, or `REPLICA` on the copy). Copying to other S3
+  services, delete replication and existing objects are still to come.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

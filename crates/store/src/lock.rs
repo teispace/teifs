@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use teifs_meta::Versioning;
-use teifs_types::{LockMode, ObjectKey, Retention};
+use teifs_types::{LockMode, ObjectKey, Retention, replication::VersionReplication};
 
 use crate::{
     Bucket, Inner, ObjectAttrs, ObjectInfo, Store, StoreError, error::Result, now_ms,
@@ -154,16 +154,48 @@ impl Inner {
         versions: Option<&ObjectBucket>,
         attrs: &mut ObjectAttrs,
     ) -> Result<()> {
-        let asked = attrs.retention.is_some() || attrs.legal_hold.is_some();
-        match self.object_lock(versions)? {
-            None if asked => Err(StoreError::InvalidRequest(NO_LOCK)),
-            None => Ok(()),
-            Some(lock) => {
-                if attrs.retention.is_none() {
-                    attrs.retention = lock.default_retention.map(|d| d.from(now_ms()));
-                }
-                Ok(())
+        lock_new_version(self.object_lock(versions)?, attrs)
+    }
+
+    /// Settles a version about to be written as `attrs`, of `key` (SSE-KMS encrypted when
+    /// `kms`), in the bucket whose record (or version store) is `versions`: its lock (as
+    /// [`Inner::lock_new_version`] does) and its replication, which it gets from the
+    /// bucket's replication rules alone (a `replica` is one, and isn't replicated again),
+    /// never from a request or a copied version.
+    pub(crate) fn settle_new_version(
+        &self,
+        versions: Option<&ObjectBucket>,
+        key: &str,
+        attrs: &mut ObjectAttrs,
+        kms: bool,
+        replica: bool,
+    ) -> Result<()> {
+        attrs.replication = replica.then(VersionReplication::replica);
+        let Some(versions) = versions.filter(|v| v.versioning == Versioning::Enabled) else {
+            return lock_new_version(None, attrs);
+        };
+        let json = self.system().bucket_config_by_id(&versions.id)?;
+        let config = crate::settings::read_config(json.as_deref())?;
+        lock_new_version(config.object_lock, attrs)?;
+        if let Some(replication) = config.replication.filter(|_| !replica) {
+            attrs.replication =
+                VersionReplication::pending(replication.destinations(key, &attrs.tags, kms));
+        }
+        Ok(())
+    }
+}
+
+/// Settles the lock of a version about to be written as `attrs` in a bucket with `lock`.
+fn lock_new_version(lock: Option<ObjectLock>, attrs: &mut ObjectAttrs) -> Result<()> {
+    let asked = attrs.retention.is_some() || attrs.legal_hold.is_some();
+    match lock {
+        None if asked => Err(StoreError::InvalidRequest(NO_LOCK)),
+        None => Ok(()),
+        Some(lock) => {
+            if attrs.retention.is_none() {
+                attrs.retention = lock.default_retention.map(|d| d.from(now_ms()));
             }
+            Ok(())
         }
     }
 }

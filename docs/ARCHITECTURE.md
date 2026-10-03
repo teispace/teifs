@@ -507,6 +507,16 @@ symlink, the manifest and its checksum through `Drive::deliver` as `s3.amazonaws
 The day or week each configuration last had its report is a store note (`Store::note`),
 so restarts neither repeat nor skip one; stopping ends a report after its current page,
 never in the middle of a store call.
+Replication (`replicator.rs`): new versions a bucket's replication rules take get
+`ObjectAttrs.replication` as they're written (`Store::settle_new_version`, from the
+bucket's cached configuration; a copy or a replica never inherits it), `PENDING` for each
+destination. The replication worker, one of the `Workers`, is woken by `Drive::notify` on
+every `ObjectCreated` event and every minute otherwise; it lists each replicating bucket's
+waiting versions (`Store::waiting_replication`, never splitting a key's), sends a key's
+oldest first, and writes each with `Store::commit_replica`, which keeps the source's
+version id and time and is idempotent, so a retry after a crash writes nothing twice.
+Each destination's outcome is recorded with `Store::set_replication_status`; one that
+may get through later stays `PENDING` and holds back that key's newer versions.
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

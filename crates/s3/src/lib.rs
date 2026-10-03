@@ -58,6 +58,7 @@ mod proxy;
 mod quota;
 mod replication;
 mod replication_targets;
+mod replicator;
 mod request_metrics;
 mod routes;
 mod sig_v2;

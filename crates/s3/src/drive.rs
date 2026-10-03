@@ -78,6 +78,8 @@ pub struct Drive {
     access_log: Option<Arc<AccessLog>>,
     /// Where answered requests go for request metrics, watched once a bucket has some.
     request_metrics: Option<Arc<RequestMetrics>>,
+    /// Wakes the replication worker as objects are written.
+    replication: Arc<tokio::sync::Notify>,
 }
 
 impl Drive {
@@ -100,7 +102,13 @@ impl Drive {
             account: account.map(Arc::from),
             access_log: None,
             request_metrics: None,
+            replication: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// What wakes the replication worker.
+    pub(crate) fn replication_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.replication)
     }
 
     /// The drive with its access log.
@@ -130,6 +138,9 @@ impl Drive {
         bucket: &str,
         happened: Happened,
     ) {
+        if name.starts_with("ObjectCreated:") {
+            self.replication.notify_one();
+        }
         self.events
             .happened(extensions, name, bucket, vec![happened])
             .await;
@@ -801,6 +812,7 @@ impl NewAttrs {
             acl: None,
             retention: None,
             legal_hold: None,
+            replication: None,
         }
     }
 }
@@ -1680,6 +1692,11 @@ impl S3 for Drive {
         }
         set_sse!(out, info.sse.as_ref());
         set_lock!(out, read_lock(caller.as_ref(), &info.attrs));
+        out.replication_status = info
+            .attrs
+            .replication
+            .as_ref()
+            .map(|r| dto::ReplicationStatus::from_static(r.status.as_str()));
         Ok(S3Response::new(out))
     }
 
@@ -1750,6 +1767,11 @@ impl S3 for Drive {
         }
         set_sse!(out, info.sse.as_ref());
         set_lock!(out, read_lock(caller.as_ref(), &info.attrs));
+        out.replication_status = info
+            .attrs
+            .replication
+            .as_ref()
+            .map(|r| dto::ReplicationStatus::from_static(r.status.as_str()));
         let mut response = S3Response::new(out);
         if slice.content_range.is_some() {
             // s3s answers every HEAD with 200; a partial one is 206, as for GET.

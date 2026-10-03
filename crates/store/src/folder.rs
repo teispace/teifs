@@ -368,7 +368,13 @@ impl Inner {
         let dir = &bucket.dir;
         let current = Inner::current_for_write(conn, &bucket.name, dir, key)?;
         precondition.check(current.as_ref())?;
-        self.lock_new_version(bucket.versions.as_ref(), &mut attrs)?;
+        self.settle_new_version(
+            bucket.versions.as_ref(),
+            key.as_str(),
+            &mut attrs,
+            false,
+            false,
+        )?;
         let parent = self.make_parents(dir, key)?;
         let path = dir.join(key.rel());
         let version_id = bucket.new_version_id();

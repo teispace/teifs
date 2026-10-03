@@ -32,6 +32,7 @@ mod objects;
 mod readers;
 mod reconcile;
 mod repair;
+mod replicating;
 mod replication_targets;
 mod rewrap;
 mod settings;
@@ -71,6 +72,7 @@ pub use lock::{
 };
 pub use multipart::{CompleteWith, MAX_PART_NUMBER, MIN_PART_SIZE};
 pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
+pub use replicating::Waiting;
 pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
 pub use settings::{
@@ -100,7 +102,7 @@ pub use verify::{Checked, Damage, Unverifiable, Verdict, VerifyCursor};
 use error::not_found_as;
 use folder::{FolderBucket, Found};
 use objects::{BUCKETS_DIR, Finished, ObjectBucket};
-pub use objects::{Deleted, INLINE_MAX};
+pub use objects::{Deleted, INLINE_MAX, Replica};
 use staged::{TmpFile, sync_dir};
 
 /// The folder in a drive's root that holds TeiFS's own data.
@@ -707,9 +709,64 @@ impl Store {
         &self,
         bucket: &str,
         key: &str,
+        staged: Staged,
+        attrs: ObjectAttrs,
+        precondition: Precondition,
+    ) -> Result<ObjectInfo> {
+        self.commit_with(bucket, key, staged, attrs, precondition, None)
+            .await
+    }
+
+    /// Records staged bytes as a replica of another version: it keeps that version's id
+    /// and creation time, is marked a replica, and isn't replicated again. Only an object
+    /// bucket with versioning enabled takes replicas. A replica already there is left as
+    /// it is and answered.
+    pub async fn commit_replica(
+        &self,
+        bucket: &str,
+        key: &str,
+        staged: Staged,
+        attrs: ObjectAttrs,
+        replica: Replica,
+    ) -> Result<ObjectInfo> {
+        if let Some(there) = self.replica_there(bucket, key, &replica.version_id).await? {
+            return Ok(there);
+        }
+        self.commit_with(
+            bucket,
+            key,
+            staged,
+            attrs,
+            Precondition::default(),
+            Some(replica),
+        )
+        .await
+    }
+
+    /// The version `version_id` of `key`, if `bucket` (an object bucket) has it.
+    async fn replica_there(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<Option<ObjectInfo>> {
+        match self.head_version(bucket, key, Some(version_id)).await {
+            Ok(info) => Ok(Some(info)),
+            Err(
+                StoreError::NoSuchKey | StoreError::NoSuchVersion | StoreError::DeleteMarker { .. },
+            ) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn commit_with(
+        &self,
+        bucket: &str,
+        key: &str,
         mut staged: Staged,
         mut attrs: ObjectAttrs,
         precondition: Precondition,
+        replica: Option<Replica>,
     ) -> Result<ObjectInfo> {
         staged.finish().await?;
         let (bucket, key) = (bucket.to_owned(), key.to_owned());
@@ -755,7 +812,11 @@ impl Store {
                 attrs,
                 sealed,
                 parts: None,
+                replica,
             };
+            if finished.replica.is_some() && !matches!(bucket, Bucket::Object(_)) {
+                return Err(StoreError::InvalidRequest("replicas need an object bucket"));
+            }
             if let Bucket::Object(object_bucket) = &bucket {
                 // The data file goes in place (and is synced) before the commit lock;
                 // only recording it needs the lock.
@@ -1615,6 +1676,8 @@ mod lifecycle_tests;
 mod lock_tests;
 #[cfg(test)]
 mod property_tests;
+#[cfg(test)]
+mod replica_tests;
 #[cfg(test)]
 mod sse_tests;
 #[cfg(test)]

@@ -13,7 +13,7 @@ use crate::{
     access_log::{AccessLog, Record},
     analytics::{self, Activity},
     drive::Drive,
-    inventory,
+    inventory, replicator,
     request_metrics::{self, Done, RequestMetrics},
 };
 
@@ -24,6 +24,7 @@ pub struct Workers {
     pub(crate) inventory: inventory::Worker,
     pub(crate) request_metrics: request_metrics::Worker,
     pub(crate) analytics: analytics::Worker,
+    pub(crate) replicator: replicator::Worker,
 }
 
 impl Workers {
@@ -46,6 +47,7 @@ impl Workers {
                 Arc::clone(&activity),
             ),
             analytics: analytics::Worker::new(drive.clone(), store.clone(), activity),
+            replicator: replicator::Worker::new(store.clone(), drive.replication_wake()),
         }
     }
 
@@ -62,6 +64,7 @@ impl Workers {
             self.inventory.run(stopping.clone()),
             self.request_metrics.run(stopping.clone()),
             self.analytics.run(stopping.clone()),
+            self.replicator.run(stopping.clone()),
         );
     }
 }

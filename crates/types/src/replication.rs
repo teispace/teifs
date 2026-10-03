@@ -2,6 +2,8 @@
 //! `PutBucketReplication` sets it. Kept as it was given, so `GetBucketReplication`
 //! answers the same.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The most rules a configuration may have.
@@ -182,7 +184,128 @@ pub struct Switch {
     pub minutes: Option<i32>,
 }
 
+/// Where a version stands in replication, as `x-amz-replication-status` says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReplicationStatus {
+    /// Not copied yet (or copying failed for a while and will be tried again).
+    Pending,
+    /// Copied to every destination.
+    Completed,
+    /// Can't be copied to some destination, and won't be tried again by itself.
+    Failed,
+    /// A copy another bucket replicated here.
+    Replica,
+}
+
+impl ReplicationStatus {
+    /// As S3 spells it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Completed => "COMPLETED",
+            Self::Failed => "FAILED",
+            Self::Replica => "REPLICA",
+        }
+    }
+}
+
+/// A version's replication: where it stands with each destination it goes to (by ARN),
+/// and so overall; or that it's a replica.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionReplication {
+    /// Where it stands overall: `FAILED` if any destination failed, else `PENDING` while
+    /// any waits, else `COMPLETED`.
+    pub status: ReplicationStatus,
+    /// Each destination's status.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, ReplicationStatus>,
+}
+
+impl VersionReplication {
+    /// Waiting for each of `destinations`; `None` when there are none.
+    #[must_use]
+    pub fn pending(destinations: impl IntoIterator<Item = String>) -> Option<Self> {
+        let targets: BTreeMap<_, _> = destinations
+            .into_iter()
+            .map(|arn| (arn, ReplicationStatus::Pending))
+            .collect();
+        (!targets.is_empty()).then_some(Self {
+            status: ReplicationStatus::Pending,
+            targets,
+        })
+    }
+
+    /// A replica's.
+    #[must_use]
+    pub const fn replica() -> Self {
+        Self {
+            status: ReplicationStatus::Replica,
+            targets: BTreeMap::new(),
+        }
+    }
+
+    /// With `arn`'s status set to `status`, and the overall one to match.
+    #[must_use]
+    pub fn with(mut self, arn: &str, status: ReplicationStatus) -> Self {
+        if let Some(target) = self.targets.get_mut(arn) {
+            *target = status;
+        }
+        let statuses = || self.targets.values().copied();
+        self.status = if statuses().any(|s| s == ReplicationStatus::Failed) {
+            ReplicationStatus::Failed
+        } else if statuses().any(|s| s == ReplicationStatus::Pending) {
+            ReplicationStatus::Pending
+        } else {
+            ReplicationStatus::Completed
+        };
+        self
+    }
+
+    /// The destinations still waiting.
+    pub fn waiting(&self) -> impl Iterator<Item = &str> {
+        self.targets
+            .iter()
+            .filter(|(_, s)| **s == ReplicationStatus::Pending)
+            .map(|(arn, _)| arn.as_str())
+    }
+}
+
+impl ReplicationConfig {
+    /// The destinations a new version of `key` with `tags` goes to: those of the enabled
+    /// rules it matches (SSE-KMS versions, `kms`, only by rules that take them), each
+    /// once.
+    #[must_use]
+    pub fn destinations(
+        &self,
+        key: &str,
+        tags: &BTreeMap<String, String>,
+        kms: bool,
+    ) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if rule.matches(key, tags, kms) && !found.contains(&rule.destination.bucket) {
+                found.push(rule.destination.bucket.clone());
+            }
+        }
+        found
+    }
+}
+
 impl ReplicationRule {
+    /// Whether the rule is on and takes a version of `key` with `tags` (SSE-KMS, `kms`).
+    #[must_use]
+    pub fn matches(&self, key: &str, tags: &BTreeMap<String, String>, kms: bool) -> bool {
+        self.enabled
+            && key.starts_with(self.prefix())
+            && self
+                .tags()
+                .iter()
+                .all(|t| tags.get(&t.key) == Some(&t.value))
+            && (!kms || self.sse_kms_objects == Some(true))
+    }
+
     /// Whether the rule replicates delete markers: the first version always does (for
     /// deletes people make); later ones when `DeleteMarkerReplication` is enabled.
     #[must_use]

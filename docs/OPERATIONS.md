@@ -1054,7 +1054,7 @@ comes when it would have (admin API `POST inventory?bucket=NAME&id=ID`, which ne
 `teifs:RunInventoryReport`). It fails as the delivery did: `AccessDenied` when the
 destination doesn't let S3 Inventory in.
 
-Every object is `STANDARD`, there's no replication yet, and Object Lock has no event
+Every object is `STANDARD` and Object Lock has no event
 holds, so those fields are empty or `STANDARD`; `ObjectOwner` is `teifs`. A destination
 that doesn't let the service in, or doesn't exist, gets nothing that day (with a warning
 in the server's log); a failure of the drive is tried again within 15 minutes. Reports
@@ -1199,7 +1199,21 @@ dropped, with a warning, as other refused deliveries are. Setting and reading qu
 take `MinIO`'s actions, `admin:SetBucketQuota` and `admin:GetBucketQuota`, on the bucket
 (see [ADMIN_API.md](ADMIN_API.md)); admin exports and imports carry them.
 
-## Replication targets
+## Replication
+
+A bucket with a replication configuration (`PutBucketReplication`, `mc replicate add`)
+has each new version its rules take copied by a background job: woken as objects are
+written, and every minute for anything a restart or a failed attempt left waiting (each
+version keeps where it stands, so nothing is lost). Both buckets must keep versions. The
+copy is a *replica*: the same version id, last-modified time, metadata, tags and Object
+Lock settings, marked `REPLICA` and not replicated again. `x-amz-replication-status`
+on the source says `PENDING` until every destination has it, then `COMPLETED`, or
+`FAILED` when a destination can't take it (it was removed, its versioning suspended, or
+it's a folder bucket, which doesn't take replicas yet). Objects encrypted with SSE-C
+fail: the server never holds their keys. Copying to targets on other S3 services, and
+replicating deletes and existing objects, are still to come.
+
+### Replication targets
 
 A bucket's replication rules name where its objects go: another bucket on the same drive
 (`arn:aws:s3:::NAME`), or a *target*, a bucket on another S3 service (another TeiFS,

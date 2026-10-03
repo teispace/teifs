@@ -312,10 +312,13 @@ fn value(field: InventoryField, entry: &Entry<'_>) -> Value {
         F::ChecksumAlgorithm => checksum_algorithm(&info.attrs.checksums).map_or(Value::None, text),
         F::ObjectAccessControlList => Value::Text(acl_json(info.attrs.acl.as_ref())),
         F::LifecycleExpirationDate => entry.expiry_ms.map_or(Value::None, Value::Time),
-        // Not kept by TeiFS: no replication yet, every object is STANDARD, and Object
-        // Lock has no event holds.
-        F::ReplicationStatus
-        | F::IntelligentTieringAccessTier
+        F::ReplicationStatus => info
+            .attrs
+            .replication
+            .as_ref()
+            .map_or(Value::None, |r| text(r.status.as_str())),
+        // Not kept by TeiFS: every object is STANDARD, and Object Lock has no event holds.
+        F::IntelligentTieringAccessTier
         | F::ObjectLockEventHoldStatus
         | F::ObjectLockEventHoldDuration
         | F::LastModifiedDate
@@ -630,6 +633,26 @@ mod tests {
             });
             assert!(row_of(&object, false).contains(&format!(",\"{name}\",")));
         }
+    }
+
+    #[test]
+    fn replication_status_is_the_versions() {
+        let schema = Schema::of(&config(false, vec![InventoryField::ReplicationStatus]));
+        let mut object = version("k");
+        let row_of = |object: &ObjectVersion| {
+            line(
+                &schema,
+                &Entry {
+                    version: object,
+                    expiry_ms: None,
+                    locked: false,
+                },
+            )
+        };
+        assert_eq!(row_of(&object), "\"photos\",\"k\",\"\"\n");
+        object.info.attrs.replication =
+            Some(teifs_types::replication::VersionReplication::replica());
+        assert_eq!(row_of(&object), "\"photos\",\"k\",\"REPLICA\"\n");
     }
 
     #[test]

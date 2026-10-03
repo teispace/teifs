@@ -52,6 +52,10 @@ pub struct ObjectAttrs {
     /// kept from removal whatever its retention.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legal_hold: Option<bool>,
+    /// Where the version stands in its bucket's replication, or that it's a replica: set
+    /// by the store as the version is written, never taken from a request or a copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication: Option<crate::replication::VersionReplication>,
 }
 
 /// How an Object Lock retention protects a version.

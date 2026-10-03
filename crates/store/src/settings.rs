@@ -64,7 +64,7 @@ pub(crate) struct BucketConfig {
     website: Option<WebsiteConfig>,
     /// Where its objects are replicated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    replication: Option<ReplicationConfig>,
+    pub(crate) replication: Option<ReplicationConfig>,
     /// The most bytes it may hold (`MinIO`'s hard quota).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quota: Option<u64>,

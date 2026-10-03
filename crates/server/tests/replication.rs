@@ -23,7 +23,8 @@ use aws_sdk_s3::{
         SseKmsEncryptedObjectsStatus, StorageClass, Tag, VersioningConfiguration,
     },
 };
-use common::{ACCESS_KEY, SECRET_KEY, client, start};
+use common::{ACCESS_KEY, SECRET_KEY, client, start, start_with};
+use teifs_store::Layout;
 use teifs_types::admin::{ADMIN_BUCKETS, BucketsExport, BucketsImportReport};
 
 const ROLE: &str = "arn:aws:iam::123456789012:role/replication";
@@ -497,4 +498,140 @@ async fn exports_carry_replication_to_another_server() {
         .await
         .unwrap();
     assert_eq!(answer.replication_configuration, Some(given));
+}
+
+/// The replication status of `key` in `bucket`, once it's no longer `PENDING`.
+async fn settled(s3: &Client, bucket: &str, key: &str) -> Option<String> {
+    for _ in 0..200 {
+        let status = s3
+            .head_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap()
+            .replication_status()
+            .map(|s| s.as_str().to_owned());
+        if status.as_deref() != Some("PENDING") {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Some("PENDING".to_owned())
+}
+
+#[tokio::test]
+async fn new_versions_the_rules_take_are_replicated() {
+    let server = start_with(|c| c.default_layout = Layout::Object).await;
+    let s3 = client(&server, SECRET_KEY);
+    buckets(&s3).await;
+    let docs = rule("docs", 1)
+        .filter(ReplicationRuleFilter::builder().prefix("docs/").build())
+        .build()
+        .unwrap();
+    put(&s3, config(vec![docs])).await.unwrap();
+    let mut written = Vec::new();
+    for key in ["docs/a.txt", "photos/b.jpg"] {
+        let put = s3
+            .put_object()
+            .bucket("source")
+            .key(key)
+            .body(b"hello".to_vec().into())
+            .content_type("text/plain")
+            .metadata("owner", "ana")
+            .tagging("team=red")
+            .send()
+            .await
+            .unwrap();
+        written.push(put.version_id().unwrap().to_owned());
+    }
+    assert_eq!(
+        settled(&s3, "source", "docs/a.txt").await.as_deref(),
+        Some("COMPLETED")
+    );
+    assert_eq!(settled(&s3, "source", "photos/b.jpg").await, None);
+
+    // The replica: the same version, marked so, with what describes it.
+    let source = s3
+        .head_object()
+        .bucket("source")
+        .key("docs/a.txt")
+        .send()
+        .await
+        .unwrap();
+    let replica = s3
+        .get_object()
+        .bucket("copy")
+        .key("docs/a.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replica.version_id(), Some(written[0].as_str()));
+    assert_eq!(
+        replica
+            .replication_status()
+            .map(aws_sdk_s3::types::ReplicationStatus::as_str),
+        Some("REPLICA")
+    );
+    assert_eq!(replica.last_modified(), source.last_modified());
+    assert_eq!(replica.e_tag(), source.e_tag());
+    assert_eq!(replica.content_type(), Some("text/plain"));
+    assert_eq!(
+        replica
+            .metadata()
+            .and_then(|m| m.get("owner"))
+            .map(String::as_str),
+        Some("ana")
+    );
+    assert_eq!(replica.tag_count(), Some(1));
+    let body = replica.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"hello");
+    let missed = s3
+        .head_object()
+        .bucket("copy")
+        .key("photos/b.jpg")
+        .send()
+        .await;
+    assert!(missed.is_err());
+
+    // A copy is a new version: the rules decide, not the source's status.
+    s3.copy_object()
+        .bucket("source")
+        .key("photos/c.jpg")
+        .copy_source("source/docs/a.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(settled(&s3, "source", "photos/c.jpg").await, None);
+}
+
+#[tokio::test]
+async fn versions_a_destination_cant_take_fail() {
+    let server = start_with(|c| c.default_layout = Layout::Object).await;
+    let s3 = client(&server, SECRET_KEY);
+    buckets(&s3).await;
+    put(&s3, config(vec![rule("r", 1).build().unwrap()]))
+        .await
+        .unwrap();
+    // Replicas need versions kept where they go.
+    versioned(&s3, "copy", BucketVersioningStatus::Suspended).await;
+    s3.put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&s3, "source", "a.txt").await.as_deref(),
+        Some("FAILED")
+    );
+    assert!(
+        s3.head_object()
+            .bucket("copy")
+            .key("a.txt")
+            .send()
+            .await
+            .is_err()
+    );
 }

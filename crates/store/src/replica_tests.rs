@@ -1,0 +1,141 @@
+//! Replicas: a version written as a copy of another keeps its id and creation time, is
+//! marked a replica and never replicated again, is written once however often it's
+//! sent, and only goes where versions are kept.
+
+use std::time::{Duration, UNIX_EPOCH};
+
+use teifs_types::replication::{
+    ReplicationConfig, ReplicationDestination, ReplicationFilter, ReplicationRule,
+    ReplicationStatus,
+};
+
+use super::*;
+
+const VERSION: &str = "0192f0a1b2c37d4e8f90a1b2c3d4e5f6";
+const MODIFIED_MS: i64 = 1_700_000_000_123;
+
+fn replica() -> Replica {
+    Replica {
+        version_id: VERSION.to_owned(),
+        modified_ms: MODIFIED_MS,
+    }
+}
+
+async fn send(store: &Store, bucket: &str, bytes: &[u8]) -> Result<ObjectInfo> {
+    let mut staged = store.stage();
+    staged.write(bytes).await?;
+    store
+        .commit_replica(bucket, "a.txt", staged, ObjectAttrs::default(), replica())
+        .await
+}
+
+/// Replicates everything in `bucket` to `to`.
+fn everything_to(to: &str) -> ReplicationConfig {
+    ReplicationConfig {
+        role: String::new(),
+        rules: vec![ReplicationRule {
+            id: "r".to_owned(),
+            priority: Some(1),
+            enabled: true,
+            filter: ReplicationFilter::All,
+            delete_markers: Some(false),
+            delete_replication: None,
+            existing_objects: None,
+            sse_kms_objects: None,
+            replica_modifications: None,
+            destination: ReplicationDestination {
+                bucket: format!("arn:aws:s3:::{to}"),
+                account: None,
+                storage_class: None,
+                owner_override: false,
+                encryption: None,
+                replication_time: None,
+                metrics: None,
+            },
+        }],
+    }
+}
+
+#[tokio::test]
+async fn a_replica_keeps_its_versions_id_and_time_and_is_never_sent_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    for bucket in ["copy", "further"] {
+        store.create_bucket(bucket, Layout::Object).await.unwrap();
+        store
+            .set_bucket_versioning(bucket, Versioning::Enabled)
+            .await
+            .unwrap();
+    }
+    // The destination replicates too: a replica isn't sent on (no chains).
+    store
+        .set_bucket_replication("copy", Some(everything_to("further")))
+        .await
+        .unwrap();
+    let info = send(&store, "copy", b"hello").await.unwrap();
+    assert_eq!(info.version_id.as_deref(), Some(VERSION));
+    assert_eq!(
+        info.modified,
+        UNIX_EPOCH + Duration::from_millis(MODIFIED_MS.try_into().unwrap())
+    );
+    let head = store
+        .head_version("copy", "a.txt", Some(VERSION))
+        .await
+        .unwrap();
+    assert_eq!(
+        head.attrs.replication.map(|r| r.status),
+        Some(ReplicationStatus::Replica)
+    );
+    // A new version written there the ordinary way is replicated.
+    let own = store
+        .put_bytes("copy", "b.txt", b"mine", ObjectAttrs::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        own.attrs.replication.map(|r| r.status),
+        Some(ReplicationStatus::Pending)
+    );
+
+    // Sent again (a retry), it's the one already there.
+    let again = send(&store, "copy", b"hello").await.unwrap();
+    assert_eq!(again.version_id.as_deref(), Some(VERSION));
+    let versions = store
+        .list_versions(
+            "copy",
+            VersionsQuery {
+                max_keys: 1000,
+                ..VersionsQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        versions
+            .versions
+            .iter()
+            .filter(|v| v.info.key == "a.txt")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn replicas_go_only_where_versions_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.create_bucket("plain", Layout::Object).await.unwrap();
+    store.create_bucket("files", Layout::Folder).await.unwrap();
+    store
+        .set_bucket_versioning("files", Versioning::Enabled)
+        .await
+        .unwrap();
+    for bucket in ["plain", "files"] {
+        assert!(
+            matches!(
+                send(&store, bucket, b"hello").await,
+                Err(StoreError::InvalidRequest(_))
+            ),
+            "{bucket}"
+        );
+    }
+}
