@@ -520,7 +520,9 @@ oldest first, and writes each with `Store::commit_replica`, which keeps the sour
 version id and time and is idempotent, so a retry after a crash writes nothing twice.
 What the worker does is counted in memory (`replicator/stats.rs`, shared with the drive,
 which counts replicas received, `MinIO`'s replication metrics and the Prometheus
-collector). Each destination's outcome is recorded with `Store::set_replication_status`; one that
+collector). `replicator/check.rs` answers `MinIO`'s replication check, asking each
+remote target with the check header that `replica_headers::refuse_check` refuses in
+`put_object` and `delete_object`. Each destination's outcome is recorded with `Store::set_replication_status`; one that
 may get through later stays `PENDING` and holds back that key's newer versions.
 Targets on other S3 services (`replicator/remote.rs`) get an aws-sdk-s3 client per pass,
 signed with the target's unsealed keys, without SDK retries (the next pass retries) or

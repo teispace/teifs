@@ -6,9 +6,11 @@
 //! replicate (`MinIO`'s `DeleteReplication`) wait in a queue of their own, since the
 //! versions are gone.
 
+mod check;
 mod remote;
 mod stats;
 
+pub(crate) use check::{Unready, check};
 pub(crate) use stats::{Bucket, Rates, Stats, Target, Timed};
 
 use std::{
@@ -780,6 +782,69 @@ mod tests {
                 Err(StoreError::DeleteMarker { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn a_destination_on_the_drive_is_checked_as_a_target_would_be() {
+        let (_dir, store) = replicating().await;
+        assert_eq!(check(&store, "source").await, Ok(()));
+        // Object Lock on the source wants it on the destination too.
+        store
+            .set_bucket_object_lock("source", teifs_store::ObjectLock::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            check(&store, "source").await,
+            Err(Unready::TargetUnlocked("copy".to_owned()))
+        );
+        store
+            .set_bucket_object_lock("copy", teifs_store::ObjectLock::default())
+            .await
+            .unwrap();
+        assert_eq!(check(&store, "source").await, Ok(()));
+        // A destination that stopped keeping versions, or is gone, can't take replicas.
+        store
+            .set_bucket_replication("source", Some(everything_to("plain")))
+            .await
+            .unwrap();
+        assert!(matches!(
+            check(&store, "source").await,
+            Err(Unready::Invalid(why)) if why.contains("plain")
+        ));
+        store.create_bucket("plain", Layout::Object).await.unwrap();
+        assert_eq!(
+            check(&store, "source").await,
+            Err(Unready::TargetNotVersioned("plain".to_owned()))
+        );
+        // Nor does a bucket without versions or rules replicate.
+        assert_eq!(check(&store, "plain").await, Err(Unready::NotVersioned));
+        store
+            .set_bucket_versioning("plain", Versioning::Enabled)
+            .await
+            .unwrap();
+        assert_eq!(check(&store, "plain").await, Err(Unready::NoConfig));
+        // A rule naming a target that's gone is stale.
+        store
+            .set_bucket_replication(
+                "source",
+                Some(ReplicationConfig {
+                    rules: everything_to("copy")
+                        .rules
+                        .into_iter()
+                        .map(|mut rule| {
+                            rule.destination.bucket = "arn:minio:replication::gone:copy".to_owned();
+                            rule
+                        })
+                        .collect(),
+                    ..everything_to("copy")
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            check(&store, "source").await,
+            Err(Unready::StaleTarget("r".to_owned()))
+        );
     }
 
     #[tokio::test]

@@ -16,7 +16,12 @@ use teifs_store::Store;
 use teifs_types::replication::ReplicationResync;
 use tokio::sync::Notify;
 
-use crate::{errors::StoreResultExt, minio_kms::rfc3339, replication, replicator::Stats};
+use crate::{
+    errors::StoreResultExt,
+    minio_kms::rfc3339,
+    replication,
+    replicator::{Stats, Unready},
+};
 
 /// What Go writes for a time never set.
 const NEVER: &str = "0001-01-01T00:00:00Z";
@@ -32,6 +37,8 @@ pub(crate) enum Call {
     Cancel,
     /// What replication did (`true`: the second version).
     Metrics(bool),
+    /// Whether replication can work (`MinIO`'s `ValidateBucketReplicationCreds`).
+    Check,
 }
 
 impl Call {
@@ -49,6 +56,7 @@ impl Call {
                 (&Method::GET, "replication-reset-status") => Some(Self::Status),
                 (&Method::PUT, "replication-reset-cancel") => Some(Self::Cancel),
                 (&Method::GET, "replication-metrics") => Some(Self::Metrics(value == "2")),
+                (&Method::GET, "replication-check") => Some(Self::Check),
                 _ => None,
             }
         })?;
@@ -69,6 +77,7 @@ impl Call {
             Self::Cancel => "ResetBucketReplicationCancel",
             Self::Metrics(false) => "GetBucketReplicationMetrics",
             Self::Metrics(true) => "GetBucketReplicationMetricsV2",
+            Self::Check => "ValidateBucketReplicationCreds",
         }
     }
 
@@ -76,7 +85,7 @@ impl Call {
     pub(crate) const fn action(self) -> &'static str {
         match self {
             Self::Start | Self::Status | Self::Cancel => "s3:ResetBucketReplicationState",
-            Self::Metrics(_) => "s3:GetReplicationConfiguration",
+            Self::Metrics(_) | Self::Check => "s3:GetReplicationConfiguration",
         }
     }
 }
@@ -134,6 +143,23 @@ const fn is_zero(n: &u64) -> bool {
 }
 
 impl Target {
+    /// A resync just started, as `MinIO` answers its start.
+    fn started(arn: String, reset_id: String) -> Self {
+        Self {
+            arn,
+            reset_id,
+            start_time: NEVER.to_owned(),
+            end_time: NEVER.to_owned(),
+            resync_status: "",
+            replicated_size: 0,
+            failed_size: 0,
+            failed_count: 0,
+            replicated_count: 0,
+            bucket: String::new(),
+            object: String::new(),
+        }
+    }
+
     fn of(bucket: &str, arn: String, resync: ReplicationResync) -> Self {
         Self {
             arn,
@@ -168,13 +194,16 @@ pub(crate) async fn serve(
             .map(|(_, value)| value.into_owned())
             .filter(|value| !value.is_empty())
     };
-    let config = store
-        .bucket_replication(bucket)
-        .await
-        .s3()?
-        .ok_or_else(replication::not_found)?;
+    let config = async || {
+        store
+            .bucket_replication(bucket)
+            .await
+            .s3()?
+            .ok_or_else(replication::not_found)
+    };
     match call {
         Call::Start => {
+            let config = config().await?;
             let arn = match param("arn") {
                 Some(arn) => arn,
                 None => only_destination(&config)?,
@@ -201,22 +230,11 @@ pub(crate) async fn serve(
                 })?;
             wake.notify_one();
             Ok(json(&Targets {
-                targets: vec![Target {
-                    arn,
-                    reset_id: resync.id,
-                    start_time: NEVER.to_owned(),
-                    end_time: NEVER.to_owned(),
-                    resync_status: "",
-                    replicated_size: 0,
-                    failed_size: 0,
-                    failed_count: 0,
-                    replicated_count: 0,
-                    bucket: String::new(),
-                    object: String::new(),
-                }],
+                targets: vec![Target::started(arn, resync.id)],
             }))
         }
         Call::Status => {
+            config().await?;
             let arn = param("arn");
             let targets = store
                 .resyncs(bucket)
@@ -229,6 +247,7 @@ pub(crate) async fn serve(
             Ok(json(&Targets { targets }))
         }
         Call::Cancel => {
+            let config = config().await?;
             let arn = match param("arn") {
                 Some(arn) => arn,
                 None => only_destination(&config)?,
@@ -241,6 +260,7 @@ pub(crate) async fn serve(
             Ok(S3Response::new(Body::from(id)))
         }
         Call::Metrics(v2) => {
+            let config = config().await?;
             let metrics = crate::minio_replication_metrics::Metrics::of(
                 replication.stats,
                 bucket,
@@ -253,6 +273,40 @@ pub(crate) async fn serve(
                 json(&metrics.current)
             })
         }
+        Call::Check => {
+            crate::replicator::check(store, bucket)
+                .await
+                .map_err(unready)?;
+            Ok(S3Response::new(Body::empty()))
+        }
+    }
+}
+
+/// What `MinIO` answers when replication can't work.
+fn unready(why: Unready) -> S3Error {
+    match why {
+        Unready::NotVersioned => error(
+            "InvalidRequest",
+            "Versioning must be 'Enabled' on the bucket to apply a replication configuration",
+            StatusCode::BAD_REQUEST,
+        ),
+        Unready::NoConfig => replication::not_found(),
+        Unready::StaleTarget(rule) => error(
+            "XMinioAdminRemoteTargetNotFoundError",
+            &format!("replication config with rule ID {rule} has a stale target"),
+            StatusCode::NOT_FOUND,
+        ),
+        Unready::TargetNotVersioned(bucket) => error(
+            "RemoteTargetNotVersionedError",
+            &format!("target bucket {bucket} is not versioned"),
+            StatusCode::BAD_REQUEST,
+        ),
+        Unready::TargetUnlocked(bucket) => error(
+            "ReplicationDestinationMissingLockError",
+            &format!("target bucket {bucket} is not object lock enabled"),
+            StatusCode::BAD_REQUEST,
+        ),
+        Unready::Invalid(why) => error("InvalidRequest", &why, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -351,24 +405,20 @@ mod tests {
         assert_eq!(of(Method::PUT, "/b/key?replication-reset"), None);
         assert_eq!(of(Method::PUT, "/?replication-reset"), None);
         assert_eq!(of(Method::PUT, "/b?replication"), None);
+        assert_eq!(
+            of(Method::GET, "/b?replication-check"),
+            Some((Call::Check, "b".to_owned()))
+        );
+        assert_eq!(of(Method::PUT, "/b?replication-check"), None);
     }
 
     #[test]
     fn started_targets_are_written_as_minio_writes_them() {
         let started = Targets {
-            targets: vec![Target {
-                arn: "arn:minio:replication::x:copy".to_owned(),
-                reset_id: "r1".to_owned(),
-                start_time: NEVER.to_owned(),
-                end_time: NEVER.to_owned(),
-                resync_status: "",
-                replicated_size: 0,
-                failed_size: 0,
-                failed_count: 0,
-                replicated_count: 0,
-                bucket: String::new(),
-                object: String::new(),
-            }],
+            targets: vec![Target::started(
+                "arn:minio:replication::x:copy".to_owned(),
+                "r1".to_owned(),
+            )],
         };
         assert_eq!(
             serde_json::to_string(&started).unwrap(),

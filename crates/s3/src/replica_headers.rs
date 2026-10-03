@@ -7,8 +7,8 @@
 //! `s3:ReplicateDelete`, makes a marker with that id, and one that doesn't removes the
 //! version it names (`MinIO`'s `DeleteReplication`), as a replicated removal.
 
-use http::HeaderMap;
-use s3s::{S3Result, s3_error};
+use http::{HeaderMap, StatusCode};
+use s3s::{S3Error, S3ErrorCode, S3Result, s3_error};
 use teifs_store::Replica;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -29,6 +29,26 @@ pub(crate) const LEGAL_HOLD_TIMESTAMP: &str = "x-minio-source-replication-legalh
 pub(crate) const STATUS: &str = "x-amz-replication-status";
 /// The query parameter naming the replicated version.
 pub(crate) const VERSION_ID: &str = "versionId";
+/// Says a write or delete only checks that replication may make it (`MinIO`'s
+/// replication check).
+pub(crate) const CHECK: &str = "x-minio-source-replication-check";
+/// The error code a replication check's write or delete is refused with.
+pub(crate) const CHECK_REFUSED: &str = "ReplicationPermissionCheck";
+
+/// Refuses a write or delete that only checks that it may be made (`MinIO`'s
+/// replication check), as `MinIO` does: once the access check let it through, and
+/// before anything is written.
+pub(crate) fn refuse_check(headers: &HeaderMap) -> S3Result<()> {
+    if !headers.contains_key(CHECK) {
+        return Ok(());
+    }
+    let mut err = S3Error::with_message(
+        S3ErrorCode::Custom(CHECK_REFUSED.into()),
+        "X-Minio-Source-Replication-Check cannot be specified in request. Request cannot be completed",
+    );
+    err.set_status_code(StatusCode::BAD_REQUEST);
+    Err(err)
+}
 
 /// The replica a write describes (its headers, and the `versionId` of its query), if
 /// its headers say it's one.

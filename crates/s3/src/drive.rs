@@ -1528,6 +1528,8 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::PutObjectInput>,
     ) -> S3Result<S3Response<dto::PutObjectOutput>> {
+        // A replication check's write is refused unwritten.
+        replica_headers::refuse_check(&req.headers)?;
         let mut input = req.input;
         let body = input.body.take().ok_or_else(|| s3_error!(IncompleteBody))?;
         let cap = req
@@ -3065,6 +3067,8 @@ impl S3 for Drive {
         &self,
         req: S3Request<dto::DeleteObjectInput>,
     ) -> S3Result<S3Response<dto::DeleteObjectOutput>> {
+        // A replication check's delete is refused, removing nothing.
+        replica_headers::refuse_check(&req.headers)?;
         let input = req.input;
         let version_id = check_version(input.version_id.as_deref())?;
         self.store.head_bucket(&input.bucket).await.s3()?;

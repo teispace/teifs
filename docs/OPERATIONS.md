@@ -1282,6 +1282,17 @@ with its downtime) and the replicas other servers sent the bucket. The same figu
 when the server restarts; what each version stands at (`PENDING`, `COMPLETED`, `FAILED`)
 is kept with it.
 
+`GET /BUCKET?replication-check` (`MinIO`'s check, from a caller allowed
+`s3:GetReplicationConfiguration`) answers `200` when the bucket's replication can work:
+the bucket keeps versions and has rules, and each enabled rule's destination is there,
+keeps versions, has Object Lock when the bucket does, and (on another TeiFS or a
+`MinIO`) lets the target's keys write replicas and replicated deletes. Those are asked
+with `MinIO`'s `X-Minio-Source-Replication-Check` header, which TeiFS and `MinIO` refuse
+once their access check passes, so nothing is written. Otherwise it says what's wrong,
+as `MinIO` does (`RemoteTargetNotVersionedError`, `s3:ReplicateObject permissions
+missing for replication user: AccessDenied: …`). AWS targets are only checked for
+versioning and Object Lock, since AWS would take the writes.
+
 ### Replication targets
 
 A bucket's replication rules name where its objects go: another bucket on the same drive

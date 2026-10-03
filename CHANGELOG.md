@@ -28,7 +28,9 @@ behaviour; the on-disk format is always upgraded automatically.
   from before it to a destination again, as when a target lost what it had.
   `mc replicate status` shows what replication did (`MinIO`'s replication metrics), the
   same figures are Prometheus metrics (`teifs_replication_…`), and replication targets
-  say whether they're online.
+  say whether they're online. `MinIO`'s replication check (`GET ?replication-check`)
+  asks each target whether it can take replicas without writing, and TeiFS answers
+  `MinIO`'s.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

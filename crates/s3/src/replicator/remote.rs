@@ -18,8 +18,9 @@ use aws_sdk_s3::{
     error::{DisplayErrorContext, ProvideErrorMetadata, SdkError},
     primitives::{ByteStream, DateTime},
     types::{
-        CompletedMultipartUpload, CompletedPart, ObjectLockLegalHoldStatus, ObjectLockMode,
-        ServerSideEncryption, StorageClass, TaggingDirective,
+        BucketVersioningStatus, CompletedMultipartUpload, CompletedPart, ObjectLockEnabled,
+        ObjectLockLegalHoldStatus, ObjectLockMode, ServerSideEncryption, StorageClass,
+        TaggingDirective,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -30,7 +31,7 @@ use teifs_store::{ObjectAttrs, Replica, Store};
 use teifs_types::{PartInfo, SseMode, md5_of_etag, replication::RemoteTarget};
 use tokio::io::AsyncReadExt as _;
 
-use super::{CHUNK, Missed, Sending};
+use super::{CHUNK, Missed, Sending, check::Unready};
 use crate::{inventory::now_ms, replica_headers};
 
 /// What a copy source's key escapes: all but S3's unreserved characters and `/`.
@@ -49,6 +50,9 @@ const PART: u64 = 64 * 1024 * 1024;
 const MOST_PARTS: u64 = 10_000;
 /// How long connecting to a target may take.
 const CONNECT: Duration = Duration::from_secs(10);
+/// The key a replication check's writes and deletes name (as `MinIO`'s does, under its
+/// system bucket's name: a receiver refuses them without writing).
+const CHECKED_KEY: &str = ".minio.sys/teifs/deleteme";
 
 /// A target, with a client signed in to it.
 #[derive(Debug)]
@@ -97,6 +101,128 @@ impl Target {
             storage_class: Some(target.storage_class.clone()).filter(|class| !class.is_empty()),
             bucket: target.target_bucket,
         })
+    }
+
+    /// Checks that the target can take replicas: its bucket is versioned, has Object
+    /// Lock when the source is `locked`, and (on a service that takes `MinIO`'s replica
+    /// headers) lets these keys write and delete replicas, asked with `MinIO`'s check
+    /// header so nothing is written.
+    pub(super) async fn check(&self, locked: bool) -> Result<(), Unready> {
+        if locked {
+            let lock = self
+                .client
+                .get_object_lock_configuration()
+                .bucket(&self.bucket)
+                .send()
+                .await;
+            let enabled = match lock {
+                Ok(out) => {
+                    out.object_lock_configuration()
+                        .and_then(|config| config.object_lock_enabled())
+                        == Some(&ObjectLockEnabled::Enabled)
+                }
+                Err(err) if err.code() == Some("ObjectLockConfigurationNotFoundError") => false,
+                Err(err) => return Err(Unready::Invalid(said(&err))),
+            };
+            if !enabled {
+                return Err(Unready::TargetUnlocked(self.bucket.clone()));
+            }
+        }
+        let versioning = self
+            .client
+            .get_bucket_versioning()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|err| Unready::Invalid(said(&err)))?;
+        if versioning.status() != Some(&BucketVersioningStatus::Enabled) {
+            return Err(Unready::TargetNotVersioned(self.bucket.clone()));
+        }
+        // AWS doesn't know the check header: it would write.
+        if self.replica_headers {
+            self.probe().await?;
+        }
+        Ok(())
+    }
+
+    /// Asks the target, with `MinIO`'s check header, whether these keys may write a
+    /// replica, a replicated delete marker and a replicated removal.
+    async fn probe(&self) -> Result<(), Unready> {
+        let replica = Replica {
+            version_id: uuid::Uuid::new_v4().to_string(),
+            modified_ms: now_ms(),
+            etag: None,
+        };
+        let mut headers = replica_headers::of(&replica);
+        headers.push((replica_headers::CHECK, "true".to_owned()));
+        let version_id = replica.version_id.clone();
+        let put = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(CHECKED_KEY)
+            .body(ByteStream::from_static(b"aaaaaaaa"))
+            .customize()
+            .mutate_request({
+                let headers = headers.clone();
+                move |request| {
+                    for (name, value) in &headers {
+                        request.headers_mut().insert(*name, value.clone());
+                    }
+                    let uri = request.uri().to_owned();
+                    let joint = if uri.contains('?') { '&' } else { '?' };
+                    // An id is hex and dashes, which a URI always takes.
+                    let _ = request.set_uri(format!(
+                        "{uri}{joint}{}={version_id}",
+                        replica_headers::VERSION_ID
+                    ));
+                }
+            })
+            .send()
+            .await;
+        let written = match put {
+            Ok(out) => out.version_id,
+            Err(err) if refused_check(&err) => None,
+            Err(err) => {
+                return Err(Unready::Invalid(format!(
+                    "s3:ReplicateObject permissions missing for replication user: {}",
+                    said(&err)
+                )));
+            }
+        };
+        // A replicated delete marker, then a replicated removal of the version.
+        for marker in [true, false] {
+            let mut headers = replica_headers::of_removal();
+            headers.push((replica_headers::CHECK, "true".to_owned()));
+            if marker {
+                headers.push((replica_headers::DELETE_MARKER, "true".to_owned()));
+            }
+            let deleted = self
+                .client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(CHECKED_KEY)
+                .set_version_id(written.clone())
+                .customize()
+                .mutate_request(move |request| {
+                    for (name, value) in &headers {
+                        request.headers_mut().insert(*name, value.clone());
+                    }
+                })
+                .send()
+                .await;
+            match deleted {
+                Ok(_) => {}
+                Err(err) if refused_check(&err) => {}
+                Err(err) => {
+                    return Err(Unready::Invalid(format!(
+                        "s3:ReplicateDelete permissions missing for replication user: {}",
+                        said(&err)
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Sends a version.
@@ -641,6 +767,25 @@ fn is_aws(endpoint: &str) -> bool {
     host == "amazonaws.com"
         || host.ends_with(".amazonaws.com")
         || host.ends_with(".amazonaws.com.cn")
+}
+
+/// What a target answered, short: its error's code and message (or why there was no
+/// answer).
+fn said<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
+    err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+) -> String {
+    match (err.code(), err.message()) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_owned(),
+        _ => DisplayErrorContext(err).to_string(),
+    }
+}
+
+/// Whether a target refused a request as a replication check's (it would have taken it).
+fn refused_check<E: ProvideErrorMetadata>(
+    err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+) -> bool {
+    err.code() == Some(replica_headers::CHECK_REFUSED)
 }
 
 /// What a target's answer means for the version: refused for good (it answered no, or

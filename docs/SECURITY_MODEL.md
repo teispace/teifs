@@ -234,7 +234,11 @@ A replicated retention change is applied as a governance bypass would be, but ne
 shortens a compliance retention. Starting, reading or canceling a resync (sending a
 bucket's versions to a destination again) needs a signed caller allowed
 `s3:ResetBucketReplicationState` on the bucket; it only sends to destinations the bucket's
-rules already name.
+rules already name. A write or delete sent with `MinIO`'s
+`X-Minio-Source-Replication-Check` header is refused after the access check, so another
+server can learn whether its keys may replicate here without writing anything; the
+replication check that sends it (`GET ?replication-check`) needs
+`s3:GetReplicationConfiguration` and only asks targets the rules name.
 A SAML response is read without a document type declaration or entities (no XXE or
 entity expansion), and only what a verified signature covers is used: the signature must
 be in the element it signs and reference that element's `ID`, which no other element may

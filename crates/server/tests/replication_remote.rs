@@ -733,6 +733,121 @@ async fn what_replication_did_is_reported_as_minio_reports_it() {
     );
 }
 
+/// `MinIO`'s replication check on `bucket` of `server`, signed by the root user: its
+/// status and answer.
+async fn check(server: &Server, bucket: &str) -> (u16, String) {
+    signed(
+        server,
+        (ACCESS_KEY, SECRET_KEY),
+        "GET",
+        &format!("/{bucket}?replication-check"),
+        &[],
+        b"",
+    )
+    .await
+}
+
+/// Keys of a user of `server` allowed only `actions`.
+fn keys_allowed(server: &Server, user: &str, actions: &[&str]) -> (String, String) {
+    server.iam.create_user(user, None, &[], None).unwrap();
+    let policy = json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": actions, "Resource": "*"}],
+    });
+    server
+        .iam
+        .put_inline(teifs_iam::Owner::User(user), "policy", &policy.to_string())
+        .unwrap();
+    let key = server.iam.create_access_key(user).unwrap();
+    (key.info.id.clone(), key.secret.as_str().to_owned())
+}
+
+#[tokio::test]
+async fn a_replication_check_asks_the_target_without_writing() {
+    let ((from, _to), source, copy) = replicating().await;
+    assert_eq!(check(&from, "source").await, (200, String::new()));
+    // The target refused the check's write and deletes: nothing's there.
+    let versions = copy
+        .list_object_versions()
+        .bucket("copy")
+        .send()
+        .await
+        .unwrap();
+    assert!(versions.versions().is_empty(), "{versions:?}");
+    assert!(versions.delete_markers().is_empty(), "{versions:?}");
+    // A bucket with no rules, or no versions, can't replicate.
+    source.create_bucket().bucket("plain").send().await.unwrap();
+    let (status, text) = check(&from, "plain").await;
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains("Versioning must be"), "{text}");
+    versioned(&source, "other").await;
+    let (status, text) = check(&from, "other").await;
+    assert_eq!(status, 404, "{text}");
+    assert!(
+        text.contains("ReplicationConfigurationNotFoundError"),
+        "{text}"
+    );
+    // A target that stopped keeping versions can't take replicas.
+    copy.put_bucket_versioning()
+        .bucket("copy")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Suspended)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let (status, text) = check(&from, "source").await;
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains("RemoteTargetNotVersionedError"), "{text}");
+}
+
+#[tokio::test]
+async fn a_replication_check_finds_keys_that_may_not_replicate() {
+    let (from, to) = (object_server().await, object_server().await);
+    let (source, copy) = (client(&from, SECRET_KEY), client(&to, SECRET_KEY));
+    versioned(&source, "source").await;
+    versioned(&copy, "copy").await;
+    let read = ["s3:GetBucketVersioning"];
+    for (user, actions, missing) in [
+        ("writer", &["s3:PutObject"][..], "s3:ReplicateObject"),
+        (
+            "replicator",
+            &["s3:PutObject", "s3:ReplicateObject", "s3:DeleteObject"][..],
+            "s3:ReplicateDelete",
+        ),
+    ] {
+        let actions: Vec<&str> = actions.iter().chain(&read).copied().collect();
+        let keys = keys_allowed(&to, user, &actions);
+        let arn = target(&from, &to, (keys.0.as_str(), keys.1.as_str())).await;
+        replicate(&source, &arn).await;
+        let (status, text) = check(&from, "source").await;
+        assert_eq!(status, 400, "{text}");
+        assert!(
+            text.contains(&format!(
+                "{missing} permissions missing for replication user: AccessDenied"
+            )),
+            "{text}"
+        );
+    }
+    // Allowed both, the check goes through.
+    let keys = keys_allowed(
+        &to,
+        "both",
+        &[
+            "s3:GetBucketVersioning",
+            "s3:PutObject",
+            "s3:ReplicateObject",
+            "s3:DeleteObject",
+            "s3:ReplicateDelete",
+        ],
+    );
+    let arn = target(&from, &to, (keys.0.as_str(), keys.1.as_str())).await;
+    replicate(&source, &arn).await;
+    assert_eq!(check(&from, "source").await, (200, String::new()));
+}
+
 /// `server`'s Prometheus metrics.
 async fn scrape(server: &Server) -> String {
     let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);
