@@ -15,6 +15,8 @@
 mod db;
 mod iam;
 mod index;
+#[cfg(test)]
+mod schemas;
 mod system;
 mod usage;
 mod versions;

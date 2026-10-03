@@ -30,7 +30,10 @@ Every release must open every drive any earlier release wrote. The rules are in
    `crates/store/tests/fixtures`.)
 2. **Schema migration**: append a new entry to `MIGRATIONS` in
    `crates/meta/src/index.rs` or `crates/meta/src/system.rs`. Never edit a released entry.
-   Migrations run in one transaction.
+   Migrations run in one transaction. Record the new schema version with
+   `UPDATE_SCHEMAS=1 cargo test -p teifs-meta schemas` (it adds to
+   `crates/meta/schemas/<database>.json` and never changes a recorded version; an edited
+   released migration fails there).
 3. **Format version**: bump `FORMAT` in `crates/store/src/format.rs` and add an
    `upgrade_from_<n>` step. Copy the metadata to `.teifs/backups/pre-format-<new>/` first
    (`teifs_meta::backup`), make the change, and write `format.json` last: it's the commit

@@ -51,7 +51,9 @@ Anything that changes what's written in `.teifs/` or how files are laid out is a
 change: bump the version in `crates/store/src/format.rs`, add the upgrade, update
 [ON_DISK_FORMAT.md](ON_DISK_FORMAT.md), and add a fixture drive written by the release
 before the change (`crates/server/tests/format_fixtures.rs` writes it). Database schema changes add a migration at the end of the list; never
-edit a released migration.
+edit a released migration. `crates/meta/src/schemas.rs` holds every version's schema to
+that (`crates/meta/schemas/*.json`; record a new version with `UPDATE_SCHEMAS=1 cargo
+test -p teifs-meta schemas`) and upgrades a database of every version with rows in it.
 
 ## S3 behaviour
 

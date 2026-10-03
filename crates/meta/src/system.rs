@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{Result, db};
 
 /// The system database's schema, one entry per version.
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // 1: buckets TeiFS created, with the layout their objects are stored in.
     "CREATE TABLE buckets (
         name       TEXT    PRIMARY KEY,

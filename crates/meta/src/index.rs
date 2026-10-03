@@ -54,7 +54,7 @@ impl Drop for Tx<'_> {
 }
 
 /// The index's schema, one entry per version.
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // 1: objects, uploads and their parts.
     "CREATE TABLE objects (
         bucket   TEXT    NOT NULL,
