@@ -7,6 +7,8 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `docs/CLI.md`: every command and option, with its default, choices and environment
+  variable, generated from the command line itself so it never falls behind.
 - Versioning, with AWS's semantics, in both layouts: `PutBucketVersioning`
   (enabled or suspended), versions stacking under each key, delete markers,
   permanent deletes by version id, `versionId` on reads, tags, ACLs, deletes and a

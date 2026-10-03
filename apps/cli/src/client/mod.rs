@@ -672,7 +672,10 @@ pub enum AliasAction {
     /// List aliases (never their secret keys).
     Ls,
     /// Remove an alias.
-    Rm { name: String },
+    Rm {
+        /// The alias's name.
+        name: String,
+    },
 }
 
 /// `alias set`'s arguments.

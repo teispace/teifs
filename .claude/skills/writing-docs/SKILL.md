@@ -14,7 +14,7 @@ description: Writes or updates TeiFS documentation (README, docs/COMPATIBILITY, 
 | A security rule or what an attacker can reach | `docs/SECURITY_MODEL.md` |
 | Crates, modules, how a request flows | `docs/ARCHITECTURE.md`, and the layout in `AGENTS.md` |
 | How code is written | `docs/CONVENTIONS.md` |
-| Commands or flags | the README's command table |
+| Commands or flags | Each command's and argument's doc comment (it's the `--help` text and `docs/CLI.md`, which is generated: `UPDATE_DOCS=1 cargo test -p teifs --bin teifs reference`, never edited; a test fails when one says nothing), and the README's command table for the main ones |
 | The admin API, S3 Control, or the IAM/STS route | `docs/ADMIN_API.md`: its prose by hand; its endpoint tables are generated from `ENDPOINTS` in `crates/s3/src/routes.rs` (each entry's `about`), rewritten with `UPDATE_DOCS=1 cargo nextest run -p teifs-s3 -E 'test(admin_api_reference)'`, never edited |
 | Anything users notice | `CHANGELOG.md` under "Unreleased" |
 

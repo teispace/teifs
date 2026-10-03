@@ -216,6 +216,8 @@ requests live. See
 
 ## Commands
 
+The main ones. [docs/CLI.md](docs/CLI.md) lists every command and option.
+
 | Command | What it does |
 |---|---|
 | `teifs init [DIR] [--listen ADDR] [--default-layout object\|folder] [--kms-keyring PATH] [--alias NAME\|--no-alias] [--force]` | Set up a drive, its settings and an alias |

@@ -26,6 +26,8 @@ mod minio_targets;
 mod notify;
 mod openid;
 mod plugin;
+#[cfg(test)]
+mod reference;
 mod repair;
 mod restart;
 mod sts;
@@ -144,7 +146,10 @@ enum Command {
     /// Print the shell completion script for `shell`, for example
     /// `teifs completions zsh > ~/.zfunc/_teifs` or
     /// `teifs completions bash > ~/.local/share/bash-completion/completions/teifs`.
-    Completions { shell: clap_complete::Shell },
+    Completions {
+        /// The shell: bash, elvish, fish, powershell or zsh.
+        shell: clap_complete::Shell,
+    },
 }
 
 /// `teifs serve`'s settings. Each can also be set in a settings file (`--config`),
@@ -598,6 +603,7 @@ enum KeyAction {
     },
     /// Add a new version to a key; objects sealed by older versions stay readable.
     Rotate {
+        /// The key's name.
         name: String,
         #[command(flatten)]
         keyring: KeyringArgs,
@@ -605,6 +611,7 @@ enum KeyAction {
     /// Seal again, under a key's newest version, the objects' keys its older versions
     /// sealed (the drive, while `teifs serve` isn't using it). Their data stays as it is.
     Rewrap {
+        /// The key's name.
         name: String,
         /// Only count what would be sealed again.
         #[arg(long)]
@@ -624,6 +631,7 @@ enum BucketAction {
     },
     /// Create a bucket.
     Create {
+        /// The bucket's name.
         name: String,
         /// How it stores objects: `object` (any key S3 allows) or `folder` (plain files).
         #[arg(long, value_enum, default_value = "object")]
@@ -634,6 +642,7 @@ enum BucketAction {
     },
     /// Remove an empty bucket.
     Remove {
+        /// The bucket's name.
         name: String,
         /// The drive's folder (while `teifs serve` isn't using it).
         #[arg(long, default_value = ".", env = "TEIFS_DIR")]
