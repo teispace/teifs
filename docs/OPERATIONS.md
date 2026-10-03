@@ -1205,7 +1205,17 @@ A bucket's replication rules name where its objects go: another bucket on the sa
 (`arn:aws:s3:::NAME`), or a *target*, a bucket on another S3 service (another TeiFS,
 MinIO, AWS…). Targets are added, listed and removed through `MinIO`'s admin API
 (`set-remote-target`, `list-remote-targets` and `remove-remote-target`, as madmin-go
-calls them), which answers the ARN the rules name.
+calls them), which answers the ARN the rules name. `mc replicate` adds the target and
+its rule together, as it does against `MinIO`:
+
+```sh
+mc replicate add local/photos --priority 1 \
+  --remote-bucket 'https://ACCESS_KEY:SECRET_KEY@backup.example.com:9000/photos-copy'
+mc replicate ls local/photos
+mc replicate update local/photos --id RULE_ID --state disable
+mc replicate rm local/photos --id RULE_ID      # the rule, then its target
+mc replicate rm local/photos --all --force     # every rule (targets stay)
+```
 
 A target's ARN is `arn:minio:replication:REGION:ID:BUCKET`; adding the same endpoint and
 bucket again changes that target (its settings and secret key) and keeps the ARN. The
