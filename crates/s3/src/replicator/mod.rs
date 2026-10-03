@@ -16,18 +16,21 @@ pub(crate) use stats::{Bucket, Rates, Stats, Target, Timed};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use teifs_store::{
     Encryption, ObjectBody, ObjectInfo, QueuedDelete, Replica, ReplicaMetadata, Store, StoreError,
     Waiting,
 };
+use teifs_types::notify::ReplicationEventData;
 use teifs_types::{
     SseMode,
-    replication::{LOCAL_ARN, ReplicationConfig, ReplicationStatus},
+    replication::{LOCAL_ARN, ReplicationConfig, ReplicationRule, ReplicationStatus},
 };
 use tokio::{io::AsyncReadExt as _, sync::Notify};
+
+use crate::events::{Events, Happened, event_time};
 use tokio_util::sync::CancellationToken;
 
 /// How often waiting versions are looked for without being woken.
@@ -36,6 +39,8 @@ const EVERY: Duration = Duration::from_secs(60);
 const BATCH: usize = 1_000;
 /// How much of a version is read at a time.
 const CHUNK: usize = 256 * 1024;
+/// How soon Replication Time Control replicates a version.
+const THRESHOLD: Duration = Duration::from_mins(15);
 
 /// Copies waiting versions to their destinations.
 #[derive(Debug)]
@@ -47,6 +52,8 @@ pub(crate) struct Worker {
     targets: Mutex<HashMap<String, Arc<remote::Target>>>,
     /// What it did, for the replication metrics.
     stats: Arc<Stats>,
+    /// Where replication events go.
+    events: Option<Events>,
 }
 
 /// Why a version didn't reach a destination.
@@ -82,7 +89,14 @@ impl Worker {
             every: EVERY,
             targets: Mutex::default(),
             stats: Arc::default(),
+            events: None,
         }
+    }
+
+    /// Sends replication events through `events`.
+    pub(crate) fn with_events(mut self, events: Events) -> Self {
+        self.events = Some(events);
+        self
     }
 
     /// Records what it does in `stats`.
@@ -295,15 +309,15 @@ impl Worker {
             } else {
                 version.size
             };
-            let status = match self.send(bucket, config, version, arn).await {
+            let (status, why) = match self.send(bucket, config, version, arn).await {
                 Ok(()) => {
                     self.stats.sent(bucket, arn, size, started.elapsed());
-                    ReplicationStatus::Completed
+                    (ReplicationStatus::Completed, None)
                 }
                 Err(Missed::Failed(err)) => {
                     self.stats.failed(bucket, arn, size, false);
                     tracing::warn!(bucket, key = %version.key, destination = %arn, error = %err, "a version can't be replicated");
-                    ReplicationStatus::Failed
+                    (ReplicationStatus::Failed, Some(err))
                 }
                 Err(missed @ (Missed::Later(_) | Missed::Unreachable(_))) => {
                     let unreachable = matches!(missed, Missed::Unreachable(_));
@@ -322,6 +336,7 @@ impl Worker {
             {
                 Ok(()) => {
                     settled = true;
+                    self.tell(bucket, config, (version, arn), why).await;
                     if version.resync.contains(arn)
                         && let Err(err) = self
                             .store
@@ -337,6 +352,65 @@ impl Worker {
             }
         }
         settled
+    }
+
+    /// Tells `bucket`'s event rules how `version` reached `arn`: it failed (`why`), or
+    /// got there, after the rule's Replication Time Control threshold too.
+    async fn tell(
+        &self,
+        bucket: &str,
+        config: &ReplicationConfig,
+        (version, arn): (&Waiting, &str),
+        why: Option<String>,
+    ) {
+        let Some(events) = &self.events else {
+            return;
+        };
+        let rule = config
+            .rules
+            .iter()
+            .find(|rule| rule.enabled && rule.destination.bucket == arn);
+        let failed = why.is_some();
+        let happened = Happened {
+            key: version.key.clone(),
+            size: (!version.delete_marker).then_some(version.size),
+            etag: None,
+            version_id: Some(version.version_id.clone()),
+            replication: Some(ReplicationEventData {
+                replication_rule_id: rule.map(|rule| rule.id.clone()).unwrap_or_default(),
+                destination_bucket: arn.to_owned(),
+                s3_operation: if version.delete_marker {
+                    "DELETE_MARKER_PUT"
+                } else {
+                    "OBJECT_PUT"
+                }
+                .to_owned(),
+                request_time: event_time(version.modified),
+                failure_reason: why,
+            }),
+        };
+        if failed {
+            events
+                .replicated("Replication:OperationFailedReplication", bucket, happened)
+                .await;
+            return;
+        }
+        if late(rule, version.modified, SystemTime::now()) {
+            events
+                .replicated(
+                    "Replication:OperationReplicatedAfterThreshold",
+                    bucket,
+                    happened.clone(),
+                )
+                .await;
+        }
+        events
+            .replicated(
+                "Replication:OperationCompletedReplication",
+                bucket,
+                happened,
+            )
+            .await;
     }
 
     /// Copies a version to the destination `arn`; whether it was sent (or is gone).
@@ -551,6 +625,14 @@ impl Sending<'_> {
 }
 
 /// A time as Unix milliseconds.
+/// Whether a version made at `made` and replicated `now` by `rule` came after the 15
+/// minutes its Replication Time Control promises.
+fn late(rule: Option<&ReplicationRule>, made: SystemTime, now: SystemTime) -> bool {
+    rule.and_then(|rule| rule.destination.replication_time.as_ref())
+        .is_some_and(|rtc| rtc.enabled)
+        && now.duration_since(made).is_ok_and(|took| took > THRESHOLD)
+}
+
 fn millis(time: std::time::SystemTime) -> i64 {
     time.duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -845,6 +927,23 @@ mod tests {
             check(&store, "source").await,
             Err(Unready::StaleTarget("r".to_owned()))
         );
+    }
+
+    #[test]
+    fn only_rules_with_replication_time_control_are_late() {
+        let made = SystemTime::UNIX_EPOCH + Duration::from_hours(1000);
+        let mut rule = everything_to("copy").rules.remove(0);
+        let after = |minutes| made + Duration::from_mins(minutes);
+        assert!(!late(Some(&rule), made, after(60)));
+        rule.destination.replication_time = Some(teifs_types::replication::Switch {
+            enabled: true,
+            minutes: Some(15),
+        });
+        assert!(!late(Some(&rule), made, after(15)));
+        assert!(late(Some(&rule), made, after(16)));
+        assert!(!late(None, made, after(60)));
+        // A clock that went back isn't late.
+        assert!(!late(Some(&rule), made, made - Duration::from_secs(1)));
     }
 
     #[tokio::test]

@@ -438,6 +438,28 @@ pub struct EventRecord {
     pub response_elements: ResponseElements,
     /// What it happened to.
     pub s3: S3Entity,
+    /// How a version's replication went (replication events alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_event_data: Option<ReplicationEventData>,
+}
+
+/// How a version's replication to one destination went, as S3 describes it in a
+/// replication event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicationEventData {
+    /// The id of the rule that replicates it.
+    pub replication_rule_id: String,
+    /// The destination: `arn:aws:s3:::NAME`, or a target's ARN.
+    pub destination_bucket: String,
+    /// What was replicated: `OBJECT_PUT` (a version), `DELETE_MARKER_PUT` (a delete
+    /// marker).
+    pub s3_operation: String,
+    /// When replication was asked for: when the version was made (ISO 8601).
+    pub request_time: String,
+    /// Why it failed (`Replication:OperationFailedReplication` alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 /// Who: an access key (empty for anyone), or the bucket's owner.
@@ -835,6 +857,7 @@ mod tests {
                 request_id: "ID".into(),
                 host_id: "HOST".into(),
             },
+            replication_event_data: None,
             s3: S3Entity {
                 s3_schema_version: "1.0".into(),
                 configuration_id: "rule".into(),

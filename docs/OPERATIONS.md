@@ -1762,9 +1762,19 @@ them against the new server's targets.
 | `s3:ObjectRetention:Put` | An object's retention was set |
 | `s3:ObjectCreated:PutLegalHold` | Its legal hold was set (MinIO's name) |
 | `s3:ObjectAccessed:Get`, `:Head`, `:Attributes`, `:GetRetention`, `:GetLegalHold` | An object was read (MinIO's) |
+| `s3:Replication:OperationCompletedReplication` | A version or delete marker reached a replication destination (MinIO's) |
+| `s3:Replication:OperationFailedReplication` | One can't reach a destination (`FAILED`) |
+| `s3:Replication:OperationReplicatedAfterThreshold` | One reached it more than 15 minutes after it was made, under a rule with Replication Time Control |
 
 MinIO's `s3:ObjectCreated:PutTagging`, `:DeleteTagging` and `:PutRetention` name the
 tagging and retention events too.
+
+Replication events come once for each destination, and carry S3's
+`replicationEventData`: the rule's id, the destination (`destinationBucket`, its ARN),
+`s3Operation` (`OBJECT_PUT`, or `DELETE_MARKER_PUT` for a marker), `requestTime` (when
+the version was made) and, for a failure, `failureReason`, which is what the destination
+answered (`the target answered 403: …`) rather than one of S3's codes. A version
+`PENDING` while a target is down sends nothing until it settles.
 
 ### What's sent
 

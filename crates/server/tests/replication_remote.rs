@@ -733,6 +733,85 @@ async fn what_replication_did_is_reported_as_minio_reports_it() {
     );
 }
 
+/// A listener for `source`'s replication events on `server`.
+async fn replication_events(server: &Server) -> teifs_client::Listen {
+    let listener = teifs_client::Client::new(
+        &server.endpoint,
+        ACCESS_KEY,
+        teifs_client::Zeroizing::new(SECRET_KEY.into()),
+    )
+    .unwrap();
+    let filter = teifs_client::ListenFilter {
+        events: vec!["s3:Replication:*".to_owned()],
+        prefix: String::new(),
+        suffix: String::new(),
+    };
+    listener.listen(Some("source"), &filter).await.unwrap()
+}
+
+/// The next event, within a few seconds.
+async fn next_event(listen: &mut teifs_client::Listen) -> teifs_client::EventRecord {
+    tokio::time::timeout(std::time::Duration::from_secs(10), listen.next())
+        .await
+        .expect("an event within 10 s")
+        .unwrap()
+        .expect("the answer goes on")
+}
+
+#[tokio::test]
+async fn replicated_and_failed_versions_are_events() {
+    let ((from, to), source, _copy) = replicating().await;
+    let mut events = replication_events(&from).await;
+    let written = source
+        .put_object()
+        .bucket("source")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    let event = next_event(&mut events).await;
+    assert_eq!(
+        event.event_name,
+        "Replication:OperationCompletedReplication"
+    );
+    assert_eq!(event.s3.object.key, "a.txt");
+    assert_eq!(event.s3.object.version_id, written.version_id);
+    assert_eq!(event.s3.object.size, Some(5));
+    let data = event.replication_event_data.unwrap();
+    assert_eq!(data.replication_rule_id, "r");
+    assert!(
+        data.destination_bucket
+            .starts_with("arn:minio:replication:"),
+        "{data:?}"
+    );
+    assert_eq!(data.s3_operation, "OBJECT_PUT");
+    assert_eq!(data.failure_reason, None);
+    // A target whose keys may only write fails the version.
+    let keys = keys_allowed(&to, "writer", &["s3:PutObject"]);
+    let arn = target(&from, &to, (keys.0.as_str(), keys.1.as_str())).await;
+    replicate(&source, &arn).await;
+    source
+        .put_object()
+        .bucket("source")
+        .key("b.txt")
+        .body(b"hi".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+    let event = next_event(&mut events).await;
+    assert_eq!(event.event_name, "Replication:OperationFailedReplication");
+    assert_eq!(event.s3.object.key, "b.txt");
+    let data = event.replication_event_data.unwrap();
+    assert_eq!(data.destination_bucket, arn);
+    assert!(
+        data.failure_reason
+            .as_deref()
+            .is_some_and(|why| why.contains("403")),
+        "{data:?}"
+    );
+}
+
 /// `MinIO`'s replication check on `bucket` of `server`, signed by the root user: its
 /// status and answer.
 async fn check(server: &Server, bucket: &str) -> (u16, String) {

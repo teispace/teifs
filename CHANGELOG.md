@@ -30,7 +30,8 @@ behaviour; the on-disk format is always upgraded automatically.
   same figures are Prometheus metrics (`teifs_replication_…`), and replication targets
   say whether they're online. `MinIO`'s replication check (`GET ?replication-check`)
   asks each target whether it can take replicas without writing, and TeiFS answers
-  `MinIO`'s.
+  `MinIO`'s. Replication sends events: `s3:Replication:OperationFailedReplication`,
+  `OperationReplicatedAfterThreshold` and `MinIO`'s `OperationCompletedReplication`.
 - Replication targets on other S3 services, through `MinIO`'s admin API
   (`set-remote-target`, `list-remote-targets`, `remove-remote-target`): their secret
   keys kept sealed by the KMS and never answered, their ARNs named by replication rules,

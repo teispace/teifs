@@ -14,7 +14,8 @@ use teifs_notify::Notifier;
 use teifs_store::{Expirations, OWNER_ID, ObjectInfo, Store};
 use teifs_types::notify::{
     BucketEntity, EVENT_VERSION, EventMessage, EventRecord, Identity, ObjectEntity,
-    RequestParameters, ResponseElements, S3Entity, TargetArn, TestEvent, event_key,
+    ReplicationEventData, RequestParameters, ResponseElements, S3Entity, TargetArn, TestEvent,
+    event_key,
 };
 use time::OffsetDateTime;
 
@@ -36,6 +37,8 @@ pub(crate) struct Happened {
     /// Its ETag, unquoted.
     pub(crate) etag: Option<String>,
     pub(crate) version_id: Option<String>,
+    /// How its replication went, for a replication event.
+    pub(crate) replication: Option<ReplicationEventData>,
 }
 
 impl Happened {
@@ -46,6 +49,7 @@ impl Happened {
             size: Some(info.size),
             etag: Some(info.etag.clone()),
             version_id: crate::drive::written_version(info),
+            replication: None,
         }
     }
 
@@ -234,6 +238,7 @@ impl Events {
                     sequencer: request.id.clone(),
                 },
             },
+            replication_event_data: object.replication.clone(),
         }
     }
 
@@ -286,8 +291,21 @@ impl Expirations for Events {
     }
 }
 
+impl Events {
+    /// Records how `bucket`'s version `happened` reached a destination: `name` is
+    /// `Replication:OperationCompletedReplication` (`MinIO`'s),
+    /// `Replication:OperationFailedReplication` or
+    /// `Replication:OperationReplicatedAfterThreshold`.
+    pub(crate) async fn replicated(&self, name: &str, bucket: &str, happened: Happened) {
+        // No request: no client, and a new id to order it by.
+        let extensions = http::Extensions::new();
+        self.happened(&extensions, name, bucket, vec![happened])
+            .await;
+    }
+}
+
 /// A time as events give it: `2026-09-30T12:00:00.000Z`.
-fn event_time(time: SystemTime) -> String {
+pub(crate) fn event_time(time: SystemTime) -> String {
     let t = OffsetDateTime::from(time);
     let millis = time
         .duration_since(UNIX_EPOCH)
