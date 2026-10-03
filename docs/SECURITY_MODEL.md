@@ -125,7 +125,9 @@ request) is read, with the job condition keys; a job that doesn't exist is decid
 its ARN alone first, so a caller without the action can't learn which jobs exist.
 `CreateJob` also needs `iam:PassRole` on the job's role, and the job's tasks run as
 that role (its trust policy must name `batchoperations.s3.amazonaws.com`) through the
-S3 API in-process, never with the creator's permissions or the server's.
+S3 API in-process, never with the creator's permissions or the server's; its completion
+report is written as the role too, so a job can't put a report where its role may not
+write.
 Their paths carry an ARN, which botocore signs as sent and AWS's other SDKs encode
 again first; s3s checks only the first, so a failed signature is checked once more
 with the path encoded again, before anything runs. The admin API's actions

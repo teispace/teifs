@@ -84,13 +84,15 @@ impl Worker {
             .filter(|job| !job.status.finished() && job.status != JobStatus::Suspended)
             .max_by_key(|job| {
                 (
-                    job.status == JobStatus::Active,
+                    matches!(job.status, JobStatus::Active | JobStatus::Cancelling),
                     job.priority,
                     std::cmp::Reverse(job.created_ms),
                 )
             })?;
         let now = crate::admin::millis(std::time::SystemTime::now());
-        if job.status != JobStatus::Active && !batch_operations::preparing(job.status) {
+        if !matches!(job.status, JobStatus::Active | JobStatus::Cancelling)
+            && !batch_operations::preparing(job.status)
+        {
             job.status = JobStatus::Active;
             job.progress.started_ms = Some(now);
             tracing::info!(job = job.id, kind = job.spec.kind(), "a batch job started");
@@ -130,7 +132,10 @@ impl Worker {
         let kept = self
             .store
             .update_batch_job(&job.id, move |kept| {
-                kept.status = status;
+                // Being cancelled meanwhile: it's cancelled next, unless it ended.
+                if kept.status != JobStatus::Cancelling || status.finished() {
+                    kept.status = status;
+                }
                 kept.progress = progress;
                 kept.failures = failures;
             })
@@ -174,7 +179,12 @@ impl Worker {
             }
             JobSpec::Operation(operation) => match &self.operations {
                 Some(operations) => {
-                    Box::pin(batch_operations::page(operations, job, &operation)).await
+                    Box::pin(batch_operations::page(
+                        (operations, &self.store),
+                        job,
+                        &operation,
+                    ))
+                    .await
                 }
                 None => Err(StoreError::Io(std::io::Error::other(
                     "S3 Batch Operations' jobs run only with IAM",

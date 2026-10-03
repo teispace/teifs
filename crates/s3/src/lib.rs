@@ -10,6 +10,7 @@ mod audit;
 mod batch_jobs;
 mod batch_operations;
 mod batch_replicate;
+mod batch_report;
 mod bucket_access;
 mod bucket_export;
 mod caps;

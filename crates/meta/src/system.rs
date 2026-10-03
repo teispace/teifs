@@ -59,6 +59,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         job        TEXT    NOT NULL,
         secrets    TEXT
      ) WITHOUT ROWID;",
+    // 16: the results of S3 Batch Operations jobs' tasks, numbered in the manifest's
+    //     order, kept for their completion reports: each a report's CSV line.
+    "CREATE TABLE batch_results (
+        job    TEXT    NOT NULL,
+        seq    INTEGER NOT NULL,
+        failed INTEGER NOT NULL,
+        line   TEXT    NOT NULL,
+        PRIMARY KEY (job, seq)
+     ) WITHOUT ROWID;",
 ];
 
 /// How a bucket stores its objects.
@@ -314,13 +323,63 @@ impl System {
         Ok(jobs)
     }
 
-    /// Removes a batch job; whether it was there.
+    /// Removes a batch job, and its tasks' results; whether it was there.
     pub fn remove_batch_job(&self, id: &str) -> Result<bool> {
+        self.remove_batch_results(id)?;
         Ok(self
             .conn
             .prepare_cached("DELETE FROM batch_jobs WHERE id = ?1")?
             .execute([id])?
             > 0)
+    }
+
+    /// Records results of batch job `job`'s tasks: each its number, whether it failed,
+    /// and its line, replacing a result of the same number (a page that ran again).
+    pub fn add_batch_results(&self, job: &str, results: &[(u64, bool, String)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR REPLACE INTO batch_results (job, seq, failed, line)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (seq, failed, line) in results {
+                let seq = i64::try_from(*seq).unwrap_or(i64::MAX);
+                insert.execute(params![job, seq, failed, line])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Up to `limit` results of `job`'s tasks that failed (or succeeded), numbered after
+    /// `after`, in order: each its number and line.
+    pub fn batch_results(
+        &self,
+        job: &str,
+        failed: bool,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, String)>> {
+        let after = after.map_or(-1, |a| i64::try_from(a).unwrap_or(i64::MAX));
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.conn.prepare_cached(
+            "SELECT seq, line FROM batch_results
+             WHERE job = ?1 AND failed = ?2 AND seq > ?3 ORDER BY seq LIMIT ?4",
+        )?;
+        let results = statement
+            .query_map(params![job, failed, after, limit], |r| {
+                Ok((u64::try_from(r.get::<_, i64>(0)?).unwrap_or(0), r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(results)
+    }
+
+    /// Removes batch job `job`'s tasks' results; how many.
+    pub fn remove_batch_results(&self, job: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .prepare_cached("DELETE FROM batch_results WHERE job = ?1")?
+            .execute([job])?)
     }
 }
 
@@ -429,5 +488,44 @@ mod tests {
         assert!(system.remove_batch_job("a").unwrap());
         assert!(!system.remove_batch_job("a").unwrap());
         assert_eq!(system.batch_jobs().unwrap(), ["{\"n\":3}"]);
+    }
+
+    #[test]
+    fn batch_results_are_kept_in_order_until_their_job_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = System::open(&dir.path().join("system.db")).unwrap();
+        system.add_batch_job("j", 1, "{}", None).unwrap();
+        let line = |n: u64| format!("line {n}");
+        let results: Vec<_> = (0..5).map(|n| (n, n % 2 == 1, line(n))).collect();
+        system.add_batch_results("j", &results).unwrap();
+        system
+            .add_batch_results("other", &[(0, false, "x".into())])
+            .unwrap();
+        // A page that ran again replaces its results.
+        system
+            .add_batch_results("j", &[(4, true, "again".into())])
+            .unwrap();
+        let ok = system.batch_results("j", false, None, 10).unwrap();
+        assert_eq!(ok, [(0, line(0)), (2, line(2))]);
+        let failed = system.batch_results("j", true, None, 10).unwrap();
+        assert_eq!(failed, [(1, line(1)), (3, line(3)), (4, "again".into())]);
+        assert_eq!(
+            system.batch_results("j", true, Some(1), 1).unwrap(),
+            [(3, line(3))]
+        );
+        assert!(
+            system
+                .batch_results("j", true, Some(4), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(system.remove_batch_job("j").unwrap());
+        assert!(
+            system
+                .batch_results("j", true, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(system.remove_batch_results("other").unwrap(), 1);
     }
 }

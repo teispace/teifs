@@ -584,7 +584,16 @@ HTTP client is `loopback::Loopback`: it calls the S3 service in-process
 manifest read are signed as the role and authorized like any request. A new job's
 manifest is read in 256 KiB ranged GETs pinned by `If-Match` (and its version), each
 line checked and counted (`progress.total`); then each page runs up to 100 tasks, 8 at a
-time, from `progress.offset`, the byte where the next line starts.
+time, from `progress.offset`, the byte where the next line starts. With a completion
+report (`batch_report.rs`), each task's result is kept as its CSV line in system.db's
+`batch_results` table, numbered in manifest order; once a job that ran tasks ends
+(done, failed, or cancelled: `UpdateJobStatus` makes it `Cancelling`, which the worker
+reports and makes `Cancelled`, and a page that ends meanwhile doesn't undo), the lines
+are written as the role to the report's bucket, a results
+file for the succeeded and one for the failed (in 16 MiB parts once they're larger),
+named by a SHA-1 of the job and status so a report written again replaces its files, then
+`manifest.json`, and the lines are forgotten. A report that can't be written fails the
+job (`ReportWriteFailed`).
 Request metrics (`request_metrics.rs`): once some bucket has a metrics configuration
 or an analytics configuration that exports (`Store::any_bucket_counting_requests` at the
 start, or a put or an import), `Watch::done` queues

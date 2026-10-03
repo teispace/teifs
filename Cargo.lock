@@ -4912,6 +4912,7 @@ dependencies = [
  "teifs-client",
  "teifs-crypto",
  "teifs-iam",
+ "teifs-meta",
  "teifs-notify",
  "teifs-s3",
  "teifs-store",

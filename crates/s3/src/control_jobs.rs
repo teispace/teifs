@@ -427,13 +427,55 @@ fn object_of(arn: &str) -> Option<(String, String)> {
     (!bucket.is_empty() && !key.is_empty()).then(|| (bucket.to_owned(), key.to_owned()))
 }
 
+/// Where a job's completion report goes: none unless it's enabled.
 fn report_of(given: &ReportXml) -> S3Result<Option<JobReport>> {
     if !given.enabled {
         return Ok(None);
     }
-    Err(not_implemented(
-        "TeiFS doesn't write completion reports yet: set the Report's Enabled to false.",
-    ))
+    let bucket = given
+        .bucket
+        .as_deref()
+        .and_then(|arn| arn.strip_prefix("arn:aws:s3:::"))
+        .filter(|bucket| !bucket.is_empty() && !bucket.contains('/'))
+        .ok_or_else(|| bad_request("An enabled Report's Bucket must be a bucket's ARN."))?;
+    if given.format.as_deref() != Some(crate::batch_report::FORMAT) {
+        return Err(bad_request(format!(
+            "An enabled Report's Format is {}.",
+            crate::batch_report::FORMAT
+        )));
+    }
+    let failed_only = match given.report_scope.as_deref() {
+        None | Some("AllTasks") => false,
+        Some("FailedTasksOnly") => true,
+        Some(_) => return Err(bad_request("ReportScope is AllTasks or FailedTasksOnly.")),
+    };
+    let prefix = given.prefix.clone().unwrap_or_default();
+    if prefix.len() > 512 {
+        return Err(bad_request("A Report's Prefix is at most 512 characters."));
+    }
+    Ok(Some(JobReport {
+        bucket: bucket.to_owned(),
+        prefix,
+        failed_only,
+    }))
+}
+
+/// A job's `Report`, as S3 Control answers it.
+fn report_xml(report: Option<&JobReport>) -> ReportXml {
+    report.map_or_else(ReportXml::default, |report| ReportXml {
+        bucket: Some(format!("arn:aws:s3:::{}", report.bucket)),
+        format: Some(crate::batch_report::FORMAT.to_owned()),
+        enabled: true,
+        prefix: Some(report.prefix.clone()).filter(|p| !p.is_empty()),
+        report_scope: Some(
+            if report.failed_only {
+                "FailedTasksOnly"
+            } else {
+                "AllTasks"
+            }
+            .to_owned(),
+        ),
+    })
 }
 
 fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
@@ -657,10 +699,7 @@ fn describe(caller: &Caller<'_>, job: &BatchJob) -> JobXml {
                 failure_reason: reason.to_owned(),
             }
         })),
-        report: ReportXml {
-            enabled: false,
-            ..ReportXml::default()
-        },
+        report: report_xml(op.and_then(|op| op.report.as_ref())),
         creation_time: iso(job.created_ms),
         termination_date: termination(job),
         role_arn: op.map(|op| op.role_arn.clone()).unwrap_or_default(),
@@ -762,7 +801,7 @@ async fn set_status(
     let given = reason.clone();
     let kept = store
         .update_batch_job(&job.id, move |job| {
-            job.status = wanted;
+            job.status = becomes(job, wanted);
             if let teifs_types::batch::JobSpec::Operation(op) = &mut job.spec {
                 op.status_reason = given;
             }
@@ -770,18 +809,31 @@ async fn set_status(
         .await
         .s3()?;
     // Ended meanwhile.
-    if kept.as_ref().is_none_or(|kept| kept.status != wanted) {
+    let Some(kept) = kept.filter(|kept| kept.status == becomes(kept, wanted)) else {
         return Err(not_now(&job, wanted));
-    }
+    };
     let answer = StatusSet {
         job_id: job.id,
-        status: wanted.as_str(),
+        status: kept.status.as_str(),
         status_update_reason: reason,
     };
     Ok((
         xml("UpdateJobStatusResult", &answer)?,
-        wanted == JobStatus::Ready,
+        kept.status == JobStatus::Ready,
     ))
+}
+
+/// What a job asked to be `wanted` becomes: a job cancelled once it ran tasks is
+/// `Cancelling` until it has reported them.
+fn becomes(job: &BatchJob, wanted: JobStatus) -> JobStatus {
+    let reports =
+        matches!(&job.spec, teifs_types::batch::JobSpec::Operation(op) if op.report.is_some());
+    if wanted == JobStatus::Cancelled && reports && crate::batch_operations::ran(&job.progress) > 0
+    {
+        JobStatus::Cancelling
+    } else {
+        wanted
+    }
 }
 
 /// Whether a job that's `from` may be made `to`: confirmed while suspended, or

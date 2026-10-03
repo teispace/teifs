@@ -1502,8 +1502,23 @@ policies can test `s3:RequestJobPriority` and `s3:RequestJobOperation` then, and
 `s3:ExistingJobPriority` and `s3:ExistingJobOperation` on the job's other calls
 (`s3:DescribeJob`, `s3:UpdateJobPriority`, `s3:UpdateJobStatus`, `s3:GetJobTagging`,
 `s3:PutJobTagging`, `s3:DeleteJobTagging`; `s3:ListJobs` on the account), whose resource
-is `arn:aws:s3:us-east-1:ACCOUNT:job/ID`. Completion reports aren't written yet, so
-`Report` must say `Enabled: false`.
+is `arn:aws:s3:us-east-1:ACCOUNT:job/ID`.
+
+A completion report lists each task's result once the job has run at least one and
+ends: complete, failed or cancelled (it's `Cancelling` until the report is written).
+Give the report's bucket and the role `s3:PutObject` there:
+
+```sh
+  --report '{"Enabled":true,"Bucket":"arn:aws:s3:::reports","Prefix":"batch",
+    "Format":"Report_CSV_20180820","ReportScope":"FailedTasksOnly"}'
+```
+
+The report is `batch/job-ID/manifest.json`, naming CSV files under
+`batch/job-ID/results/`: one of the tasks that succeeded (unless `ReportScope` is
+`FailedTasksOnly`) and one of those that failed, each line the bucket, the URL-encoded
+key, the version, `succeeded` or `failed`, the HTTP status, the error code and its
+message, as AWS writes them. A report the role can't write fails the job with
+`ReportWriteFailed`.
 
 ## Migrating from MinIO or another S3 service
 

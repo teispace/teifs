@@ -21,8 +21,10 @@ use aws_sdk_s3::{
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use teifs_iam::Iam;
-use teifs_store::StoreError;
-use teifs_types::batch::{BatchJob, JobStatus, Manifest, ManifestField, Operation, OperationJob};
+use teifs_store::{Store, StoreError};
+use teifs_types::batch::{
+    BatchJob, JobProgress, JobStatus, Manifest, ManifestField, Operation, OperationJob,
+};
 
 use crate::{loopback::Loopback, replicator::said};
 
@@ -59,13 +61,44 @@ pub(crate) struct Task {
     pub(crate) version: Option<String>,
 }
 
-/// Why a manifest couldn't be read.
+/// Why a page stopped: the manifest couldn't be read, or the report written.
 #[derive(Debug)]
-enum Unread {
+pub(crate) enum Stop {
     /// For good: the job fails.
     Failed(String),
     /// For now: the page runs again.
     Later(String),
+}
+
+/// Why a task failed, as a report says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Failure {
+    /// The answer's status, if one came.
+    pub(crate) status: Option<u16>,
+    /// Its error code.
+    pub(crate) code: String,
+    /// Its message.
+    pub(crate) message: String,
+}
+
+impl Failure {
+    fn of<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
+        err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+    ) -> Self {
+        Self {
+            status: err.raw_response().map(|r| r.status().as_u16()),
+            code: err.code().unwrap_or("InternalError").to_owned(),
+            message: err.message().map_or_else(|| said(err), str::to_owned),
+        }
+    }
+
+    fn internal(why: impl std::fmt::Display) -> Self {
+        Self {
+            status: None,
+            code: "InternalError".to_owned(),
+            message: why.to_string(),
+        }
+    }
 }
 
 /// A piece of a manifest: its whole lines, and whether it's the last.
@@ -74,10 +107,12 @@ struct Piece {
     last: bool,
 }
 
-/// Runs a page of `job`: reads a new job's manifest, or runs the next tasks of a ready
-/// or active one; whether it's done. A job that fails as a whole is left `Failed`.
+/// Runs a page of `job`: reads a new job's manifest, runs the next tasks of a ready or
+/// active one, or reports what a cancelled one ran; whether it's done. A job that fails
+/// as a whole is left `Failed`, and one being cancelled `Cancelled`. A job that ran
+/// tasks reports them once it ends, as AWS's do.
 pub(crate) async fn page(
-    operations: &Operations,
+    (operations, store): (&Operations, &Store),
     job: &mut BatchJob,
     spec: &OperationJob,
 ) -> Result<bool, StoreError> {
@@ -90,17 +125,49 @@ pub(crate) async fn page(
     };
     let result = if preparing(job.status) {
         prepare(&client, job, spec).await.map(|()| false)
+    } else if job.status == JobStatus::Cancelling {
+        report(&client, store, job, spec).await.map(|()| {
+            job.status = JobStatus::Cancelled;
+            false
+        })
     } else {
-        run(&client, job, spec).await
+        match run(&client, store, job, spec).await {
+            Ok(done) if done || job.status == JobStatus::Failed => {
+                report(&client, store, job, spec).await.map(|()| done)
+            }
+            Err(Stop::Failed(why)) if ran(&job.progress) > 0 => {
+                fail(job, why);
+                report(&client, store, job, spec).await.map(|()| false)
+            }
+            other => other,
+        }
     };
     match result {
         Ok(done) => Ok(done),
-        Err(Unread::Failed(why)) => {
+        Err(Stop::Failed(why)) => {
             fail(job, why);
             Ok(false)
         }
-        Err(Unread::Later(why)) => Err(StoreError::Io(std::io::Error::other(why))),
+        Err(Stop::Later(why)) => Err(StoreError::Io(std::io::Error::other(why))),
     }
+}
+
+/// Writes the job's report, if it asked for one.
+async fn report(
+    client: &Client,
+    store: &Store,
+    job: &BatchJob,
+    spec: &OperationJob,
+) -> Result<(), Stop> {
+    match &spec.report {
+        Some(report) => crate::batch_report::write(client, store, job, report).await,
+        None => Ok(()),
+    }
+}
+
+/// How many of a job's tasks ran.
+pub(crate) const fn ran(progress: &JobProgress) -> u64 {
+    progress.objects + progress.objects_failed
 }
 
 /// Whether a job's manifest is still to be read.
@@ -126,7 +193,7 @@ fn session(operations: &Operations, job: &BatchJob, spec: &OperationJob) -> Resu
 }
 
 /// Counts and checks a new job's tasks; it then waits to be confirmed, or is ready.
-async fn prepare(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Result<(), Unread> {
+async fn prepare(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Result<(), Stop> {
     job.status = JobStatus::Preparing;
     let (mut offset, mut total) = (0, 0_u64);
     loop {
@@ -153,14 +220,20 @@ async fn prepare(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Re
     Ok(())
 }
 
-fn manifest_line(n: u64, why: &str) -> Unread {
-    Unread::Failed(format!(
+fn manifest_line(n: u64, why: &str) -> Stop {
+    Stop::Failed(format!(
         "InvalidManifestContent: Line {n} of the manifest is invalid: {why}"
     ))
 }
 
-/// Runs the next tasks; whether they were the last.
-async fn run(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Result<bool, Unread> {
+/// Runs the next tasks, keeping their results for the report; whether they were the
+/// last.
+async fn run(
+    client: &Client,
+    store: &Store,
+    job: &mut BatchJob,
+    spec: &OperationJob,
+) -> Result<bool, Stop> {
     let piece = read(client, &spec.manifest, job.progress.offset).await?;
     let mut tasks = Vec::new();
     let mut consumed = 0;
@@ -182,15 +255,28 @@ async fn run(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Result
         .iter()
         .map(|task| run_task(client, &spec.operation, task))
         .collect();
-    let results: Vec<Result<(), String>> = stream::iter(running).buffered(PARALLEL).collect().await;
-    for (task, result) in tasks.iter().zip(results) {
-        match result {
-            Ok(()) => job.progress.objects += 1,
-            Err(why) => {
-                tracing::debug!(job = job.id, key = task.key, why, "a batch task failed");
-                job.progress.objects_failed += 1;
-            }
+    let results: Vec<Result<(), Failure>> =
+        stream::iter(running).buffered(PARALLEL).collect().await;
+    let first = job.progress.objects + job.progress.objects_failed;
+    let mut lines = Vec::new();
+    for ((n, task), result) in (first..).zip(&tasks).zip(results) {
+        let failed = result.is_err();
+        if failed {
+            job.progress.objects_failed += 1;
+        } else {
+            job.progress.objects += 1;
         }
+        if let Some(report) = &spec.report
+            && (failed || !report.failed_only)
+        {
+            lines.push((n, failed, crate::batch_report::line(task, &result)));
+        }
+    }
+    if !lines.is_empty() {
+        store
+            .add_batch_results(&job.id, lines)
+            .await
+            .map_err(|err| Stop::Later(err.to_string()))?;
     }
     job.progress.offset += consumed as u64;
     let p = &job.progress;
@@ -215,7 +301,7 @@ const fn failing(succeeded: u64, failed: u64) -> bool {
 }
 
 /// Reads the manifest's whole lines from `offset` on, a piece at a time.
-async fn read(client: &Client, manifest: &Manifest, offset: u64) -> Result<Piece, Unread> {
+async fn read(client: &Client, manifest: &Manifest, offset: u64) -> Result<Piece, Stop> {
     let got = client
         .get_object()
         .bucket(&manifest.bucket)
@@ -248,7 +334,7 @@ async fn read(client: &Client, manifest: &Manifest, offset: u64) -> Result<Piece
         .body
         .collect()
         .await
-        .map_err(|err| Unread::Later(format!("Reading the manifest failed: {err}")))?
+        .map_err(|err| Stop::Later(format!("Reading the manifest failed: {err}")))?
         .into_bytes();
     if last {
         return Ok(Piece { bytes, last });
@@ -258,7 +344,7 @@ async fn read(client: &Client, manifest: &Manifest, offset: u64) -> Result<Piece
             bytes: bytes.slice(..=end),
             last,
         }),
-        None => Err(Unread::Failed(format!(
+        None => Err(Stop::Failed(format!(
             "InvalidManifestContent: A line of the manifest is longer than {} KiB.",
             CHUNK / 1024
         ))),
@@ -267,20 +353,26 @@ async fn read(client: &Client, manifest: &Manifest, offset: u64) -> Result<Piece
 
 fn unread<E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static>(
     err: &SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
-) -> Unread {
-    let status = err.raw_response().map(|r| r.status().as_u16());
-    let why = format!(
-        "ManifestReadFailed: Reading the manifest failed: {}",
-        said(err)
-    );
+) -> Stop {
+    stop(
+        err.raw_response().map(|r| r.status().as_u16()),
+        format!(
+            "ManifestReadFailed: Reading the manifest failed: {}",
+            said(err)
+        ),
+    )
+}
+
+/// How a request answered `status` stops a job: for good, or until it's tried again.
+pub(crate) fn stop(status: Option<u16>, why: String) -> Stop {
     if for_good(status) {
-        Unread::Failed(why)
+        Stop::Failed(why)
     } else {
-        Unread::Later(why)
+        Stop::Later(why)
     }
 }
 
-/// Whether an answer of `status` (none: no answer) refuses a read for good: a client
+/// Whether an answer of `status` (none: no answer) refuses a request for good: a client
 /// error, but for a timeout or throttling.
 fn for_good(status: Option<u16>) -> bool {
     status.is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429))
@@ -369,7 +461,7 @@ fn decode_key(encoded: &str) -> Result<String, String> {
 }
 
 /// Runs one task; why it failed.
-async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result<(), String> {
+async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result<(), Failure> {
     let (bucket, key, version) = (&task.bucket, &task.key, task.version.clone());
     match operation {
         Operation::PutObjectTagging { tags } => {
@@ -377,11 +469,11 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .iter()
                 .map(|kv| Tag::builder().key(&kv.key).value(&kv.value).build())
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| err.to_string())?;
+                .map_err(Failure::internal)?;
             let tagging = Tagging::builder()
                 .set_tag_set(Some(tags))
                 .build()
-                .map_err(|err| err.to_string())?;
+                .map_err(Failure::internal)?;
             client
                 .put_object_tagging()
                 .bucket(bucket)
@@ -391,7 +483,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .send()
                 .await
                 .map(drop)
-                .map_err(|err| said(&err))
+                .map_err(|err| Failure::of(&err))
         }
         Operation::DeleteObjectTagging => client
             .delete_object_tagging()
@@ -401,7 +493,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
             .send()
             .await
             .map(drop)
-            .map_err(|err| said(&err)),
+            .map_err(|err| Failure::of(&err)),
         Operation::PutObjectLegalHold { on } => {
             let status = if *on {
                 ObjectLockLegalHoldStatus::On
@@ -417,7 +509,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .send()
                 .await
                 .map(drop)
-                .map_err(|err| said(&err))
+                .map_err(|err| Failure::of(&err))
         }
         Operation::PutObjectRetention {
             mode,
@@ -438,7 +530,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .send()
                 .await
                 .map(drop)
-                .map_err(|err| said(&err))
+                .map_err(|err| Failure::of(&err))
         }
     }
 }
@@ -507,6 +599,18 @@ mod tests {
         for status in [None, Some(408), Some(429), Some(500), Some(503), Some(399)] {
             assert!(!for_good(status), "{status:?}");
         }
+        assert!(matches!(stop(Some(403), "no".into()), Stop::Failed(why) if why == "no"));
+        assert!(matches!(stop(Some(503), "later".into()), Stop::Later(why) if why == "later"));
+    }
+
+    #[test]
+    fn tasks_that_failed_ran_too() {
+        let progress = JobProgress {
+            objects: 2,
+            objects_failed: 3,
+            ..JobProgress::default()
+        };
+        assert_eq!(ran(&progress), 5);
     }
 
     #[test]

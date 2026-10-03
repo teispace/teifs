@@ -191,6 +191,39 @@ impl Store {
         }
     }
 
+    /// Records results of job `id`'s tasks for its completion report: each its number,
+    /// whether it failed, and its line.
+    pub async fn add_batch_results(
+        &self,
+        id: &str,
+        results: Vec<(u64, bool, String)>,
+    ) -> Result<()> {
+        let id = id.to_owned();
+        self.blocking(move |inner| Ok(inner.system().add_batch_results(&id, &results)?))
+            .await
+    }
+
+    /// Up to `limit` results of job `id`'s tasks that failed (or succeeded), numbered
+    /// after `after`, in order.
+    pub async fn batch_results(
+        &self,
+        id: &str,
+        failed: bool,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, String)>> {
+        let id = id.to_owned();
+        self.blocking(move |inner| Ok(inner.system().batch_results(&id, failed, after, limit)?))
+            .await
+    }
+
+    /// Forgets job `id`'s tasks' results, once its report is written.
+    pub async fn forget_batch_results(&self, id: &str) -> Result<()> {
+        let id = id.to_owned();
+        self.blocking(move |inner| Ok(inner.system().remove_batch_results(&id).map(drop)?))
+            .await
+    }
+
     /// Forgets the jobs that finished before `before_ms`; how many.
     pub async fn forget_batch_jobs(&self, before_ms: i64) -> Result<usize> {
         self.blocking(move |inner| {

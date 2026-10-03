@@ -68,7 +68,9 @@ behaviour; the on-disk format is always upgraded automatically.
   after a restart, and fail once at least 1,000 tasks ran and more than half of them
   failed. Making one takes `s3:CreateJob` and `iam:PassRole` on its role, and policies
   can test `s3:RequestJobPriority`, `s3:RequestJobOperation`, `s3:ExistingJobPriority`
-  and `s3:ExistingJobOperation`.
+  and `s3:ExistingJobOperation`. Completion reports are written as AWS writes them, of
+  every task or the failed ones, to the bucket and prefix the job names, once a job
+  that ran tasks completes, fails or is cancelled.
 - MinIO's form of S3's XML, as `mc` sends it: replication rules with `DeleteReplication`
   and minio-go's empty filter elements, and `DeleteBucketReplication` answering `200`;
   MinIO's lifecycle and versioning extensions (`DelMarkerExpiration`,

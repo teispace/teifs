@@ -31,6 +31,7 @@ rustls-webpki.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
+teifs-meta.workspace = true
 teifs-crypto.workspace = true
 tracing-subscriber.workspace = true
 time.workspace = true
