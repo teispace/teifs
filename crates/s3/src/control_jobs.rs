@@ -526,11 +526,16 @@ fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
             crate::batch_copy::parse(*copy)?,
         )));
     }
+    if let Some(acl) = given.acl {
+        operations.push(Operation::PutObjectAcl(Box::new(crate::batch_acl::parse(
+            acl,
+        )?)));
+    }
     match operations.len() {
         1 => Ok(operations.remove(0)),
         0 => Err(not_implemented(
             "TeiFS runs these operations: S3PutObjectTagging, S3DeleteObjectTagging, \
-             S3PutObjectLegalHold, S3PutObjectRetention and S3PutObjectCopy.",
+             S3PutObjectLegalHold, S3PutObjectRetention, S3PutObjectCopy and S3PutObjectAcl.",
         )),
         _ => Err(bad_request("A job has exactly one Operation.")),
     }
@@ -755,6 +760,7 @@ fn operation_xml(operation: &Operation) -> OperationXml {
         Operation::PutObjectCopy(copy) => {
             xml.copy = Some(Box::new(crate::batch_copy::xml(copy)));
         }
+        Operation::PutObjectAcl(acl) => xml.acl = Some(crate::batch_acl::xml(acl)),
     }
     xml
 }
@@ -988,6 +994,8 @@ struct OperationXml {
     retention: Option<PutRetentionXml>,
     #[serde(rename = "S3PutObjectCopy", skip_serializing_if = "Option::is_none")]
     copy: Option<Box<crate::batch_copy::CopyXml>>,
+    #[serde(rename = "S3PutObjectAcl", skip_serializing_if = "Option::is_none")]
+    acl: Option<crate::batch_acl::AclXml>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

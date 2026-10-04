@@ -19,7 +19,7 @@ use aws_sdk_s3::{
 };
 use s3s::S3Result;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
-use teifs_types::batch::{CopyGrant, CopyMetadata, CopyOperation, KeyValue};
+use teifs_types::batch::{CopyMetadata, CopyOperation, Grant, KeyValue};
 
 use crate::{
     batch_operations::{Failure, Task},
@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-const CANNED_ACLS: [&str; 7] = [
+pub(crate) const CANNED_ACLS: [&str; 7] = [
     "private",
     "public-read",
     "public-read-write",
@@ -117,14 +117,14 @@ pub(crate) struct CopyXml {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct GrantXml {
+pub(crate) struct GrantXml {
     grantee: Option<GranteeXml>,
     permission: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct GranteeXml {
+pub(crate) struct GranteeXml {
     type_identifier: Option<String>,
     identifier: Option<String>,
 }
@@ -278,7 +278,7 @@ fn check(given: &CopyXml) -> S3Result<()> {
 }
 
 /// Fails unless `value`, when given, is one of `allowed`.
-fn one_of(name: &str, value: Option<&str>, allowed: &[&str]) -> S3Result<()> {
+pub(crate) fn one_of(name: &str, value: Option<&str>, allowed: &[&str]) -> S3Result<()> {
     match value {
         Some(value) if !allowed.contains(&value) => Err(bad_request(format!(
             "{name} is one of {}.",
@@ -288,7 +288,7 @@ fn one_of(name: &str, value: Option<&str>, allowed: &[&str]) -> S3Result<()> {
     }
 }
 
-fn grants_of(given: Members<GrantXml>) -> S3Result<Vec<CopyGrant>> {
+pub(crate) fn grants_of(given: Members<GrantXml>) -> S3Result<Vec<Grant>> {
     given
         .member
         .into_iter()
@@ -310,7 +310,7 @@ fn grants_of(given: Members<GrantXml>) -> S3Result<Vec<CopyGrant>> {
                     "An object's grant is FULL_CONTROL, READ, READ_ACP or WRITE_ACP.",
                 ));
             }
-            Ok(CopyGrant {
+            Ok(Grant {
                 kind,
                 identifier,
                 permission,
@@ -361,20 +361,25 @@ fn metadata_of(given: MetadataXml) -> S3Result<CopyMetadata> {
     })
 }
 
+/// Grants, as `DescribeJob` answers them; none when there are none.
+pub(crate) fn grants_xml(grants: &[Grant]) -> Option<Members<GrantXml>> {
+    (!grants.is_empty()).then(|| {
+        members(grants.iter().map(|grant| GrantXml {
+            grantee: Some(GranteeXml {
+                type_identifier: Some(grant.kind.clone()),
+                identifier: Some(grant.identifier.clone()),
+            }),
+            permission: Some(grant.permission.clone()),
+        }))
+    })
+}
+
 /// A job's copy, as `DescribeJob` answers it.
 pub(crate) fn xml(copy: &CopyOperation) -> CopyXml {
     CopyXml {
         target_resource: Some(format!("arn:aws:s3:::{}", copy.target_bucket)),
         canned_access_control_list: copy.canned_acl.clone(),
-        access_control_grants: (!copy.grants.is_empty()).then(|| {
-            members(copy.grants.iter().map(|grant| GrantXml {
-                grantee: Some(GranteeXml {
-                    type_identifier: Some(grant.kind.clone()),
-                    identifier: Some(grant.identifier.clone()),
-                }),
-                permission: Some(grant.permission.clone()),
-            }))
-        }),
+        access_control_grants: grants_xml(&copy.grants),
         metadata_directive: copy.metadata_directive.clone(),
         modified_since_constraint: copy.modified_since_ms.map(iso),
         new_object_metadata: copy.metadata.as_ref().map(|m| MetadataXml {
@@ -437,7 +442,7 @@ fn source(task: &Task) -> String {
 }
 
 /// The grants of `permission`, as its `x-amz-grant-*` header lists them.
-fn grantees(grants: &[CopyGrant], permission: &str) -> Option<String> {
+fn grantees(grants: &[Grant], permission: &str) -> Option<String> {
     let listed: Vec<String> = grants
         .iter()
         .filter(|grant| grant.permission == permission)
@@ -841,7 +846,7 @@ mod tests {
 
     #[test]
     fn grants_are_listed_by_permission() {
-        let grant = |kind: &str, identifier: &str, permission: &str| CopyGrant {
+        let grant = |kind: &str, identifier: &str, permission: &str| Grant {
             kind: kind.to_owned(),
             identifier: identifier.to_owned(),
             permission: permission.to_owned(),

@@ -573,7 +573,7 @@ failures) is written back with `Store::update_batch_job`, which leaves a job can
 meanwhile alone, so a restart resumes from the last page; an ended job's result is
 posted to its webhook.
 S3 Batch Operations (`control_jobs.rs`, `batch_operations.rs`, `batch_copy.rs`,
-`loopback.rs`): S3
+`batch_acl.rs`, `loopback.rs`): S3
 Control's job calls make and change `JobSpec::Operation` jobs in the same table, each
 decided in `control_jobs` once its job or request is read (`Needs::OnJob`), so the job
 condition keys are in the context; `CreateJob` also needs `iam:PassRole` on the role. The

@@ -533,6 +533,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .map_err(|err| Failure::of(&err))
         }
         Operation::PutObjectCopy(copy) => crate::batch_copy::run(client, copy, task).await,
+        Operation::PutObjectAcl(acl) => crate::batch_acl::run(client, acl, task).await,
     }
 }
 

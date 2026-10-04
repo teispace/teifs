@@ -1464,7 +1464,7 @@ for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
 AWS's S3 Batch Operations run through S3 Control, as `aws s3control` and the SDKs call
 it: a job runs one operation on every object a CSV manifest lists, as an IAM role. TeiFS
 runs `S3PutObjectTagging`, `S3DeleteObjectTagging`, `S3PutObjectLegalHold`,
-`S3PutObjectRetention` and `S3PutObjectCopy`. Make the role first; it must trust the service, and its policies
+`S3PutObjectRetention`, `S3PutObjectCopy` and `S3PutObjectAcl`. Make the role first; it must trust the service, and its policies
 decide what each task may do (reading the manifest included):
 
 ```sh
@@ -1516,6 +1516,14 @@ given, with `CopyObject`'s options; the role needs `s3:GetObject` (and
 
 `photos/a.jpg` becomes `archive/2026/a.jpg`. `NewObjectMetadata` replaces the source's
 metadata, `NewObjectTagging` its tags.
+
+An ACL job replaces each object's ACL, with a canned ACL or with grants and their owner;
+the role needs `s3:PutObjectAcl` (and `s3:PutObjectVersionAcl` for versions), and the
+buckets need ACLs enabled:
+
+```sh
+  --operation '{"S3PutObjectAcl":{"AccessControlPolicy":{"CannedAccessControlList":"private"}}}'
+```
 
 A completion report lists each task's result once the job has run at least one and
 ends: complete, failed or cancelled (it's `Cancelling` until the report is written).

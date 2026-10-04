@@ -7,6 +7,8 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
+  job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
   it names, worked out from its bytes, in place of the source's, and copying an object
   onto itself that way adds a checksum. The `CopyObjectResult` gives the copy's checksum

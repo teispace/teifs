@@ -446,6 +446,26 @@ pub enum Operation {
     },
     /// Copies it to another bucket, or the same (`S3PutObjectCopy`).
     PutObjectCopy(Box<CopyOperation>),
+    /// Replaces its ACL (`S3PutObjectAcl`): a canned one, or grants and an owner.
+    PutObjectAcl(Box<AclOperation>),
+}
+
+/// The ACL an S3 Batch Operations job gives each object, as `PutObjectAcl` would.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AclOperation {
+    /// A canned ACL, in place of grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canned_acl: Option<String>,
+    /// The owner the ACL names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    /// The owner's display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_name: Option<String>,
+    /// The grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
 }
 
 /// How an S3 Batch Operations job copies each object, as `CopyObject` would.
@@ -462,7 +482,7 @@ pub struct CopyOperation {
     pub canned_acl: Option<String>,
     /// Grants for the copies, as `x-amz-grant-*` headers take them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<CopyGrant>,
+    pub grants: Vec<Grant>,
     /// `COPY` or `REPLACE`: whether the source's metadata goes with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_directive: Option<String>,
@@ -507,10 +527,10 @@ pub struct CopyOperation {
     pub retain_until_ms: Option<i64>,
 }
 
-/// A grant a copy gets.
+/// A grant an object gets, by a copy or an ACL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CopyGrant {
+pub struct Grant {
     /// `id`, `emailAddress` or `uri`.
     pub kind: String,
     /// The canonical user id, email address or group URI.
@@ -559,6 +579,7 @@ impl Operation {
             Self::PutObjectLegalHold { .. } => "S3PutObjectLegalHold",
             Self::PutObjectRetention { .. } => "S3PutObjectRetention",
             Self::PutObjectCopy(_) => "S3PutObjectCopy",
+            Self::PutObjectAcl(_) => "S3PutObjectAcl",
         }
     }
 }
@@ -784,6 +805,25 @@ mod tests {
         assert_eq!(json["tags"], serde_json::json!([]));
         assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), copy);
         assert_eq!(copy.name(), "S3PutObjectCopy");
+    }
+
+    #[test]
+    fn acls_are_kept_with_their_grants() {
+        let acl = Operation::PutObjectAcl(Box::new(AclOperation {
+            owner_id: Some("teifs".to_owned()),
+            grants: vec![Grant {
+                kind: "uri".to_owned(),
+                identifier: "http://acs.amazonaws.com/groups/global/AllUsers".to_owned(),
+                permission: "READ".to_owned(),
+            }],
+            ..AclOperation::default()
+        }));
+        let json = serde_json::to_value(&acl).unwrap();
+        assert_eq!(json["type"], "putObjectAcl");
+        assert_eq!(json["ownerId"], "teifs");
+        assert!(json.get("cannedAcl").is_none());
+        assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), acl);
+        assert_eq!(acl.name(), "S3PutObjectAcl");
     }
 
     #[test]

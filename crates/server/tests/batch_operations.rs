@@ -1874,3 +1874,168 @@ async fn copies_wait_for_their_sources_conditions() {
     let progress = done.job.unwrap().progress_summary.unwrap();
     assert_eq!(progress.number_of_tasks_succeeded, Some(1));
 }
+
+/// What the ACL job's role may do: read manifests, and set photos' ACLs.
+const ACLER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":["s3:PutObjectAcl","s3:PutObjectVersionAcl"],"Resource":"arn:aws:s3:::photos/*"}]}"#;
+
+const ALL_USERS: &str = "http://acs.amazonaws.com/groups/global/AllUsers";
+
+fn acl_setting(policy: aws_sdk_s3control::types::S3AccessControlPolicy) -> JobOperation {
+    JobOperation::builder()
+        .s3_put_object_acl(
+            aws_sdk_s3control::types::S3SetObjectAclOperation::builder()
+                .access_control_policy(policy)
+                .build(),
+        )
+        .build()
+}
+
+/// `photos/{key}`'s grants, as `(grantee, permission)`.
+async fn grants_of(root: &Client, key: &str) -> Vec<(String, String)> {
+    let acl = root
+        .get_object_acl()
+        .bucket("photos")
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    acl.grants()
+        .iter()
+        .map(|g| {
+            let grantee = g.grantee().unwrap();
+            let who = grantee.uri().or(grantee.id()).unwrap_or_default();
+            (who.to_owned(), g.permission().unwrap().as_str().to_owned())
+        })
+        .collect()
+}
+
+/// `photos` (ACLs enabled, Block Public Access off) with `a.jpg` and `b.jpg`, and
+/// `manifests`.
+async fn acl_buckets(root: &Client) {
+    root.create_bucket()
+        .bucket("photos")
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    root.delete_public_access_block()
+        .bucket("photos")
+        .send()
+        .await
+        .unwrap();
+    root.create_bucket()
+        .bucket("manifests")
+        .send()
+        .await
+        .unwrap();
+    for key in ["a.jpg", "b.jpg"] {
+        put(root, "photos", key, "photo").await;
+    }
+}
+
+/// An ACL of the owner's full control and everyone's `READ_ACP`.
+fn listed_policy() -> aws_sdk_s3control::types::S3AccessControlPolicy {
+    use aws_sdk_s3control::types::{
+        S3AccessControlList, S3AccessControlPolicy, S3Grant, S3Grantee, S3GranteeTypeIdentifier,
+        S3ObjectOwner, S3Permission,
+    };
+    let grant = |kind, identifier: &str, permission| {
+        S3Grant::builder()
+            .grantee(
+                S3Grantee::builder()
+                    .type_identifier(kind)
+                    .identifier(identifier)
+                    .build(),
+            )
+            .permission(permission)
+            .build()
+    };
+    S3AccessControlPolicy::builder()
+        .access_control_list(
+            S3AccessControlList::builder()
+                .owner(S3ObjectOwner::builder().id("teifs").build())
+                .grants(grant(
+                    S3GranteeTypeIdentifier::Canonical,
+                    "teifs",
+                    S3Permission::FullControl,
+                ))
+                .grants(grant(
+                    S3GranteeTypeIdentifier::Group,
+                    ALL_USERS,
+                    S3Permission::ReadAcp,
+                ))
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn jobs_replace_acls_with_canned_ones_or_grants() {
+    use aws_sdk_s3control::types::{S3AccessControlPolicy, S3CannedAccessControlList};
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    acl_buckets(&root).await;
+    let acler = role(&server, "acler", TRUST, ACLER);
+    let tagger = role(&server, "tagger", TRUST, TAGGER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let run = |operation: JobOperation, key: &'static str, role: String| {
+        let (root, s3control, account) = (&root, &s3control, &account);
+        async move {
+            let manifest = manifest(root, key, &[&format!("photos,{key}")]).await;
+            let token = format!("{key}-{role}");
+            let id = create(
+                s3control,
+                account,
+                (operation, manifest, &role),
+                (&token, 1, false),
+            )
+            .await
+            .unwrap();
+            wait_for(s3control, account, &id, &JobStatus::Complete).await
+        }
+    };
+
+    let canned = S3AccessControlPolicy::builder()
+        .canned_access_control_list(S3CannedAccessControlList::PublicRead)
+        .build();
+    run(acl_setting(canned), "a.jpg", acler.clone()).await;
+    assert!(
+        grants_of(&root, "a.jpg")
+            .await
+            .contains(&(ALL_USERS.to_owned(), "READ".to_owned()))
+    );
+
+    let done = run(acl_setting(listed_policy()), "b.jpg", acler).await;
+    assert_eq!(
+        grants_of(&root, "b.jpg").await,
+        [
+            ("teifs".to_owned(), "FULL_CONTROL".to_owned()),
+            (ALL_USERS.to_owned(), "READ_ACP".to_owned()),
+        ]
+    );
+    let job = done.job.unwrap();
+    let described = job.operation.unwrap().s3_put_object_acl.unwrap();
+    let list = described
+        .access_control_policy
+        .unwrap()
+        .access_control_list
+        .unwrap();
+    assert_eq!(list.owner.unwrap().id.as_deref(), Some("teifs"));
+    assert_eq!(list.grants.unwrap().len(), 2);
+
+    // A role that may not set ACLs fails each task.
+    let private = S3AccessControlPolicy::builder()
+        .canned_access_control_list(S3CannedAccessControlList::Private)
+        .build();
+    let denied = run(acl_setting(private), "a.jpg", tagger).await;
+    let progress = denied.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_failed, Some(1));
+    assert!(
+        grants_of(&root, "a.jpg")
+            .await
+            .contains(&(ALL_USERS.to_owned(), "READ".to_owned()))
+    );
+}
