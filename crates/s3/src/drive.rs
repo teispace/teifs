@@ -692,10 +692,12 @@ fn check_copy_onto_itself(
     let asks_encryption = input.server_side_encryption.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.ssekms_key_id.is_some();
+    // A new checksum algorithm is a change too: S3 adds checksums to objects that way.
     if src_bucket == input.bucket
         && src_key == input.key
         && !replace
         && !asks_encryption
+        && input.checksum_algorithm.is_none()
         && src_version.is_none()
     {
         return Err(s3_error!(
@@ -1233,6 +1235,18 @@ fn upload_checksum_dto(
         ),
         None => (None, None),
     }
+}
+
+/// What `CopyObject` answers of the copy: its ETag, time and checksums.
+fn copy_result(info: &ObjectInfo) -> dto::CopyObjectResult {
+    let mut result = dto::CopyObjectResult {
+        e_tag: Some(etag(&info.etag)),
+        last_modified: Some(info.modified.into()),
+        checksum_type: checksum_type(&info.attrs.checksums, info.attrs.checksum_type),
+        ..Default::default()
+    };
+    set_checksums!(result, &info.attrs.checksums);
+    result
 }
 
 /// `x-amz-checksum-type` for these checksums: the recorded type, else full object.
@@ -3308,15 +3322,22 @@ impl S3 for Drive {
         )
         .await?;
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref());
+        let how = teifs_store::CopyHow {
+            source_key: source_key.as_ref(),
+            encryption: &encryption,
+            checksum: input
+                .checksum_algorithm
+                .as_ref()
+                .map(dto::ChecksumAlgorithm::as_str),
+        };
         let info = self
             .store
-            .copy_with(
+            .copy_how(
                 (&src_bucket, &src_key, src_version),
                 (&input.bucket, &input.key),
                 attrs,
                 pre,
-                source_key.as_ref(),
-                &encryption,
+                how,
             )
             .await
             .s3()?;
@@ -3328,11 +3349,7 @@ impl S3 for Drive {
         )
         .await;
         let mut out = dto::CopyObjectOutput {
-            copy_object_result: Some(dto::CopyObjectResult {
-                e_tag: Some(etag(&info.etag)),
-                last_modified: Some(info.modified.into()),
-                ..Default::default()
-            }),
+            copy_object_result: Some(copy_result(&info)),
             version_id: written_version(&info),
             copy_source_version_id: source.version_id.clone(),
             expiration: self.expiration(&input.bucket, &info).await,

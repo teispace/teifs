@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
+  it names, worked out from its bytes, in place of the source's, and copying an object
+  onto itself that way adds a checksum. The `CopyObjectResult` gives the copy's checksum
+  and checksum type. Before, the header was ignored.
 - A folder bucket's key whose path on the drive is longer than the system takes
   (1,024 bytes on macOS) is refused with `400 KeyTooLongError`, instead of failing with
   `500 InternalError`.

@@ -1800,9 +1800,11 @@ async fn copies_take_every_option_copy_object_takes() {
         .head_object()
         .bucket("copies")
         .key("a.jpg")
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
         .send()
         .await
         .unwrap();
+    assert!(head.checksum_sha256.is_some());
     assert_eq!(head.content_disposition.as_deref(), Some("attachment"));
     assert_eq!(head.content_encoding.as_deref(), Some("identity"));
     assert_eq!(head.content_language.as_deref(), Some("en"));

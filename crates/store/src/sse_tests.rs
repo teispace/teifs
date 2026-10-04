@@ -1413,3 +1413,45 @@ fn part_keys_come_from_the_record_or_count_from_one() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_encrypted_copy_seals_the_checksum_it_asked_for_and_says_what_it_is() {
+    let d = drive().await;
+    d.store
+        .put_bytes("vault", "a", b"data", ObjectAttrs::default())
+        .await
+        .unwrap();
+    let mut sha256 = checksum::Checksums::default();
+    assert!(sha256.add("SHA256"));
+    sha256.update(b"data");
+    let wanted = sha256.finish();
+    let copy = d
+        .store
+        .copy_how(
+            ("vault", "a", None),
+            ("vault", "b"),
+            None,
+            Precondition::default(),
+            CopyHow {
+                source_key: None,
+                encryption: &managed_kms(),
+                checksum: Some("SHA256"),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(copy.attrs.checksums, wanted);
+    // Sealed: only a read (which opens the encryption) shows them.
+    assert!(
+        d.store
+            .head("vault", "b")
+            .await
+            .unwrap()
+            .attrs
+            .checksums
+            .is_empty()
+    );
+    let (read, _) = d.store.read("vault", "b").await.unwrap();
+    assert_eq!(read.attrs.checksums, wanted);
+    assert_eq!(read.sse.unwrap().mode, SseMode::Kms);
+}

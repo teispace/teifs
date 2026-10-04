@@ -1334,6 +1334,30 @@ impl Store {
         source_key: Option<&CustomerKey>,
         encryption: &Encryption,
     ) -> Result<ObjectInfo> {
+        let how = CopyHow {
+            source_key,
+            encryption,
+            checksum: None,
+        };
+        self.copy_how(from, to, attrs, precondition, how).await
+    }
+
+    /// Copies as [`Store::copy_with`] does, as `how` says. A copy asked for a checksum
+    /// algorithm reads the source's bytes, works out that checksum as it writes them, and
+    /// has it as its only one.
+    pub async fn copy_how(
+        &self,
+        from: (&str, &str, Option<&str>),
+        to: (&str, &str),
+        attrs: Option<ObjectAttrs>,
+        precondition: Precondition,
+        how: CopyHow<'_>,
+    ) -> Result<ObjectInfo> {
+        let CopyHow {
+            source_key,
+            encryption,
+            checksum,
+        } = how;
         let (src_bucket, src_key) = (from.0.to_owned(), from.1.to_owned());
         let src_version = from.2.map(str::to_owned);
         let from = (from.0, from.1, src_version.as_deref());
@@ -1358,16 +1382,19 @@ impl Store {
         if same
             && attrs.is_none()
             && src_version.is_none()
+            && checksum.is_none()
             && matches!(encryption, Encryption::None)
         {
             return Err(StoreError::InvalidRequest(
                 "copying an object onto itself needs new metadata or encryption",
             ));
         }
-        if source_encrypted || source_key.is_some() || !matches!(encryption, Encryption::None) {
-            return self
-                .copy_through(from, to, attrs, precondition, source_key, encryption)
-                .await;
+        if source_encrypted
+            || source_key.is_some()
+            || checksum.is_some()
+            || !matches!(encryption, Encryption::None)
+        {
+            return self.copy_through(from, to, attrs, precondition, how).await;
         }
         self.blocking(move |inner| {
             let (src, dst) = (inner.bucket(&src_bucket)?, inner.bucket(&dst_bucket)?);
@@ -1396,19 +1423,29 @@ impl Store {
         .await
     }
 
-    /// Copies by reading (decrypting) the source and writing (encrypting) the copy.
+    /// Copies by reading (decrypting) the source and writing (encrypting) the copy,
+    /// working out the checksum `how` asks for on the way.
     async fn copy_through(
         &self,
         from: (&str, &str, Option<&str>),
         to: (&str, &str),
         attrs: Option<ObjectAttrs>,
         precondition: Precondition,
-        source_key: Option<&CustomerKey>,
-        encryption: &Encryption,
+        how: CopyHow<'_>,
     ) -> Result<ObjectInfo> {
         use tokio::io::AsyncReadExt;
-        let (source, body) = self.read_with(from.0, from.1, from.2, source_key).await?;
-        let mut staged = self.stage_for(to.0, encryption).await?;
+        let (source, body) = self
+            .read_with(from.0, from.1, from.2, how.source_key)
+            .await?;
+        let mut staged = self.stage_for(to.0, how.encryption).await?;
+        let mut sums = checksum::Checksums::default();
+        if let Some(algorithm) = how.checksum
+            && !sums.add(algorithm)
+        {
+            return Err(StoreError::InvalidRequest(
+                "Value for x-amz-checksum-algorithm header is invalid.",
+            ));
+        }
         if let Some(body) = body {
             let mut reader = body.all().await?;
             let mut buf = vec![0; 256 * 1024];
@@ -1417,12 +1454,32 @@ impl Store {
                 if n == 0 {
                     break;
                 }
+                sums.update(&buf[..n]);
                 staged.write(&buf[..n]).await?;
             }
         }
-        let attrs = copied_attrs(source.attrs, attrs);
-        self.commit(to.0, to.1, staged, attrs, precondition).await
+        let mut attrs = copied_attrs(source.attrs, attrs);
+        if how.checksum.is_none() {
+            return self.commit(to.0, to.1, staged, attrs, precondition).await;
+        }
+        let asked = sums.finish();
+        attrs.checksums.clone_from(&asked);
+        let mut info = self.commit(to.0, to.1, staged, attrs, precondition).await?;
+        // An encrypted copy keeps them sealed; the answer says what they are.
+        info.attrs.checksums = asked;
+        Ok(info)
     }
+}
+
+/// How a copy is made ([`Store::copy_how`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CopyHow<'a> {
+    /// The SSE-C key that reads the source.
+    pub source_key: Option<&'a CustomerKey>,
+    /// How the copy is encrypted.
+    pub encryption: &'a Encryption,
+    /// The checksum algorithm the copy has (`x-amz-checksum-algorithm`), if one is asked.
+    pub checksum: Option<&'a str>,
 }
 
 /// The attributes a copy gets: `replacement`, or the source's. The source's checksums

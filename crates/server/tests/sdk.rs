@@ -1969,3 +1969,81 @@ async fn keys_too_long_for_a_folder_bucket_are_refused_as_too_long() {
         );
     }
 }
+
+#[tokio::test]
+async fn copies_work_out_the_checksum_they_ask_for() {
+    use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, ChecksumType};
+    const SHA256: &str = "Om6weQ85rIfJTzhWst0sXREOaBFgImGpqSPTuyOtyLc=";
+    let server = start().await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("sums").send().await.unwrap();
+    s3.put_object()
+        .bucket("sums")
+        .key("a")
+        .body(ByteStream::from_static(b"data"))
+        .checksum_algorithm(ChecksumAlgorithm::Crc32)
+        .send()
+        .await
+        .unwrap();
+    let head = |key: &'static str| {
+        s3.head_object()
+            .bucket("sums")
+            .key(key)
+            .checksum_mode(ChecksumMode::Enabled)
+            .send()
+    };
+
+    let copy = s3
+        .copy_object()
+        .bucket("sums")
+        .key("b")
+        .copy_source("sums/a")
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .send()
+        .await
+        .unwrap();
+    let result = copy.copy_object_result().unwrap();
+    assert_eq!(result.checksum_sha256(), Some(SHA256));
+    assert_eq!(result.checksum_crc32(), None);
+    assert_eq!(result.checksum_type(), Some(&ChecksumType::FullObject));
+    let b = head("b").await.unwrap();
+    assert_eq!(b.checksum_sha256(), Some(SHA256));
+    assert_eq!(b.checksum_crc32(), None);
+
+    // Without one, the source's checksum is copied.
+    let kept = s3
+        .copy_object()
+        .bucket("sums")
+        .key("c")
+        .copy_source("sums/a")
+        .send()
+        .await
+        .unwrap();
+    let crc32 = head("a").await.unwrap().checksum_crc32().map(str::to_owned);
+    assert!(crc32.is_some());
+    assert_eq!(
+        kept.copy_object_result().unwrap().checksum_crc32(),
+        crc32.as_deref()
+    );
+
+    // Copying an object onto itself adds a checksum.
+    s3.copy_object()
+        .bucket("sums")
+        .key("a")
+        .copy_source("sums/a")
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head("a").await.unwrap().checksum_sha256(), Some(SHA256));
+
+    let unknown = s3
+        .copy_object()
+        .bucket("sums")
+        .key("d")
+        .copy_source("sums/a")
+        .checksum_algorithm(ChecksumAlgorithm::from("ADLER32"))
+        .send()
+        .await;
+    assert_eq!(code(unknown), "InvalidRequest");
+}

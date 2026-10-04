@@ -1563,3 +1563,68 @@ async fn unicode_forms_are_kept_apart_or_refused() {
     }
     assert_eq!(read_all(&store, "photos", composed).await, b"nfc");
 }
+
+#[tokio::test]
+async fn copies_work_out_the_checksum_they_ask_for() {
+    let (_dir, store) = with_bucket().await;
+    let attrs = ObjectAttrs {
+        checksums: [("CRC32".to_owned(), "AAAAAA==".to_owned())].into(),
+        ..ObjectAttrs::default()
+    };
+    store
+        .put_bytes("photos", "a", b"data", attrs)
+        .await
+        .unwrap();
+    let mut sha256 = checksum::Checksums::default();
+    assert!(sha256.add("SHA256"));
+    sha256.update(b"data");
+    let wanted = sha256.finish();
+    let how = |encryption, checksum| CopyHow {
+        source_key: None,
+        encryption,
+        checksum,
+    };
+
+    let copy = store
+        .copy_how(
+            ("photos", "a", None),
+            ("photos", "b"),
+            None,
+            Precondition::default(),
+            how(&Encryption::None, Some("SHA256")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(copy.attrs.checksums, wanted);
+    assert_eq!(
+        store.head("photos", "b").await.unwrap().attrs.checksums,
+        wanted
+    );
+    assert_eq!(read_all(&store, "photos", "b").await, b"data");
+
+    // Onto itself: the new checksum is the change.
+    let same = store
+        .copy_how(
+            ("photos", "a", None),
+            ("photos", "a"),
+            None,
+            Precondition::default(),
+            how(&Encryption::None, Some("SHA256")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same.attrs.checksums, wanted);
+
+    assert!(matches!(
+        store
+            .copy_how(
+                ("photos", "a", None),
+                ("photos", "c"),
+                None,
+                Precondition::default(),
+                how(&Encryption::None, Some("ADLER32")),
+            )
+            .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+}
