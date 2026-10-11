@@ -50,10 +50,10 @@ sysinfo = { version = "0.39", default-features = false, features = ["system", "d
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 # Inventory reports in ORC and Parquet: Arrow batches, written by orc-rust (which pins
 # Arrow's version) and parquet with Snappy.
-arrow-array = "59"
-arrow-schema = "59"
+arrow-array = "60"
+arrow-schema = "60"
 orc-rust = { version = "0.9", default-features = false }
-parquet = { version = "59", default-features = false, features = ["arrow", "snap"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
 snap = "1.1"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame", "safe-encode", "safe-decode", "checked-decode", "std"] }
 zstd = { version = "0.14", default-features = false }
