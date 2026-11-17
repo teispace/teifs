@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- An SSE-C write to a bucket that blocks SSE-C is refused with AWS's message ("This
+  bucket has blocked upload requests that specify Server Side Encryption with Customer
+  provided keys (SSE-C)…"), still `403 AccessDenied`.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum

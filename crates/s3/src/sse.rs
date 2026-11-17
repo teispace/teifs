@@ -180,7 +180,7 @@ pub(crate) fn for_write(
         if bucket.block_customer_keys {
             return Err(s3_error!(
                 AccessDenied,
-                "SSE-C is blocked for this bucket; PutBucketEncryption can allow it"
+                "This bucket has blocked upload requests that specify Server Side Encryption with Customer provided keys (SSE-C). Please specify a different server-side encryption type."
             ));
         }
         return Ok(Encryption::Customer(key));
