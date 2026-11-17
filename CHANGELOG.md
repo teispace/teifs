@@ -7,6 +7,21 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+The first public release of TeiFS: an S3 server for your own disks and its command line,
+in one binary for Linux, macOS and Windows, with `.deb` and `.rpm` packages, a Docker
+image (`ghcr.io/teispace/teifs`) and a Helm chart. It's early: keep another copy of what
+you store in it. [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says what it supports,
+with the ceph/s3-tests results; every release file has a checksum in `SHA256SUMS.txt` and
+build provenance (`gh attestation verify FILE --repo teispace/teifs`).
+
+Everything in it:
+
+- The ceph/s3-tests results are published in
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#cephs3-tests-results), counted from the
+  test lists by `cargo xtask docs`, which fails when they're out of date.
+- `cargo xtask release-notes` refuses notes longer than GitHub takes for a release
+  (125,000 characters), and a test keeps the next release's notes under it, so a tag
+  can't fail at its last step.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum

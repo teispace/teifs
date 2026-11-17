@@ -32,6 +32,109 @@ here come only from tests; nothing is listed as supported because it "should wor
 | ceph/s3-tests | The standard S3 conformance suite, run nightly; every test is in one of three lists (passing, not yet implemented, excluded with a reason) | `tests/s3-tests/` |
 | Client matrix | Real clients doing what people do with them, on both bucket layouts: the AWS CLI, rclone, restic (also in a bucket with Object Lock), Kopia with its own Object Lock retention, boto3, the Go and JavaScript SDKs and Terraform's S3 backend with lock files, nightly (the AWS CLI, boto3 and JavaScript on every change) | `tests/clients/` |
 
+### ceph/s3-tests results
+
+Every test of the suite is in one of the lists in `tests/s3-tests/`, and Nightly CI runs
+the whole suite against them on both bucket layouts: a test in `implemented.txt` that
+fails is a regression. The table is generated from the lists (`cargo xtask docs` fails
+when it's out of date, and `UPDATE_DOCS=1 cargo xtask docs` writes it again).
+
+<!-- generated: s3-tests -->
+The suite at commit [`5522d1c`](https://github.com/ceph/s3-tests/tree/5522d1c351f75bc00ae0f64f742f3f095f5939d9), counted from the lists:
+
+| Tests | Count | |
+|---|---|---|
+| Pass on object buckets (`implemented.txt`) | 535 | 88.8% of the 602 that are a goal |
+| Pass on folder buckets too | 444 | the other 91 store keys a folder can't hold, or need encryption at rest (`folder-excluded.txt`) |
+| Not supported yet (`unimplemented.txt`) | 67 | standard S3 behaviour still to come |
+| Not a goal (`excluded.txt`) | 49 | another server's own behaviour, or a test that can't pass anywhere; each says why |
+| Run | 651 | |
+
+<details><summary>The 67 tests not supported yet</summary>
+
+- `test_bucket_create_bad_authorization_empty`
+- `test_bucket_create_bad_authorization_invalid_aws2`
+- `test_bucket_create_bad_authorization_none`
+- `test_bucket_create_bad_date_after_today_aws2`
+- `test_bucket_create_bad_date_before_today_aws2`
+- `test_bucket_create_exists_nonowner`
+- `test_copy_part_enc[sse-c-sse-c-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-s3-sse-c-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]`
+- `test_copy_part_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]`
+- `test_cors_origin_response`
+- `test_create_bucket_bucket_owner_preferred`
+- `test_create_bucket_object_writer`
+- `test_delete_bucket_encryption_kms`
+- `test_delete_bucket_encryption_s3`
+- `test_expected_bucket_owner`
+- `test_get_bucket_encryption_kms`
+- `test_get_bucket_encryption_s3`
+- `test_get_object_ifmodifiedsince_failed`
+- `test_get_object_ifnonematch_good`
+- `test_get_object_torrent`
+- `test_head_object_404_with_policy_prefix`
+- `test_lifecycle_plain_null_version_current_transition`
+- `test_lifecycle_set_noncurrent_transition`
+- `test_list_multipart_upload_owner`
+- `test_multipart_resend_first_finishes_last`
+- `test_multipart_use_cksum_helper_crc32`
+- `test_multipart_use_cksum_helper_crc32c`
+- `test_multipart_use_cksum_helper_crc64nvme`
+- `test_multipart_use_cksum_helper_sha1`
+- `test_multipart_use_cksum_helper_sha256`
+- `test_object_content_encoding_aws_chunked`
+- `test_object_copy_not_owned_bucket`
+- `test_object_copy_not_owned_object_bucket`
+- `test_object_create_amz_date_and_no_date`
+- `test_object_create_bad_authorization_empty`
+- `test_object_create_bad_authorization_incorrect_aws2`
+- `test_object_create_bad_authorization_invalid_aws2`
+- `test_object_create_bad_authorization_none`
+- `test_object_create_bad_contentlength_mismatch_below_aws2`
+- `test_object_create_bad_contentlength_none`
+- `test_object_create_bad_date_after_end_aws2`
+- `test_object_create_bad_date_before_today_aws2`
+- `test_object_create_bad_md5_empty`
+- `test_object_create_bad_md5_invalid_short`
+- `test_object_create_date_and_amz_date`
+- `test_object_delete_key_bucket_gone`
+- `test_object_raw_get_bucket_gone`
+- `test_object_raw_get_object_gone`
+- `test_object_raw_get_x_amz_expires_out_max_range`
+- `test_object_raw_get_x_amz_expires_out_positive_range`
+- `test_object_raw_put_authenticated_expired`
+- `test_object_read_unreadable`
+- `test_object_requestid_matches_header_on_error`
+- `test_object_set_get_unicode_metadata`
+- `test_object_write_with_chunked_transfer_encoding`
+- `test_post_object_upload_checksum`
+- `test_put_bucket_ownership_bucket_owner_preferred`
+- `test_put_bucket_ownership_object_writer`
+- `test_sse_kms_method_head`
+- `test_sse_kms_read_declare`
+- `test_sse_s3_default_method_head`
+
+</details>
+<!-- end generated: s3-tests -->
+
+To run the suite yourself (it needs Python 3; it clones the suite at that commit, builds
+`teifs` and serves an empty drive):
+
+```sh
+tests/s3-tests/run.sh                          # object buckets
+S3TESTS_LAYOUT=folder tests/s3-tests/run.sh    # folder buckets
+```
+
+The suite was written for S3 before AWS's 2023 and 2026 defaults, so its server allows
+public ACLs, SSE-C and Signature V2; [tests/s3-tests/README.md](../tests/s3-tests/README.md)
+says how it's set up.
+
 ## Operations
 
 | Area | Status |
