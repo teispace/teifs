@@ -1,6 +1,8 @@
 //! S3 Batch Operations' jobs (`aws s3control create-job`): each runs one operation on
-//! every object its CSV manifest lists, as the IAM role the job names, through this
-//! server's own S3 service, so a task may do just what a request of that role's may.
+//! every object its manifest lists (a CSV file, an inventory report, or a list the job
+//! makes itself: [`crate::batch_manifest`]), as the IAM role the job names, through
+//! this server's own S3 service, so a task may do just what a request of that role's
+//! may.
 //!
 //! A new job's manifest is read first: its lines are counted and checked, and the job
 //! waits to be confirmed (`Suspended`) or is `Ready`. A running job reads the manifest a
@@ -23,7 +25,8 @@ use futures::{StreamExt, stream};
 use teifs_iam::{Iam, Identity};
 use teifs_store::{Store, StoreError};
 use teifs_types::batch::{
-    BatchJob, JobProgress, JobStatus, Manifest, ManifestField, Operation, OperationJob,
+    BatchJob, JobProgress, JobStatus, Manifest, ManifestField, ManifestFormat, Operation,
+    OperationJob,
 };
 
 use crate::{loopback::Loopback, replicator::said};
@@ -54,14 +57,16 @@ pub(crate) struct Operations {
     pub(crate) loopback: Loopback,
     pub(crate) replicator: Arc<crate::replicator::Worker>,
     pub(crate) rules: Arc<crate::bucket_access::Rules>,
+    /// The manifest data file being read.
+    pub(crate) reading: crate::batch_manifest::Reading,
 }
 
 /// Who a page's tasks run as: the role's client, and the role's session itself (what
 /// Batch Replication is decided for).
-struct AsRole<'a> {
-    client: Client,
-    identity: Arc<Identity>,
-    operations: &'a Operations,
+pub(crate) struct AsRole<'a> {
+    pub(crate) client: Client,
+    pub(crate) identity: Arc<Identity>,
+    pub(crate) operations: &'a Operations,
 }
 
 /// One object a manifest lists.
@@ -136,7 +141,7 @@ pub(crate) async fn page(
     };
     let client = &role.client;
     let result = if preparing(job.status) {
-        prepare(client, job, spec).await.map(|()| false)
+        prepare(&role, store, job, spec).await.map(|()| false)
     } else if job.status == JobStatus::Cancelling {
         report(client, store, job, spec).await.map(|()| {
             job.status = JobStatus::Cancelled;
@@ -216,15 +221,46 @@ fn session<'a>(
 }
 
 /// Counts and checks a new job's tasks; it then waits to be confirmed, or is ready.
-async fn prepare(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Result<(), Stop> {
+async fn prepare(
+    role: &AsRole<'_>,
+    store: &Store,
+    job: &mut BatchJob,
+    spec: &OperationJob,
+) -> Result<(), Stop> {
     job.status = JobStatus::Preparing;
+    match (&spec.manifest, &spec.generator) {
+        (Some(manifest), _) if manifest.format == ManifestFormat::Csv => {
+            prepare_csv(&role.client, job, manifest).await?;
+        }
+        (Some(manifest), _) => {
+            crate::batch_manifest::prepare_inventory(role, job, manifest).await?;
+        }
+        (None, Some(generator)) => {
+            crate::batch_manifest::prepare_generated(role, store, job, (generator, spec)).await?;
+        }
+        (None, None) => {
+            return Err(Stop::Failed(
+                "InvalidManifest: The job has no manifest.".to_owned(),
+            ));
+        }
+    }
+    job.status = if spec.confirmation_required {
+        JobStatus::Suspended
+    } else {
+        JobStatus::Ready
+    };
+    Ok(())
+}
+
+/// Counts and checks the lines of a CSV manifest.
+async fn prepare_csv(client: &Client, job: &mut BatchJob, manifest: &Manifest) -> Result<(), Stop> {
     let (mut offset, mut total) = (0, 0_u64);
     loop {
-        let piece = read(client, &spec.manifest, offset).await?;
+        let piece = read(client, manifest, offset).await?;
         for (line, _) in lines(&piece.bytes) {
             let line = line.map_err(|why| manifest_line(total + 1, &why))?;
             if let Some(line) = line {
-                task(line, &spec.manifest.fields).map_err(|why| manifest_line(total + 1, &why))?;
+                task(line, &manifest.fields).map_err(|why| manifest_line(total + 1, &why))?;
                 total += 1;
             }
         }
@@ -235,12 +271,62 @@ async fn prepare(client: &Client, job: &mut BatchJob, spec: &OperationJob) -> Re
     }
     job.progress.total = Some(total);
     job.progress.offset = 0;
-    job.status = if spec.confirmation_required {
-        JobStatus::Suspended
-    } else {
-        JobStatus::Ready
-    };
     Ok(())
+}
+
+/// Where a job goes on from in its manifest.
+enum Position {
+    /// A CSV file's byte.
+    Offset(u64),
+    /// A data file's line.
+    Line(usize, u64),
+    /// After an object of the list it keeps to itself.
+    After(Option<(String, Option<String>)>),
+}
+
+/// The next tasks: at most a page of them, where the job then is, and whether they
+/// were the last.
+async fn next(
+    role: &AsRole<'_>,
+    store: &Store,
+    job: &BatchJob,
+    spec: &OperationJob,
+) -> Result<(Vec<Task>, Position, bool), Stop> {
+    match (&spec.manifest, &spec.generator) {
+        (Some(manifest), _) if manifest.format == ManifestFormat::Csv => {
+            let piece = read(&role.client, manifest, job.progress.offset).await?;
+            let mut tasks = Vec::new();
+            let mut consumed = 0;
+            for (line, len) in lines(&piece.bytes) {
+                if tasks.len() == TASKS {
+                    break;
+                }
+                consumed += len;
+                // Checked when the job was prepared; a manifest's version doesn't change.
+                if let Ok(Some(line)) = line
+                    && let Ok(task) = task(line, &manifest.fields)
+                {
+                    tasks.push(task);
+                }
+            }
+            let last = piece.last && consumed == piece.bytes.len();
+            Ok((
+                tasks,
+                Position::Offset(job.progress.offset + consumed as u64),
+                last,
+            ))
+        }
+        (None, Some(generator)) if job.progress.generated.is_none() => {
+            let (tasks, after, last) =
+                crate::batch_manifest::next_listed(store, job, (generator, spec), TASKS).await?;
+            Ok((tasks, Position::After(after), last))
+        }
+        _ => {
+            let (tasks, (file, line), last) =
+                crate::batch_manifest::next_in_files(role, job, TASKS).await?;
+            Ok((tasks, Position::Line(file, line), last))
+        }
+    }
 }
 
 fn manifest_line(n: u64, why: &str) -> Stop {
@@ -257,22 +343,7 @@ async fn run(
     job: &mut BatchJob,
     spec: &OperationJob,
 ) -> Result<bool, Stop> {
-    let client = &role.client;
-    let piece = read(client, &spec.manifest, job.progress.offset).await?;
-    let mut tasks = Vec::new();
-    let mut consumed = 0;
-    for (line, len) in lines(&piece.bytes) {
-        if tasks.len() == TASKS {
-            break;
-        }
-        consumed += len;
-        // Checked when the job was prepared; a manifest's version doesn't change.
-        if let Ok(Some(line)) = line
-            && let Ok(task) = task(line, &spec.manifest.fields)
-        {
-            tasks.push(task);
-        }
-    }
+    let (tasks, position, last) = next(role, store, job, spec).await?;
     // Made first: a stream that maps borrowed tasks wouldn't be `Send` for every
     // lifetime, as the worker's task must be.
     let running: Vec<_> = tasks
@@ -301,7 +372,14 @@ async fn run(
             .await
             .map_err(|err| Stop::Later(err.to_string()))?;
     }
-    job.progress.offset += consumed as u64;
+    match position {
+        Position::Offset(offset) => job.progress.offset = offset,
+        Position::Line(file, line) => (job.progress.file, job.progress.line) = (file, line),
+        Position::After(after) => {
+            let (key, version) = after.map_or((None, None), |(k, v)| (Some(k), v));
+            (job.progress.last_key, job.progress.last_version) = (key, version);
+        }
+    }
     let p = &job.progress;
     let ran = p.objects + p.objects_failed;
     if failing(p.objects, p.objects_failed) {
@@ -314,7 +392,7 @@ async fn run(
         );
         return Ok(false);
     }
-    Ok(piece.last && consumed == piece.bytes.len())
+    Ok(last)
 }
 
 /// Whether a job fails for its tasks: at least 1,000 ran, and more than half failed.

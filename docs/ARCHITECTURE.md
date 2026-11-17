@@ -572,8 +572,8 @@ version and writes it with `Store::commit_replica`/`commit_replica_marker`. The 
 failures) is written back with `Store::update_batch_job`, which leaves a job cancelled
 meanwhile alone, so a restart resumes from the last page; an ended job's result is
 posted to its webhook.
-S3 Batch Operations (`control_jobs.rs`, `batch_operations.rs`, `batch_copy.rs`,
-`batch_acl.rs`, `batch_checksum.rs`, `batch_encryption.rs`,
+S3 Batch Operations (`control_jobs.rs`, `batch_operations.rs`, `batch_manifest.rs`,
+`batch_copy.rs`, `batch_acl.rs`, `batch_checksum.rs`, `batch_encryption.rs`,
 `batch_replication.rs`, `loopback.rs`): S3
 Control's job calls make and change `JobSpec::Operation` jobs in the same table, each
 decided in `control_jobs` once its job or request is read (`Needs::OnJob`), so the job
@@ -591,7 +591,20 @@ version waiting for its destinations (`Store::resend_replication`) and sends it 
 A new job's
 manifest is read in 256 KiB ranged GETs pinned by `If-Match` (and its version), each
 line checked and counted (`progress.total`); then each page runs up to 100 tasks, 8 at a
-time, from `progress.offset`, the byte where the next line starts. With a completion
+time, from `progress.offset`, the byte where the next line starts. An inventory report's
+manifest (`batch_manifest.rs`) is its `manifest.json`, read at its ETag: its data files
+(each checked against its MD5 and gunzipped) and `fileSchema` columns are kept in
+`progress.files` and `progress.fields` when the job is prepared, and a job goes on from
+`progress.file` and `progress.line`, the open file kept between pages
+(`batch_manifest::Reading`) so it isn't read from its start each time. A
+`ManifestGenerator` job lists its source bucket from the store when it's prepared, after
+`access::allows` gives the role `s3:ListBucket` (`s3:ListBucketVersions` for Batch
+Replication, which lists every version the replication rules take), applying its filter;
+with `EnableManifestOutput` it writes the list as the role, gzipped CSV under
+`{prefix}/job-{id}/generated/` with `manifest.json` and `manifest.checksum`, recorded in
+`progress.generated`, and runs from those files like an inventory report. Without, it
+keeps `progress.listed_ms` and lists again a page at a time from `progress.last_key`
+(and `last_version`), taking only objects written by then. With a completion
 report (`batch_report.rs`), each task's result is kept as its CSV line in system.db's
 `batch_results` table, numbered in manifest order; once a job that ran tasks ends
 (done, failed, or cancelled: `UpdateJobStatus` makes it `Cancelling`, which the worker

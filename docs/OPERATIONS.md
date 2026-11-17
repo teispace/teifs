@@ -1462,7 +1462,7 @@ for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
 ### S3 Batch Operations
 
 AWS's S3 Batch Operations run through S3 Control, as `aws s3control` and the SDKs call
-it: a job runs one operation on every object a CSV manifest lists, as an IAM role. TeiFS
+it: a job runs one operation on every object a manifest lists, as an IAM role. TeiFS
 runs `S3PutObjectTagging`, `S3DeleteObjectTagging`, `S3PutObjectLegalHold`,
 `S3PutObjectRetention`, `S3PutObjectCopy`, `S3PutObjectAcl`, `S3ComputeObjectChecksum`, `S3UpdateObjectEncryption` and `S3ReplicateObject`. Make the role first; it must trust the service, and its policies
 decide what each task may do (reading the manifest included):
@@ -1501,6 +1501,28 @@ teifs batch ls home
 teifs batch describe home JOB-ID
 teifs batch report home JOB-ID
 ```
+
+An S3 Inventory report (CSV) is a manifest too: name its `manifest.json`, with no
+`Fields`, and the job runs on every object its data files list (the version each names,
+when the report has `VersionId`). Or let the job list the objects itself, with the
+filters AWS takes, instead of a manifest; the role then needs `s3:ListBucket` on the
+source bucket (and `s3:PutObject` where the list is written):
+
+```sh
+  --manifest '{"Spec":{"Format":"S3InventoryReport_CSV_20161130"},
+    "Location":{"ObjectArn":"arn:aws:s3:::reports/photos/daily/2026-11-17T01-00Z/manifest.json","ETag":"…"}}'
+
+  --manifest-generator '{"S3JobManifestGenerator":{"SourceBucket":"arn:aws:s3:::photos",
+    "Filter":{"KeyNameConstraint":{"MatchAnyPrefix":["2026/"],"MatchAnySuffix":[".jpg"]},
+      "CreatedAfter":"2026-01-01T00:00:00Z"},
+    "EnableManifestOutput":true,"ManifestOutputLocation":{"Bucket":"arn:aws:s3:::manifests",
+      "ManifestPrefix":"made","ManifestFormat":"S3InventoryReport_CSV_20211130"}}}'
+```
+
+With `EnableManifestOutput` the list is written to
+`made/job-{id}/generated/manifest.json` (and its data files), which `describe-job` names
+as `GeneratedManifestDescriptor` and another job can run on. For `S3ReplicateObject`
+the list holds every version the bucket's replication rules take.
 
 The manifest is read, counted and checked first, at the ETag given: a changed manifest,
 or a line that names no bucket or key, fails the job. With `--confirmation-required` the

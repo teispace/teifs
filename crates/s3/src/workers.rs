@@ -73,6 +73,7 @@ impl Workers {
             loopback: loopback.clone(),
             replicator: Arc::new(self.replicator.sibling()),
             rules: Arc::clone(rules),
+            reading: crate::batch_manifest::Reading::default(),
         });
     }
 

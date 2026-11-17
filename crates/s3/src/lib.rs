@@ -12,6 +12,7 @@ mod batch_checksum;
 mod batch_copy;
 mod batch_encryption;
 mod batch_jobs;
+mod batch_manifest;
 mod batch_operations;
 mod batch_replicate;
 mod batch_replication;

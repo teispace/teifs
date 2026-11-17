@@ -2542,3 +2542,303 @@ async fn batch_replication_sends_objects_by_the_buckets_rules() {
             .is_err()
     );
 }
+
+fn gzip(text: &str) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(text.as_bytes()).unwrap();
+    gz.finish().unwrap()
+}
+
+async fn put_bytes(root: &Client, bucket: &str, key: &str, body: Vec<u8>) -> String {
+    root.put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(ByteStream::from(body))
+        .send()
+        .await
+        .unwrap()
+        .e_tag
+        .unwrap()
+}
+
+/// An inventory report at `manifests/{name}/manifest.json` whose data files hold
+/// `files`; the job's manifest for it. `wrong` gives the first file another checksum.
+async fn inventory(root: &Client, name: &str, files: &[&str], wrong: bool) -> JobManifest {
+    let mut listed = Vec::new();
+    for (n, lines) in files.iter().enumerate() {
+        let data = gzip(lines);
+        let md5 = if wrong && n == 0 {
+            "0".repeat(32)
+        } else {
+            Md5::digest(&data).iter().fold(String::new(), |mut hex, b| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{b:02x}");
+                hex
+            })
+        };
+        let key = format!("{name}/data/{n}.csv.gz");
+        listed.push(serde_json::json!({"key": key, "size": data.len(), "MD5checksum": md5}));
+        put_bytes(root, "manifests", &key, data).await;
+    }
+    let manifest = serde_json::json!({
+        "sourceBucket": "photos",
+        "destinationBucket": "arn:aws:s3:::manifests",
+        "version": "2016-11-30",
+        "creationTimestamp": "1767323045000",
+        "fileFormat": "CSV",
+        "fileSchema": "Bucket, Key, IsLatest",
+        "files": listed,
+    });
+    let key = format!("{name}/manifest.json");
+    let etag = put_bytes(root, "manifests", &key, manifest.to_string().into_bytes()).await;
+    JobManifest::builder()
+        .spec(
+            JobManifestSpec::builder()
+                .format(JobManifestFormat::S3InventoryReportCsv20161130)
+                .build()
+                .unwrap(),
+        )
+        .location(
+            JobManifestLocation::builder()
+                .object_arn(format!("arn:aws:s3:::manifests/{key}"))
+                .e_tag(etag)
+                .build()
+                .unwrap(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn a_job_runs_on_the_objects_an_inventory_report_lists() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["a.jpg", "b c+d.jpg", "c.jpg"]).await;
+    let role = role(&server, "batch", TRUST, TAGGER);
+    let files = [
+        "\"photos\",\"a.jpg\",\"true\"\n\"photos\",\"b%20c%2Bd.jpg\",\"true\"\n",
+        "\n\"photos\",\"c.jpg\",\"true\"\n\"photos\",\"missing.jpg\",\"true\"\n",
+    ];
+    let manifest = inventory(&root, "inv", &files, false).await;
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let job = (tagging("team", "blue"), manifest, role.as_str());
+    let id = create(&s3control, &account, job, ("inv", 1, false))
+        .await
+        .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let described = done.job.unwrap();
+    let progress = described.progress_summary.unwrap();
+    assert_eq!(progress.total_number_of_tasks, Some(4));
+    assert_eq!(progress.number_of_tasks_succeeded, Some(3));
+    assert_eq!(progress.number_of_tasks_failed, Some(1));
+    let spec = described.manifest.unwrap().spec.unwrap();
+    assert_eq!(spec.format, JobManifestFormat::S3InventoryReportCsv20161130);
+    assert!(spec.fields.unwrap_or_default().is_empty());
+    for key in ["a.jpg", "b c+d.jpg", "c.jpg"] {
+        assert_eq!(tags_of(&root, key).await.len(), 1, "{key}");
+    }
+
+    // A data file that isn't what its manifest says fails the job before it runs.
+    let wrong = inventory(&root, "wrong", &files, true).await;
+    let job = (tagging("team", "red"), wrong, role.as_str());
+    let id = create(&s3control, &account, job, ("wrong", 1, false))
+        .await
+        .unwrap();
+    let failed = wait_for(&s3control, &account, &id, &JobStatus::Failed).await;
+    let reasons = failed.job.unwrap().failure_reasons.unwrap();
+    assert_eq!(
+        reasons[0].failure_code.as_deref(),
+        Some("InvalidManifestContent")
+    );
+    assert_eq!(
+        tags_of(&root, "a.jpg").await,
+        [("team".into(), "blue".into())]
+    );
+}
+
+/// What a role that lists `photos` may do besides tagging: write generated manifests.
+const LISTER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::photos"},
+  {"Effect":"Allow","Action":["s3:PutObjectTagging","s3:PutObjectVersionTagging"],"Resource":"arn:aws:s3:::photos/*"}]}"#;
+
+fn generator(
+    filter: aws_sdk_s3control::types::JobManifestGeneratorFilter,
+    output: Option<&str>,
+) -> aws_sdk_s3control::types::JobManifestGenerator {
+    use aws_sdk_s3control::types::{
+        GeneratedManifestFormat, JobManifestGenerator, S3JobManifestGenerator,
+        S3ManifestOutputLocation,
+    };
+    let location = output.map(|prefix| {
+        S3ManifestOutputLocation::builder()
+            .bucket("arn:aws:s3:::manifests")
+            .manifest_prefix(prefix)
+            .manifest_format(GeneratedManifestFormat::S3InventoryReportCsv20211130)
+            .build()
+            .unwrap()
+    });
+    JobManifestGenerator::S3JobManifestGenerator(
+        S3JobManifestGenerator::builder()
+            .source_bucket("arn:aws:s3:::photos")
+            .enable_manifest_output(output.is_some())
+            .set_manifest_output_location(location)
+            .filter(filter)
+            .build()
+            .unwrap(),
+    )
+}
+
+async fn create_generated(
+    s3control: &aws_sdk_s3control::Client,
+    account: &str,
+    (generator, manifest): (
+        aws_sdk_s3control::types::JobManifestGenerator,
+        Option<JobManifest>,
+    ),
+    role: &str,
+    token: &str,
+) -> Result<String, String> {
+    Box::pin(
+        s3control
+            .create_job()
+            .account_id(account)
+            .operation(tagging("listed", "yes"))
+            .manifest_generator(generator)
+            .set_manifest(manifest)
+            .report(no_report())
+            .client_request_token(token)
+            .priority(1)
+            .role_arn(role)
+            .confirmation_required(false)
+            .send(),
+    )
+    .await
+    .map(|out| out.job_id.unwrap())
+    .map_err(|err| {
+        aws_sdk_s3control::error::ProvideErrorMetadata::code(&err)
+            .unwrap_or("?")
+            .to_owned()
+    })
+}
+
+fn by_key(prefix: &str, suffix: &str) -> aws_sdk_s3control::types::JobManifestGeneratorFilter {
+    aws_sdk_s3control::types::JobManifestGeneratorFilter::builder()
+        .key_name_constraint(
+            aws_sdk_s3control::types::KeyNameConstraint::builder()
+                .match_any_prefix(prefix)
+                .match_any_suffix(suffix)
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn a_job_lists_its_objects_and_writes_the_list_as_a_manifest() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["old/a.jpg", "2026/b.png"]).await;
+    // More than a page of tasks (100).
+    for n in 0..120 {
+        put(&root, "photos", &format!("2026/{n:03} x.jpg"), "photo").await;
+    }
+    let role = role(&server, "batch", TRUST, LISTER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let made = (generator(by_key("2026/", ".jpg"), Some("made")), None);
+    let id = create_generated(&s3control, &account, made, &role, "gen")
+        .await
+        .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let described = done.job.unwrap();
+    let progress = described.progress_summary.unwrap();
+    assert_eq!(progress.total_number_of_tasks, Some(120));
+    assert_eq!(progress.number_of_tasks_succeeded, Some(120));
+    assert!(described.manifest.is_none());
+    let given = described.manifest_generator.unwrap();
+    let given = given.as_s3_job_manifest_generator().unwrap();
+    assert_eq!(given.source_bucket, "arn:aws:s3:::photos");
+    assert!(given.enable_manifest_output);
+    let descriptor = described.generated_manifest_descriptor.unwrap();
+    let location = descriptor.location.unwrap();
+    let key = format!("made/job-{id}/generated/manifest.json");
+    assert_eq!(location.object_arn, format!("arn:aws:s3:::manifests/{key}"));
+    for (key, tags) in [("2026/007 x.jpg", 1), ("old/a.jpg", 0), ("2026/b.png", 0)] {
+        assert_eq!(tags_of(&root, key).await.len(), tags, "{key}");
+    }
+
+    // The manifest it wrote is one a job may run on.
+    let json: serde_json::Value =
+        serde_json::from_str(&text(&root, "manifests", &key).await).unwrap();
+    assert_eq!(json["fileSchema"], "Bucket, Key, VersionId");
+    assert_eq!(json["sourceBucket"], "photos");
+    let checksum = text(&root, "manifests", &key.replace(".json", ".checksum")).await;
+    assert_eq!(checksum.len(), 32);
+    let again = JobManifest::builder()
+        .spec(
+            JobManifestSpec::builder()
+                .format(JobManifestFormat::S3InventoryReportCsv20161130)
+                .build()
+                .unwrap(),
+        )
+        .location(
+            JobManifestLocation::builder()
+                .object_arn(location.object_arn)
+                .e_tag(location.e_tag)
+                .build()
+                .unwrap(),
+        )
+        .build();
+    let job = (tagging("again", "yes"), again, role.as_str());
+    let id = create(&s3control, &account, job, ("again", 1, false))
+        .await
+        .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(120));
+}
+
+#[tokio::test]
+async fn a_job_that_keeps_its_list_runs_on_what_the_filter_takes() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &[]).await;
+    // Taken and left out in turn, over more than a page of tasks.
+    for n in 0..240 {
+        let suffix = if n % 2 == 0 { "jpg" } else { "png" };
+        put(&root, "photos", &format!("p/{n:03}.{suffix}"), "photo").await;
+    }
+    let role = role(&server, "batch", TRUST, LISTER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let kept = (generator(by_key("p/", ".jpg"), None), None);
+    let id = create_generated(&s3control, &account, kept, &role, "kept")
+        .await
+        .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let described = done.job.unwrap();
+    let progress = described.progress_summary.unwrap();
+    assert_eq!(progress.total_number_of_tasks, Some(120));
+    assert_eq!(progress.number_of_tasks_succeeded, Some(120));
+    assert!(described.generated_manifest_descriptor.is_none());
+    for (key, tags) in [("p/000.jpg", 1), ("p/238.jpg", 1), ("p/001.png", 0)] {
+        assert_eq!(tags_of(&root, key).await.len(), tags, "{key}");
+    }
+
+    // A role that may not list the bucket fails the job.
+    let tagger = self::role(&server, "tagger", TRUST, TAGGER);
+    let unlisted = (generator(by_key("p/", ".jpg"), None), None);
+    let id = create_generated(&s3control, &account, unlisted, &tagger, "unlisted")
+        .await
+        .unwrap();
+    let failed = wait_for(&s3control, &account, &id, &JobStatus::Failed).await;
+    let reasons = failed.job.unwrap().failure_reasons.unwrap();
+    assert_eq!(reasons[0].failure_code.as_deref(), Some("AccessDenied"));
+
+    // A job has a manifest or a generator, not both.
+    let manifest = manifest(&root, "m.csv", &["photos,p/000.jpg"]).await;
+    let both = (generator(by_key("p/", ".jpg"), None), Some(manifest));
+    let refused = create_generated(&s3control, &account, both, &role, "both").await;
+    assert_eq!(refused, Err("BadRequestException".to_owned()));
+}

@@ -98,7 +98,8 @@ pub enum BatchAction {
 ))]
 pub struct CreateArgs {
     /// `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the
-    /// key URL-encoded (and `,version` with `--versions`).
+    /// key URL-encoded (and `,version` with `--versions`). A key ending in
+    /// `manifest.json` is a CSV S3 Inventory report's, whose objects the job runs on.
     manifest: String,
     /// The IAM role the tasks run as: its name, or its ARN. It must trust
     /// `batchoperations.s3.amazonaws.com`.
@@ -251,6 +252,24 @@ impl Control {
     }
 }
 
+/// What a manifest is: an inventory report's `manifest.json`, or a CSV file of
+/// `bucket,key[,version]` lines.
+fn manifest_spec(
+    key: &str,
+    versions: bool,
+) -> aws_sdk_s3control::types::builders::JobManifestSpecBuilder {
+    if key == "manifest.json" || key.ends_with("/manifest.json") {
+        return JobManifestSpec::builder().format(JobManifestFormat::S3InventoryReportCsv20161130);
+    }
+    let mut fields = vec![JobManifestFieldName::Bucket, JobManifestFieldName::Key];
+    if versions {
+        fields.push(JobManifestFieldName::VersionId);
+    }
+    JobManifestSpec::builder()
+        .format(JobManifestFormat::S3BatchOperationsCsv20180820)
+        .set_fields(Some(fields))
+}
+
 async fn create(args: CreateArgs, aliases: &Aliases) -> Result<(), Error> {
     let remote = Target::parse(&args.manifest, aliases)?.remote("batch create")?;
     let bucket = remote.bucket()?.to_owned();
@@ -274,15 +293,9 @@ async fn create(args: CreateArgs, aliases: &Aliases) -> Result<(), Error> {
                 &e,
             )
         })?;
-    let mut fields = vec![JobManifestFieldName::Bucket, JobManifestFieldName::Key];
-    if args.versions {
-        fields.push(JobManifestFieldName::VersionId);
-    }
     let manifest = JobManifest::builder()
         .spec(
-            JobManifestSpec::builder()
-                .format(JobManifestFormat::S3BatchOperationsCsv20180820)
-                .set_fields(Some(fields))
+            manifest_spec(&remote.key, args.versions)
                 .build()
                 .map_err(|e| Error::usage(e.to_string()))?,
         )
@@ -811,6 +824,20 @@ async fn report(control: &Control, id: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_inventory_reports_manifest_json_is_read_as_one() {
+        let spec = manifest_spec("inv/photos/daily/2026-11-17T01-00Z/manifest.json", true)
+            .build()
+            .unwrap();
+        assert_eq!(spec.format, JobManifestFormat::S3InventoryReportCsv20161130);
+        assert!(spec.fields.is_none());
+        let csv = manifest_spec("lists/manifest.json.csv", true)
+            .build()
+            .unwrap();
+        assert_eq!(csv.format, JobManifestFormat::S3BatchOperationsCsv20180820);
+        assert_eq!(csv.fields.unwrap().len(), 3);
+    }
 
     #[test]
     fn roles_are_named_or_given_by_arn() {
