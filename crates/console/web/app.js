@@ -4,6 +4,7 @@
 import { onSignedOut, session } from "./lib/api.js";
 import { announce, h, mount } from "./lib/dom.js";
 import { buckets } from "./views/buckets.js";
+import { group, groups, policies, policy, user, users } from "./views/iam.js";
 import { objects } from "./views/objects.js";
 import { settings } from "./views/settings.js";
 import { signIn } from "./views/signin.js";
@@ -44,7 +45,12 @@ function shell() {
   mount(
     top,
     h("a", { class: "brand", href: "#/buckets" }, h("img", { src: "favicon.svg", alt: "", width: "24", height: "24" }), "TeiFS"),
-    h("nav", { "aria-label": "Main" }, h("a", { href: "#/buckets", "data-route": "buckets" }, "Buckets")),
+    h(
+      "nav",
+      { "aria-label": "Main" },
+      h("a", { href: "#/buckets", "data-route": "buckets" }, "Buckets"),
+      h("a", { href: "#/users", "data-route": "iam" }, "Identity and access"),
+    ),
     h(
       "div",
       { class: "who" },
@@ -76,6 +82,13 @@ function showSignIn() {
   });
 }
 
+/** The navigation's section a route belongs to. */
+function section(name) {
+  if (["b", "s"].includes(name)) return "buckets";
+  if (["users", "user", "groups", "group", "policies", "policy"].includes(name)) return "iam";
+  return name;
+}
+
 /** The route the fragment names: `[name, ...parts]`, parts decoded. */
 export function parseRoute(hash) {
   const parts = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
@@ -86,7 +99,7 @@ function route() {
   if (!who) return;
   const [name, ...parts] = parseRoute(location.hash);
   for (const link of top.querySelectorAll("nav a")) {
-    if (link.dataset.route === name || (["b", "s"].includes(name) && link.dataset.route === "buckets")) link.setAttribute("aria-current", "page");
+    if (link.dataset.route === section(name)) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   switch (name) {
@@ -98,6 +111,24 @@ function route() {
       break;
     case "s":
       settings(main, parts[0]);
+      break;
+    case "users":
+      users(main);
+      break;
+    case "user":
+      user(main, parts[0]);
+      break;
+    case "groups":
+      groups(main);
+      break;
+    case "group":
+      group(main, parts[0]);
+      break;
+    case "policies":
+      policies(main);
+      break;
+    case "policy":
+      policy(main, parts.join("/"));
       break;
     default:
       mount(main, h("h1", {}, "Not found"), h("p", {}, "There's no such page."), h("a", { href: "#/buckets" }, "Back to buckets"));

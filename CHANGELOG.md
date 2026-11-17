@@ -12,7 +12,9 @@ behaviour; the on-disk format is always upgraded automatically.
   bucket's folders, upload files and folders (multipart for big files, which can be
   cancelled), download, delete one or many, and see, download and delete versions; set
   a bucket's layout when creating it, and its versioning, default encryption, tags,
-  policy and lifecycle rules; in light or dark. It does only what the key's policies allow: every action is an S3, IAM or STS
+  policy and lifecycle rules; manage IAM users, their access keys (the secret shown
+  once), groups and their members, and managed and inline policies; in light or dark.
+  It does only what the key's policies allow: every action is an S3, IAM or STS
   request signed with that key and answered by the S3 service. The key stays in the
   server's memory for the session; the browser holds an `HttpOnly` cookie. Plain HTTP is
   served only on loopback or behind trusted proxies.
