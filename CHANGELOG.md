@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- A guide to moving from MinIO, [docs/MOVING_FROM_MINIO.md](docs/MOVING_FROM_MINIO.md):
+  copying buckets with `teifs migrate` or a batch job that keeps version ids, users with
+  `mc admin cluster iam`, `mc` against TeiFS, MinIO's settings and what's different. A
+  test checks that each `teifs` and `mc` admin command it shows is one TeiFS takes.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum

@@ -121,6 +121,7 @@ const DOCS: &[&str] = &[
     "docs/ENCRYPTION_FORMAT.md",
     "docs/COMPATIBILITY.md",
     "docs/CLI.md",
+    "docs/MOVING_FROM_MINIO.md",
     "tests/s3-tests/README.md",
 ];
 

@@ -2279,6 +2279,93 @@ mod tests {
         );
     }
 
+    /// The `mc` commands the endpoints' lines name, as words: `mc admin user add`; every
+    /// choice of `mc admin idp ldap|openid add`; and `mc quota set` and `clear`'s second
+    /// command, the first's last word replaced.
+    fn mc_commands() -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        for e in endpoints() {
+            let mut spans = e.about.split('`');
+            let mut between = spans.next().unwrap_or_default();
+            let mut last: Option<Vec<String>> = None;
+            while let (Some(span), next) = (spans.next(), spans.next()) {
+                if let Some(rest) = span.strip_prefix("mc ") {
+                    let mut commands = vec![vec!["mc".to_owned()]];
+                    for word in rest.split(' ').take_while(|w| {
+                        w.chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '-' || c == '|')
+                    }) {
+                        commands = commands
+                            .iter()
+                            .flat_map(|c| {
+                                word.split('|').map(move |choice| {
+                                    let mut longer = c.clone();
+                                    longer.push(choice.to_owned());
+                                    longer
+                                })
+                            })
+                            .collect();
+                    }
+                    last = commands.last().cloned();
+                    out.extend(commands);
+                } else if let Some(previous) = &last
+                    && matches!(between, " and " | ", " | " or ")
+                    && span.chars().all(|c| c.is_ascii_lowercase())
+                {
+                    let mut other = previous.clone();
+                    other.pop();
+                    other.push(span.to_owned());
+                    out.push(other);
+                } else {
+                    last = None;
+                }
+                between = next.unwrap_or_default();
+            }
+        }
+        out
+    }
+
+    /// Every admin command `docs/MOVING_FROM_MINIO.md` shows people running with `mc` is
+    /// one an endpoint answers.
+    #[test]
+    fn the_minio_guide_shows_only_mc_commands_teifs_answers() {
+        let served = mc_commands();
+        for expected in [
+            "mc admin user add",
+            "mc admin user disable",
+            "mc admin idp openid info",
+            "mc quota clear",
+        ] {
+            let words: Vec<&str> = expected.split(' ').collect();
+            assert!(served.iter().any(|c| c == &words), "{expected}: {served:?}");
+        }
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/MOVING_FROM_MINIO.md"
+        );
+        let guide = std::fs::read_to_string(path).unwrap();
+        let mut checked = 0;
+        for block in guide.split("```sh\n").skip(1) {
+            for line in block.split("\n```").next().unwrap_or_default().lines() {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                let admin = matches!(
+                    words.get(..2),
+                    Some(["mc", "admin" | "batch" | "quota" | "idp" | "support"])
+                );
+                if admin {
+                    checked += 1;
+                    assert!(
+                        served
+                            .iter()
+                            .any(|c| words.len() > c.len() && words[..c.len()] == c[..]),
+                        "docs/MOVING_FROM_MINIO.md: `{line}` isn't a command an endpoint answers"
+                    );
+                }
+            }
+        }
+        assert!(checked > 5, "{checked}");
+    }
+
     /// The endpoint tables of `docs/ADMIN_API.md`.
     fn reference() -> String {
         use std::fmt::Write;
