@@ -41,10 +41,12 @@ files! {
     "lib/dom.js" => JS,
     "lib/format.js" => JS,
     "lib/s3.js" => JS,
+    "lib/settings.js" => JS,
     "lib/upload.js" => JS,
     "lib/xml.js" => JS,
     "views/buckets.js" => JS,
     "views/objects.js" => JS,
+    "views/settings.js" => JS,
     "views/signin.js" => JS,
 }
 

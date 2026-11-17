@@ -314,6 +314,7 @@ export async function objects(main, bucket, prefix = "") {
         deleteSelected,
         h("span", { class: "check" }, versionsToggle, h("label", { for: "show-versions" }, "Show versions")),
         h("button", { type: "button", onclick: refresh, "aria-label": "Refresh" }, "↻"),
+        h("a", { href: `#/s/${encodeURIComponent(bucket)}`, class: "button" }, "Settings"),
       ),
     ),
     uploads,

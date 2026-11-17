@@ -538,3 +538,89 @@ async fn versions_are_listed_and_deleted_through_the_console() {
         .unwrap();
     assert_eq!(versions.versions().len(), 1);
 }
+
+#[tokio::test]
+async fn bucket_settings_are_saved_through_the_console() {
+    let (server, console) = start().await;
+    let mut page = Page::new(&console);
+    page.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    // Encryption at rest needs an object bucket: the layout header goes through.
+    let created = page
+        .call(Method::PUT, "/api/s3/conf")
+        .header("x-teifs-bucket-layout", "object")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    // What the settings page sends: lifecycle (which needs a Content-MD5), tags,
+    // encryption and a policy.
+    for (query, content_type, body) in [
+        (
+            "lifecycle",
+            "application/xml",
+            "<LifecycleConfiguration><Rule><ID>expire-1</ID><Filter><Prefix>logs/</Prefix></Filter>\
+             <Status>Enabled</Status><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>",
+        ),
+        (
+            "tagging",
+            "application/xml",
+            "<Tagging><TagSet><Tag><Key>team</Key><Value>media</Value></Tag></TagSet></Tagging>",
+        ),
+        (
+            "encryption",
+            "application/xml",
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+             <SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule>\
+             </ServerSideEncryptionConfiguration>",
+        ),
+        (
+            "policy",
+            "application/json",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:DeleteBucket","Resource":"arn:aws:s3:::conf"}]}"#,
+        ),
+    ] {
+        let saved = page
+            .call(Method::PUT, &format!("/api/s3/conf?{query}"))
+            .header(header::CONTENT_TYPE, content_type)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            saved.status().is_success(),
+            "{query}: {}",
+            saved.text().await.unwrap()
+        );
+    }
+    let s3 = common::client(&server, common::SECRET_KEY);
+    let rules = s3
+        .get_bucket_lifecycle_configuration()
+        .bucket("conf")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rules.rules()[0].id(), Some("expire-1"));
+    let tags = s3.get_bucket_tagging().bucket("conf").send().await.unwrap();
+    assert_eq!(tags.tag_set()[0].value(), "media");
+    // The policy binds the console as it binds any client.
+    let refused = page
+        .call(Method::DELETE, "/api/s3/conf")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    // A setting the bucket doesn't have is S3's own error.
+    let removed = page
+        .call(Method::DELETE, "/api/s3/conf?tagging")
+        .send()
+        .await
+        .unwrap();
+    assert!(removed.status().is_success());
+    let none = page
+        .call(Method::GET, "/api/s3/conf?tagging")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(none.status(), StatusCode::NOT_FOUND);
+    assert!(none.text().await.unwrap().contains("NoSuchTagSet"));
+}

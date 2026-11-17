@@ -4,6 +4,7 @@ import { announce, confirmAction, dialog, h, mount } from "../lib/dom.js";
 import { dateTime } from "../lib/format.js";
 import { bucketNameProblem, createBucket, deleteBucket, listBuckets } from "../lib/s3.js";
 import { browseHash } from "./objects.js";
+import { settingsHash } from "./settings.js";
 
 /** Shows the bucket list in `main`. */
 export async function buckets(main) {
@@ -43,6 +44,8 @@ export async function buckets(main) {
                 h(
                   "td",
                   { class: "actions" },
+                  h("a", { href: settingsHash(b.name), class: "button small", "aria-label": `Settings of ${b.name}` }, "Settings"),
+                  " ",
                   h(
                     "button",
                     { type: "button", class: "danger small", "aria-label": `Delete bucket ${b.name}`, onclick: () => remove(b.name, refresh) },
@@ -61,6 +64,13 @@ async function create(refresh) {
   const name = h("input", { id: "bucket-name", required: true, spellcheck: "false", autocapitalize: "none", "aria-describedby": "bucket-name-help" });
   const help = h("p", { id: "bucket-name-help", class: "muted" }, "3–63 lowercase letters, digits, dots and hyphens.");
   const lock = h("input", { id: "bucket-lock", type: "checkbox" });
+  const layout = h(
+    "select",
+    { id: "bucket-layout", "aria-describedby": "bucket-layout-help" },
+    h("option", { value: "" }, "The server's default"),
+    h("option", { value: "object" }, "Object: any key, encryption, Object Lock"),
+    h("option", { value: "folder" }, "Folder: keys are files and folders on the drive"),
+  );
   const problem = h("p", { class: "error", role: "alert", hidden: true });
   name.addEventListener("input", () => {
     const why = name.value ? bucketNameProblem(name.value) : "";
@@ -75,6 +85,9 @@ async function create(refresh) {
       h("label", { for: "bucket-name" }, "Name"),
       name,
       help,
+      h("label", { for: "bucket-layout" }, "Layout"),
+      layout,
+      h("p", { id: "bucket-layout-help", class: "muted" }, "How TeiFS stores the bucket's objects on its drive."),
       h("div", { class: "check" }, lock, h("label", { for: "bucket-lock" }, "Object Lock (turns versioning on; can't be turned off)")),
       problem,
     ),
@@ -90,7 +103,7 @@ async function create(refresh) {
     return;
   }
   try {
-    await createBucket(name.value, { objectLock: lock.checked });
+    await createBucket(name.value, { objectLock: lock.checked, layout: layout.value });
     announce(`Created bucket ${name.value}.`);
     refresh();
   } catch (e) {
