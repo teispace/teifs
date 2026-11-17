@@ -30,8 +30,9 @@ export function onSignedOut(handler) {
 export function parseError(status, body, type = "") {
   if (type.includes("json")) {
     try {
-      const { code, message } = JSON.parse(body);
-      return new ApiError(status, code, message);
+      // The console's and TeiFS's admin API's are camelCase; MinIO's admin API's PascalCase.
+      const error = JSON.parse(body);
+      return new ApiError(status, error.code ?? error.Code ?? "", error.message ?? error.Message ?? "");
     } catch {
       return new ApiError(status, "", "");
     }

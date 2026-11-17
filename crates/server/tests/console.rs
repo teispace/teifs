@@ -541,6 +541,61 @@ async fn people_and_their_access_are_managed_as_the_iam_pages_do() {
 }
 
 #[tokio::test]
+async fn the_status_page_reads_the_admin_apis_as_the_signed_in_key() {
+    let (server, console) = start().await;
+    let mut root = Page::new(&console);
+    root.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    let put = root.call(Method::PUT, "/api/s3/held").send().await.unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let object = root
+        .call(Method::PUT, "/api/s3/held/a.txt")
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(object.status(), StatusCode::OK);
+
+    let info = root
+        .call(Method::GET, "/api/s3/.teifs/admin/v1/info")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+    let info: serde_json::Value = info.json().await.unwrap();
+    assert!(
+        info["version"].is_string() && info["uptimeSeconds"].is_u64(),
+        "{info}"
+    );
+    assert!(
+        info["jobs"].is_object() && info["disks"].is_array(),
+        "{info}"
+    );
+    assert_eq!(info["usage"]["buckets"], 1, "{info}");
+    let usage = root
+        .call(Method::GET, "/api/s3/minio/admin/v3/datausageinfo")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(usage.status(), StatusCode::OK);
+    let usage: serde_json::Value = usage.json().await.unwrap();
+    assert_eq!(usage["bucketsUsageInfo"]["held"]["size"], 5, "{usage}");
+
+    // A key that may not read the server's status is told so, in the admin API's words.
+    server.iam.create_user("dee", None, &[], None).unwrap();
+    let key = server.iam.create_access_key("dee").unwrap();
+    let mut hers = Page::new(&console);
+    hers.sign_in(&key.info.id, &key.secret).await;
+    let refused = hers
+        .call(Method::GET, "/api/s3/.teifs/admin/v1/info")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let error: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(error["code"], "AccessDenied", "{error}");
+}
+
+#[tokio::test]
 async fn plain_http_off_loopback_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let keys = tempfile::tempdir().unwrap();
