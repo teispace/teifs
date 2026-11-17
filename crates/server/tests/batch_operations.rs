@@ -2432,19 +2432,18 @@ async fn replication_of(root: &Client, bucket: &str, key: &str) -> Option<String
     Some("PENDING".to_owned())
 }
 
-#[tokio::test]
-async fn batch_replication_sends_objects_by_the_buckets_rules() {
-    let server = start().await;
-    let account = server.iam.account();
-    let root = client(&server, SECRET_KEY);
-    buckets(&root, &[]).await;
+/// Buckets for a batch replication job: `photos` replicating to `copy` (with an object
+/// written before it did, whose version id is returned, and one after), and `plain`,
+/// which doesn't replicate.
+async fn replicating_photos(root: &Client) -> String {
+    buckets(root, &[]).await;
     for bucket in ["copy", "reports", "plain"] {
         root.create_bucket().bucket(bucket).send().await.unwrap();
     }
     for bucket in ["photos", "copy"] {
-        versioned(&root, bucket).await;
+        versioned(root, bucket).await;
     }
-    put(&root, "plain", "a.jpg", "photo").await;
+    put(root, "plain", "a.jpg", "photo").await;
     // Written before the bucket replicated: never sent.
     let old = root
         .put_object()
@@ -2456,16 +2455,23 @@ async fn batch_replication_sends_objects_by_the_buckets_rules() {
         .unwrap()
         .version_id
         .unwrap();
-    put(&root, "photos", "x.jpg", "secret").await;
-    replicate_photos(&root).await;
-    put(&root, "photos", "o-new.jpg", "new").await;
+    put(root, "photos", "x.jpg", "secret").await;
+    replicate_photos(root).await;
+    put(root, "photos", "o-new.jpg", "new").await;
     assert_eq!(
-        replication_of(&root, "photos", "o-new.jpg")
-            .await
-            .as_deref(),
+        replication_of(root, "photos", "o-new.jpg").await.as_deref(),
         Some("COMPLETED")
     );
-    assert_eq!(replication_of(&root, "photos", "o-old.jpg").await, None);
+    assert_eq!(replication_of(root, "photos", "o-old.jpg").await, None);
+    old
+}
+
+#[tokio::test]
+async fn batch_replication_sends_objects_by_the_buckets_rules() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    let old = replicating_photos(&root).await;
 
     let role = role(&server, "replicator", TRUST, REPLICATOR);
     let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
