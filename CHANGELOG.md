@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Replication: S3 Batch Operations run `S3ReplicateObject` jobs, replicating
+  each object now by its bucket's replication rules, whatever it reached before, with
+  AWS's replication failure reasons in the completion report.
 - S3 Batch Operations run `S3UpdateObjectEncryption` jobs: each object moves in place,
   as the job's role, to the SSE-KMS key (and S3 Bucket Key setting) the job names.
 - `UpdateObjectEncryption` is allowed to IAM users and roles granted

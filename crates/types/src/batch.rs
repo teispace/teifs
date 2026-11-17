@@ -455,6 +455,9 @@ pub enum Operation {
         /// `FULL_OBJECT` or `COMPOSITE`.
         kind: String,
     },
+    /// Replicates it by its bucket's replication configuration (`S3ReplicateObject`:
+    /// S3 Batch Replication).
+    ReplicateObject,
     /// Changes its encryption in place to an SSE-KMS key (`S3UpdateObjectEncryption`).
     UpdateObjectEncryption {
         /// The KMS key's full ARN.
@@ -597,6 +600,7 @@ impl Operation {
             Self::PutObjectAcl(_) => "S3PutObjectAcl",
             Self::ComputeObjectChecksum { .. } => "S3ComputeObjectChecksum",
             Self::UpdateObjectEncryption { .. } => "S3UpdateObjectEncryption",
+            Self::ReplicateObject => "S3ReplicateObject",
         }
     }
 }
@@ -868,6 +872,14 @@ mod tests {
         assert_eq!(json["bucket_key"], true);
         assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), update);
         assert_eq!(update.name(), "S3UpdateObjectEncryption");
+        let replicate = serde_json::to_value(Operation::ReplicateObject).unwrap();
+        assert_eq!(replicate["type"], "replicateObject");
+        assert_eq!(
+            serde_json::from_value::<Operation>(replicate)
+                .unwrap()
+                .name(),
+            "S3ReplicateObject"
+        );
     }
 
     #[test]

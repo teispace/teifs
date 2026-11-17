@@ -20,7 +20,7 @@ use aws_sdk_s3::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use teifs_iam::Iam;
+use teifs_iam::{Iam, Identity};
 use teifs_store::{Store, StoreError};
 use teifs_types::batch::{
     BatchJob, JobProgress, JobStatus, Manifest, ManifestField, Operation, OperationJob,
@@ -46,11 +46,22 @@ const PARALLEL: usize = 8;
 /// How many tasks run before a job may fail for failing too many.
 const THRESHOLD_TASKS: u64 = 1000;
 
-/// What runs jobs' tasks: IAM, for their roles' sessions, and the S3 service.
+/// What runs jobs' tasks: IAM, for their roles' sessions, and the S3 service; for
+/// Batch Replication, the replicator and the buckets' rules.
 #[derive(Debug, Clone)]
 pub(crate) struct Operations {
     pub(crate) iam: Arc<Iam>,
     pub(crate) loopback: Loopback,
+    pub(crate) replicator: Arc<crate::replicator::Worker>,
+    pub(crate) rules: Arc<crate::bucket_access::Rules>,
+}
+
+/// Who a page's tasks run as: the role's client, and the role's session itself (what
+/// Batch Replication is decided for).
+struct AsRole<'a> {
+    client: Client,
+    identity: Arc<Identity>,
+    operations: &'a Operations,
 }
 
 /// One object a manifest lists.
@@ -116,28 +127,29 @@ pub(crate) async fn page(
     job: &mut BatchJob,
     spec: &OperationJob,
 ) -> Result<bool, StoreError> {
-    let client = match session(operations, job, spec) {
-        Ok(client) => client,
+    let role = match session(operations, job, spec) {
+        Ok(role) => role,
         Err(why) => {
             fail(job, why);
             return Ok(false);
         }
     };
+    let client = &role.client;
     let result = if preparing(job.status) {
-        prepare(&client, job, spec).await.map(|()| false)
+        prepare(client, job, spec).await.map(|()| false)
     } else if job.status == JobStatus::Cancelling {
-        report(&client, store, job, spec).await.map(|()| {
+        report(client, store, job, spec).await.map(|()| {
             job.status = JobStatus::Cancelled;
             false
         })
     } else {
-        match run(&client, store, job, spec).await {
+        match run(&role, store, job, spec).await {
             Ok(done) if done || job.status == JobStatus::Failed => {
-                report(&client, store, job, spec).await.map(|()| done)
+                report(client, store, job, spec).await.map(|()| done)
             }
             Err(Stop::Failed(why)) if ran(&job.progress) > 0 => {
                 fail(job, why);
-                report(&client, store, job, spec).await.map(|()| false)
+                report(client, store, job, spec).await.map(|()| false)
             }
             other => other,
         }
@@ -180,16 +192,27 @@ fn fail(job: &mut BatchJob, why: String) {
     job.status = JobStatus::Failed;
 }
 
-/// A client signed in as the job's role.
-fn session(operations: &Operations, job: &BatchJob, spec: &OperationJob) -> Result<Client, String> {
+/// A client signed in as the job's role, and the role's session.
+fn session<'a>(
+    operations: &'a Operations,
+    job: &BatchJob,
+    spec: &OperationJob,
+) -> Result<AsRole<'a>, String> {
     let name = format!("s3-batch-{}", job.id.replace('-', ""));
     let issued = operations
         .iam
         .service_session(&spec.role_arn, SERVICE, &name, SESSION_SECONDS)
         .map_err(|err| format!("AccessDenied: The job's role can't be assumed: {err}"))?;
-    Ok(operations
-        .loopback
-        .client(&issued.access_key, &issued.secret, &issued.token))
+    let identity =
+        crate::access::identify(&operations.iam, &issued.access_key, Some(&issued.token))
+            .map_err(|err| format!("AccessDenied: The job's role can't be assumed: {err}"))?;
+    Ok(AsRole {
+        client: operations
+            .loopback
+            .client(&issued.access_key, &issued.secret, &issued.token),
+        identity,
+        operations,
+    })
 }
 
 /// Counts and checks a new job's tasks; it then waits to be confirmed, or is ready.
@@ -229,11 +252,12 @@ fn manifest_line(n: u64, why: &str) -> Stop {
 /// Runs the next tasks, keeping their results for the report; whether they were the
 /// last.
 async fn run(
-    client: &Client,
+    role: &AsRole<'_>,
     store: &Store,
     job: &mut BatchJob,
     spec: &OperationJob,
 ) -> Result<bool, Stop> {
+    let client = &role.client;
     let piece = read(client, &spec.manifest, job.progress.offset).await?;
     let mut tasks = Vec::new();
     let mut consumed = 0;
@@ -253,7 +277,7 @@ async fn run(
     // lifetime, as the worker's task must be.
     let running: Vec<_> = tasks
         .iter()
-        .map(|task| run_task(client, &spec.operation, task))
+        .map(|task| run_task(role, &spec.operation, task))
         .collect();
     let results: Vec<Outcome> = stream::iter(running).buffered(PARALLEL).collect().await;
     let first = job.progress.objects + job.progress.objects_failed;
@@ -464,7 +488,8 @@ fn decode_key(encoded: &str) -> Result<String, String> {
 pub(crate) type Outcome = Result<Option<String>, Failure>;
 
 /// Runs one task: what its report says it did, else why it failed.
-async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Outcome {
+async fn run_task(role: &AsRole<'_>, operation: &Operation, task: &Task) -> Outcome {
+    let client = &role.client;
     let (bucket, key, version) = (&task.bucket, &task.key, task.version.clone());
     match operation {
         Operation::PutObjectTagging { tags } => {
@@ -552,6 +577,11 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Outcom
         } => crate::batch_encryption::run(client, (kms_key_arn, *bucket_key), task)
             .await
             .map(|()| None),
+        Operation::ReplicateObject => {
+            crate::batch_replication::run(role.operations, &role.identity, task)
+                .await
+                .map(|()| None)
+        }
     }
 }
 

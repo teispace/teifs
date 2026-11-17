@@ -14,6 +14,7 @@ mod batch_encryption;
 mod batch_jobs;
 mod batch_operations;
 mod batch_replicate;
+mod batch_replication;
 mod batch_report;
 mod bucket_access;
 mod bucket_export;
@@ -276,7 +277,7 @@ pub fn service(store: Store, options: Options) -> Result<Service, s3s::host::Dom
     )))));
     let loopback = loopback::Loopback::default();
     if let Some(iam) = options.iam {
-        workers.run_operations(&iam, &loopback);
+        workers.run_operations(&iam, &loopback, &rules);
         builder.set_auth(access::Auth(iam.clone()));
         builder.set_access(access::Access::new(
             iam.clone(),

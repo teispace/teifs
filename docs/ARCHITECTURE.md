@@ -574,7 +574,7 @@ meanwhile alone, so a restart resumes from the last page; an ended job's result 
 posted to its webhook.
 S3 Batch Operations (`control_jobs.rs`, `batch_operations.rs`, `batch_copy.rs`,
 `batch_acl.rs`, `batch_checksum.rs`, `batch_encryption.rs`,
-`loopback.rs`): S3
+`batch_replication.rs`, `loopback.rs`): S3
 Control's job calls make and change `JobSpec::Operation` jobs in the same table, each
 decided in `control_jobs` once its job or request is read (`Needs::OnJob`), so the job
 condition keys are in the context; `CreateJob` also needs `iam:PassRole` on the role. The
@@ -583,7 +583,12 @@ worker skips `Suspended` jobs. For each page it asks IAM for a session of the jo
 `batchoperations.s3.amazonaws.com`) and runs the job through an aws-sdk-s3 client whose
 HTTP client is `loopback::Loopback`: it calls the S3 service in-process
 (`s3s::service::S3Service`, set once the service is built), so every task and the
-manifest read are signed as the role and authorized like any request. A new job's
+manifest read are signed as the role and authorized like any request. Batch Replication
+(`S3ReplicateObject`) has no S3 request to make: its task checks `s3:InitiateReplication`
+for the role's session with `access::allows`, then calls `replicator::Worker::replicate`
+(a sibling of the live replicator, sharing its metrics and events), which marks the
+version waiting for its destinations (`Store::resend_replication`) and sends it at once.
+A new job's
 manifest is read in 256 KiB ranged GETs pinned by `If-Match` (and its version), each
 line checked and counted (`progress.total`); then each page runs up to 100 tasks, 8 at a
 time, from `progress.offset`, the byte where the next line starts. With a completion

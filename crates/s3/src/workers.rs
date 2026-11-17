@@ -13,6 +13,7 @@ use crate::{
     access_log::{AccessLog, Record},
     analytics::{self, Activity},
     batch_jobs, batch_operations,
+    bucket_access::Rules,
     drive::Drive,
     inventory,
     loopback::Loopback,
@@ -59,11 +60,19 @@ impl Workers {
     }
 
     /// Runs S3 Batch Operations' jobs too, as roles IAM gives sessions of, through
-    /// `loopback`.
-    pub(crate) fn run_operations(&mut self, iam: &Arc<teifs_iam::Iam>, loopback: &Loopback) {
+    /// `loopback` (and, for Batch Replication, the replicator, as the buckets' `rules`
+    /// allow).
+    pub(crate) fn run_operations(
+        &mut self,
+        iam: &Arc<teifs_iam::Iam>,
+        loopback: &Loopback,
+        rules: &Arc<Rules>,
+    ) {
         self.batch.run_operations(batch_operations::Operations {
             iam: Arc::clone(iam),
             loopback: loopback.clone(),
+            replicator: Arc::new(self.replicator.sibling()),
+            rules: Arc::clone(rules),
         });
     }
 

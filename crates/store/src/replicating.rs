@@ -237,6 +237,32 @@ impl Store {
         .await
     }
 
+    /// Marks `key`'s version `version_id` (an object or a delete marker) waiting again
+    /// for all of it at each of `arns`, as S3 Batch Replication sends it, whatever it
+    /// reached before; whether it was marked. A replica is left as it is (`false`), and
+    /// so is a version gone meanwhile.
+    pub async fn resend_replication(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        arns: Vec<String>,
+    ) -> Result<bool> {
+        let marked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let noted = std::sync::Arc::clone(&marked);
+        self.change_replication(bucket, key, version_id, move |replication| {
+            let replica = replication
+                .as_ref()
+                .is_some_and(|r| r.status == ReplicationStatus::Replica);
+            noted.store(!replica, std::sync::atomic::Ordering::Relaxed);
+            arns.iter().fold(replication, |replication, arn| {
+                VersionReplication::resent(replication, arn)
+            })
+        })
+        .await?;
+        Ok(marked.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Records that `key`'s version `version_id` was reported as missing its Replication
     /// Time Control threshold for `arn`, so it's reported once.
     pub async fn set_replication_missed(
