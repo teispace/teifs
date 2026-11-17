@@ -3,6 +3,7 @@
 import { announce, confirmAction, dialog, h, mount } from "../lib/dom.js";
 import { dateTime } from "../lib/format.js";
 import { bucketNameProblem, createBucket, deleteBucket, listBuckets } from "../lib/s3.js";
+import { browseHash } from "./objects.js";
 
 /** Shows the bucket list in `main`. */
 export async function buckets(main) {
@@ -37,7 +38,7 @@ export async function buckets(main) {
               h(
                 "tr",
                 {},
-                h("th", { scope: "row" }, b.name),
+                h("th", { scope: "row" }, h("a", { href: browseHash(b.name) }, b.name)),
                 h("td", {}, dateTime(b.created)),
                 h(
                   "td",

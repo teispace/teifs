@@ -195,7 +195,9 @@ record per check.
 ## Web console
 
 `teifs serve --console-address 127.0.0.1:9001` (or `TEIFS_CONSOLE_ADDRESS`) also serves
-a web console on that address: buckets, and what the signed-in key may do with them. It's
+a web console on that address: buckets, their objects (folders, uploads of files or
+whole folders, downloads, deletes, versions), and what the signed-in key may do with
+them. It's
 off unless asked for. Open the address in a browser and sign in with an access key and
 its secret: the root user's, an IAM user's, or temporary credentials with their session
 token. The console can do exactly what that key could with the AWS CLI, no more: every

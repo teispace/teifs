@@ -4,6 +4,7 @@
 import { onSignedOut, session } from "./lib/api.js";
 import { announce, h, mount } from "./lib/dom.js";
 import { buckets } from "./views/buckets.js";
+import { objects } from "./views/objects.js";
 import { signIn } from "./views/signin.js";
 
 const THEMES = ["system", "light", "dark"];
@@ -82,14 +83,17 @@ export function parseRoute(hash) {
 
 function route() {
   if (!who) return;
-  const [name] = parseRoute(location.hash);
+  const [name, ...parts] = parseRoute(location.hash);
   for (const link of top.querySelectorAll("nav a")) {
-    if (link.dataset.route === name) link.setAttribute("aria-current", "page");
+    if (link.dataset.route === name || (name === "b" && link.dataset.route === "buckets")) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   switch (name) {
     case "buckets":
       buckets(main);
+      break;
+    case "b":
+      objects(main, parts[0], parts[1] ?? "");
       break;
     default:
       mount(main, h("h1", {}, "Not found"), h("p", {}, "There's no such page."), h("a", { href: "#/buckets" }, "Back to buckets"));
