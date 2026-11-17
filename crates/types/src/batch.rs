@@ -448,6 +448,13 @@ pub enum Operation {
     PutObjectCopy(Box<CopyOperation>),
     /// Replaces its ACL (`S3PutObjectAcl`): a canned one, or grants and an owner.
     PutObjectAcl(Box<AclOperation>),
+    /// Works out its checksum for the completion report (`S3ComputeObjectChecksum`).
+    ComputeObjectChecksum {
+        /// The algorithm, as S3 names it (`CRC32`, `SHA256`, …).
+        algorithm: String,
+        /// `FULL_OBJECT` or `COMPOSITE`.
+        kind: String,
+    },
 }
 
 /// The ACL an S3 Batch Operations job gives each object, as `PutObjectAcl` would.
@@ -580,6 +587,7 @@ impl Operation {
             Self::PutObjectRetention { .. } => "S3PutObjectRetention",
             Self::PutObjectCopy(_) => "S3PutObjectCopy",
             Self::PutObjectAcl(_) => "S3PutObjectAcl",
+            Self::ComputeObjectChecksum { .. } => "S3ComputeObjectChecksum",
         }
     }
 }
@@ -824,6 +832,20 @@ mod tests {
         assert!(json.get("cannedAcl").is_none());
         assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), acl);
         assert_eq!(acl.name(), "S3PutObjectAcl");
+    }
+
+    #[test]
+    fn checksums_are_kept_with_their_algorithm_and_type() {
+        let compute = Operation::ComputeObjectChecksum {
+            algorithm: "SHA256".to_owned(),
+            kind: "COMPOSITE".to_owned(),
+        };
+        let json = serde_json::to_value(&compute).unwrap();
+        assert_eq!(json["type"], "computeObjectChecksum");
+        assert_eq!(json["algorithm"], "SHA256");
+        assert_eq!(json["kind"], "COMPOSITE");
+        assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), compute);
+        assert_eq!(compute.name(), "S3ComputeObjectChecksum");
     }
 
     #[test]

@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Operations run `S3ComputeObjectChecksum` jobs: each object's full-object or
+  composite checksum, in any of S3's algorithms, is worked out from its bytes and written
+  to the job's completion report as AWS writes it.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
