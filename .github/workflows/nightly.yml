@@ -19,9 +19,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # cargo-deny runs on the runner, not in the action's musl container: the container
+      # has no copy of the toolchain rust-toolchain.toml pins.
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
-          command: check advisories
+          tool: cargo-deny
+      - run: cargo deny --log-level error check advisories
 
   s3-tests:
     # The ceph/s3-tests suite on each bucket layout: every test in
@@ -177,6 +180,9 @@ jobs:
           cd "$RUNNER_TEMP/lazyfs"
           git fetch -q --depth 1 https://github.com/dsrhaslab/lazyfs "$LAZYFS_COMMIT"
           git checkout -q FETCH_HEAD
+          # LazyFS fetches an old toml11 whose cmake_minimum_required is below 3.5, which
+          # CMake 4 refuses unless told the minimum policy version.
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
           (cd libs/libpcache && ./build.sh)
           (cd lazyfs && ./build.sh)
       - name: Mount LazyFS
