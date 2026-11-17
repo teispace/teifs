@@ -1,6 +1,11 @@
 //! The web console end to end: its page and headers, signing in and out, and calls
 //! passed on to S3, IAM and STS as the signed-in key's, with no more authority.
 
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers fail the test on any error"
+)]
+
 mod common;
 
 use reqwest::{Method, StatusCode, header};
@@ -289,7 +294,22 @@ async fn s3_calls_go_through_as_the_signed_in_key() {
             .unwrap()
             .contains("<Code>NoSuchKey</Code>")
     );
+}
 
+#[tokio::test]
+async fn bodies_get_what_s3_asks_for_and_no_signature_from_the_page() {
+    let (_server, console) = start().await;
+    let mut page = Page::new(&console);
+    page.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    page.call(Method::PUT, "/api/s3/photos")
+        .send()
+        .await
+        .unwrap();
+    page.call(Method::PUT, "/api/s3/photos/big%20%281%29.bin")
+        .body("x")
+        .send()
+        .await
+        .unwrap();
     // Bodies with a Content-MD5 S3 asks for (DeleteObjects) get one.
     let delete = page
         .call(Method::POST, "/api/s3/photos?delete")
