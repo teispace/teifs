@@ -33,7 +33,7 @@ use crate::{
     encode,
     errors::{StoreResultExt, from_body},
     events::{Events, Happened},
-    lifecycle, logging, notification,
+    lifecycle, logging, namespace, notification,
     object_lock::{self, ReadLock, WriteLock, set_lock, write_lock},
     observe,
     post_form::{self, Form},
@@ -1398,6 +1398,11 @@ impl S3 for Drive {
         let acl = acl::for_new_bucket(requested, &new)?;
         let configuration = input.create_bucket_configuration.as_ref();
         check_location(configuration)?;
+        namespace::check(
+            &input.bucket,
+            input.bucket_namespace.as_ref(),
+            self.account(),
+        )?;
         let tags = tagging::of_new_bucket(configuration)?;
         self.store
             .create_bucket_with(&input.bucket, layout, NewBucket { acl, tags, ..new })

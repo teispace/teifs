@@ -59,6 +59,7 @@ mod minio_service;
 mod minio_service_accounts;
 mod minio_speedtest;
 mod minio_trace;
+mod namespace;
 mod notification;
 mod object_lock;
 mod observe;

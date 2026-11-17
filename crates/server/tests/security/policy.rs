@@ -441,3 +441,63 @@ async fn federated(server: &Server, policy_text: &str) -> Client {
             .build(),
     )
 }
+
+/// Buckets in the account regional namespace (`x-amz-bucket-namespace`): a name ending
+/// in `-an` needs the header, the header needs the caller's own account and this
+/// server's region in the name, and `s3:x-amz-bucket-namespace` lets a policy require
+/// the namespace, as AWS's example policy does.
+#[tokio::test]
+async fn account_regional_buckets_are_the_accounts_own() {
+    use aws_sdk_s3::types::BucketNamespace;
+    let server = start().await;
+    let account = server.iam.account();
+    let create = |s3: &Client, bucket: String, namespace: Option<BucketNamespace>| {
+        let s3 = s3.clone();
+        async move {
+            let create = s3
+                .create_bucket()
+                .bucket(bucket)
+                .set_bucket_namespace(namespace);
+            code(create.send().await)
+        }
+    };
+    let regional = || Some(BucketNamespace::AccountRegional);
+    let mine = |prefix: &str| format!("{prefix}-{account}-us-east-1-an");
+    let root = client(&server, SECRET_KEY);
+
+    assert_eq!(create(&root, mine("logs"), None).await, "InvalidBucketName");
+    let global = Some(BucketNamespace::Global);
+    assert_eq!(
+        create(&root, mine("logs"), global).await,
+        "InvalidBucketName"
+    );
+    let plain = create(&root, "logs".to_owned(), regional()).await;
+    assert_eq!(plain, "InvalidNamespaceHeader");
+    let theirs = create(
+        &root,
+        "logs-444455556666-us-east-1-an".to_owned(),
+        regional(),
+    );
+    assert_eq!(theirs.await, "AccessDenied");
+    let elsewhere = create(&root, format!("logs-{account}-eu-west-1-an"), regional());
+    assert_eq!(elsewhere.await, "IllegalLocationConstraintException");
+    assert_eq!(create(&root, mine("logs"), regional()).await, "ok");
+    let again = create(&root, mine("logs"), regional()).await;
+    assert_eq!(again, "BucketAlreadyOwnedByYou");
+    let head = root.head_bucket().bucket(mine("logs")).send().await;
+    assert_eq!(code(head), "ok");
+
+    let regional_only = policy(
+        r#"{"Effect":"Allow","Action":"s3:CreateBucket","Resource":"*"},
+           {"Effect":"Deny","Action":"s3:CreateBucket","Resource":"*","Condition":{"StringNotEquals":{"s3:x-amz-bucket-namespace":"account-regional"}}}"#,
+    );
+    let builder = user(&server, "builder", Some(&regional_only));
+    assert_eq!(
+        create(&builder, "anywhere".to_owned(), None).await,
+        "AccessDenied"
+    );
+    let global = Some(BucketNamespace::Global);
+    let named_global = create(&builder, "anywhere".to_owned(), global).await;
+    assert_eq!(named_global, "AccessDenied");
+    assert_eq!(create(&builder, mine("data"), regional()).await, "ok");
+}

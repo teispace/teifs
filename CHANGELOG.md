@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Account regional namespaces for buckets, as on AWS since March 2026: `CreateBucket`
+  with `x-amz-bucket-namespace: account-regional` creates
+  `<name>-<account id>-us-east-1-an`, a name ending in `-an` needs that header, and
+  policies can require it with `s3:x-amz-bucket-namespace`.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
