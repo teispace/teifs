@@ -7,6 +7,13 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- A web console: `teifs serve --console-address 127.0.0.1:9001` serves it (off unless
+  asked for). Sign in with an access key; list, create and delete buckets, in light or
+  dark. It does only what the key's policies allow: every action is an S3, IAM or STS
+  request signed with that key and answered by the S3 service. The key stays in the
+  server's memory for the session; the browser holds an `HttpOnly` cookie. Plain HTTP is
+  served only on loopback or behind trusted proxies.
+
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum

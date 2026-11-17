@@ -2,7 +2,11 @@
 //! what one client can hold: connections, time to send headers (and finish a TLS
 //! handshake), and (in the S3 service) stalled bodies.
 
-use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+
+use http::Request;
+use hyper::body::Incoming;
+use s3s::{HttpError, HttpResponse};
 
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
@@ -53,11 +57,58 @@ impl Default for Limits {
     }
 }
 
+/// What one request's answer is, as [`Serves`]'s services give it.
+pub type Answer = Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send>>;
+
+/// What [`serve`] serves: a service for each connection, told who its client is.
+pub trait Serves: Clone + Send + Sync + 'static {
+    /// The service one connection's requests go to.
+    type Connection: hyper::service::Service<
+            Request<Incoming>,
+            Response = HttpResponse,
+            Error = HttpError,
+            Future = Answer,
+        > + Send
+        + 'static;
+
+    /// The service for a connection from `client`, which sent `certificates` over TLS.
+    fn for_connection(
+        &self,
+        client: teifs_s3::Client,
+        certificates: teifs_s3::ClientCertificates,
+    ) -> Self::Connection;
+}
+
+impl Serves for teifs_s3::Service {
+    type Connection = Self;
+
+    fn for_connection(
+        &self,
+        client: teifs_s3::Client,
+        certificates: teifs_s3::ClientCertificates,
+    ) -> Self {
+        self.for_client(client)
+            .with_client_certificates(certificates)
+    }
+}
+
+impl Serves for teifs_console::Console {
+    type Connection = Self;
+
+    fn for_connection(
+        &self,
+        client: teifs_s3::Client,
+        _certificates: teifs_s3::ClientCertificates,
+    ) -> Self {
+        self.for_client(client)
+    }
+}
+
 /// Serves `service` on `listener` (over TLS with `tls`) until `shutdown` resolves, then
 /// lets open requests finish for up to [`DRAIN`].
-pub async fn serve(
+pub async fn serve<S: Serves>(
     listener: TcpListener,
-    service: teifs_s3::Service,
+    service: S,
     limits: Limits,
     tls: Option<Arc<Tls>>,
     shutdown: impl Future<Output = ()>,
@@ -117,14 +168,14 @@ pub async fn serve(
 }
 
 /// One accepted connection, before it's served.
-struct Connection {
+struct Connection<S> {
     http: Arc<Builder<TokioExecutor>>,
-    service: teifs_s3::Service,
+    service: S,
     watcher: Watcher,
     peer: SocketAddr,
 }
 
-impl Connection {
+impl<S: Serves> Connection<S> {
     async fn run(self, socket: TcpStream, tls: Option<TlsAcceptor>, timeout: Duration) {
         // Telling HTTP/1 from HTTP/2, and TLS from plain HTTP, waits for the first
         // bytes: bound that wait too.
@@ -174,14 +225,14 @@ impl Connection {
     ) where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let service = self
-            .service
-            .for_client(teifs_s3::Client {
+        let service = self.service.for_connection(
+            teifs_s3::Client {
                 ip: Some(self.peer.ip()),
                 secure: tls.is_some(),
                 tls,
-            })
-            .with_client_certificates(certificates);
+            },
+            certificates,
+        );
         let connection = self.http.serve_connection(TokioIo::new(io), service);
         if let Err(err) = self.watcher.watch(connection.into_owned()).await {
             tracing::debug!(error = %err, "connection ended with an error");

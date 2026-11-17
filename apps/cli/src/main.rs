@@ -169,6 +169,12 @@ pub(crate) struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
     listen: SocketAddr,
+    /// Serve the web console on this address too, such as `127.0.0.1:9001` (off unless
+    /// given). People sign in with an access key and can do what its policies allow.
+    /// It's HTTPS when the server has certificates; plain HTTP only on a loopback
+    /// address or behind `--trusted-proxies`.
+    #[arg(long, value_name = "ADDR", env = "TEIFS_CONSOLE_ADDRESS")]
+    console_address: Option<SocketAddr>,
     /// Serve HTTPS with the certificates in this folder: `public.crt` and `private.key`
     /// (or `tls.crt` and `tls.key`), and a subfolder with the same files for each
     /// further certificate, chosen by the name clients ask for. They're reloaded when
@@ -1752,6 +1758,7 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
         client_certificates,
         openid: identity.openid,
         config_check,
+        console: args.console_address,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1805,6 +1812,10 @@ fn announce(
     durability: Durability,
 ) {
     let endpoint = format!("{}://{}", server.scheme(), announce_address(address));
+    let console = server
+        .console_addr()
+        .and_then(Result::ok)
+        .map(|console| format!("{}://{}", server.scheme(), announce_address(console)));
     let drive = server.root().display().to_string();
     let secret = match keys {
         Some(keys) => keys.secret.describe(),
@@ -1826,6 +1837,7 @@ fn announce(
             "accessKey": server.access_key(),
             "keyring": keyring,
             "durability": durability_name,
+            "console": console,
         }));
         return;
     }
@@ -1854,7 +1866,10 @@ fn announce(
                 keyring.clone(),
             ),
             ("Durability", durability_name.to_owned()),
-        ],
+        ]
+        .into_iter()
+        .chain(console.map(|console| ("Console", console)))
+        .collect::<Vec<_>>(),
         &[
             alias,
             "teifs ls local".to_owned(),

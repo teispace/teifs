@@ -1,0 +1,37 @@
+[package]
+name = "teifs-console"
+description = "The TeiFS web console: its pages, sign-in sessions, and a proxy that signs each request for the S3 service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+teifs-s3.workspace = true
+s3s.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+http = "1"
+http-body-util.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+aws-sigv4 = { workspace = true, features = ["sign-http"] }
+aws-credential-types.workspace = true
+aws-lc-rs.workspace = true
+md-5.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+form_urlencoded.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

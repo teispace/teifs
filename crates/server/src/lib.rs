@@ -34,7 +34,7 @@ pub use kms::{
     AwsKmsConfig, ExternalKms, Kes, KmsLocation, Transit, default_keyring, open_external, open_kms,
     with_default_key,
 };
-pub use serve::{DRAIN, Limits, serve};
+pub use serve::{Answer, DRAIN, Limits, Serves, serve};
 pub use teifs_iam::{
     ConfiguredOidcProvider, Directory, LdapSettings, SrvRecord, Transport,
     plugin::{IdentityPlugin, PluginSettings},
@@ -138,6 +138,10 @@ pub struct Config {
     /// Whether the root key, the service accounts it made and the sessions it started
     /// sign in (MinIO's `root_access`); off, only IAM's users and roles do.
     pub root_access: bool,
+    /// Serve the web console on this address too; `None` (the default) doesn't. It's
+    /// served over HTTPS when `tls` is set; plain HTTP only on loopback or behind
+    /// trusted proxies, as its session cookie would travel in the clear.
+    pub console: Option<SocketAddr>,
 }
 
 /// Checks a change to the drive's key-value configuration as the next start would read
@@ -200,6 +204,9 @@ pub enum ServerError {
     /// A domain for virtual-hosted-style requests or websites is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
+    /// The web console can't be served as asked.
+    #[error("can't serve the console: {0}")]
+    Console(String),
     /// The TLS certificates couldn't be loaded.
     #[error("can't load the TLS certificates: {0}")]
     Tls(TlsError),
@@ -279,6 +286,8 @@ pub struct Server {
     audit_writers: Vec<audit::Writer>,
     /// Sends bucket notifications.
     notifier: Arc<Notifier>,
+    /// The web console and its listener, when it's served.
+    console: Option<(TcpListener, teifs_console::Console)>,
 }
 
 impl std::fmt::Debug for Server {
@@ -645,7 +654,9 @@ impl Server {
             .map_err(ServerError::Tls)?
             .map(Arc::new);
         let sign_ins = SignIns::new(&config)?;
-        let (store, kms, location) = open_drive(&config).await?;
+        let console_listener = listen_console(&config).await?;
+        // Boxed: opening a drive is a big future, and `bind`'s callers await it inline.
+        let (store, kms, location) = Box::pin(open_drive(&config)).await?;
         let (listener, listen) = listen(config.listen).await?;
         let mut admin_config = admin_config(&config, &location, listen);
         sign_ins.show(&mut admin_config);
@@ -693,7 +704,7 @@ impl Server {
                 website_domains: config.website_domains,
                 default_layout: config.default_layout,
                 plain_http_is_secure: admin_config.plain_http_is_secure,
-                trusted_proxies: config.trusted_proxies,
+                trusted_proxies: config.trusted_proxies.clone(),
                 body_timeout: Some(config.limits.body_timeout),
                 allow_sig_v2: config.allow_sig_v2,
                 legacy_bucket_defaults: config.legacy_bucket_defaults,
@@ -715,6 +726,8 @@ impl Server {
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
+        let console = console_listener
+            .map(|listener| (listener, console(&service, config.trusted_proxies, listen)));
         Ok(Self {
             store,
             jobs: config.jobs,
@@ -728,7 +741,15 @@ impl Server {
             tls,
             audit_writers,
             notifier,
+            console,
         })
+    }
+
+    /// The address the web console listens on, when it's served.
+    pub fn console_addr(&self) -> Option<io::Result<SocketAddr>> {
+        self.console
+            .as_ref()
+            .map(|(listener, _)| listener.local_addr())
     }
 
     /// The address it listens on (useful with port 0).
@@ -821,6 +842,7 @@ impl Server {
         let stopping = self.service.stopping();
         let control = self.service.control();
         let asked = std::sync::OnceLock::new();
+        let stop = tokio_util::sync::CancellationToken::new();
         let shutdown = async {
             tokio::select! {
                 () = shutdown => {}
@@ -830,8 +852,31 @@ impl Server {
             }
             stopping.cancel();
             control.thaw();
+            stop.cancel();
         };
-        serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
+        let console = async {
+            if let Some((listener, console)) = self.console {
+                // Boxed: the server's own future stays the size it was without it.
+                Box::pin(serve(
+                    listener,
+                    console,
+                    self.limits,
+                    self.tls.clone(),
+                    stop.cancelled(),
+                ))
+                .await;
+            }
+        };
+        tokio::join!(
+            serve(
+                self.listener,
+                self.service,
+                self.limits,
+                self.tls.clone(),
+                shutdown
+            ),
+            console
+        );
         if let Some(reloads) = reloads {
             reloads.abort();
         }
@@ -856,6 +901,44 @@ impl Server {
             }
         }
         asked.into_inner()
+    }
+}
+
+/// The console's listener, when it's served (and may be).
+async fn listen_console(config: &Config) -> Result<Option<TcpListener>, ServerError> {
+    check_console(config)?;
+    match config.console {
+        Some(address) => Ok(Some(listen(address).await?.0)),
+        None => Ok(None),
+    }
+}
+
+/// The console for `service`, whose S3 endpoint listens on `listen`.
+fn console(
+    service: &teifs_s3::Service,
+    proxies: TrustedProxies,
+    listen: SocketAddr,
+) -> teifs_console::Console {
+    teifs_console::Console::new(service.clone(), proxies, listen.to_string())
+}
+
+/// Refuses to serve the console over plain HTTP where its session cookie could be read
+/// on the way: anywhere but loopback, unless a trusted proxy (which terminates HTTPS)
+/// stands in front of it.
+fn check_console(config: &Config) -> Result<(), ServerError> {
+    match config.console {
+        Some(address)
+            if config.tls.is_none()
+                && !address.ip().is_loopback()
+                && config.trusted_proxies.networks().is_empty() =>
+        {
+            Err(ServerError::Console(format!(
+                "{address} isn't a loopback address, and without HTTPS its sign-ins would \
+                 cross the network in the clear: give the server certificates (--certs-dir), \
+                 listen on 127.0.0.1, or put it behind a trusted proxy that serves HTTPS"
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
