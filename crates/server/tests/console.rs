@@ -489,7 +489,7 @@ async fn multipart_uploads_go_through_as_the_page_sends_them() {
         .unwrap();
     assert_eq!(
         got.content_length(),
-        Some((first.len() + last.len()) as i64)
+        Some(i64::try_from(first.len() + last.len()).unwrap())
     );
     assert_eq!(got.content_type(), Some("video/mp4"));
     assert!(got.e_tag().unwrap().ends_with("-2\""));
