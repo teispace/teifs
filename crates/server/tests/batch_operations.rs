@@ -2223,3 +2223,132 @@ async fn jobs_compute_checksums_into_their_reports() {
         assert_eq!(refused, Err("BadRequestException".to_owned()), "{token}");
     }
 }
+
+/// What the encryption job's role may do: read manifests, change photos' encryption.
+const ENCRYPTER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:UpdateObjectEncryption"],
+    "Resource":"arn:aws:s3:::photos/*"},
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::reports/*"}]}"#;
+
+const KMS_ARN: &str = "arn:aws:kms:us-east-1:000000000000:key/teifs-default";
+
+fn encrypting(arn: &str, bucket_key: Option<bool>) -> JobOperation {
+    use aws_sdk_s3control::types::{
+        ObjectEncryption, S3UpdateObjectEncryptionOperation, S3UpdateObjectEncryptionSsekms,
+    };
+    let kms = S3UpdateObjectEncryptionSsekms::builder()
+        .kms_key_arn(arn)
+        .set_bucket_key_enabled(bucket_key)
+        .build()
+        .unwrap();
+    JobOperation::builder()
+        .s3_update_object_encryption(
+            S3UpdateObjectEncryptionOperation::builder()
+                .object_encryption(ObjectEncryption::builder().ssekms(kms).build())
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn jobs_move_objects_to_a_kms_key_in_place() {
+    use aws_sdk_s3::types::ServerSideEncryption;
+    // Encrypted objects need an object bucket; they're SSE-S3 by default.
+    let server =
+        common::start_with(|config| config.default_layout = teifs_store::Layout::Object).await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &["a.jpg", "b.jpg"]).await;
+    root.create_bucket().bucket("reports").send().await.unwrap();
+    let before = root
+        .head_object()
+        .bucket("photos")
+        .key("a.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        before.server_side_encryption(),
+        Some(&ServerSideEncryption::Aes256)
+    );
+    let role = role(&server, "encrypter", TRUST, ENCRYPTER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let manifest = manifest(
+        &root,
+        "e.csv",
+        &["photos,a.jpg", "photos,b.jpg", "photos,gone.jpg"],
+    )
+    .await;
+    let id = create_reported(
+        &s3control,
+        &account,
+        (encrypting(KMS_ARN, Some(true)), manifest.clone(), &role),
+        ("e1", 1, false),
+        report(None, JobReportScope::AllTasks),
+    )
+    .await
+    .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let files = report_of(&root, &format!("job-{id}")).await;
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert_eq!(
+        files[1],
+        (
+            "failed".to_owned(),
+            vec![
+                "photos,gone.jpg,,failed,404,NoSuchKey,The specified key does not exist."
+                    .to_owned()
+            ]
+        )
+    );
+    let job = done.job.unwrap();
+    let progress = job.progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(2));
+    assert_eq!(progress.number_of_tasks_failed, Some(1));
+    let described = job.operation.unwrap().s3_update_object_encryption.unwrap();
+    let kms = described.object_encryption.unwrap().ssekms.unwrap();
+    assert_eq!(kms.kms_key_arn, KMS_ARN);
+    assert_eq!(kms.bucket_key_enabled, Some(true));
+
+    for key in ["a.jpg", "b.jpg"] {
+        let got = root
+            .get_object()
+            .bucket("photos")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            got.server_side_encryption(),
+            Some(&ServerSideEncryption::AwsKms)
+        );
+        assert_eq!(got.ssekms_key_id(), Some("teifs-default"));
+        assert_eq!(got.bucket_key_enabled(), Some(true));
+        if key == "a.jpg" {
+            // In place: the same ETag and time.
+            assert_eq!(
+                (got.e_tag(), got.last_modified()),
+                (before.e_tag(), before.last_modified())
+            );
+        }
+        let bytes = got.body.collect().await.unwrap().into_bytes();
+        assert_eq!(&bytes[..], b"photo");
+    }
+
+    // As UpdateObjectEncryption refuses them: an alias, a bare key, no key.
+    for (token, arn) in [
+        ("e2", "arn:aws:kms:us-east-1:000000000000:alias/teifs"),
+        ("e3", "teifs-default"),
+        ("e4", ""),
+    ] {
+        let refused = create(
+            &s3control,
+            &account,
+            (encrypting(arn, None), manifest.clone(), &role),
+            (token, 1, false),
+        )
+        .await;
+        assert_eq!(refused, Err("BadRequestException".to_owned()), "{token}");
+    }
+}

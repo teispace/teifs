@@ -32,6 +32,8 @@ const DOCUMENTED: &[(&str, &str)] = &[
     ("GetBucketAbac", "s3:GetBucketAbac"),
     // CreateBucketConfiguration's Tags: "You must have the s3:TagResource permission".
     ("CreateBucket", "s3:TagResource"),
+    // "To use the UpdateObjectEncryption operation, you must have … s3:UpdateObjectEncryption".
+    ("UpdateObjectEncryption", "s3:UpdateObjectEncryption"),
 ];
 
 #[test]

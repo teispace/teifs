@@ -546,6 +546,12 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Outcom
                 .await
                 .map(Some)
         }
+        Operation::UpdateObjectEncryption {
+            kms_key_arn,
+            bucket_key,
+        } => crate::batch_encryption::run(client, (kms_key_arn, *bucket_key), task)
+            .await
+            .map(|()| None),
     }
 }
 
