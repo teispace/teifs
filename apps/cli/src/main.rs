@@ -679,6 +679,21 @@ impl From<LayoutArg> for Layout {
 }
 
 fn main() -> ExitCode {
+    // Everything runs on a thread with a roomy stack, parsing and the runtime's own
+    // thread included: Windows gives the main thread only 1 MiB, which the AWS SDK's
+    // futures and clap's command tree outgrow.
+    let main = std::thread::Builder::new()
+        .name("teifs".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(start)
+        .expect("a thread for the command");
+    match main.join() {
+        Ok(code) => code,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn start() -> ExitCode {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     tracing_subscriber::registry()
