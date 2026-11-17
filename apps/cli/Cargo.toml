@@ -24,6 +24,7 @@ clap.workspace = true
 clap_complete.workspace = true
 toml.workspace = true
 aws-sdk-s3.workspace = true
+aws-sdk-s3control.workspace = true
 aws-sdk-iam.workspace = true
 aws-sdk-sts.workspace = true
 aws-smithy-http-client.workspace = true

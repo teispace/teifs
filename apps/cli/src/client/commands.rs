@@ -30,6 +30,7 @@ const MAX_PRESIGN: Duration = Duration::from_hours(7 * 24);
 /// The most keys one `DeleteObjects` request takes.
 const DELETE_BATCH: usize = 1000;
 
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
 pub async fn run(command: Command) -> Result<(), Error> {
     let mut aliases = Aliases::load()?;
     let remote = |text: &str, what: &str| Target::parse(text, &aliases)?.remote(what);
@@ -108,6 +109,7 @@ pub async fn run(command: Command) -> Result<(), Error> {
         Command::Website { action } => super::website::website(action, &aliases).await,
         Command::Quota { action } => super::quota::quota(action, &aliases).await,
         Command::Replicate { action } => super::replicate::run(action, &aliases).await,
+        Command::Batch { action } => Box::pin(super::batch::run(action, &aliases)).await,
         Command::Presign {
             target,
             expires,

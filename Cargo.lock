@@ -4639,6 +4639,7 @@ dependencies = [
  "aws-lc-rs",
  "aws-sdk-iam",
  "aws-sdk-s3",
+ "aws-sdk-s3control",
  "aws-sdk-sts",
  "aws-smithy-http-client",
  "base64 0.23.1",

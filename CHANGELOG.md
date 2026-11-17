@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- `teifs batch`: make S3 Batch Operations jobs from a CSV manifest (every operation TeiFS
+  runs), list and describe them, confirm, cancel or reprioritize them, and print their
+  completion reports.
 - S3 Batch Replication: S3 Batch Operations run `S3ReplicateObject` jobs, replicating
   each object now by its bucket's replication rules, whatever it reached before, with
   AWS's replication failure reasons in the completion report.
