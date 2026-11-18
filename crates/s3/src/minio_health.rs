@@ -515,11 +515,14 @@ struct Host {
 impl Host {
     /// Reads what `asked` asks for; `anonymize` names the server's names to replace.
     fn read(asked: Asked, addr: &str, anonymize: Option<&Vec<String>>) -> Self {
+        // Without the system's view (sysinfo couldn't read it), only the parts that
+        // don't need it are filled in.
         let mut system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
-        );
+        )
+        .ok();
         let me = sysinfo::get_current_pid().ok();
         let watched = || {
             ProcessRefreshKind::nothing()
@@ -530,13 +533,17 @@ impl Host {
                 .with_cwd(UpdateKind::Always)
                 .with_tasks()
         };
-        if let Some(me) = me.filter(|_| asked.process) {
+        if let Some(system) = system.as_mut()
+            && let Some(me) = me.filter(|_| asked.process)
+        {
             // CPU use is measured between two looks.
             system.refresh_processes_specifics(ProcessesToUpdate::Some(&[me]), true, watched());
             std::thread::sleep(GAP);
             system.refresh_processes_specifics(ProcessesToUpdate::Some(&[me]), true, watched());
         }
-        if asked.os || asked.errors {
+        if let Some(system) = system.as_mut()
+            && (asked.os || asked.errors)
+        {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 false,
@@ -545,10 +552,12 @@ impl Host {
         }
         let addr = || addr.to_owned();
         let mut host = Self::default();
-        if asked.cpu {
+        if let Some(system) = &system
+            && asked.cpu
+        {
             host.cpus = Some(Cpus {
                 addr: addr(),
-                cpus: cpus(&system),
+                cpus: cpus(system),
             });
         }
         if asked.drives {
@@ -560,22 +569,24 @@ impl Host {
         if asked.network {
             host.net = Some(net_info(addr()));
         }
-        if asked.os {
-            host.os = Some(os_info(&system, addr(), anonymize.is_some()));
-        }
-        if asked.memory {
-            host.memory = Some(mem_info(&system, addr()));
-        }
-        if asked.process
-            && let Some(process) = me.and_then(|me| proc_info(&system, me, addr(), anonymize))
-        {
-            host.process = Some(process);
-        }
-        if asked.errors {
-            host.errors = Some(SysErrors {
-                addr: addr(),
-                errors: sys_errors(&system),
-            });
+        if let Some(system) = &system {
+            if asked.os {
+                host.os = Some(os_info(system, addr(), anonymize.is_some()));
+            }
+            if asked.memory {
+                host.memory = Some(mem_info(system, addr()));
+            }
+            if asked.process
+                && let Some(process) = me.and_then(|me| proc_info(system, me, addr(), anonymize))
+            {
+                host.process = Some(process);
+            }
+            if asked.errors {
+                host.errors = Some(SysErrors {
+                    addr: addr(),
+                    errors: sys_errors(system),
+                });
+            }
         }
         if asked.services {
             host.services = Some(sys_services(addr()));
@@ -612,9 +623,10 @@ fn cpus(system: &System) -> Vec<Cpu> {
 
 /// The mounted disks.
 fn partitions() -> Vec<Partition> {
-    let disks = Disks::new_with_refreshed_list();
+    let Ok(disks) = Disks::new_with_refreshed_list() else {
+        return Vec::new();
+    };
     let mut partitions: Vec<Partition> = disks
-        .list()
         .iter()
         .map(|disk| Partition {
             device: disk.name().to_string_lossy().into_owned(),
@@ -634,21 +646,17 @@ fn partitions() -> Vec<Partition> {
 /// The network interfaces with an address: `MinIO` reports the one its nodes talk on,
 /// and a single server has none.
 fn net_info(addr: String) -> NetInfo {
-    let networks = Networks::new_with_refreshed_list();
-    let mut names: Vec<&String> = networks
-        .list()
+    let networks = Networks::new_with_refreshed_list().ok();
+    let mut names: Vec<String> = networks
         .iter()
+        .flat_map(|networks| networks.iter())
         .filter(|(_, data)| !data.ip_networks().is_empty())
-        .map(|(name, _)| name)
+        .map(|(name, _)| name.to_string_lossy().into_owned())
         .collect();
     names.sort();
     NetInfo {
         addr,
-        interface: names
-            .into_iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(","),
+        interface: names.join(","),
     }
 }
 
@@ -661,8 +669,8 @@ fn os_info(system: &System, addr: String, anonymize: bool) -> OsInfo {
             } else {
                 System::host_name().unwrap_or_default()
             },
-            uptime: System::uptime(),
-            boot_time: System::boot_time(),
+            uptime: System::uptime().unwrap_or_default(),
+            boot_time: System::boot_time().unwrap_or_default(),
             procs: u64::try_from(system.processes().len()).unwrap_or(u64::MAX),
             os: std::env::consts::OS,
             platform: System::distribution_id(),
@@ -815,7 +823,7 @@ fn sys_services(addr: String) -> SysServices {
 /// transparent huge pages, XFS's retries and the kernel's command line.
 fn sys_config() -> Map<String, Value> {
     let mut config = Map::new();
-    if let Some(limit) = System::open_files_limit() {
+    if let Ok(limit) = System::open_files_limit() {
         config.insert("rlimit-max".to_owned(), json!(limit));
     }
     config.insert(
