@@ -120,6 +120,157 @@ impl Worker {
         self
     }
 
+    /// One that replicates the same store's versions when asked (S3 Batch Replication),
+    /// counted in the same metrics and told to the same event rules.
+    pub(crate) fn sibling(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            wake: Arc::clone(&self.wake),
+            every: self.every,
+            targets: Mutex::default(),
+            stats: Arc::clone(&self.stats),
+            events: self.events.clone(),
+            ahead: self.ahead,
+        }
+    }
+
+    /// Replicates `key`'s version (`None`: the current one) of `bucket` now, to every
+    /// destination the bucket's rules send it to, whatever it reached before (S3 Batch
+    /// Replication's `S3ReplicateObject`); why it didn't, as AWS's replication failure
+    /// reasons name it. One a destination can't take yet stays waiting, and is sent
+    /// again as any other.
+    pub(crate) async fn replicate(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<(), (&'static str, String)> {
+        let config = match self.store.bucket_replication(bucket).await {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                return Err((
+                    "SrcBucketReplicationConfigMissing",
+                    "The bucket has no replication configuration.".to_owned(),
+                ));
+            }
+            Err(StoreError::NoSuchBucket) => {
+                return Err(("SrcBucketNotFound", "The bucket doesn't exist.".to_owned()));
+            }
+            Err(err) => return Err(("InternalError", err.to_string())),
+        };
+        let (mut waiting, tags, kms) = self.to_resend(bucket, key, version_id).await?;
+        // A version with no id (written while versioning was off) can't be sent as
+        // itself.
+        if waiting.version_id.is_empty() || waiting.version_id == "null" {
+            return Err((
+                "SrcObjectNotEligible",
+                "A version written while versioning was off isn't replicated.".to_owned(),
+            ));
+        }
+        waiting.destinations = match &tags {
+            Some(tags) => config.destinations(key, tags, kms),
+            None => config.marker_destinations(key),
+        };
+        if waiting.destinations.is_empty() {
+            return Err((
+                "SrcObjectNotEligible",
+                "No rule of the bucket's replication configuration replicates it.".to_owned(),
+            ));
+        }
+        let marked = self
+            .store
+            .resend_replication(
+                bucket,
+                key,
+                &waiting.version_id,
+                waiting.destinations.clone(),
+            )
+            .await
+            .map_err(|err| ("InternalError", err.to_string()))?;
+        if !marked {
+            return Err((
+                "SrcObjectNotEligible",
+                "A replica isn't replicated again.".to_owned(),
+            ));
+        }
+        self.queued(bucket, [&waiting], false);
+        let (mut held, mut why_not) = (Vec::new(), Vec::new());
+        self.version(bucket, &config, &waiting, (&mut held, &mut why_not))
+            .await;
+        match why_not.into_iter().next() {
+            None => Ok(()),
+            Some((arn, why)) if held.contains(&arn) => Err((
+                "DstPutObjectNotPermitted",
+                format!("{arn} didn't take it yet, and it's sent again later: {why}"),
+            )),
+            Some((arn, why)) => Err(("DstPutObjectNotPermitted", format!("{arn}: {why}"))),
+        }
+    }
+
+    /// The version Batch Replication sends (`None`: the current one), with its tags (none
+    /// for a delete marker) and whether it's SSE-KMS; why not, when it can't be found.
+    #[allow(
+        clippy::type_complexity,
+        reason = "a replication failure reason and its message"
+    )]
+    async fn to_resend(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<(Waiting, Option<BTreeMap<String, String>>, bool), (&'static str, String)> {
+        let found = |what: &'static str| {
+            if version_id.is_some() {
+                (
+                    "SrcVersionNotFound",
+                    format!("The {what} version doesn't exist."),
+                )
+            } else {
+                ("SrcKeyNotFound", format!("The {what} doesn't exist."))
+            }
+        };
+        match self.store.head_version(bucket, key, version_id).await {
+            Ok(info) => {
+                let kms = info
+                    .sse
+                    .as_ref()
+                    .is_some_and(|sse| matches!(sse.mode, SseMode::Kms | SseMode::Dsse));
+                let waiting = Waiting {
+                    key: key.to_owned(),
+                    version_id: info.version_id.clone().unwrap_or_default(),
+                    destinations: Vec::new(),
+                    metadata: Vec::new(),
+                    resync: Vec::new(),
+                    missed: Vec::new(),
+                    delete_marker: false,
+                    size: info.size,
+                    modified: info.modified,
+                };
+                Ok((waiting, Some(info.attrs.tags), kms))
+            }
+            Err(StoreError::DeleteMarker {
+                version_id: Some(id),
+                modified,
+                ..
+            }) => {
+                let waiting = Waiting {
+                    key: key.to_owned(),
+                    version_id: id,
+                    destinations: Vec::new(),
+                    metadata: Vec::new(),
+                    resync: Vec::new(),
+                    missed: Vec::new(),
+                    delete_marker: true,
+                    size: 0,
+                    modified,
+                };
+                Ok((waiting, None, false))
+            }
+            Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Err(found("object")),
+            Err(err) => Err(("InternalError", err.to_string())),
+        }
+    }
+
     /// Replicates what's waiting, then what comes, until `stopping`.
     pub(crate) async fn run(self, stopping: CancellationToken) {
         loop {
@@ -207,7 +358,9 @@ impl Worker {
                 if stopping.is_cancelled() {
                     return None;
                 }
-                through |= self.version(bucket, config, version, &mut held).await;
+                through |= self
+                    .version(bucket, config, version, (&mut held, &mut Vec::new()))
+                    .await;
                 unsettled.extend(
                     version
                         .resync
@@ -305,13 +458,14 @@ impl Worker {
     }
 
     /// Sends one version to each destination it waits for, but those `held` back for
-    /// its key (to which it adds those it couldn't reach); whether any was settled.
+    /// its key (to which it adds those it couldn't reach); whether any was settled. Why
+    /// it didn't reach a destination is added to `why`.
     async fn version(
         &self,
         bucket: &str,
         config: &ReplicationConfig,
         version: &Waiting,
-        held: &mut Vec<String>,
+        (held, why_not): (&mut Vec<String>, &mut Vec<(String, String)>),
     ) -> bool {
         let mut settled = false;
         for arn in &version.destinations {
@@ -333,6 +487,7 @@ impl Worker {
                 Err(Missed::Failed(err)) => {
                     self.stats.failed(bucket, arn, size, false);
                     tracing::warn!(bucket, key = %version.key, destination = %arn, error = %err, "a version can't be replicated");
+                    why_not.push((arn.clone(), err.clone()));
                     (ReplicationStatus::Failed, Some(err))
                 }
                 Err(missed @ (Missed::Later(_) | Missed::Unreachable(_))) => {
@@ -341,6 +496,7 @@ impl Worker {
                     let (Missed::Later(err) | Missed::Unreachable(err) | Missed::Failed(err)) =
                         missed;
                     tracing::info!(bucket, key = %version.key, destination = %arn, error = %err, "a version will be replicated later");
+                    why_not.push((arn.clone(), err));
                     held.push(arn.clone());
                     continue;
                 }

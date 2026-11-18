@@ -793,3 +793,84 @@ async fn a_resync_marks_versions_a_page_at_a_time_and_can_be_canceled() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn batch_replication_sends_any_version_again_but_a_replica() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    for bucket in ["source", "copy"] {
+        store.create_bucket(bucket, Layout::Object).await.unwrap();
+        store
+            .set_bucket_versioning(bucket, Versioning::Enabled)
+            .await
+            .unwrap();
+    }
+    let arn = "arn:aws:s3:::copy";
+    let other = "arn:aws:s3:::other".to_owned();
+    // Written before the rules: never replicated.
+    let before = store
+        .put_bytes("source", "a.txt", b"one", ObjectAttrs::default())
+        .await
+        .unwrap();
+    store
+        .set_bucket_replication("source", Some(everything_to("copy")))
+        .await
+        .unwrap();
+    let after = store
+        .put_bytes("source", "b.txt", b"two", ObjectAttrs::default())
+        .await
+        .unwrap();
+    let after_id = after.version_id.clone().unwrap();
+    store
+        .set_replication_status("source", "b.txt", &after_id, arn, ReplicationStatus::Failed)
+        .await
+        .unwrap();
+    let before_id = before.version_id.unwrap();
+    for (key, id) in [("a.txt", &before_id), ("b.txt", &after_id)] {
+        assert!(
+            store
+                .resend_replication("source", key, id, vec![arn.to_owned(), other.clone()])
+                .await
+                .unwrap()
+        );
+    }
+    let waiting = store.waiting_replication("source", 10).await.unwrap();
+    let found: Vec<_> = waiting
+        .iter()
+        .map(|w| {
+            (
+                w.key.as_str(),
+                w.destinations.clone(),
+                w.metadata.is_empty(),
+            )
+        })
+        .collect();
+    let both = vec![arn.to_owned(), other];
+    assert_eq!(
+        found,
+        [("a.txt", both.clone(), true), ("b.txt", both, true)]
+    );
+
+    // A replica is left as it is; a version gone is nothing to mark.
+    send(&store, "copy", b"hello").await.unwrap();
+    assert!(
+        !store
+            .resend_replication("copy", "a.txt", VERSION, vec![arn.to_owned()])
+            .await
+            .unwrap()
+    );
+    let head = store
+        .head_version("copy", "a.txt", Some(VERSION))
+        .await
+        .unwrap();
+    assert_eq!(
+        head.attrs.replication.map(|r| r.status),
+        Some(ReplicationStatus::Replica)
+    );
+    assert!(
+        !store
+            .resend_replication("source", "gone.txt", VERSION, vec![arn.to_owned()])
+            .await
+            .unwrap()
+    );
+}

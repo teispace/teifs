@@ -2352,3 +2352,199 @@ async fn jobs_move_objects_to_a_kms_key_in_place() {
         assert_eq!(refused, Err("BadRequestException".to_owned()), "{token}");
     }
 }
+
+/// What the replication job's role may do: start replicating photos named `o…` and
+/// anything in `plain`, read manifests, write reports.
+const REPLICATOR: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":"s3:InitiateReplication",
+    "Resource":["arn:aws:s3:::photos/o*","arn:aws:s3:::plain/*"]},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::reports/*"}]}"#;
+
+async fn versioned(root: &Client, bucket: &str) {
+    use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+    root.put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// Replicates every object of `photos` to `copy`.
+async fn replicate_photos(root: &Client) {
+    use aws_sdk_s3::types::{
+        DeleteMarkerReplication, DeleteMarkerReplicationStatus, Destination,
+        ReplicationConfiguration, ReplicationRule, ReplicationRuleFilter, ReplicationRuleStatus,
+    };
+    let rule = ReplicationRule::builder()
+        .id("all")
+        .priority(1)
+        .status(ReplicationRuleStatus::Enabled)
+        .filter(ReplicationRuleFilter::builder().build())
+        .delete_marker_replication(
+            DeleteMarkerReplication::builder()
+                .status(DeleteMarkerReplicationStatus::Disabled)
+                .build(),
+        )
+        .destination(
+            Destination::builder()
+                .bucket("arn:aws:s3:::copy")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    root.put_bucket_replication()
+        .bucket("photos")
+        .replication_configuration(
+            ReplicationConfiguration::builder()
+                .role("arn:aws:iam::123456789012:role/replication")
+                .rules(rule)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// A version's replication status, once it's settled.
+async fn replication_of(root: &Client, bucket: &str, key: &str) -> Option<String> {
+    for _ in 0..400 {
+        let head = root
+            .head_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        let status = head.replication_status.map(|s| s.as_str().to_owned());
+        if status.as_deref() != Some("PENDING") {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Some("PENDING".to_owned())
+}
+
+/// Buckets for a batch replication job: `photos` replicating to `copy` (with an object
+/// written before it did, whose version id is returned, and one after), and `plain`,
+/// which doesn't replicate.
+async fn replicating_photos(root: &Client) -> String {
+    buckets(root, &[]).await;
+    for bucket in ["copy", "reports", "plain"] {
+        root.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    for bucket in ["photos", "copy"] {
+        versioned(root, bucket).await;
+    }
+    put(root, "plain", "a.jpg", "photo").await;
+    // Written before the bucket replicated: never sent.
+    let old = root
+        .put_object()
+        .bucket("photos")
+        .key("o-old.jpg")
+        .body(ByteStream::from_static(b"old"))
+        .send()
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    put(root, "photos", "x.jpg", "secret").await;
+    replicate_photos(root).await;
+    put(root, "photos", "o-new.jpg", "new").await;
+    assert_eq!(
+        replication_of(root, "photos", "o-new.jpg").await.as_deref(),
+        Some("COMPLETED")
+    );
+    assert_eq!(replication_of(root, "photos", "o-old.jpg").await, None);
+    old
+}
+
+#[tokio::test]
+async fn batch_replication_sends_objects_by_the_buckets_rules() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    let old = replicating_photos(&root).await;
+
+    let role = role(&server, "replicator", TRUST, REPLICATOR);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let lines = [
+        "photos,o-old.jpg",
+        "photos,o-new.jpg",
+        "photos,o-gone.jpg",
+        "photos,x.jpg",
+        "plain,a.jpg",
+    ];
+    let manifest = manifest(&root, "r.csv", &lines).await;
+    let operation = JobOperation::builder()
+        .s3_replicate_object(
+            aws_sdk_s3control::types::S3ReplicateObjectOperation::builder().build(),
+        )
+        .build();
+    let id = create_reported(
+        &s3control,
+        &account,
+        (operation, manifest, &role),
+        ("r1", 1, false),
+        report(None, JobReportScope::AllTasks),
+    )
+    .await
+    .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let job = done.job.unwrap();
+    assert!(job.operation.unwrap().s3_replicate_object.is_some());
+    let files = report_of(&root, &format!("job-{id}")).await;
+    let mut lines: Vec<String> = files.into_iter().flat_map(|(_, lines)| lines).collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            "photos,o-gone.jpg,,failed,,SrcKeyNotFound,The object doesn't exist.",
+            "photos,o-new.jpg,,succeeded,200,,Successful",
+            "photos,o-old.jpg,,succeeded,200,,Successful",
+            "photos,x.jpg,,failed,403,InitiateReplicationNotPermitted,The job's role may not \
+             initiate replication of the object (s3:InitiateReplication).",
+            "plain,a.jpg,,failed,,SrcBucketReplicationConfigMissing,The bucket has no \
+             replication configuration.",
+        ]
+    );
+
+    // The old version is there now, as itself, and the source says so.
+    assert_eq!(
+        replication_of(&root, "photos", "o-old.jpg")
+            .await
+            .as_deref(),
+        Some("COMPLETED")
+    );
+    let replica = root
+        .head_object()
+        .bucket("copy")
+        .key("o-old.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replica.version_id.as_deref(), Some(old.as_str()));
+    assert_eq!(
+        replica
+            .replication_status
+            .map(|s| s.as_str().to_owned())
+            .as_deref(),
+        Some("REPLICA")
+    );
+    // The role may not send x.jpg: it's still only in photos.
+    assert!(
+        root.head_object()
+            .bucket("copy")
+            .key("x.jpg")
+            .send()
+            .await
+            .is_err()
+    );
+}

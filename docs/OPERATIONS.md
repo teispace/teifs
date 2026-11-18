@@ -1464,7 +1464,7 @@ for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
 AWS's S3 Batch Operations run through S3 Control, as `aws s3control` and the SDKs call
 it: a job runs one operation on every object a CSV manifest lists, as an IAM role. TeiFS
 runs `S3PutObjectTagging`, `S3DeleteObjectTagging`, `S3PutObjectLegalHold`,
-`S3PutObjectRetention`, `S3PutObjectCopy`, `S3PutObjectAcl`, `S3ComputeObjectChecksum` and `S3UpdateObjectEncryption`. Make the role first; it must trust the service, and its policies
+`S3PutObjectRetention`, `S3PutObjectCopy`, `S3PutObjectAcl`, `S3ComputeObjectChecksum`, `S3UpdateObjectEncryption` and `S3ReplicateObject`. Make the role first; it must trust the service, and its policies
 decide what each task may do (reading the manifest included):
 
 ```sh
@@ -1543,6 +1543,16 @@ needs `s3:UpdateObjectEncryption`:
 ```sh
   --operation '{"S3UpdateObjectEncryption":{"ObjectEncryption":{"SSE-KMS":{
     "KMSKeyArn":"arn:aws:kms:us-east-1:000000000000:key/teifs-default","BucketKeyEnabled":true}}}}'
+```
+
+A Batch Replication job replicates each object by its bucket's replication rules, now,
+whether it was replicated before or not: objects from before the rules, ones that failed,
+or to a destination added since. The role needs only `s3:InitiateReplication` on the
+objects; a completion report names AWS's replication failure reason for each one that
+didn't get there:
+
+```sh
+  --operation '{"S3ReplicateObject":{}}'
 ```
 
 A completion report lists each task's result once the job has run at least one and
