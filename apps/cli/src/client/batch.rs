@@ -1,7 +1,8 @@
 //! S3 Batch Operations: `teifs batch create|ls|describe|confirm|cancel|priority|report`,
 //! through S3 Control as `aws s3control` calls it. A job runs one operation on every
-//! object a CSV manifest lists, as an IAM role; the manifest's ETag (and version) is
-//! read for it, and a role named without an ARN is the alias's account's.
+//! object a manifest lists (a CSV file or an inventory report), or that it lists itself
+//! (`--generate`), as an IAM role; a manifest's ETag (and version) is read for it, and a
+//! role named without an ARN is the alias's account's.
 
 use aws_sdk_s3control::{
     Client,
@@ -11,11 +12,13 @@ use aws_sdk_s3control::{
     },
     primitives::DateTime,
     types::{
-        JobListDescriptor, JobManifest, JobManifestFieldName, JobManifestFormat,
-        JobManifestLocation, JobManifestSpec, JobOperation, JobReport, JobReportFormat,
-        JobReportScope, JobStatus, ObjectEncryption, RequestedJobStatus, S3AccessControlPolicy,
-        S3CannedAccessControlList, S3ComputeObjectChecksumOperation, S3CopyObjectOperation,
-        S3DeleteObjectTaggingOperation, S3ObjectLockLegalHold, S3ObjectLockLegalHoldStatus,
+        GeneratedManifestFormat, JobListDescriptor, JobManifest, JobManifestFieldName,
+        JobManifestFormat, JobManifestGenerator, JobManifestGeneratorFilter, JobManifestLocation,
+        JobManifestSpec, JobOperation, JobReport, JobReportFormat, JobReportScope, JobStatus,
+        KeyNameConstraint, ObjectEncryption, ReplicationStatus, RequestedJobStatus,
+        S3AccessControlPolicy, S3CannedAccessControlList, S3ComputeObjectChecksumOperation,
+        S3CopyObjectOperation, S3DeleteObjectTaggingOperation, S3JobManifestGenerator,
+        S3ManifestOutputLocation, S3ObjectLockLegalHold, S3ObjectLockLegalHoldStatus,
         S3ObjectLockRetentionMode, S3ReplicateObjectOperation, S3Retention,
         S3SetObjectAclOperation, S3SetObjectLegalHoldOperation, S3SetObjectRetentionOperation,
         S3SetObjectTaggingOperation, S3Tag, S3UpdateObjectEncryptionOperation,
@@ -37,8 +40,8 @@ use crate::{
 
 #[derive(Subcommand)]
 pub enum BatchAction {
-    /// Make a job that runs one operation on every object a CSV manifest lists, as an IAM
-    /// role (S3 Batch Operations).
+    /// Make a job that runs one operation on every object a CSV manifest lists, or that
+    /// it lists itself (`--generate`), as an IAM role (S3 Batch Operations).
     Create(Box<CreateArgs>),
     /// List the alias's jobs, newest first.
     Ls {
@@ -96,11 +99,38 @@ pub enum BatchAction {
         .args(["tag", "untag", "legal_hold", "retention", "copy_to", "acl", "checksum",
                "encrypt_kms", "replicate"])
 ))]
+#[command(group(ArgGroup::new("objects").required(true).args(["manifest", "generate"])))]
 pub struct CreateArgs {
     /// `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the
     /// key URL-encoded (and `,version` with `--versions`). A key ending in
     /// `manifest.json` is a CSV S3 Inventory report's, whose objects the job runs on.
-    manifest: String,
+    manifest: Option<String>,
+    /// List the objects instead, from `ALIAS/BUCKET[/PREFIX]`: those under the prefix
+    /// (every version the bucket's replication rules take, with `--replicate`).
+    #[arg(
+        long,
+        value_name = "ALIAS/BUCKET[/PREFIX]",
+        conflicts_with = "versions"
+    )]
+    generate: Option<String>,
+    /// With `--generate`: only keys ending in this.
+    #[arg(long, value_name = "SUFFIX", conflicts_with = "manifest")]
+    suffix: Option<String>,
+    /// With `--generate`: only objects written after this day, `YYYY-MM-DD`.
+    #[arg(long, value_name = "DATE", conflicts_with = "manifest")]
+    created_after: Option<String>,
+    /// With `--generate`: only objects written before this day, `YYYY-MM-DD`.
+    #[arg(long, value_name = "DATE", conflicts_with = "manifest")]
+    created_before: Option<String>,
+    /// With `--generate`: only objects whose replication status is one of these
+    /// (`NONE`, `FAILED`, `COMPLETED`, `REPLICA`).
+    #[arg(long = "replication-status", value_name = "STATUS", conflicts_with = "manifest",
+          value_parser = ["NONE", "FAILED", "COMPLETED", "REPLICA"])]
+    replication_statuses: Vec<String>,
+    /// With `--generate`: also write the list as a manifest into this bucket of the same
+    /// server, under the prefix if given, for other jobs to run on.
+    #[arg(long, value_name = "BUCKET[/PREFIX]", conflicts_with = "manifest")]
+    manifest_out: Option<String>,
     /// The IAM role the tasks run as: its name, or its ARN. It must trust
     /// `batchoperations.s3.amazonaws.com`.
     #[arg(long)]
@@ -270,15 +300,87 @@ fn manifest_spec(
         .set_fields(Some(fields))
 }
 
+/// The objects a job runs on: a manifest's, or a list the job makes.
+enum Objects {
+    Manifest(JobManifest),
+    Generated(Box<JobManifestGenerator>),
+}
+
 async fn create(args: CreateArgs, aliases: &Aliases) -> Result<(), Error> {
-    let remote = Target::parse(&args.manifest, aliases)?.remote("batch create")?;
+    let (objects, alias_name) = match (&args.manifest, &args.generate) {
+        (Some(manifest), _) => manifest_of(&args, manifest, aliases).await?,
+        (None, Some(source)) => generated(&args, source, aliases)?,
+        (None, None) => {
+            return Err(Error::usage(
+                "give a manifest, or --generate to list the objects".to_owned(),
+            ));
+        }
+    };
+    let control = Control::of(aliases, &alias_name).await?;
+    let report = match &args.report {
+        Some(at) => {
+            let (bucket, prefix) = at.split_once('/').unwrap_or((at, ""));
+            JobReport::builder()
+                .enabled(true)
+                .bucket(format!("arn:aws:s3:::{bucket}"))
+                .set_prefix(Some(prefix.trim_end_matches('/').to_owned()).filter(|p| !p.is_empty()))
+                .format(JobReportFormat::ReportCsv20180820)
+                .report_scope(if args.failed_only {
+                    JobReportScope::FailedTasksOnly
+                } else {
+                    JobReportScope::AllTasks
+                })
+                .build()
+        }
+        None => JobReport::builder().enabled(false).build(),
+    };
+    let role = role_arn(&args.role, &control.account);
+    let operation = operation(&args)?;
+    let (manifest, generator) = match objects {
+        Objects::Manifest(manifest) => (Some(manifest), None),
+        Objects::Generated(generator) => (None, Some(*generator)),
+    };
+    let created = control
+        .client
+        .create_job()
+        .account_id(&control.account)
+        .operation(operation)
+        .set_manifest(manifest)
+        .set_manifest_generator(generator)
+        .report(report)
+        .priority(args.priority)
+        .role_arn(&role)
+        .confirmation_required(args.confirm)
+        .set_description(args.description.clone())
+        .send()
+        .await
+        .map_err(|e| Error::s3(format!("can't make the job on {}", control.name), &e))?;
+    let id = created.job_id.unwrap_or_default();
+    let then = if args.confirm {
+        format!(": it waits for `teifs batch confirm {} {id}`", control.name)
+    } else {
+        String::new()
+    };
+    ui::done(
+        format!("{}: job {id} made{then}", control.name),
+        || json!({"type": "batchJob", "alias": control.name, "id": id, "role": role}),
+    );
+    Ok(())
+}
+
+/// A manifest the job reads, pinned at its ETag (and version).
+async fn manifest_of(
+    args: &CreateArgs,
+    manifest: &str,
+    aliases: &Aliases,
+) -> Result<(Objects, String), Error> {
+    let remote = Target::parse(manifest, aliases)?.remote("batch create")?;
     let bucket = remote.bucket()?.to_owned();
     if remote.key.is_empty() {
         return Err(Error::usage(
             "give the manifest's object: ALIAS/BUCKET/KEY".to_owned(),
         ));
     }
-    let control = Control::of(aliases, &remote.alias_name).await?;
     let head = remote
         .alias
         .client()
@@ -308,50 +410,83 @@ async fn create(args: CreateArgs, aliases: &Aliases) -> Result<(), Error> {
                 .map_err(|e| Error::usage(e.to_string()))?,
         )
         .build();
-    let report = match &args.report {
-        Some(at) => {
+    Ok((Objects::Manifest(manifest), remote.alias_name))
+}
+
+/// The list a job makes of `source`'s objects (`ALIAS/BUCKET[/PREFIX]`), with the
+/// filters given, written as a manifest with `--manifest-out`.
+fn generated(
+    args: &CreateArgs,
+    source: &str,
+    aliases: &Aliases,
+) -> Result<(Objects, String), Error> {
+    let remote = Target::parse(source, aliases)?.remote("batch create")?;
+    let generator = generator_of(args, remote.bucket()?, &remote.key)?;
+    Ok((Objects::Generated(Box::new(generator)), remote.alias_name))
+}
+
+/// The generator for `bucket`'s objects under `prefix`, with the arguments' filters.
+fn generator_of(
+    args: &CreateArgs,
+    bucket: &str,
+    prefix: &str,
+) -> Result<JobManifestGenerator, Error> {
+    let day = |text: &Option<String>| {
+        text.as_deref()
+            .map(|t| {
+                parse_day(t)
+                    .map(DateTime::from_millis)
+                    .map_err(Error::usage)
+            })
+            .transpose()
+    };
+    let mut names = KeyNameConstraint::builder();
+    if !prefix.is_empty() {
+        names = names.match_any_prefix(prefix);
+    }
+    if let Some(suffix) = &args.suffix {
+        names = names.match_any_suffix(suffix);
+    }
+    let names = names.build();
+    let filter = JobManifestGeneratorFilter::builder()
+        .set_key_name_constraint(
+            (names.match_any_prefix.is_some() || names.match_any_suffix.is_some()).then_some(names),
+        )
+        .set_created_after(day(&args.created_after)?)
+        .set_created_before(day(&args.created_before)?)
+        .set_object_replication_statuses(
+            Some(
+                args.replication_statuses
+                    .iter()
+                    .map(|s| ReplicationStatus::from(s.as_str()))
+                    .collect::<Vec<_>>(),
+            )
+            .filter(|s| !s.is_empty()),
+        )
+        .build();
+    let output = args
+        .manifest_out
+        .as_ref()
+        .map(|at| {
             let (bucket, prefix) = at.split_once('/').unwrap_or((at, ""));
-            JobReport::builder()
-                .enabled(true)
+            S3ManifestOutputLocation::builder()
                 .bucket(format!("arn:aws:s3:::{bucket}"))
-                .set_prefix(Some(prefix.trim_end_matches('/').to_owned()).filter(|p| !p.is_empty()))
-                .format(JobReportFormat::ReportCsv20180820)
-                .report_scope(if args.failed_only {
-                    JobReportScope::FailedTasksOnly
-                } else {
-                    JobReportScope::AllTasks
-                })
+                .set_manifest_prefix(
+                    Some(prefix.trim_end_matches('/').to_owned()).filter(|p| !p.is_empty()),
+                )
+                .manifest_format(GeneratedManifestFormat::S3InventoryReportCsv20211130)
                 .build()
-        }
-        None => JobReport::builder().enabled(false).build(),
-    };
-    let role = role_arn(&args.role, &control.account);
-    let operation = operation(&args)?;
-    let created = control
-        .client
-        .create_job()
-        .account_id(&control.account)
-        .operation(operation)
-        .manifest(manifest)
-        .report(report)
-        .priority(args.priority)
-        .role_arn(&role)
-        .confirmation_required(args.confirm)
-        .set_description(args.description.clone())
-        .send()
-        .await
-        .map_err(|e| Error::s3(format!("can't make the job on {}", control.name), &e))?;
-    let id = created.job_id.unwrap_or_default();
-    let then = if args.confirm {
-        format!(": it waits for `teifs batch confirm {} {id}`", control.name)
-    } else {
-        String::new()
-    };
-    ui::done(
-        format!("{}: job {id} made{then}", control.name),
-        || json!({"type": "batchJob", "alias": control.name, "id": id, "role": role}),
-    );
-    Ok(())
+                .map_err(|e| Error::usage(e.to_string()))
+        })
+        .transpose()?;
+    let generator = S3JobManifestGenerator::builder()
+        .source_bucket(format!("arn:aws:s3:::{bucket}"))
+        .enable_manifest_output(output.is_some())
+        .set_manifest_output_location(output)
+        .filter(filter)
+        .build()
+        .map_err(|e| Error::usage(e.to_string()))?;
+    Ok(JobManifestGenerator::S3JobManifestGenerator(generator))
 }
 
 /// A role's ARN: as given, or the account's role of that name.
@@ -837,6 +972,74 @@ mod tests {
             .unwrap();
         assert_eq!(csv.format, JobManifestFormat::S3BatchOperationsCsv20180820);
         assert_eq!(csv.fields.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_generated_list_takes_the_prefix_and_filters_given() {
+        #[derive(clap::Parser)]
+        struct Line {
+            #[command(flatten)]
+            args: CreateArgs,
+        }
+        let parse = |line: &[&str]| {
+            <Line as clap::Parser>::try_parse_from(
+                ["batch", "--role", "r", "--replicate"].iter().chain(line),
+            )
+            .map(|l| l.args)
+        };
+        let args = parse(&[
+            "--generate",
+            "local/photos/2026/",
+            "--suffix",
+            ".jpg",
+            "--created-after",
+            "2026-01-02",
+            "--replication-status",
+            "FAILED",
+            "--replication-status",
+            "NONE",
+            "--manifest-out",
+            "lists/made/",
+        ])
+        .unwrap();
+        let JobManifestGenerator::S3JobManifestGenerator(made) =
+            generator_of(&args, "photos", "2026/").unwrap()
+        else {
+            panic!("an S3 generator");
+        };
+        assert_eq!(made.source_bucket, "arn:aws:s3:::photos");
+        assert!(made.enable_manifest_output);
+        let output = made.manifest_output_location.unwrap();
+        assert_eq!(output.bucket, "arn:aws:s3:::lists");
+        assert_eq!(output.manifest_prefix.as_deref(), Some("made"));
+        let filter = made.filter.unwrap();
+        let names = filter.key_name_constraint.unwrap();
+        assert_eq!(names.match_any_prefix.unwrap(), ["2026/"]);
+        assert_eq!(names.match_any_suffix.unwrap(), [".jpg"]);
+        assert_eq!(
+            filter.created_after.map(|d| d.to_millis().unwrap()),
+            Some(1_767_312_000_000)
+        );
+        assert_eq!(
+            filter.object_replication_statuses.unwrap(),
+            [ReplicationStatus::Failed, ReplicationStatus::None]
+        );
+
+        // The whole bucket, unfiltered, the list kept to the job.
+        let args = parse(&["--generate", "local/photos"]).unwrap();
+        let JobManifestGenerator::S3JobManifestGenerator(made) =
+            generator_of(&args, "photos", "").unwrap()
+        else {
+            panic!("an S3 generator");
+        };
+        assert!(!made.enable_manifest_output);
+        assert!(made.manifest_output_location.is_none());
+        assert!(made.filter.unwrap().key_name_constraint.is_none());
+
+        // A manifest or a list, not both, and filters only for a list.
+        assert!(parse(&["local/m/a.csv", "--generate", "local/photos"]).is_err());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["local/m/a.csv", "--suffix", ".jpg"]).is_err());
     }
 
     #[test]

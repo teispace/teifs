@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Replication on a generated list takes the delete markers the bucket's rules
+  replicate, as AWS's does; they were left out. `teifs batch create --generate
+  ALIAS/BUCKET[/PREFIX]` makes a job that lists its objects itself, with `--suffix`,
+  `--created-after`, `--created-before` and `--replication-status` filters, and
+  `--manifest-out` to keep the list as a manifest.
 - S3 Batch Operations jobs run on S3 Inventory reports (`S3InventoryReport_CSV_20161130`:
   the report's `manifest.json`, its gzipped CSV data files checked against their MD5s)
   and on lists they make themselves (`ManifestGenerator`), with every filter AWS takes,

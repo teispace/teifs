@@ -1522,7 +1522,20 @@ source bucket (and `s3:PutObject` where the list is written):
 With `EnableManifestOutput` the list is written to
 `made/job-{id}/generated/manifest.json` (and its data files), which `describe-job` names
 as `GeneratedManifestDescriptor` and another job can run on. For `S3ReplicateObject`
-the list holds every version the bucket's replication rules take.
+the list holds every version the bucket's replication rules take, and every delete
+marker a rule that replicates delete markers takes (a size, storage class or encryption
+filter leaves markers out: they have none). A delete marker an inventory report lists
+(`IsDeleteMarker` true) is a task like any version: Batch Replication replicates it, and
+other operations fail on it as their API does on a marker (`405 MethodNotAllowed`).
+
+`teifs batch create` makes the list with `--generate ALIAS/BUCKET[/PREFIX]` in place of
+the manifest, filtered by `--suffix`, `--created-after`, `--created-before` and
+`--replication-status`, and written as a manifest with `--manifest-out BUCKET[/PREFIX]`:
+
+```sh
+teifs batch create --generate home/photos/2026/ --replicate --role replicator \
+  --replication-status NONE --replication-status FAILED --report reports/replication
+```
 
 The manifest is read, counted and checked first, at the ETag given: a changed manifest,
 or a line that names no bucket or key, fails the job. With `--confirmation-required` the

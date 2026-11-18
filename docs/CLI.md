@@ -1594,15 +1594,21 @@ teifs batch [OPTIONS] <COMMAND>
 
 ## teifs batch create
 
-Make a job that runs one operation on every object a CSV manifest lists, as an IAM role (S3 Batch Operations).
+Make a job that runs one operation on every object a CSV manifest lists, or that it lists itself (`--generate`), as an IAM role (S3 Batch Operations).
 
 ```
-teifs batch create [OPTIONS] --role <ROLE> <--tag <KEY=VALUE>|--untag|--legal-hold <on|off>|--retention <GOVERNANCE|COMPLIANCE|off>|--copy-to <BUCKET[/PREFIX]>|--acl <ACL>|--checksum <ALGORITHM>|--encrypt-kms <KMS_KEY_ARN>|--replicate> <MANIFEST>
+teifs batch create [OPTIONS] --role <ROLE> <--tag <KEY=VALUE>|--untag|--legal-hold <on|off>|--retention <GOVERNANCE|COMPLIANCE|off>|--copy-to <BUCKET[/PREFIX]>|--acl <ACL>|--checksum <ALGORITHM>|--encrypt-kms <KMS_KEY_ARN>|--replicate> <MANIFEST|--generate <ALIAS/BUCKET[/PREFIX]>>
 ```
 
 | Argument | |
 |---|---|
 | `<MANIFEST>` | `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the key URL-encoded (and `,version` with `--versions`). A key ending in `manifest.json` is a CSV S3 Inventory report's, whose objects the job runs on. |
+| `--generate <ALIAS/BUCKET[/PREFIX]>` | List the objects instead, from `ALIAS/BUCKET[/PREFIX]`: those under the prefix (every version the bucket's replication rules take, with `--replicate`). |
+| `--suffix <SUFFIX>` | With `--generate`: only keys ending in this. |
+| `--created-after <DATE>` | With `--generate`: only objects written after this day, `YYYY-MM-DD`. |
+| `--created-before <DATE>` | With `--generate`: only objects written before this day, `YYYY-MM-DD`. |
+| `--replication-status <STATUS>` | With `--generate`: only objects whose replication status is one of these (`NONE`, `FAILED`, `COMPLETED`, `REPLICA`). One of `NONE`, `FAILED`, `COMPLETED`, `REPLICA`. |
+| `--manifest-out <BUCKET[/PREFIX]>` | With `--generate`: also write the list as a manifest into this bucket of the same server, under the prefix if given, for other jobs to run on. |
 | `--role <ROLE>` | The IAM role the tasks run as: its name, or its ARN. It must trust `batchoperations.s3.amazonaws.com`. |
 | `--versions` | The manifest's lines name each object's version in a third column. |
 | `--tag <KEY=VALUE>` | Replace each object's tags with these. |
