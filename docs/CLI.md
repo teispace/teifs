@@ -55,6 +55,8 @@ teifs serve [OPTIONS] [DIR]
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
+| `--sftp-address <ADDR>` | Serve the drive's buckets over SFTP on this address too, such as `0.0.0.0:2222` (off unless given). People sign in with an access key as the user name and its secret as the password, and can do what its policies allow. Environment: `TEIFS_SFTP_ADDRESS`. |
+| `--sftp-host-key <PATH>` | The SFTP server's host key (OpenSSH format, readable by its owner only), made when missing (default: `<config dir>/teifs/ssh/<drive id>_ed25519`). Keep it: a new one makes clients warn of an impostor. Environment: `TEIFS_SFTP_HOST_KEY`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |
 | `--tls-key <TLS_KEY>` | The private key (PEM) of `--tls-cert`. Environment: `TEIFS_TLS_KEY`. |
@@ -154,6 +156,8 @@ teifs config show [OPTIONS] [DIR]
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
+| `--sftp-address <ADDR>` | Serve the drive's buckets over SFTP on this address too, such as `0.0.0.0:2222` (off unless given). People sign in with an access key as the user name and its secret as the password, and can do what its policies allow. Environment: `TEIFS_SFTP_ADDRESS`. |
+| `--sftp-host-key <PATH>` | The SFTP server's host key (OpenSSH format, readable by its owner only), made when missing (default: `<config dir>/teifs/ssh/<drive id>_ed25519`). Keep it: a new one makes clients warn of an impostor. Environment: `TEIFS_SFTP_HOST_KEY`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |
 | `--tls-key <TLS_KEY>` | The private key (PEM) of `--tls-cert`. Environment: `TEIFS_TLS_KEY`. |
@@ -2719,6 +2723,8 @@ teifs doctor [OPTIONS] [DIR]
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
+| `--sftp-address <ADDR>` | Serve the drive's buckets over SFTP on this address too, such as `0.0.0.0:2222` (off unless given). People sign in with an access key as the user name and its secret as the password, and can do what its policies allow. Environment: `TEIFS_SFTP_ADDRESS`. |
+| `--sftp-host-key <PATH>` | The SFTP server's host key (OpenSSH format, readable by its owner only), made when missing (default: `<config dir>/teifs/ssh/<drive id>_ed25519`). Keep it: a new one makes clients warn of an impostor. Environment: `TEIFS_SFTP_HOST_KEY`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |
 | `--tls-key <TLS_KEY>` | The private key (PEM) of `--tls-cert`. Environment: `TEIFS_TLS_KEY`. |

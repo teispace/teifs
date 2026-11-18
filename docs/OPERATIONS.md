@@ -598,6 +598,59 @@ answers (`HEAD`). Clients send `POST /` with
 `DurationSeconds`, `Policy`) in a form body or, as MinIO's clients do, in the query,
 unsigned.
 
+## SFTP
+
+Tools that don't speak S3 (FileZilla, WinSCP, Cyberduck, `sftp`, `scp -s`, `rclone`'s
+`sftp` backend, backup software) can reach the drive's buckets over SFTP. It's off until
+you give it an address:
+
+```sh
+teifs serve /srv/drive --sftp-address 0.0.0.0:2222
+sftp -P 2222 AKIA…@s3.example.com     # the password is the key's secret
+```
+
+| Setting | What it is |
+|---|---|
+| `--sftp-address ADDR` | Where SFTP is served (`TEIFS_SFTP_ADDRESS`); off without it |
+| `--sftp-host-key PATH` | The server's SSH host key, OpenSSH format, readable by its owner only (`chmod 600`), unencrypted (`TEIFS_SFTP_HOST_KEY`). Made (Ed25519) on the first start when missing; by default `<config dir>/teifs/ssh/<drive id>_ed25519`, off the drive like the KMS keyring |
+
+`teifs serve` prints the host key's fingerprint (`SHA256:…`) beside the address: compare
+it with what the client shows on its first connection, and keep the key (back it up with
+the keyring), since a new one makes every client warn of an impostor.
+
+People sign in with an **access key as the user name and its secret as the password**:
+the root key, an IAM user's key or a service account's. Each file operation is an S3
+request signed with that key and sent to the server's own S3 service, so the key can do
+exactly what its policies allow, and every operation is in the audit log (with the user
+agent `app/teifs-sftp`), the metrics and the bucket's notifications, as an S3 client's
+request would be. Temporary (STS) credentials can't sign in, as in MinIO. Public-key
+sign-in isn't there yet.
+
+What people see:
+
+- `/` holds the buckets the key may list; making a folder there creates a bucket (in the
+  server's `--default-layout`), removing an empty one deletes it.
+- `/BUCKET/a/b.txt` is the object `a/b.txt`. A folder is the keys under a prefix:
+  making one stores an empty `a/` object (a real folder in a folder bucket), and only an
+  empty folder can be removed. Listings come a page of 1,000 at a time.
+- Files are uploaded whole, from the start, in order: a small one is one `PutObject`,
+  a bigger one a multipart upload in 16 MiB parts (64 MiB after the first thousand, so
+  up to about 590 GB), aborted if the client goes away. Appending to a file, writing in
+  the middle of it or resuming an upload isn't possible; set your client to upload whole
+  files over one connection, and to overwrite rather than resume.
+- Renaming a file within a bucket is S3's `RenameObject` (atomic in folder buckets);
+  between buckets, or in a bucket that has had versioning, it's a copy and a delete (up
+  to 5 GiB). Folders and buckets can't be renamed, and a rename never replaces a file.
+- Setting times, modes or owners is accepted and ignored, as AWS Transfer Family's
+  `SetStatOption=ENABLE_NO_OP` does, so `put -p` works. Links aren't supported. Only an
+  object's current version is shown.
+
+Limits: an address that fails to sign in 10 times in 10 minutes is refused until then,
+each rejection takes a second, a connection gets 3 attempts and 60 s to sign in, idle
+connections close after 10 minutes, 256 connections are served at once, and a session
+holds at most 64 open files and 4 uploads. SSH runs with aws-lc-rs's cryptography and
+offers Ed25519 and ECDSA keys; RSA isn't offered.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

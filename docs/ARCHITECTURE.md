@@ -55,6 +55,11 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
                                per SNI name, reloads them), graceful shutdown, and
                                `Server::bind` / `run`, which the command and embedders
                                use.
+crates/gateway  teifs-gateway  File-protocol gateways (SFTP): buckets and objects as
+                               folders and files (`files.rs`), over AWS SDK clients
+                               whose requests go to the S3 service in memory
+                               (`backend.rs`); the SSH server (`sftp.rs`, russh and
+                               russh-sftp); sign-in limits (`attempts.rs`).
 crates/notify   teifs-notify   Bucket notifications' delivery: the server's targets
                                (webhooks, Elasticsearch, Redis, NSQ, NATS, MQTT,
                                Kafka (`kafka/`, its wire format in `wire.rs`, SASL
@@ -620,6 +625,20 @@ declared length and `stage` cuts off a body past it. A multipart upload's cap is
 with the upload (`uploads.max_size`): each part is admitted against the room its other
 parts leave (`Store::part_room`), and `put_part` checks the total again under the
 store's lock, which also covers copied parts, before the part replaces any other.
+
+## File-protocol gateways
+
+The SFTP gateway is a client of the S3 service, not a second way into the store.
+`Server::bind` hands it a clone of the `teifs_s3::Service` the S3 listener serves; for
+each person who signs in, `Backend` builds an AWS SDK client signed with their key whose
+HTTP connector opens an in-memory HTTP/1.1 connection (`tokio::io::duplex`) to
+`Service::for_client(peer)`. A file operation (`Files` in `crates/gateway/src/files.rs`)
+is therefore one or a few S3 requests, authenticated, authorized, audited and counted as
+any other. `Files` is protocol-neutral, so the later gateways share it: paths map to
+buckets and keys, folders are prefixes, uploads are a `PutObject` or a multipart upload
+whose parts go as they fill, reads stream one `GetObject` per open file (pinned to its
+ETag), and renames are `RenameObject`, or a copy and a delete. `Server::run` serves the
+gateway beside the S3 listener and stops it with it.
 
 ## Two layouts, one API
 

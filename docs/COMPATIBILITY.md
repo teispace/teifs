@@ -247,6 +247,32 @@ TeiFS does.
 | WriteGetObjectResponse | Not served |
 <!-- end generated -->
 
+## SFTP gateway
+
+`teifs serve --sftp-address` serves the buckets over SFTP (protocol version 3, the one
+OpenSSH, FileZilla and WinSCP speak), as MinIO's `--sftp` and RustFS's SFTP gateway do.
+Each operation is S3 requests signed with the signed-in key:
+
+| SFTP | S3 |
+|---|---|
+| Sign-in: access key and secret as user name and password | `sts:GetCallerIdentity` with the key |
+| `ls /` | `ListBuckets` |
+| `ls /b/dir` (`OPENDIR`, `READDIR`) | `ListObjectsV2` with `prefix=dir/`, `delimiter=/`, 1,000 a page |
+| `stat` | `HeadBucket`, `HeadObject`, or a one-key `ListObjectsV2` for a folder |
+| `mkdir /b`, `rmdir /b` | `CreateBucket`, `DeleteBucket` (empty buckets only) |
+| `mkdir /b/dir`, `rmdir /b/dir` | `PutObject dir/` (empty), `DeleteObject dir/` (empty folders only) |
+| `put` (`OPEN` with write, create and truncate) | `PutObject`, or `CreateMultipartUpload`, `UploadPart`…, `CompleteMultipartUpload` (`AbortMultipartUpload` when the client goes away); exclusive create sends `If-None-Match: *` |
+| `get` (`READ`) | `GetObject` with `Range` and `If-Match` |
+| `rm` | `HeadObject`, `DeleteObject` |
+| `rename` | `RenameObject` with `If-None-Match: *`; between buckets or in a bucket that has had versioning, `CopyObject` and `DeleteObject` (5 GiB at most) |
+| `SETSTAT`, `FSETSTAT` | Nothing: accepted and ignored, as AWS Transfer Family's `ENABLE_NO_OP` |
+
+Not supported (`SSH_FX_OP_UNSUPPORTED`): appending, writing anywhere but after what's
+written (resumed or multi-connection uploads), opening for read and write, renaming
+folders and buckets, links. Errors map to `SSH_FX_NO_SUCH_FILE` (`404`),
+`SSH_FX_PERMISSION_DENIED` (`403`) and `SSH_FX_FAILURE` with S3's code and message.
+Only current versions are shown. A file being uploaded appears when it's closed.
+
 ## Bucket layouts
 
 A bucket is either an **object bucket** (the default: objects stored by id, every key S3
