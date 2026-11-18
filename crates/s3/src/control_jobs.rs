@@ -11,13 +11,13 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{HeaderValue, StatusCode, header};
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize};
 use teifs_iam::Identity;
 use teifs_policy::{Context, S3Key, TagKind};
 use teifs_store::Store;
 use teifs_types::batch::{
-    BatchJob, JobProgress, JobReport, JobStatus, KeyValue, Manifest, ManifestField, Operation,
-    OperationJob,
+    BatchJob, JobProgress, JobReport, JobStatus, KeyValue, Manifest, ManifestField, ManifestFormat,
+    Operation, OperationJob,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -331,16 +331,18 @@ fn job_of(request: CreateJob) -> S3Result<(OperationJob, i32)> {
     if description.chars().count() > 256 {
         return Err(bad_request("Description must be at most 256 characters."));
     }
-    if request.manifest_generator.is_some() {
-        return Err(not_implemented(
-            "TeiFS reads a job's objects from a CSV manifest; it doesn't generate one.",
-        ));
-    }
-    let manifest = manifest_of(
-        request
-            .manifest
-            .ok_or_else(|| bad_request("A job needs a Manifest."))?,
-    )?;
+    let (manifest, generator) = match (request.manifest, request.manifest_generator) {
+        (Some(manifest), None) => (Some(manifest_of(manifest)?), None),
+        (None, Some(generator)) => (
+            None,
+            Some(Box::new(crate::batch_manifest::generator_of(generator)?)),
+        ),
+        _ => {
+            return Err(bad_request(
+                "A job needs a Manifest or a ManifestGenerator, not both.",
+            ));
+        }
+    };
     let report = report_of(
         &request
             .report
@@ -361,6 +363,7 @@ fn job_of(request: CreateJob) -> S3Result<(OperationJob, i32)> {
         OperationJob {
             operation,
             manifest,
+            generator,
             role_arn,
             description,
             confirmation_required: request.confirmation_required.unwrap_or(false),
@@ -374,11 +377,16 @@ fn job_of(request: CreateJob) -> S3Result<(OperationJob, i32)> {
 }
 
 fn manifest_of(given: ManifestXml) -> S3Result<Manifest> {
-    if given.spec.format != CSV_MANIFEST {
-        return Err(not_implemented(format!(
-            "TeiFS reads manifests in the {CSV_MANIFEST} format."
-        )));
-    }
+    let format = match given.spec.format.as_str() {
+        CSV_MANIFEST => ManifestFormat::Csv,
+        crate::batch_manifest::INVENTORY_FORMAT => ManifestFormat::Inventory,
+        other => {
+            return Err(bad_request(format!(
+                "A manifest's Format is {CSV_MANIFEST} or {}, not {other}.",
+                crate::batch_manifest::INVENTORY_FORMAT
+            )));
+        }
+    };
     let fields = given
         .spec
         .fields
@@ -394,7 +402,14 @@ fn manifest_of(given: ManifestXml) -> S3Result<Manifest> {
         })
         .collect::<S3Result<Vec<_>>>()?;
     let once = |wanted| fields.iter().filter(|f| **f == wanted).count() == 1;
-    if !(once(ManifestField::Bucket) && once(ManifestField::Key))
+    if format == ManifestFormat::Inventory {
+        // An inventory report's manifest.json says what its columns are.
+        if !fields.is_empty() {
+            return Err(bad_request(
+                "An inventory report's manifest has no Fields: its fileSchema names them.",
+            ));
+        }
+    } else if !(once(ManifestField::Bucket) && once(ManifestField::Key))
         || fields
             .iter()
             .filter(|f| **f == ManifestField::VersionId)
@@ -418,6 +433,7 @@ fn manifest_of(given: ManifestXml) -> S3Result<Manifest> {
         format!("\"{etag}\"")
     };
     Ok(Manifest {
+        format,
         bucket,
         key,
         version_id: given.location.object_version_id.filter(|v| !v.is_empty()),
@@ -711,7 +727,15 @@ fn describe(caller: &Caller<'_>, job: &BatchJob) -> JobXml {
             .filter(|d| !d.is_empty()),
         job_arn: caller.job_arn(&job.id),
         status: job.status.as_str(),
-        manifest: op.map(|op| manifest_xml(&op.manifest)),
+        manifest: op.and_then(|op| op.manifest.as_ref()).map(manifest_xml),
+        manifest_generator: op
+            .and_then(|op| op.generator.as_deref())
+            .map(crate::batch_manifest::generator_xml),
+        generated_manifest_descriptor: job
+            .progress
+            .generated
+            .as_ref()
+            .map(crate::batch_manifest::descriptor_xml),
         operation: op.map(|op| operation_xml(&op.operation)),
         priority: job.priority,
         progress_summary: progress(job),
@@ -735,10 +759,9 @@ fn describe(caller: &Caller<'_>, job: &BatchJob) -> JobXml {
 fn manifest_xml(manifest: &Manifest) -> ManifestXml {
     ManifestXml {
         spec: SpecXml {
-            format: CSV_MANIFEST.to_owned(),
-            fields: Some(members(
-                manifest.fields.iter().map(|f| f.as_str().to_owned()),
-            )),
+            format: manifest.format.as_str().to_owned(),
+            fields: (!manifest.fields.is_empty())
+                .then(|| members(manifest.fields.iter().map(|f| f.as_str().to_owned()))),
         },
         location: LocationXml {
             object_arn: format!("arn:aws:s3:::{}/{}", manifest.bucket, manifest.key),
@@ -984,7 +1007,7 @@ impl<T> Default for Members<T> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Empty {}
+pub(crate) struct Empty {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -994,7 +1017,7 @@ struct CreateJob {
     report: Option<ReportXml>,
     client_request_token: Option<String>,
     manifest: Option<ManifestXml>,
-    manifest_generator: Option<IgnoredAny>,
+    manifest_generator: Option<crate::batch_manifest::GeneratorXml>,
     description: Option<String>,
     priority: Option<i64>,
     role_arn: Option<String>,
@@ -1160,6 +1183,10 @@ struct JobXml {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest: Option<ManifestXml>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_generator: Option<crate::batch_manifest::GeneratorXml>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_manifest_descriptor: Option<crate::batch_manifest::DescriptorXml>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation: Option<OperationXml>,
     priority: i32,
@@ -1360,6 +1387,41 @@ mod tests {
         }
         assert!(manifest(&["Bucket", "Key"], None).is_err());
         assert!(manifest(&["Bucket", "Key"], Some("")).is_err());
+    }
+
+    #[test]
+    fn an_inventory_reports_manifest_names_no_fields() {
+        let read = |format: &str, fields: &[&str]| {
+            manifest_of(ManifestXml {
+                spec: SpecXml {
+                    format: format.to_owned(),
+                    fields: Some(members(fields.iter().map(|f| (*f).to_owned()))),
+                },
+                location: LocationXml {
+                    object_arn: "arn:aws:s3:::reports/inv/manifest.json".to_owned(),
+                    object_version_id: None,
+                    etag: Some("abc".to_owned()),
+                },
+            })
+        };
+        let inventory = crate::batch_manifest::INVENTORY_FORMAT;
+        let read_ = read(inventory, &[]).unwrap();
+        assert_eq!(read_.format, ManifestFormat::Inventory);
+        assert!(read_.fields.is_empty());
+        let described = manifest_xml(&read_);
+        assert_eq!(described.spec.format, inventory);
+        assert!(described.spec.fields.is_none());
+        for (format, fields) in [
+            (inventory, &["Bucket", "Key"][..]),
+            ("S3InventoryReport_CSV_20211130", &[]),
+            ("JSON", &["Bucket", "Key"]),
+        ] {
+            assert_eq!(
+                read(format, fields).unwrap_err().code().as_str(),
+                "BadRequestException",
+                "{format}"
+            );
+        }
     }
 
     #[test]

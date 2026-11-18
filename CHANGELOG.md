@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Operations jobs run on S3 Inventory reports (`S3InventoryReport_CSV_20161130`:
+  the report's `manifest.json`, its gzipped CSV data files checked against their MD5s)
+  and on lists they make themselves (`ManifestGenerator`), with every filter AWS takes,
+  written as a manifest (`S3InventoryReport_CSV_20211130`) when asked. Both were refused
+  with `501 NotImplemented`.
 - `teifs batch`: make S3 Batch Operations jobs from a CSV manifest (every operation TeiFS
   runs), list and describe them, confirm, cancel or reprioritize them, and print their
   completion reports.

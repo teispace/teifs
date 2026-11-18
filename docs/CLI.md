@@ -1602,7 +1602,7 @@ teifs batch create [OPTIONS] --role <ROLE> <--tag <KEY=VALUE>|--untag|--legal-ho
 
 | Argument | |
 |---|---|
-| `<MANIFEST>` | `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the key URL-encoded (and `,version` with `--versions`). |
+| `<MANIFEST>` | `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the key URL-encoded (and `,version` with `--versions`). A key ending in `manifest.json` is a CSV S3 Inventory report's, whose objects the job runs on. |
 | `--role <ROLE>` | The IAM role the tasks run as: its name, or its ARN. It must trust `batchoperations.s3.amazonaws.com`. |
 | `--versions` | The manifest's lines name each object's version in a third column. |
 | `--tag <KEY=VALUE>` | Replace each object's tags with these. |

@@ -141,7 +141,7 @@ impl JobSpec {
             Self::Expire(job) => &job.bucket,
             Self::KeyRotate(job) => &job.bucket,
             Self::Replicate(job) => &job.here().bucket,
-            Self::Operation(job) => &job.manifest.bucket,
+            Self::Operation(job) => job.bucket(),
         }
     }
 
@@ -392,8 +392,12 @@ pub struct RemoteEnd {
 pub struct OperationJob {
     /// What it does to each object.
     pub operation: Operation,
-    /// The objects.
-    pub manifest: Manifest,
+    /// The manifest that lists its objects; none when it generates its own list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<Manifest>,
+    /// How it lists its objects itself, without a manifest (`ManifestGenerator`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<Box<ManifestGenerator>>,
     /// The IAM role its tasks run as.
     pub role_arn: String,
     /// Its description.
@@ -413,6 +417,19 @@ pub struct OperationJob {
     /// Why its status last changed, when someone said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+}
+
+impl OperationJob {
+    /// The bucket its objects are listed in: its manifest's, or the source bucket of
+    /// its generated list.
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        match (&self.manifest, &self.generator) {
+            (Some(manifest), _) => &manifest.bucket,
+            (None, Some(generator)) => &generator.source_bucket,
+            (None, None) => "",
+        }
+    }
 }
 
 /// What an S3 Batch Operations job does to each object.
@@ -605,11 +622,14 @@ impl Operation {
     }
 }
 
-/// The CSV object that lists an S3 Batch Operations job's objects
-/// (`S3BatchOperations_CSV_20180820`), pinned to the version it was when the job was made.
+/// The object that lists an S3 Batch Operations job's objects, pinned to the version it
+/// was when the job was made: a CSV file, or an inventory report's `manifest.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
+    /// Its format.
+    #[serde(default, skip_serializing_if = "ManifestFormat::is_csv")]
+    pub format: ManifestFormat,
     /// Its bucket.
     pub bucket: String,
     /// Its key.
@@ -619,8 +639,173 @@ pub struct Manifest {
     pub version_id: Option<String>,
     /// Its `ETag`, quoted.
     pub etag: String,
-    /// What each column is.
+    /// What each column is (a CSV file's; an inventory report's `fileSchema` says).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<ManifestField>,
+}
+
+/// The format of a manifest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManifestFormat {
+    /// `S3BatchOperations_CSV_20180820`: a CSV file, one object a line.
+    #[default]
+    Csv,
+    /// `S3InventoryReport_CSV_20161130`: a CSV inventory report's `manifest.json`, which
+    /// lists its gzipped CSV data files.
+    Inventory,
+}
+
+impl ManifestFormat {
+    /// Its name in S3 Control.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "S3BatchOperations_CSV_20180820",
+            Self::Inventory => "S3InventoryReport_CSV_20161130",
+        }
+    }
+
+    /// Whether it's a CSV file (the default).
+    #[must_use]
+    pub const fn is_csv(&self) -> bool {
+        matches!(self, Self::Csv)
+    }
+}
+
+/// How an S3 Batch Operations job lists its objects itself (`S3JobManifestGenerator`):
+/// the current objects of a bucket that its filter takes, and where the list is
+/// written, if anywhere.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestGenerator {
+    /// The bucket whose objects are listed.
+    pub source_bucket: String,
+    /// The account that must own it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_bucket_owner: Option<String>,
+    /// Which objects are taken.
+    #[serde(default)]
+    pub filter: GeneratorFilter,
+    /// Whether the list is written as a manifest (`EnableManifestOutput`).
+    #[serde(default)]
+    pub output_enabled: bool,
+    /// Where it's written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<ManifestOutput>,
+}
+
+/// Which objects a generated list takes (`JobManifestGeneratorFilter`): each condition
+/// given must hold; within one, any of its values may.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratorFilter {
+    /// Created after this (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_after_ms: Option<i64>,
+    /// Created before this (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_before_ms: Option<i64>,
+    /// Whether the bucket's replication rules take it (`true`) or don't (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_for_replication: Option<bool>,
+    /// Keys starting with any of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
+    /// Keys holding any of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substrings: Vec<String>,
+    /// Keys ending with any of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suffixes: Vec<String>,
+    /// Larger than this many bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_greater_than: Option<u64>,
+    /// Smaller than this many bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_less_than: Option<u64>,
+    /// Stored in any of these storage classes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_classes: Vec<String>,
+    /// Encrypted so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionFilter>,
+    /// With any of these replication statuses (`COMPLETED`, `FAILED`, `REPLICA`, `NONE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replication_statuses: Vec<String>,
+}
+
+/// How the objects a generated list takes are encrypted (`ObjectEncryptionFilter`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum EncryptionFilter {
+    /// SSE-S3.
+    SseS3,
+    /// SSE-KMS, with this key and Bucket Key status if given.
+    #[serde(rename_all = "camelCase")]
+    SseKms {
+        /// The KMS key's ARN.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_arn: Option<String>,
+        /// Whether an S3 Bucket Key is used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bucket_key: Option<bool>,
+    },
+    /// DSSE-KMS, with this key if given.
+    #[serde(rename_all = "camelCase")]
+    DsseKms {
+        /// The KMS key's ARN.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_arn: Option<String>,
+    },
+    /// SSE-C.
+    SseC,
+    /// Not encrypted.
+    NotSse,
+}
+
+/// Where a generated list is written (`S3ManifestOutputLocation`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestOutput {
+    /// The bucket.
+    pub bucket: String,
+    /// What its keys start with (`job-{id}/` follows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// The account that must own the bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_owner: Option<String>,
+    /// SSE-KMS with this key for the files written, rather than the bucket's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key: Option<String>,
+    /// SSE-S3 for the files written, rather than the bucket's default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sse_s3: bool,
+}
+
+/// A data file of an inventory report or a generated list, as its `manifest.json`
+/// names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestFile {
+    /// Its bucket.
+    pub bucket: String,
+    /// Its key.
+    pub key: String,
+    /// The MD5 of its bytes, in hex.
+    pub md5: String,
+}
+
+/// The manifest a job wrote of the objects it listed itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedManifest {
+    /// Its bucket.
+    pub bucket: String,
+    /// Its `manifest.json`'s key.
+    pub key: String,
+    /// Its `ETag`, quoted.
+    pub etag: String,
 }
 
 /// A column of a manifest.
@@ -760,9 +945,38 @@ pub struct JobProgress {
     /// How many tasks it has, once its manifest was read (an S3 Batch Operations job's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
-    /// Where in its manifest it goes on, in bytes.
+    /// Where in its manifest (a CSV file) it goes on, in bytes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub offset: u64,
+    /// The data files of its manifest, when it's an inventory report or a list it
+    /// generated and wrote, found when the job was prepared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ManifestFile>,
+    /// What each column of those files is, from the manifest's `fileSchema`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ManifestField>,
+    /// Which of those files it's in (gzipped, so read from their start).
+    #[serde(default, skip_serializing_if = "is_zero_index")]
+    pub file: usize,
+    /// How many lines of that file it's done.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub line: u64,
+    /// When it listed its objects itself, keeping the list to itself: it takes only
+    /// objects written by then (Unix milliseconds), going on after `last_key` (and
+    /// `last_version`, when it lists every version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_ms: Option<i64>,
+    /// The manifest it wrote of the objects it listed itself, if it was asked to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<GeneratedManifest>,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+const fn is_zero_index(n: &usize) -> bool {
+    *n == 0
 }
 
 #[expect(
@@ -807,6 +1021,32 @@ pub fn wildcard(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Jobs kept before manifests could be inventory reports or generated read back the
+    /// same: a CSV manifest, and a byte offset into it.
+    #[test]
+    fn jobs_kept_with_a_csv_manifest_and_an_offset_read_back() {
+        let kept = r#"{"operation":{"type":"deleteObjectTagging"},
+            "manifest":{"bucket":"m","key":"k.csv","etag":"\"e\"","fields":["Bucket","Key"]},
+            "roleArn":"arn:aws:iam::1:role/r","clientToken":"t"}"#;
+        let job: OperationJob = serde_json::from_str(kept).unwrap();
+        let manifest = job.manifest.as_ref().unwrap();
+        assert_eq!(manifest.format, ManifestFormat::Csv);
+        assert_eq!(manifest.fields, [ManifestField::Bucket, ManifestField::Key]);
+        assert!(job.generator.is_none());
+        assert_eq!(job.bucket(), "m");
+        // Written again as it was: the new fields are left out while unused.
+        let written = serde_json::to_value(&job).unwrap();
+        assert!(written["manifest"].get("format").is_none());
+        assert!(written.get("generator").is_none());
+        let progress: JobProgress = serde_json::from_str(r#"{"total":3,"offset":42}"#).unwrap();
+        assert_eq!((progress.offset, progress.file, progress.line), (42, 0, 0));
+        assert!(progress.files.is_empty() && progress.generated.is_none());
+        let written = serde_json::to_value(&progress).unwrap();
+        for new in ["files", "fields", "file", "line", "listedMs", "generated"] {
+            assert!(written.get(new).is_none(), "{new}");
+        }
+    }
 
     #[test]
     fn copies_are_kept_with_their_options() {
