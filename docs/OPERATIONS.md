@@ -198,8 +198,11 @@ record per check.
 a web console on that address: buckets, their objects (folders, uploads of files or
 whole folders, downloads, deletes, versions), their settings (versioning, default
 encryption, tags, bucket policy, lifecycle rules), and what the signed-in key may do
-with them. Each setting loads and saves on its own, so a key allowed only some of them
-can still use those. It's
+with them, and IAM (users and their access keys, groups, managed and inline policies).
+Each setting loads and saves on its own, so a key allowed only some of them can still
+use those. A new access key's secret is shown once, as IAM returns it. Deleting a user
+or a group first removes what IAM asks to be removed (keys, policies, memberships);
+deleting a managed policy needs it detached everywhere first. It's
 off unless asked for. Open the address in a browser and sign in with an access key and
 its secret: the root user's, an IAM user's, or temporary credentials with their session
 token. The console can do exactly what that key could with the AWS CLI, no more: every

@@ -407,6 +407,139 @@ async fn iam_and_sts_calls_go_through() {
     assert_eq!(get.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// An IAM call as the page makes it: a form, answered with IAM's status and XML.
+async fn iam(page: &Page, form: &[(&str, &str)]) -> (StatusCode, String) {
+    let mut body = form_urlencoded::Serializer::new(String::new());
+    body.extend_pairs(form).append_pair("Version", "2010-05-08");
+    let response = page
+        .call(Method::POST, "/api/iam")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body.finish())
+        .send()
+        .await
+        .unwrap();
+    (response.status(), response.text().await.unwrap())
+}
+
+/// The text of the first `<tag>` in `xml`.
+fn element<'a>(xml: &'a str, tag: &str) -> &'a str {
+    let open = format!("<{tag}>");
+    let start = xml.find(&open).unwrap() + open.len();
+    let end = start + xml[start..].find(&format!("</{tag}>")).unwrap();
+    &xml[start..end]
+}
+
+#[tokio::test]
+async fn people_and_their_access_are_managed_as_the_iam_pages_do() {
+    let (_server, console) = start().await;
+    let mut admin = Page::new(&console);
+    admin.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    assert_eq!(
+        iam(&admin, &[("Action", "CreateUser"), ("UserName", "cy")])
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, created) = iam(&admin, &[("Action", "CreateAccessKey"), ("UserName", "cy")]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (id, secret) = (
+        element(&created, "AccessKeyId"),
+        element(&created, "SecretAccessKey"),
+    );
+
+    // The new key signs in, and may do only what its policies say.
+    let mut hers = Page::new(&console);
+    assert_eq!(hers.sign_in(id, secret).await.status(), StatusCode::OK);
+    let before = hers.call(Method::GET, "/api/s3/").send().await.unwrap();
+    assert_eq!(before.status(), StatusCode::FORBIDDEN);
+    let read_only = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess";
+    let attach = [
+        ("Action", "AttachUserPolicy"),
+        ("UserName", "cy"),
+        ("PolicyArn", read_only),
+    ];
+    assert_eq!(iam(&admin, &attach).await.0, StatusCode::OK);
+    let (_, attached) = iam(
+        &admin,
+        &[("Action", "ListAttachedUserPolicies"), ("UserName", "cy")],
+    )
+    .await;
+    assert!(attached.contains(read_only), "{attached}");
+    let after = hers.call(Method::GET, "/api/s3/").send().await.unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+
+    // A key turned off stops working.
+    let off = [
+        ("Action", "UpdateAccessKey"),
+        ("UserName", "cy"),
+        ("AccessKeyId", id),
+        ("Status", "Inactive"),
+    ];
+    assert_eq!(iam(&admin, &off).await.0, StatusCode::OK);
+    let inactive = hers.call(Method::GET, "/api/s3/").send().await.unwrap();
+    assert_eq!(inactive.status(), StatusCode::FORBIDDEN);
+
+    // A managed policy, edited by a new default version, read back as the page reads it.
+    let first = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    let (status, made) = iam(
+        &admin,
+        &[
+            ("Action", "CreatePolicy"),
+            ("PolicyName", "reader"),
+            ("PolicyDocument", first),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let arn = element(&made, "Arn").to_owned();
+    let second = first.replace("s3:GetObject", "s3:ListBucket");
+    let version = [
+        ("Action", "CreatePolicyVersion"),
+        ("PolicyArn", arn.as_str()),
+        ("PolicyDocument", second.as_str()),
+        ("SetAsDefault", "true"),
+    ];
+    assert_eq!(iam(&admin, &version).await.0, StatusCode::OK);
+    let (_, policy) = iam(&admin, &[("Action", "GetPolicy"), ("PolicyArn", &arn)]).await;
+    let default = element(&policy, "DefaultVersionId").to_owned();
+    assert_eq!(default, "v2");
+    let (_, document) = iam(
+        &admin,
+        &[
+            ("Action", "GetPolicyVersion"),
+            ("PolicyArn", &arn),
+            ("VersionId", &default),
+        ],
+    )
+    .await;
+    let decoded = percent_encoding::percent_decode_str(element(&document, "Document"))
+        .decode_utf8()
+        .unwrap();
+    assert!(decoded.contains("s3:ListBucket"), "{decoded}");
+
+    // A user with keys and policies is deleted after them, as the page does it.
+    let (status, refused) = iam(&admin, &[("Action", "DeleteUser"), ("UserName", "cy")]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    let delete_key = [
+        ("Action", "DeleteAccessKey"),
+        ("UserName", "cy"),
+        ("AccessKeyId", id),
+    ];
+    assert_eq!(iam(&admin, &delete_key).await.0, StatusCode::OK);
+    let detach = [
+        ("Action", "DetachUserPolicy"),
+        ("UserName", "cy"),
+        ("PolicyArn", read_only),
+    ];
+    assert_eq!(iam(&admin, &detach).await.0, StatusCode::OK);
+    assert_eq!(
+        iam(&admin, &[("Action", "DeleteUser"), ("UserName", "cy")])
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn plain_http_off_loopback_is_refused() {
     let dir = tempfile::tempdir().unwrap();

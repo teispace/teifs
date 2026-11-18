@@ -84,6 +84,14 @@ export function dialog(title, body, buttons) {
         ),
       ),
     );
+    // Enter in a one-line field answers with the primary button, as a form would.
+    const primary = buttons.find((b) => b.class?.split(" ").includes("primary"));
+    d.addEventListener("keydown", (e) => {
+      if (primary && e.key === "Enter" && !e.isComposing && e.target instanceof HTMLInputElement) {
+        e.preventDefault();
+        d.close(primary.value);
+      }
+    });
     d.addEventListener("close", () => {
       d.remove();
       if (before instanceof HTMLElement) before.focus();
