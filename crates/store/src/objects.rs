@@ -320,6 +320,8 @@ pub(crate) struct Written {
     version_id: String,
     created_ms: i64,
     replica: Option<Replica>,
+    /// On a drive set, whether a drive that's up missed its shard.
+    missed: bool,
 }
 
 impl Written {
@@ -352,10 +354,19 @@ impl Unrecorded {
     }
 }
 
-/// Removes a data file (on a drive set, its shards); whether it's gone.
+/// Removes a data file (on a drive set, its shards); whether it's gone (on a set,
+/// from the drives that are up; shards left are noted for the heal queue).
 fn remove_data_file(set: Option<&crate::set::DriveSet>, path: &Path) -> bool {
     match set {
-        Some(set) => set.remove(path),
+        Some(set) => {
+            let removed = set.remove(path);
+            if !removed.complete()
+                && let Some(id) = path.file_name().and_then(|n| n.to_str())
+            {
+                set.suspect(path, id);
+            }
+            removed.gone()
+        }
         None => match fs::remove_file(path) {
             Ok(()) => true,
             Err(err) => err.kind() == io::ErrorKind::NotFound,
@@ -381,7 +392,7 @@ impl ObjectBucket {
     pub(crate) fn open_data(&self, object_id: &str) -> Result<Data> {
         let path = self.data_path(object_id);
         Ok(match &self.set {
-            Some(set) => Data::Shards(Box::new(set.open_file(&path, object_id)?)),
+            Some(set) => Data::Shards(Box::new(set.open_data(&path, object_id)?)),
             None => Data::File(fs::File::open(path)?),
         })
     }
@@ -390,7 +401,7 @@ impl ObjectBucket {
     pub(crate) fn copy_data(&self, object_id: &str, to: &Path) -> Result<()> {
         match &self.set {
             Some(set) => {
-                let mut reader = set.open_file(&self.data_path(object_id), object_id)?;
+                let mut reader = set.open_data(&self.data_path(object_id), object_id)?;
                 let mut file = io::BufWriter::new(fs::File::create(to)?);
                 io::copy(&mut reader, &mut file)?;
                 file.into_inner().map_err(io::IntoInnerError::into_error)?;
@@ -641,6 +652,7 @@ impl Inner {
                 .map_or_else(|| bucket.new_version_id(), |r| r.version_id.clone()),
             created_ms: replica.as_ref().map_or_else(now_ms, |r| r.modified_ms),
             replica,
+            missed: false,
         };
         let kms = written
             .crypt
@@ -678,7 +690,7 @@ impl Inner {
             .set_len(stored_len)?;
         self.append_footer(bucket, &written, tmp)?;
         if let Some(set) = &bucket.set {
-            set.publish(tmp, &written.path, &written.object_id)?;
+            written.missed = set.publish(tmp, &written.path, &written.object_id)?;
             return Ok(written);
         }
         let parent = written.path.parent().unwrap_or(&bucket.dir);
@@ -727,6 +739,7 @@ impl Inner {
             return Err(err);
         }
         let path = written.path().map(Path::to_owned);
+        let missed = written.missed;
         let Written {
             key,
             object_id,
@@ -757,10 +770,17 @@ impl Inner {
             latest: true,
         };
         match conn.put_version(&row, created_ms) {
-            Ok(replaced) => Ok((bucket.info(&row), replaced)),
+            Ok(replaced) => {
+                // A drive missed a shard: healed by the queue, which the version's own
+                // commit keeps.
+                if missed && let Some(id) = &row.object_id {
+                    conn.queue_heal(&bucket.id, id, now_ms())?;
+                }
+                Ok((bucket.info(&row), replaced))
+            }
             Err(err) => {
                 if let Some(path) = path {
-                    let _ = fs::remove_file(path);
+                    remove_data_file(bucket.set.as_deref(), &path);
                 }
                 Err(err.into())
             }
@@ -808,7 +828,8 @@ impl Inner {
                 let _ = fs::remove_file(&tmp);
                 return Err(err);
             }
-            return set.publish(&tmp, &written.path, &written.object_id);
+            written.missed |= set.publish(&tmp, &written.path, &written.object_id)?;
+            return Ok(());
         }
         fs::OpenOptions::new()
             .write(true)
@@ -985,7 +1006,16 @@ impl Inner {
     ) -> usize {
         let mut removed = 0;
         for id in object_ids {
-            let gone = remove_data_file(bucket.set.as_deref(), &bucket.data_path(id));
+            let path = bucket.data_path(id);
+            let gone = match &bucket.set {
+                // Shards left on a drive that's down or failing are the heal queue's
+                // (kept in this change, so they aren't forgotten), not garbage.
+                Some(set) => {
+                    let removed = set.remove(&path);
+                    removed.complete() || conn.queue_heal(&bucket.id, id, now_ms()).is_ok()
+                }
+                None => remove_data_file(None, &path),
+            };
             if gone && conn.drop_garbage(id).is_ok() {
                 removed += 1;
             }

@@ -7,9 +7,14 @@
 //! folder, where writes are staged and the other `.teifs` files live.
 
 use std::{
+    collections::BTreeSet,
     fs,
-    io::{self, BufReader, BufWriter},
+    io::{self, BufReader, BufWriter, Read, Seek},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64},
+    },
 };
 
 use teifs_erasure::{Geometry, Reader};
@@ -48,6 +53,9 @@ pub fn write_quorum(data: usize, parity: usize) -> usize {
 pub(crate) struct DriveSet {
     /// Each place's drive folder (canonical); `None` where the drive is down.
     roots: Vec<Option<PathBuf>>,
+    /// Each place's folder as given: a drive that's down is taken to be one of the
+    /// folders given that weren't there, in the order given.
+    given: Vec<PathBuf>,
     home: usize,
     geometry: Geometry,
     quorum: usize,
@@ -56,8 +64,80 @@ pub(crate) struct DriveSet {
     replaced: Vec<usize>,
     /// Whether a drive missed writes, so objects need healing.
     heal: bool,
+    /// Data files a read found a shard of missing or damaged, by bucket id and object
+    /// id: the heal queue's job takes them.
+    suspects: Mutex<BTreeSet<(String, String)>>,
+    /// What healing has done since the set opened.
+    pub(crate) healed: HealCounters,
     /// Each up drive's lock, held while the set is open.
     _locks: Vec<fs::File>,
+}
+
+/// What healing has done since a set opened.
+#[derive(Debug, Default)]
+pub(crate) struct HealCounters {
+    /// Data files given new shards (or rid of shards they shouldn't have).
+    pub objects: AtomicU64,
+    /// Shards written or removed.
+    pub shards: AtomicU64,
+    /// Bytes of shards written.
+    pub bytes: AtomicU64,
+    /// Whether a full heal (every object) is under way.
+    pub running: AtomicBool,
+    /// The heal queue's length, and of it those waiting for a drive that's down, when
+    /// last looked at.
+    pub queued: AtomicU64,
+    pub waiting: AtomicU64,
+}
+
+/// What removing a data file's shards did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Removed {
+    /// Shards removed.
+    pub shards: usize,
+    /// Up drives where removing failed: the shard may be there still.
+    pub failed: usize,
+    /// Drives down, which may still have one.
+    pub down: usize,
+}
+
+impl Removed {
+    /// Whether no up drive has a shard left.
+    pub(crate) fn gone(self) -> bool {
+        self.failed == 0
+    }
+
+    /// Whether no drive at all may have a shard left.
+    pub(crate) fn complete(self) -> bool {
+        self.failed == 0 && self.down == 0
+    }
+}
+
+/// The state of a drive's shard of a data file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShardState {
+    /// There and sound.
+    Ok,
+    /// Not there.
+    Missing,
+    /// There but damaged, or not this file's.
+    Corrupt,
+    /// On a drive that's down.
+    Offline,
+}
+
+/// What healing one data file did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Healed {
+    /// Each drive's shard before, by place.
+    pub before: Vec<ShardState>,
+    /// The places of the drives given a new shard.
+    pub places: Vec<usize>,
+    /// Bytes written to them.
+    pub bytes: u64,
+    /// Up drives whose shard was bad and couldn't be written.
+    pub failed: usize,
 }
 
 /// How a set is opened.
@@ -96,6 +176,12 @@ impl DriveSet {
         for drive in drives {
             found.push(read_member(drive)?);
         }
+        let absent: Vec<PathBuf> = drives
+            .iter()
+            .zip(&found)
+            .filter(|(_, f)| f.is_none())
+            .map(|(d, _)| d.clone())
+            .collect();
         given_once(&found)?;
         let formats: Vec<&DriveFormat> = found
             .iter()
@@ -161,6 +247,7 @@ impl DriveSet {
         let format = places[home].clone().map(|(_, f)| f).expect("home is up");
         Ok(Opened {
             set: Self {
+                given: given_places(&roots, absent),
                 roots,
                 home,
                 geometry,
@@ -168,6 +255,8 @@ impl DriveSet {
                 sync,
                 replaced,
                 heal: false,
+                suspects: Mutex::default(),
+                healed: HealCounters::default(),
                 _locks: locks,
             },
             format,
@@ -219,6 +308,7 @@ impl DriveSet {
         }
         Ok(Opened {
             set: Self {
+                given: roots.clone(),
                 roots: roots.into_iter().map(Some).collect(),
                 home: 0,
                 geometry,
@@ -226,6 +316,8 @@ impl DriveSet {
                 sync,
                 replaced: Vec::new(),
                 heal: false,
+                suspects: Mutex::default(),
+                healed: HealCounters::default(),
                 _locks: locks,
             },
             format: home_format.expect("a set has drives"),
@@ -284,6 +376,11 @@ impl DriveSet {
         &self.roots
     }
 
+    /// Each place's folder, as given (for a drive that's down, a best guess).
+    pub(crate) fn given(&self) -> &[PathBuf] {
+        &self.given
+    }
+
     /// Notes that a drive missed writes.
     pub(crate) fn needs_heal(&mut self) {
         self.heal = true;
@@ -292,6 +389,33 @@ impl DriveSet {
     /// Whether a drive missed writes when the set was opened.
     pub(crate) fn heal_needed(&self) -> bool {
         self.heal
+    }
+
+    /// Whether every drive is up.
+    pub(crate) fn all_up(&self) -> bool {
+        self.roots.iter().all(Option::is_some)
+    }
+
+    /// Notes that a shard of data file `path` (object `id`) was found missing or
+    /// damaged, or couldn't be removed, for the heal queue.
+    pub(crate) fn suspect(&self, path: &Path, id: &str) {
+        let Some(bucket) = bucket_of(path) else {
+            return;
+        };
+        self.suspects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((bucket, id.to_owned()));
+    }
+
+    /// Takes the data files [`DriveSet::suspect`] noted.
+    pub(crate) fn take_suspects(&self) -> BTreeSet<(String, String)> {
+        std::mem::take(
+            &mut *self
+                .suspects
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Places whose drive was replaced by a new one at this open.
@@ -340,14 +464,15 @@ impl DriveSet {
     /// Codes the file staged at `tmp` (object `id`'s data file) into a shard file on
     /// each drive at `to`'s place: staged in each drive's `.teifs/tmp`, synced, renamed
     /// into place, the folder synced. Needs the write quorum of drives; below it, every
-    /// shard placed is removed again. `tmp` is removed either way.
-    pub(crate) fn publish(&self, tmp: &Path, to: &Path, id: &str) -> Result<()> {
+    /// shard placed is removed again. `tmp` is removed either way. Whether a drive
+    /// that's up missed its shard (so the data file needs healing).
+    pub(crate) fn publish(&self, tmp: &Path, to: &Path, id: &str) -> Result<bool> {
         let done = self.publish_shards(tmp, to, id);
         let _ = fs::remove_file(tmp);
         done
     }
 
-    fn publish_shards(&self, tmp: &Path, to: &Path, id: &str) -> Result<()> {
+    fn publish_shards(&self, tmp: &Path, to: &Path, id: &str) -> Result<bool> {
         let id16 = object_id(id)?;
         let dests = self
             .on_drives(to)
@@ -426,7 +551,42 @@ impl DriveSet {
                 needed: self.quorum,
             });
         }
-        Ok(())
+        let missed = placed
+            .iter()
+            .enumerate()
+            .any(|(s, ok)| !*ok && dests[self.drive_of(&id16, s)].is_some());
+        if missed {
+            tracing::warn!(
+                object = id,
+                "a drive missed a shard; it's queued for healing"
+            );
+        }
+        Ok(missed)
+    }
+
+    /// Opens object `id`'s data file at `path`'s place for reading, from its shards on
+    /// the drives that are up; shards found missing or damaged on drives that are up
+    /// are queued for healing once it's dropped.
+    pub(crate) fn open_data(self: &Arc<Self>, path: &Path, id: &str) -> Result<ShardFile> {
+        let reader = self.open_file(path, id)?;
+        Ok(ShardFile {
+            reader,
+            set: Arc::clone(self),
+            path: path.to_owned(),
+            id: id.to_owned(),
+        })
+    }
+
+    /// Whether a shard of `id` that `reader` found missing or damaged was on a drive
+    /// that's up (so it can be healed now).
+    fn damaged_up(&self, id: &str, reader: &Reader<fs::File>) -> bool {
+        let Ok(id16) = object_id(id) else {
+            return false;
+        };
+        reader
+            .damaged()
+            .iter()
+            .any(|shard| self.roots[self.drive_of(&id16, *shard)].is_some())
     }
 
     /// Opens object `id`'s data file at `path`'s place, from its shards on the drives
@@ -464,31 +624,45 @@ impl DriveSet {
     /// Checks each shard of object `id`'s data file at `path`'s place on the drives that
     /// are up, and rebuilds those that are missing or damaged from the others: each
     /// staged in its drive's `.teifs/tmp`, synced and renamed into place. The places of
-    /// the drives given a new shard.
-    pub(crate) fn heal_file(&self, path: &Path, id: &str) -> Result<Vec<usize>> {
+    /// the drives given a new shard, and how many up drives couldn't be given one.
+    /// `deep` reads every piece of each shard and checks its hash; else a shard whose
+    /// header and length are right is taken as sound. `dry_run` only looks.
+    pub(crate) fn heal_file(
+        &self,
+        path: &Path,
+        id: &str,
+        deep: bool,
+        dry_run: bool,
+    ) -> Result<Healed> {
         let id16 = object_id(id)?;
         let paths = self
             .on_drives(path)
             .ok_or(StoreError::InvalidRequest("a data file outside the drive"))?;
         let mut reader = self.open_file(path, id)?;
         let len = reader.len();
+        let mut healed = Healed {
+            before: vec![ShardState::Offline; self.roots.len()],
+            ..Healed::default()
+        };
         let mut bad = Vec::new();
         for shard in 0..self.roots.len() {
             let drive = self.drive_of(&id16, shard);
             let Some(at) = &paths[drive] else {
                 continue;
             };
-            let sound = fs::File::open(at)
-                .ok()
-                .and_then(|file| {
-                    teifs_erasure::verify(id16, self.geometry, &mut BufReader::new(file)).ok()
-                })
-                .is_some_and(|header| header.index == shard && header.len == len);
-            if !sound {
-                bad.push((shard, drive, at));
+            let state = self.shard_state(at, id16, shard, len, deep);
+            healed.before[drive] = state;
+            match state {
+                ShardState::Missing | ShardState::Corrupt => bad.push((shard, drive, at)),
+                // Up when the set opened, not answering now: healed once it's back.
+                ShardState::Offline => healed.failed += 1,
+                ShardState::Ok => {}
             }
         }
-        let mut healed = Vec::new();
+        if dry_run {
+            return Ok(healed);
+        }
+        let shard_len = self.geometry.shard_file_len(len);
         for (shard, drive, at) in bad {
             let root = self.roots[drive].as_ref().expect("the drive is up");
             let staged = root
@@ -515,8 +689,12 @@ impl DriveSet {
             })();
             let _ = fs::remove_file(&staged);
             match written {
-                Ok(()) => healed.push(drive),
+                Ok(()) => {
+                    healed.places.push(drive);
+                    healed.bytes += shard_len;
+                }
                 Err(err) => {
+                    healed.failed += 1;
                     tracing::warn!(drive = %root.display(), error = %err, "a shard couldn't be healed");
                 }
             }
@@ -524,16 +702,74 @@ impl DriveSet {
         Ok(healed)
     }
 
-    /// Removes the shards at `path`'s place; whether none is left on the drives that
-    /// are up (one on a drive that's down is removed when it's healed).
-    pub(crate) fn remove(&self, path: &Path) -> bool {
-        let Some(paths) = self.on_drives(path) else {
-            return false;
+    /// The state of shard `shard` of file `id16` (`len` bytes long) at `at`.
+    fn shard_state(
+        &self,
+        at: &Path,
+        id16: [u8; 16],
+        shard: usize,
+        len: u64,
+        deep: bool,
+    ) -> ShardState {
+        let mut file = match fs::File::open(at) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return if drive_there(at) {
+                    ShardState::Missing
+                } else {
+                    ShardState::Offline
+                };
+            }
+            Err(_) => return ShardState::Corrupt,
         };
-        paths.iter().flatten().all(|p| match fs::remove_file(p) {
-            Ok(()) => true,
-            Err(err) => err.kind() == io::ErrorKind::NotFound,
-        })
+        let header = if deep {
+            teifs_erasure::verify(id16, self.geometry, &mut BufReader::new(file)).ok()
+        } else {
+            let mut bytes = [0u8; teifs_erasure::HEADER_LEN];
+            let sized = file
+                .metadata()
+                .is_ok_and(|m| m.len() == self.geometry.shard_file_len(len));
+            (sized && file.read_exact(&mut bytes).is_ok())
+                .then(|| teifs_erasure::Header::decode(&bytes).ok())
+                .flatten()
+                .filter(|h| h.id == id16 && h.geometry == self.geometry)
+        };
+        if header.is_some_and(|h| h.index == shard && h.len == len) {
+            ShardState::Ok
+        } else {
+            ShardState::Corrupt
+        }
+    }
+
+    /// Removes the shards at `path`'s place, on every drive that's up (one on a drive
+    /// that's down, or where removing failed, is for the heal queue).
+    pub(crate) fn remove(&self, path: &Path) -> Removed {
+        let mut removed = Removed {
+            shards: 0,
+            failed: 0,
+            down: 0,
+        };
+        let Some(paths) = self.on_drives(path) else {
+            removed.failed = self.roots.len();
+            return removed;
+        };
+        for p in &paths {
+            let Some(p) = p else {
+                removed.down += 1;
+                continue;
+            };
+            match fs::remove_file(p) {
+                Ok(()) => removed.shards += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    // Gone, unless the drive itself is (its `.teifs` missing).
+                    if !drive_there(p) {
+                        removed.failed += 1;
+                    }
+                }
+                Err(_) => removed.failed += 1,
+            }
+        }
+        removed
     }
 
     /// Whether any drive has a shard at `path`'s place.
@@ -621,6 +857,16 @@ fn adopt(
     Ok(replaced)
 }
 
+/// Each place's folder: its drive's, or for one that's down, one of the folders given
+/// that weren't there (`absent`, in the order given).
+fn given_places(roots: &[Option<PathBuf>], mut absent: Vec<PathBuf>) -> Vec<PathBuf> {
+    absent.reverse();
+    roots
+        .iter()
+        .map(|r| r.clone().or_else(|| absent.pop()).unwrap_or_default())
+        .collect()
+}
+
 /// Fails when a drive is given twice (by two paths to it, say).
 fn given_once(found: &[Option<(PathBuf, Option<DriveFormat>)>]) -> Result<()> {
     let canonical: Vec<&PathBuf> = found.iter().flatten().map(|(p, _)| p).collect();
@@ -653,6 +899,52 @@ fn create_parents(parent: &Path, shard: &Path) -> io::Result<()> {
         ));
     }
     fs::create_dir_all(parent)
+}
+
+/// A data file read from its shards ([`DriveSet::open_data`]): when it's dropped, a
+/// shard found missing or damaged on a drive that's up is queued for healing.
+#[derive(Debug)]
+pub(crate) struct ShardFile {
+    reader: Reader<fs::File>,
+    set: Arc<DriveSet>,
+    path: PathBuf,
+    id: String,
+}
+
+impl Read for ShardFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl Seek for ShardFile {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.reader.seek(pos)
+    }
+}
+
+impl Drop for ShardFile {
+    fn drop(&mut self) {
+        if self.set.damaged_up(&self.id, &self.reader) {
+            self.set.suspect(&self.path, &self.id);
+        }
+    }
+}
+
+/// The bucket id in a data file's path (`<buckets>/<bucket id>/<aa>/<bb>/<object id>`).
+fn bucket_of(path: &Path) -> Option<String> {
+    path.ancestors()
+        .nth(3)?
+        .file_name()?
+        .to_str()
+        .map(str::to_owned)
+}
+
+/// Whether the drive a shard at `path` would be on is there (its `.teifs` is).
+fn drive_there(path: &Path) -> bool {
+    path.ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == SYSTEM_DIR))
+        .is_some_and(Path::is_dir)
 }
 
 /// An object id (32 hex digits) as the 16 bytes shard headers carry.

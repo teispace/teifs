@@ -629,6 +629,44 @@ pub struct ServerInfo {
     /// None from a server that doesn't say.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<DiskInfo>,
+    /// On a drive set, its drives and how its healing stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive_set: Option<DriveSetStatus>,
+}
+
+/// A drive set's shape, drives and healing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveSetStatus {
+    /// Shards holding each object's bytes.
+    pub data: usize,
+    /// Drives it can lose.
+    pub parity: usize,
+    /// Its drives, by place.
+    pub drives: Vec<SetDrive>,
+    /// Data files waiting in the heal queue.
+    pub heal_queued: u64,
+    /// Of them, those waiting for a drive that's down.
+    pub heal_waiting: u64,
+    /// Data files healed since the server started.
+    pub healed_objects: u64,
+    /// Bytes of shards written by healing since the server started.
+    pub healed_bytes: u64,
+    /// Whether a full heal is under way.
+    pub healing: bool,
+}
+
+/// One drive of a drive set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDrive {
+    /// Its place in the set.
+    pub place: usize,
+    /// Its folder (for a drive that's down, the folder given for it).
+    pub path: String,
+    /// `ok`, `offline` (down), `failing` (its copy of the metadata failed) or `healing`
+    /// (new in a lost drive's place).
+    pub state: String,
 }
 
 /// A disk a drive uses.
@@ -964,12 +1002,17 @@ mod tests {
                 reserved: 5,
                 ..DiskInfo::default()
             }],
+            drive_set: Some(DriveSetStatus {
+                heal_queued: 6,
+                ..DriveSetStatus::default()
+            }),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["startedMs"], 1);
         assert_eq!(json["usage"]["deleteMarkers"], 4);
         assert_eq!(json["disks"][0]["reserved"], 5);
         assert_eq!(json["scrub"]["current"]["startedMs"], 3);
+        assert_eq!(json["driveSet"]["healQueued"], 6);
         // A server from before scrubs is still understood.
         let mut older = json.clone();
         older.as_object_mut().unwrap().remove("scrub");

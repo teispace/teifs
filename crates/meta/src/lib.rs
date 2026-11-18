@@ -13,6 +13,7 @@
 //! [`Stamp`]: teifs_types::Stamp
 
 mod db;
+mod heal_queue;
 mod iam;
 mod index;
 mod mirror;
@@ -25,6 +26,7 @@ mod usage;
 mod versions;
 
 pub use db::{backup, intact};
+pub use heal_queue::{PARKED, QueuedHeal};
 pub use iam::{
     AccessKeyRow, GroupRow, IamRows, IamWrite, InlineRow, LdapParentRow, LdapPolicyRow,
     LdapSessionRow, OidcProviderRow, PolicyRow, PolicyVersionRow, RevocationRow, RoleRow,

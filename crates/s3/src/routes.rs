@@ -998,7 +998,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: "/minio/admin/v3/heal/",
         needs: Needs::Action("admin:Heal", ANY),
         handler: Handler::MinioHeal(minio_heal::Call::Heal),
-        about: "Starts a heal of every bucket, as `madmin.HealOpts` asks, and answers its token; with `?clientToken=` the results since the last call; `?forceStart`, `?forceStop`. One drive has no other copy to heal from: a heal checks each bucket and object and reports it, changing nothing; a deep scan reads each version's bytes, as `teifs verify` does: `mc admin heal`",
+        about: "Starts a heal of every bucket, as `madmin.HealOpts` asks, and answers its token; with `?clientToken=` the results since the last call; `?forceStart`, `?forceStop`. One drive has no other copy to heal from: a heal checks each bucket and object and reports it, changing nothing; a deep scan reads each version's bytes, as `teifs verify` does. On a drive set it checks each version's shard on every disk and rebuilds those missing or damaged (not with `dryRun`): `mc admin heal`",
     },
     Endpoint {
         api: Api::Minio,
@@ -1140,7 +1140,7 @@ pub(crate) static ENDPOINTS: &[Endpoint] = &[
         path: "/minio/admin/v3/background-heal/status",
         needs: Needs::Action("admin:Heal", ANY),
         handler: Handler::MinioHeal(minio_heal::Call::BackgroundStatus),
-        about: "The background heal's status as `madmin.BgHealState`: the drive's scrub, with the versions it checked and the drive's disks: `mc admin heal` with no target",
+        about: "The background heal's status as `madmin.BgHealState`: the drive's scrub, with the versions it checked and the drive's disks (on a drive set, each disk's state, the set's parity and what the heal queue healed): `mc admin heal` with no target",
     },
     Endpoint {
         api: Api::Minio,

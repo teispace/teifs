@@ -112,9 +112,18 @@ impl Disk {
 
 impl Store {
     /// The disks the drive uses: its own, then those of folder buckets kept outside it
-    /// (linked folders), each once.
+    /// (linked folders), each once. On a drive set, each drive that's up and answers.
     pub async fn disks(&self) -> Result<Vec<Disk>> {
         self.blocking(|inner| {
+            // A drive set's drives, each its own disk (those that answer).
+            if let Some(set) = &inner.set {
+                return Ok(set
+                    .drives()
+                    .iter()
+                    .flatten()
+                    .filter_map(|root| Disk::at(root).ok())
+                    .collect());
+            }
             let mut dirs = vec![inner.root.clone()];
             for bucket in inner.buckets()? {
                 if bucket.layout == crate::Layout::Folder

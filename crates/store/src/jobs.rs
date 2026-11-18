@@ -308,6 +308,9 @@ impl Store {
         if let Some(every) = options.scrub_every {
             jobs.push(Box::new(scrub::Scrub::new(self.clone(), every)));
         }
+        if self.inner.set.is_some() {
+            jobs.push(Box::new(crate::heal::HealQueue::new()));
+        }
         let cancel = CancellationToken::new();
         let status = Arc::clone(&self.inner.jobs);
         let tasks = jobs

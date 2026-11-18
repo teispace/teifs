@@ -4,6 +4,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use tempfile::TempDir;
@@ -519,4 +520,205 @@ async fn a_new_drive_replaces_a_lost_one_and_is_healed() {
     let store = set.open(&set.drives).unwrap();
     assert_eq!(read(&store, "a").await.unwrap(), bytes);
     assert_eq!(read(&store, "small").await.unwrap(), b"a small one");
+}
+
+impl Set {
+    /// Takes drive `i` away while the set may be open (a disk that stops answering).
+    fn take_away(&self, i: usize) {
+        std::fs::rename(&self.drives[i], self.drives[i].with_extension("away")).unwrap();
+    }
+
+    /// Brings drive `i` back.
+    fn bring_back(&self, i: usize) {
+        std::fs::rename(self.drives[i].with_extension("away"), &self.drives[i]).unwrap();
+    }
+}
+
+/// Runs the heal queue's job once, as if at `later` past now.
+fn heal_step(store: &Store, later: std::time::Duration) -> usize {
+    use crate::jobs::{Job, Step};
+    let mut job = crate::heal::HealQueue::new();
+    job.step(
+        &store.inner,
+        &Step {
+            now: SystemTime::now() + later,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        },
+    )
+    .unwrap()
+}
+
+async fn queued(store: &Store) -> (u64, u64) {
+    let status = store.heal_status().await.unwrap().unwrap();
+    (status.queued, status.waiting)
+}
+
+#[tokio::test]
+async fn a_drive_failing_while_the_set_serves_is_healed_from_the_queue() {
+    let set = Set::new(4);
+    let bytes = pattern(1_500_000, 2);
+    let store = set.open_all();
+    store.create_bucket("docs", Layout::Object).await.unwrap();
+    put_encrypted(&store, "a", &bytes).await;
+    // Drive 2 stops answering: writes and deletes still reach the quorum (3 of 4).
+    set.take_away(2);
+    put_encrypted(&store, "b", &bytes).await;
+    store.delete("docs", "a").await.unwrap();
+    assert_eq!(queued(&store).await, (2, 0));
+    // While it's away, healing fails and is put off.
+    assert_eq!(heal_step(&store, Duration::ZERO), 2);
+    assert_eq!(heal_step(&store, Duration::ZERO), 0);
+    assert_eq!(queued(&store).await, (2, 0));
+    // Back: the next try gives it b's shard and takes a's away.
+    set.bring_back(2);
+    assert_eq!(heal_step(&store, Duration::from_hours(2)), 2);
+    assert_eq!(queued(&store).await, (0, 0));
+    assert_eq!(shard_count(&set.drives[2]), 1);
+    let status = store.heal_status().await.unwrap().unwrap();
+    assert_eq!((status.objects, status.shards), (2, 2));
+    assert!(status.drives.iter().all(|d| d.state == DriveState::Ok));
+    // b survives losing the two other drives that had it.
+    drop(store);
+    set.lose(0);
+    set.lose(1);
+    let store = set.open(&set.drives).unwrap();
+    assert_eq!(read(&store, "b").await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn a_read_that_finds_a_damaged_shard_queues_it() {
+    let set = Set::new(4);
+    let bytes = pattern(900_000, 6);
+    let store = set.open_all();
+    store.create_bucket("docs", Layout::Object).await.unwrap();
+    put_encrypted(&store, "a", &bytes).await;
+    // Damage the drive with the first data shard (a read uses data shards only).
+    let first = (0..4)
+        .find(|i| {
+            let shard = &files(&set.drives[*i].join(SYSTEM_DIR).join(BUCKETS_DIR))[0];
+            std::fs::read(shard).unwrap()[5] == 0
+        })
+        .unwrap();
+    set.damage_shards(first);
+    assert_eq!(read(&store, "a").await.unwrap(), bytes);
+    assert_eq!(heal_step(&store, Duration::ZERO), 1);
+    assert_eq!(queued(&store).await, (0, 0));
+    // Sound again: nothing for a full heal to do.
+    assert_eq!(store.heal_set().await.unwrap().healed, 0);
+    // A read of the healed object queues nothing.
+    assert_eq!(read(&store, "a").await.unwrap(), bytes);
+    assert_eq!(heal_step(&store, Duration::ZERO), 0);
+}
+
+#[tokio::test]
+async fn shards_left_on_a_drive_that_is_down_wait_for_it() {
+    let set = Set::new(4);
+    let bytes = pattern(300_000, 1);
+    {
+        let store = set.open_all();
+        store.create_bucket("docs", Layout::Object).await.unwrap();
+        put_encrypted(&store, "a", &bytes).await;
+    }
+    set.take_away(3);
+    {
+        let store = set.open(&set.drives).unwrap();
+        store.delete("docs", "a").await.unwrap();
+        assert_eq!(heal_step(&store, Duration::ZERO), 1);
+        assert_eq!(queued(&store).await, (1, 1));
+        // It waits: not tried again however long it's been.
+        assert_eq!(heal_step(&store, Duration::from_hours(48)), 0);
+        let status = store.heal_status().await.unwrap().unwrap();
+        assert_eq!(status.drives[3].state, DriveState::Offline);
+    }
+    set.bring_back(3);
+    assert_eq!(shard_count(&set.drives[3]), 1);
+    let store = set.open_all();
+    assert_eq!(heal_step(&store, Duration::ZERO), 1);
+    assert_eq!(queued(&store).await, (0, 0));
+    assert_eq!(shard_count(&set.drives[3]), 0);
+}
+
+#[tokio::test]
+async fn heal_object_reports_each_drive_and_heals_unless_asked_not_to() {
+    use ShardState::{Corrupt, Missing, Ok as Sound};
+    let set = Set::new(4);
+    let store = set.open_all();
+    store.create_bucket("docs", Layout::Object).await.unwrap();
+    put_encrypted(&store, "a", &pattern(200_000, 8)).await;
+    set.damage_shards(0);
+    for shard in files(&set.drives[1].join(SYSTEM_DIR).join(BUCKETS_DIR)) {
+        std::fs::remove_file(shard).unwrap();
+    }
+    let look = HealOptions {
+        dry_run: true,
+        ..HealOptions::default()
+    };
+    let found = store
+        .heal_object("docs", "a", None, look)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.before, [Corrupt, Missing, Sound, Sound]);
+    assert_eq!(found.after, found.before);
+    let healed = store
+        .heal_object("docs", "a", None, HealOptions::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(healed.before, [Corrupt, Missing, Sound, Sound]);
+    assert_eq!(healed.after, [Sound; 4]);
+    let deep = HealOptions {
+        deep: true,
+        dry_run: true,
+    };
+    let again = store
+        .heal_object("docs", "a", None, deep)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.before, [Sound; 4]);
+    assert!(matches!(
+        store.heal_object("docs", "nope", None, look).await,
+        Err(StoreError::NoSuchKey)
+    ));
+}
+
+#[tokio::test]
+async fn the_scrub_rebuilds_damaged_parity_shards() {
+    let set = Set::new(4);
+    let store = set.open_all();
+    store.create_bucket("docs", Layout::Object).await.unwrap();
+    put_encrypted(&store, "a", &pattern(400_000, 3)).await;
+    // Every drive but one damaged would be too many; damage one parity shard's drive.
+    let parity = (0..4)
+        .find(|i| {
+            let shard = &files(&set.drives[*i].join(SYSTEM_DIR).join(BUCKETS_DIR))[0];
+            std::fs::read(shard).unwrap()[5] >= 2
+        })
+        .unwrap();
+    set.damage_shards(parity);
+    let mut job = crate::jobs::scrub::Scrub::new(store.clone(), Duration::from_millis(1));
+    let step = crate::jobs::Step {
+        now: SystemTime::now() + Duration::from_secs(1),
+        cancel: tokio_util::sync::CancellationToken::new(),
+    };
+    job.run(&step).await.unwrap();
+    // The scrub's first look only notes when it was first seen: the pass is the next.
+    job.run(&crate::jobs::Step {
+        now: SystemTime::now() + Duration::from_secs(5),
+        ..step
+    })
+    .await
+    .unwrap();
+    let deep = HealOptions {
+        deep: true,
+        dry_run: true,
+    };
+    let now = store
+        .heal_object("docs", "a", None, deep)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(now.before, [ShardState::Ok; 4]);
+    assert_eq!(store.scrub_report().await.unwrap().last.unwrap().damaged, 0);
 }

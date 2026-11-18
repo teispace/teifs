@@ -200,3 +200,96 @@ async fn the_background_heal_is_the_scrub() {
     assert_eq!(set["disks"][0]["state"], "ok");
     assert_eq!(state["sc_parity"]["STANDARD"], 0);
 }
+
+/// Every file under `dir`.
+fn files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .map(|e| e.unwrap().path())
+                .flat_map(|p| if p.is_dir() { files(&p) } else { vec![p] })
+                .collect()
+        },
+    )
+}
+
+#[tokio::test]
+async fn on_a_drive_set_mc_admin_heal_rebuilds_each_drives_shards() {
+    let others = tempfile::tempdir().unwrap();
+    let drives: Vec<std::path::PathBuf> = (1..4)
+        .map(|i| {
+            let drive = others.path().join(format!("d{i}"));
+            std::fs::create_dir(&drive).unwrap();
+            drive
+        })
+        .collect();
+    let set = drives.clone();
+    let server = common::start_with(|config| config.set_drives = set).await;
+    let s3 = client(&server, SECRET_KEY);
+    s3.create_bucket().bucket("pics").send().await.unwrap();
+    let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    s3.put_object()
+        .bucket("pics")
+        .key("big")
+        .body(bytes.clone().into())
+        .send()
+        .await
+        .unwrap();
+    // Drive 2 loses its shard.
+    let shards = |drive: &std::path::Path| files(&drive.join(".teifs/buckets"));
+    for shard in shards(&drives[1]) {
+        std::fs::remove_file(shard).unwrap();
+    }
+
+    // A dry run reports it and changes nothing.
+    let path = "/minio/admin/v3/heal/pics";
+    let opts = br#"{"recursive":true,"dryRun":true,"scanMode":1}"#;
+    let (_, started) = post(&server, path, opts).await;
+    let token = started["clientToken"].as_str().unwrap().to_owned();
+    let (_, items) = results(&server, path, &token).await;
+    let drive_states = |item: &Value, when: &str| -> Vec<String> {
+        item[when]["drives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["state"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let object = &items[1];
+    assert_eq!(object["object"], "big");
+    assert_eq!(object["diskCount"], 4);
+    assert_eq!(
+        drive_states(object, "before"),
+        ["ok", "ok", "missing", "ok"]
+    );
+    assert_eq!(
+        drive_states(object, "after"),
+        drive_states(object, "before")
+    );
+    assert!(shards(&drives[1]).is_empty());
+
+    // Healed: the shard is back.
+    let (_, started) = post(&server, path, br#"{"recursive":true,"scanMode":2}"#).await;
+    let token = started["clientToken"].as_str().unwrap().to_owned();
+    let (done, items) = results(&server, path, &token).await;
+    assert_eq!(done["Summary"], "finished");
+    let object = &items[1];
+    assert_eq!(
+        drive_states(object, "before"),
+        ["ok", "ok", "missing", "ok"]
+    );
+    assert_eq!(drive_states(object, "after"), ["ok"; 4]);
+    assert_eq!(object["detail"], "1 shards rebuilt");
+    assert_eq!(shards(&drives[1]).len(), 1);
+
+    // The background heal's status lists each drive and the set's parity.
+    let (status, state) = post(&server, "/minio/admin/v3/background-heal/status", b"").await;
+    assert_eq!(status, 200, "{state}");
+    let disks = state["sets"][0]["disks"].as_array().unwrap();
+    assert_eq!(disks.len(), 4);
+    assert!(disks.iter().all(|d| d["state"] == "ok"), "{state}");
+    assert_eq!(state["sc_parity"]["STANDARD"], 2);
+    let mrf = state["mrf"].as_object().unwrap().values().next().unwrap();
+    assert_eq!(mrf["items_healed"], 1);
+}

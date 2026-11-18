@@ -579,7 +579,20 @@ async fn an_imported_metrics_configuration_starts_watching() {
 /// Prometheus query uses.
 #[tokio::test]
 async fn every_metric_is_documented() {
-    let server = start_with(|config| config.public_metrics = true).await;
+    // A drive set's, which has every metric a single drive has and its own.
+    let others = tempfile::tempdir().unwrap();
+    let drives: Vec<std::path::PathBuf> = (1..4)
+        .map(|i| {
+            let drive = others.path().join(format!("d{i}"));
+            std::fs::create_dir(&drive).unwrap();
+            drive
+        })
+        .collect();
+    let server = start_with(|config| {
+        config.public_metrics = true;
+        config.set_drives = drives;
+    })
+    .await;
     let s3 = client(&server, SECRET_KEY);
     s3.create_bucket().bucket("measured").send().await.unwrap();
     measure(&s3, "measured", "EntireBucket", None).await;
