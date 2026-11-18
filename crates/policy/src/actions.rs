@@ -439,6 +439,8 @@ const SIMPLE: &[(&str, &str)] = &[
         "UpdateBucketMetadataJournalTableConfiguration",
         "s3:UpdateBucketMetadataJournalTableConfiguration",
     ),
+    // The reference lists no action for it; its API page requires this one.
+    ("UpdateObjectEncryption", "s3:UpdateObjectEncryption"),
     ("UploadPart", "s3:PutObject"),
 ];
 

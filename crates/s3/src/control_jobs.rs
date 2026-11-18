@@ -540,12 +540,19 @@ fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
         let (algorithm, kind) = crate::batch_checksum::parse(compute)?;
         operations.push(Operation::ComputeObjectChecksum { algorithm, kind });
     }
+    if let Some(encryption) = given.encryption {
+        let (kms_key_arn, bucket_key) = crate::batch_encryption::parse(encryption)?;
+        operations.push(Operation::UpdateObjectEncryption {
+            kms_key_arn,
+            bucket_key,
+        });
+    }
     match operations.len() {
         1 => Ok(operations.remove(0)),
         0 => Err(not_implemented(
             "TeiFS runs these operations: S3PutObjectTagging, S3DeleteObjectTagging, \
-             S3PutObjectLegalHold, S3PutObjectRetention, S3PutObjectCopy, S3PutObjectAcl \
-             and S3ComputeObjectChecksum.",
+             S3PutObjectLegalHold, S3PutObjectRetention, S3PutObjectCopy, S3PutObjectAcl, \
+             S3ComputeObjectChecksum and S3UpdateObjectEncryption.",
         )),
         _ => Err(bad_request("A job has exactly one Operation.")),
     }
@@ -774,6 +781,10 @@ fn operation_xml(operation: &Operation) -> OperationXml {
         Operation::ComputeObjectChecksum { algorithm, kind } => {
             xml.compute = Some(crate::batch_checksum::xml(algorithm, kind));
         }
+        Operation::UpdateObjectEncryption {
+            kms_key_arn,
+            bucket_key,
+        } => xml.encryption = Some(crate::batch_encryption::xml(kms_key_arn, *bucket_key)),
     }
     xml
 }
@@ -1014,6 +1025,11 @@ struct OperationXml {
         skip_serializing_if = "Option::is_none"
     )]
     compute: Option<crate::batch_checksum::ComputeXml>,
+    #[serde(
+        rename = "S3UpdateObjectEncryption",
+        skip_serializing_if = "Option::is_none"
+    )]
+    encryption: Option<crate::batch_encryption::EncryptionXml>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

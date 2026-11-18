@@ -455,6 +455,14 @@ pub enum Operation {
         /// `FULL_OBJECT` or `COMPOSITE`.
         kind: String,
     },
+    /// Changes its encryption in place to an SSE-KMS key (`S3UpdateObjectEncryption`).
+    UpdateObjectEncryption {
+        /// The KMS key's full ARN.
+        kms_key_arn: String,
+        /// Whether it uses an S3 Bucket Key.
+        #[serde(default)]
+        bucket_key: bool,
+    },
 }
 
 /// The ACL an S3 Batch Operations job gives each object, as `PutObjectAcl` would.
@@ -588,6 +596,7 @@ impl Operation {
             Self::PutObjectCopy(_) => "S3PutObjectCopy",
             Self::PutObjectAcl(_) => "S3PutObjectAcl",
             Self::ComputeObjectChecksum { .. } => "S3ComputeObjectChecksum",
+            Self::UpdateObjectEncryption { .. } => "S3UpdateObjectEncryption",
         }
     }
 }
@@ -846,6 +855,19 @@ mod tests {
         assert_eq!(json["kind"], "COMPOSITE");
         assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), compute);
         assert_eq!(compute.name(), "S3ComputeObjectChecksum");
+    }
+
+    #[test]
+    fn encryption_updates_keep_their_key_and_bucket_key() {
+        let update = Operation::UpdateObjectEncryption {
+            kms_key_arn: "arn:aws:kms:us-east-1:111122223333:key/k".to_owned(),
+            bucket_key: true,
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["type"], "updateObjectEncryption");
+        assert_eq!(json["bucket_key"], true);
+        assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), update);
+        assert_eq!(update.name(), "S3UpdateObjectEncryption");
     }
 
     #[test]

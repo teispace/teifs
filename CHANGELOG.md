@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Operations run `S3UpdateObjectEncryption` jobs: each object moves in place,
+  as the job's role, to the SSE-KMS key (and S3 Bucket Key setting) the job names.
+- `UpdateObjectEncryption` is allowed to IAM users and roles granted
+  `s3:UpdateObjectEncryption`; it was refused to everyone but the root user.
 - S3 Batch Operations run `S3ComputeObjectChecksum` jobs: each object's full-object or
   composite checksum, in any of S3's algorithms, is worked out from its bytes and written
   to the job's completion report as AWS writes it.

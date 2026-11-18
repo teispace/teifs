@@ -10,6 +10,7 @@ mod audit;
 mod batch_acl;
 mod batch_checksum;
 mod batch_copy;
+mod batch_encryption;
 mod batch_jobs;
 mod batch_operations;
 mod batch_replicate;
