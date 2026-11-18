@@ -959,6 +959,163 @@ async fn blocked_sse_c_and_bucket_encryption_settings() {
 }
 
 #[tokio::test]
+async fn new_buckets_block_sse_c() {
+    use aws_sdk_s3::types::{EncryptionType, ServerSideEncryption};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use md5::{Digest, Md5};
+    // The server's default, without --allow-sse-c: as on AWS since April 2026.
+    let server = common::start_with(|config| config.allow_sse_c = false).await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "fresh").await;
+    let got = s3
+        .get_bucket_encryption()
+        .bucket("fresh")
+        .send()
+        .await
+        .unwrap();
+    let rule = &got.server_side_encryption_configuration().unwrap().rules()[0];
+    assert_eq!(
+        rule.apply_server_side_encryption_by_default()
+            .unwrap()
+            .sse_algorithm(),
+        &ServerSideEncryption::Aes256
+    );
+    assert_eq!(
+        rule.blocked_encryption_types().unwrap().encryption_type(),
+        &[EncryptionType::SseC]
+    );
+
+    let key = [7u8; 32];
+    let (k, m) = (STANDARD.encode(key), STANDARD.encode(Md5::digest(key)));
+    let put = |name: &'static str| {
+        s3.put_object()
+            .bucket("fresh")
+            .key(name)
+            .sse_customer_algorithm("AES256")
+            .sse_customer_key(&k)
+            .sse_customer_key_md5(&m)
+            .body(ByteStream::from_static(b"mine"))
+            .send()
+    };
+    let refused = put("secret").await.unwrap_err();
+    assert_eq!(refused.code(), Some("AccessDenied"));
+    assert!(
+        refused
+            .message()
+            .unwrap()
+            .contains("blocked upload requests that specify Server Side Encryption with Customer provided keys (SSE-C)")
+    );
+    let upload = s3
+        .create_multipart_upload()
+        .bucket("fresh")
+        .key("parts")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .send()
+        .await;
+    assert_eq!(upload.unwrap_err().code(), Some("AccessDenied"));
+    s3.put_object()
+        .bucket("fresh")
+        .key("plain")
+        .body(ByteStream::from_static(b"open"))
+        .send()
+        .await
+        .unwrap();
+    let copy = s3
+        .copy_object()
+        .bucket("fresh")
+        .key("copy")
+        .copy_source("fresh/plain")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .send()
+        .await;
+    assert_eq!(copy.unwrap_err().code(), Some("AccessDenied"));
+}
+
+#[tokio::test]
+async fn sse_c_is_allowed_per_bucket_and_blocked_again() {
+    use aws_sdk_s3::types::{
+        BlockedEncryptionTypes, EncryptionType, ServerSideEncryptionConfiguration,
+        ServerSideEncryptionRule,
+    };
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use md5::{Digest, Md5};
+    let server = common::start_with(|config| config.allow_sse_c = false).await;
+    let s3 = client(&server, SECRET_KEY);
+    object_bucket(&s3, "fresh").await;
+    let key = [7u8; 32];
+    let (k, m) = (STANDARD.encode(key), STANDARD.encode(Md5::digest(key)));
+    let put = |name: &'static str| {
+        s3.put_object()
+            .bucket("fresh")
+            .key(name)
+            .sse_customer_algorithm("AES256")
+            .sse_customer_key(&k)
+            .sse_customer_key_md5(&m)
+            .body(ByteStream::from_static(b"mine"))
+            .send()
+    };
+    assert_eq!(
+        put("secret").await.unwrap_err().code(),
+        Some("AccessDenied")
+    );
+    // BlockedEncryptionTypes NONE allows SSE-C; the bucket's default stays.
+    let blocking = |types: EncryptionType| {
+        ServerSideEncryptionConfiguration::builder()
+            .rules(
+                ServerSideEncryptionRule::builder()
+                    .blocked_encryption_types(
+                        BlockedEncryptionTypes::builder()
+                            .encryption_type(types)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+            .unwrap()
+    };
+    s3.put_bucket_encryption()
+        .bucket("fresh")
+        .server_side_encryption_configuration(blocking(EncryptionType::None))
+        .send()
+        .await
+        .unwrap();
+    put("secret").await.unwrap();
+
+    // Blocked again, objects already written with SSE-C are still read with their key.
+    s3.put_bucket_encryption()
+        .bucket("fresh")
+        .server_side_encryption_configuration(blocking(EncryptionType::SseC))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put("again").await.unwrap_err().code(), Some("AccessDenied"));
+    let read = s3
+        .get_object()
+        .bucket("fresh")
+        .key("secret")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(body(read).await, b"mine");
+    s3.head_object()
+        .bucket("fresh")
+        .key("secret")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key(&k)
+        .sse_customer_key_md5(&m)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn multipart_uploads_are_encrypted_too() {
     use aws_sdk_s3::types::ServerSideEncryption;
     let server = start().await;
