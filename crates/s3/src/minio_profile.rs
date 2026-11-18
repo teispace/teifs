@@ -367,8 +367,11 @@ pub(crate) fn archive(
     files: impl Iterator<Item = (String, Vec<u8>)>,
 ) -> zip::result::ZipResult<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    // Unix attributes on every system: zip 9 writes DOS ones on Windows, which carry no
+    // permissions.
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
+        .system(zip::System::Unix)
         .unix_permissions(0o600);
     for (name, bytes) in files {
         zip.start_file(name, options)?;
