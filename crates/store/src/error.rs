@@ -120,6 +120,20 @@ pub enum StoreError {
     /// Encryption was asked for but no KMS is configured.
     #[error("encryption needs a KMS, and none is configured")]
     NoKms,
+    /// The drive is a member of a drive set: it opens only with the set's other drives.
+    #[error("this drive is a member of a drive set: serve it with the set's other drives")]
+    SetMember,
+    /// A drive set can't be opened as given: why.
+    #[error("the drive set can't be opened: {0}")]
+    DriveSet(String),
+    /// Too few of a drive set's drives answered for the request.
+    #[error("only {found} of the drive set's drives answered; {needed} are needed")]
+    Quorum {
+        /// Drives (or copies) that answered.
+        found: usize,
+        /// Drives needed.
+        needed: usize,
+    },
     /// Another process has the drive open (a running `teifs serve`, say).
     #[error("the drive is in use by another TeiFS process")]
     DriveInUse,

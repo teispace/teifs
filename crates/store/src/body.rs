@@ -30,12 +30,15 @@ pub(crate) enum Data {
     File(std::fs::File),
     /// The bytes, kept in the index with its row.
     Inline(Bytes),
+    /// Its shard files, on a drive set.
+    Shards(Box<teifs_erasure::Reader<std::fs::File>>),
 }
 
 /// A blocking reader of stored bytes, for decrypting on the blocking pool.
 enum Source {
     File(std::fs::File),
     Inline(io::Cursor<Bytes>),
+    Shards(Box<teifs_erasure::Reader<std::fs::File>>),
 }
 
 impl Read for Source {
@@ -43,6 +46,7 @@ impl Read for Source {
         match self {
             Self::File(file) => file.read(buf),
             Self::Inline(bytes) => Read::read(bytes, buf),
+            Self::Shards(shards) => shards.read(buf),
         }
     }
 }
@@ -91,6 +95,13 @@ impl ObjectBody {
             (Data::Inline(bytes), None) => {
                 let bytes = slice(&bytes, start, len)?;
                 Ok(Box::new(io::Cursor::new(bytes)))
+            }
+            (Data::Shards(mut shards), None) => {
+                io::Seek::seek(&mut shards, SeekFrom::Start(start))?;
+                let stream = futures::stream::try_unfold((shards, len), next_shard_chunk);
+                Ok(Box::new(tokio_util::io::StreamReader::new(Box::pin(
+                    stream,
+                ))))
             }
             (data, Some(decrypt)) => decrypting(data, decrypt, start, len).await,
         }
@@ -155,6 +166,10 @@ async fn decrypting(data: Data, decrypt: Decrypt, start: u64, len: u64) -> Resul
             cursor.set_position(at);
             Source::Inline(cursor)
         }
+        Data::Shards(mut shards) => {
+            io::Seek::seek(&mut shards, SeekFrom::Start(at))?;
+            Source::Shards(shards)
+        }
     };
     let position = Position {
         cipher: PartCipher::layered(&decrypt.key, decrypt.outer.as_ref(), decrypt.parts[part].1),
@@ -167,6 +182,27 @@ async fn decrypting(data: Data, decrypt: Decrypt, start: u64, len: u64) -> Resul
     };
     let stream = Box::pin(futures::stream::try_unfold(position, next_chunk));
     Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
+}
+
+/// Bytes read from shards at a time (one erasure block).
+const SHARD_CHUNK: u64 = 1 << 20;
+
+/// Reads (and on a damaged or missing shard, rebuilds) the next bytes of a shards'
+/// file, on the blocking pool.
+async fn next_shard_chunk(
+    (mut shards, remaining): (Box<teifs_erasure::Reader<std::fs::File>>, u64),
+) -> io::Result<Option<(Bytes, (Box<teifs_erasure::Reader<std::fs::File>>, u64))>> {
+    if remaining == 0 {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || {
+        let want = usize::try_from(remaining.min(SHARD_CHUNK)).map_err(io::Error::other)?;
+        let mut buf = BytesMut::zeroed(want);
+        shards.read_exact(&mut buf)?;
+        Ok(Some((buf.freeze(), (shards, remaining - want as u64))))
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Reads, decrypts and trims the next packages, on the blocking pool.

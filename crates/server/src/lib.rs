@@ -59,8 +59,13 @@ pub use tls::{Tls, TlsError, TlsSource, read_authorities};
     reason = "each is an independent setting of the server"
 )]
 pub struct Config {
-    /// The drive's folder (created if missing).
+    /// The drive's folder (created if missing); with `set_drives`, a drive set's first.
     pub dir: PathBuf,
+    /// The other drives of a drive set (folders that must exist; one that doesn't is
+    /// down). Empty for a single drive.
+    pub set_drives: Vec<PathBuf>,
+    /// A new drive set's parity (drives it can lose); `None` for the default.
+    pub parity: Option<usize>,
     /// Where to listen.
     pub listen: SocketAddr,
     /// Domains for virtual-hosted-style requests (`bucket.domain`).
@@ -303,30 +308,46 @@ fn start_audit(targets: &[AuditTarget]) -> Result<Audit, ServerError> {
     Ok((Some(logs), writers))
 }
 
+/// The drive's folder, or a drive set's drives that are up.
+fn up_drives(store: &Store) -> Vec<PathBuf> {
+    store.drive_set().map_or_else(
+        || vec![store.root().to_owned()],
+        |set| set.drives.into_iter().flatten().collect(),
+    )
+}
+
 /// Opens (or creates) the drive, with its KMS.
 async fn open_drive(
     config: &Config,
 ) -> Result<(Store, Arc<dyn teifs_store::Kms>, KmsLocation), ServerError> {
-    std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
-        path: config.dir.clone(),
-        source,
-    })?;
+    // A drive set's drives are disks that must be mounted: one that isn't is down,
+    // never a new folder.
+    if config.set_drives.is_empty() {
+        std::fs::create_dir_all(&config.dir).map_err(|source| ServerError::CreateDir {
+            path: config.dir.clone(),
+            source,
+        })?;
+    }
     let default_encryption = config.allow_sse_c.then(|| BucketEncryption {
         block_customer_keys: false,
         ..BucketEncryption::aws_default()
     });
-    let store = Store::open_with(
-        &config.dir,
-        StoreOptions {
-            kms: None,
-            default_encryption,
-            durability: config.durability,
-            key_rules: config.key_rules,
-            lifecycle_day: config.lifecycle_day,
-            inline_max: config.inline_max,
-        },
-    )
-    .map_err(|source| ServerError::Open {
+    let options = StoreOptions {
+        kms: None,
+        default_encryption,
+        durability: config.durability,
+        key_rules: config.key_rules,
+        lifecycle_day: config.lifecycle_day,
+        inline_max: config.inline_max,
+    };
+    let opened = if config.set_drives.is_empty() {
+        Store::open_with(&config.dir, options)
+    } else {
+        let mut drives = vec![config.dir.clone()];
+        drives.extend(config.set_drives.iter().cloned());
+        Store::open_set(&drives, config.parity, options)
+    };
+    let store = opened.map_err(|source| ServerError::Open {
         path: config.dir.clone(),
         source,
     })?;
@@ -517,7 +538,11 @@ async fn open_iam(
     root: RootKey,
     sign_ins: SignIns,
 ) -> Result<Iam, ServerError> {
-    let mut iam = Iam::open(&store.system_db(), &store.format().drive, kms, Some(root))
+    let db = store.open_system().map_err(|source| ServerError::Open {
+        path: store.root().to_owned(),
+        source,
+    })?;
+    let mut iam = Iam::open_db(db, &store.format().drive, kms, Some(root))
         .await
         .map_err(ServerError::Iam)?;
     let SignIns {
@@ -652,11 +677,15 @@ impl Server {
         let root_keys: Option<Arc<dyn teifs_s3::RootKeyStore>> =
             config.credentials.is_none().then(|| {
                 Arc::new(credentials::DriveKeys {
-                    drive: store.root().to_owned(),
+                    drives: up_drives(&store),
                 }) as _
             });
         let (credentials, created_credentials) = match config.credentials {
             Some(credentials) => (credentials, false),
+            None if store.drive_set().is_some() => {
+                credentials::load_or_create_on(&up_drives(&store))
+                    .map_err(ServerError::Credentials)?
+            }
             None => credentials::load_or_create(store.root()).map_err(ServerError::Credentials)?,
         };
         let access_key = credentials.access_key.clone();

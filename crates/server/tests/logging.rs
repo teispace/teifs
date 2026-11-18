@@ -648,7 +648,7 @@ async fn records_wait_through_a_restart() {
         }
     };
     // Records spooled for an hour's delivery...
-    let (endpoint, account, stop, running) = run(3600).await;
+    let (endpoint, account, stop, running) = Box::pin(run(3600)).await;
     let root = common::client_at(&endpoint, common::ACCESS_KEY, SECRET_KEY);
     for bucket in ["app", "logs"] {
         root.create_bucket().bucket(bucket).send().await.unwrap();
@@ -670,7 +670,7 @@ async fn records_wait_through_a_restart() {
     .unwrap();
     std::fs::write(spools.join("2-empty.log"), "").unwrap();
     // ...are delivered after the next start, which watches requests from the first.
-    let (endpoint, _, _stop, _running) = run(1).await;
+    let (endpoint, _, _stop, _running) = Box::pin(run(1)).await;
     let root = common::client_at(&endpoint, common::ACCESS_KEY, SECRET_KEY);
     root.list_objects_v2().bucket("app").send().await.unwrap();
     let (keys, records) = delivered(&root, "logs", "", 3).await;

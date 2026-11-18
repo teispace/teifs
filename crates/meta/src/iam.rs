@@ -815,12 +815,18 @@ impl System {
 
     /// Applies changes in one transaction: all of them, or none.
     pub fn iam_apply(&mut self, writes: &[IamWrite]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        for write in writes {
-            apply(&tx, write)?;
-        }
-        tx.commit()?;
-        Ok(())
+        let applied = (|| -> Result<()> {
+            let tx = self.conn.transaction()?;
+            for write in writes {
+                apply(&tx, write)?;
+            }
+            Ok(tx.commit()?)
+        })();
+        // On a drive set, IAM's changes reach the other copies before they're used
+        // (and a connection refusing changes learns whether it still must).
+        let shipped = self.ship();
+        applied?;
+        shipped
     }
 }
 

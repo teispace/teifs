@@ -7,6 +7,13 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Drive sets: `teifs serve DIR --set-drive DIR2 --set-drive DIR3 …` serves 2 to 16 disks
+  as one, every object erasure-coded across them (Reed-Solomon, with a hash on every
+  piece), so the set keeps serving with up to `--parity` disks lost and reads around
+  damaged shards. The databases and credentials are kept on every disk. Writes need a
+  quorum of disks and are refused with `503 ServiceUnavailable` below it. Set members
+  are a new on-disk format (3) that earlier releases refuse; single drives are
+  unchanged.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet

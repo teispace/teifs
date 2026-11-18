@@ -197,7 +197,17 @@ impl Iam {
         kms: &dyn Kms,
         root: Option<RootKey>,
     ) -> Result<Self> {
-        let mut db = System::open(path)?;
+        Self::open_db(System::open(path)?, drive, kms, root).await
+    }
+
+    /// [`Iam::open`] on a system database already open (a drive set's, whose
+    /// changes reach every copy).
+    pub async fn open_db(
+        mut db: System,
+        drive: &str,
+        kms: &dyn Kms,
+        root: Option<RootKey>,
+    ) -> Result<Self> {
         let mut rows = db.iam_rows()?;
         let setting = |name: &str| {
             rows.meta

@@ -54,6 +54,8 @@ pub(crate) struct ObjectBucket {
     pub dir: PathBuf,
     /// Its versioning.
     pub versioning: Versioning,
+    /// On a drive set, the set: data files are shard files on its drives.
+    pub set: Option<std::sync::Arc<crate::set::DriveSet>>,
 }
 
 /// What a delete did.
@@ -297,6 +299,8 @@ impl<'a> Finished<'a> {
 /// says what [`Inner::record_object`] is expected to record. A small object's bytes are
 /// held instead, to be kept in its row.
 pub(crate) struct Written {
+    /// On a drive set, the set its shards are on.
+    set: Option<std::sync::Arc<crate::set::DriveSet>>,
     key: String,
     object_id: String,
     path: PathBuf,
@@ -327,8 +331,35 @@ impl Written {
     /// Removes the data file of a write that won't be recorded.
     pub(crate) fn discard(&self) {
         if let Some(path) = self.path() {
-            let _ = fs::remove_file(path);
+            remove_data_file(self.set.as_deref(), path);
         }
+    }
+
+    /// What [`Written::discard`] needs, to discard it later.
+    pub(crate) fn unrecorded(&self) -> Option<Unrecorded> {
+        self.path()
+            .map(|p| Unrecorded(p.to_owned(), self.set.clone()))
+    }
+}
+
+/// A data file put in place for a write that may not be recorded.
+pub(crate) struct Unrecorded(PathBuf, Option<std::sync::Arc<crate::set::DriveSet>>);
+
+impl Unrecorded {
+    /// Removes it.
+    pub(crate) fn discard(&self) {
+        remove_data_file(self.1.as_deref(), &self.0);
+    }
+}
+
+/// Removes a data file (on a drive set, its shards); whether it's gone.
+fn remove_data_file(set: Option<&crate::set::DriveSet>, path: &Path) -> bool {
+    match set {
+        Some(set) => set.remove(path),
+        None => match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(err) => err.kind() == io::ErrorKind::NotFound,
+        },
     }
 }
 
@@ -339,6 +370,40 @@ impl ObjectBucket {
         let tail = &object_id[object_id.len().saturating_sub(4)..];
         let (aa, bb) = tail.split_at(tail.len().min(2));
         self.dir.join(aa).join(bb).join(object_id)
+    }
+
+    /// Opens data file `object_id` for reading.
+    pub(crate) fn open_data(&self, object_id: &str) -> Result<Data> {
+        let path = self.data_path(object_id);
+        Ok(match &self.set {
+            Some(set) => Data::Shards(Box::new(set.open_file(&path, object_id)?)),
+            None => Data::File(fs::File::open(path)?),
+        })
+    }
+
+    /// Copies data file `object_id`'s bytes (its footer too) to `to`.
+    pub(crate) fn copy_data(&self, object_id: &str, to: &Path) -> Result<()> {
+        match &self.set {
+            Some(set) => {
+                let mut reader = set.open_file(&self.data_path(object_id), object_id)?;
+                let mut file = io::BufWriter::new(fs::File::create(to)?);
+                io::copy(&mut reader, &mut file)?;
+                file.into_inner().map_err(io::IntoInnerError::into_error)?;
+            }
+            None => {
+                fs::copy(self.data_path(object_id), to)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether data file `object_id` is on the drive (any shard of it, on a set).
+    pub(crate) fn has_data(&self, object_id: &str) -> bool {
+        let path = self.data_path(object_id);
+        match &self.set {
+            Some(set) => set.exists(&path),
+            None => path.exists(),
+        }
     }
 
     /// The id a new version gets: its own while versioning is on, else `null`.
@@ -552,6 +617,7 @@ impl Inner {
             None => (uuid::Uuid::now_v7().simple().to_string(), None),
         };
         let mut written = Written {
+            set: bucket.set.clone(),
             key: key.to_owned(),
             path: bucket.data_path(&object_id),
             inline: None,
@@ -606,6 +672,10 @@ impl Inner {
             .open(tmp)?
             .set_len(stored_len)?;
         self.append_footer(bucket, &written, tmp)?;
+        if let Some(set) = &bucket.set {
+            set.publish(tmp, &written.path, &written.object_id)?;
+            return Ok(written);
+        }
         let parent = written.path.parent().unwrap_or(&bucket.dir);
         fs::create_dir_all(parent)?;
         publish(tmp, &written.path, &bucket.dir, Publish::Replace)?;
@@ -720,6 +790,21 @@ impl Inner {
         if written.inline.is_some() {
             return Ok(());
         }
+        if let Some(set) = &bucket.set {
+            // Shards can't be cut and appended to: the bytes are coded again with the
+            // new footer, over the old shards.
+            let tmp = self.tmp.join(uuid::Uuid::new_v4().simple().to_string());
+            let mut reader = set.open_file(&written.path, &written.object_id)?;
+            let mut file = io::BufWriter::new(fs::File::create(&tmp)?);
+            io::copy(&mut (&mut reader).take(written.stored_len), &mut file)?;
+            file.into_inner().map_err(io::IntoInnerError::into_error)?;
+            drop(reader);
+            if let Err(err) = self.append_footer(bucket, written, &tmp) {
+                let _ = fs::remove_file(&tmp);
+                return Err(err);
+            }
+            return set.publish(&tmp, &written.path, &written.object_id);
+        }
         fs::OpenOptions::new()
             .write(true)
             .open(&written.path)?
@@ -759,7 +844,7 @@ impl Inner {
     ) -> Result<(VersionRow, Option<Data>)> {
         let mut row = Inner::version_row(conn, bucket, key, version_id)?;
         let data = match (&row.object_id, row.inline.take()) {
-            (Some(id), _) => Some(Data::File(fs::File::open(bucket.data_path(id))?)),
+            (Some(id), _) => Some(bucket.open_data(id)?),
             (None, Some(bytes)) => Some(Data::Inline(bytes.into())),
             (None, None) => None,
         };
@@ -895,10 +980,7 @@ impl Inner {
     ) -> usize {
         let mut removed = 0;
         for id in object_ids {
-            let gone = match fs::remove_file(bucket.data_path(id)) {
-                Ok(()) => true,
-                Err(err) => err.kind() == io::ErrorKind::NotFound,
-            };
+            let gone = remove_data_file(bucket.set.as_deref(), &bucket.data_path(id));
             if gone && conn.drop_garbage(id).is_ok() {
                 removed += 1;
             }
@@ -920,6 +1002,7 @@ impl Inner {
                 dir: self.system_dir().join(BUCKETS_DIR).join(&bucket_id),
                 id: bucket_id,
                 versioning: Versioning::Unversioned,
+                set: self.set.clone(),
             };
             done += Inner::remove_data_files(conn, &bucket, std::slice::from_ref(&object_id));
         }

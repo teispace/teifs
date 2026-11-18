@@ -56,11 +56,30 @@ pub fn load_or_create(drive: &Path) -> io::Result<(Credentials, bool)> {
     Ok((credentials, true))
 }
 
+/// The credentials a drive set generated, kept on each of its drives (`drives`, the
+/// ones that are up): those of the first drive that has them, copied to the others
+/// that don't; generated and written to all of them on first use.
+pub fn load_or_create_on(drives: &[PathBuf]) -> io::Result<(Credentials, bool)> {
+    // A damaged copy on one drive doesn't hide the others.
+    let found = drives.iter().find_map(|drive| load(drive).ok().flatten());
+    let created = found.is_none();
+    let credentials = found.unwrap_or_else(generate);
+    let json = zeroize::Zeroizing::new(
+        serde_json::to_vec_pretty(&credentials).expect("credentials serialize"),
+    );
+    for drive in drives {
+        if !matches!(load(drive), Ok(Some(_))) {
+            teifs_store::replace_private(&path(drive), &json)?;
+        }
+    }
+    Ok((credentials, created))
+}
+
 /// The drive's generated credentials, which the admin API may replace.
 #[derive(Debug)]
 pub(crate) struct DriveKeys {
-    /// The drive's folder.
-    pub(crate) drive: PathBuf,
+    /// The drive's folder (on a drive set, every up drive's).
+    pub(crate) drives: Vec<PathBuf>,
 }
 
 impl teifs_s3::RootKeyStore for DriveKeys {
@@ -80,7 +99,10 @@ impl teifs_s3::RootKeyStore for DriveKeys {
             })
             .expect("credentials serialize"),
         );
-        teifs_store::replace_private(&path(&self.drive), &json)
+        for drive in &self.drives {
+            teifs_store::replace_private(&path(drive), &json)?;
+        }
+        Ok(())
     }
 }
 
@@ -112,7 +134,7 @@ mod tests {
         assert!(!format!("{first:?}").contains(&first.secret_key));
         // A replaced key is what the drive reads next time.
         let keys = DriveKeys {
-            drive: dir.path().to_owned(),
+            drives: vec![dir.path().to_owned()],
         };
         let new = teifs_s3::RootKeyStore::generate(&keys);
         assert_ne!(new.access_key, first.access_key);
@@ -130,6 +152,33 @@ mod tests {
                 fs::metadata(path(dir.path())).unwrap().permissions().mode() & 0o777,
                 0o600
             );
+        }
+    }
+
+    #[test]
+    fn a_drive_set_keeps_them_on_every_drive() {
+        let dir = tempfile::tempdir().unwrap();
+        let drives: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let d = dir.path().join(format!("d{i}"));
+                fs::create_dir_all(d.join(teifs_store::SYSTEM_DIR)).unwrap();
+                d
+            })
+            .collect();
+        let (first, created) = load_or_create_on(&drives).unwrap();
+        assert!(created);
+        for d in &drives {
+            assert_eq!(load(d).unwrap().unwrap().secret_key, first.secret_key);
+        }
+        // Lost from two drives (one replaced, one damaged): the third's are kept and
+        // copied back.
+        fs::remove_file(path(&drives[0])).unwrap();
+        fs::write(path(&drives[1]), b"{").unwrap();
+        let (again, created) = load_or_create_on(&drives).unwrap();
+        assert!(!created);
+        assert_eq!(again.secret_key, first.secret_key);
+        for d in &drives {
+            assert_eq!(load(d).unwrap().unwrap().secret_key, first.secret_key);
         }
     }
 }

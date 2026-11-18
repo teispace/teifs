@@ -131,7 +131,11 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
         | StoreError::WrongCustomerKey
         | StoreError::CustomerKeyNotApplicable
         | StoreError::NoKms => unreachable!("answered by encryption_error"),
+        err @ (StoreError::Quorum { .. }
+        | StoreError::Meta(teifs_store::MetaError::TooFewCopies)) => too_few_drives(err),
         err @ (StoreError::Io(_)
+        | StoreError::SetMember
+        | StoreError::DriveSet(_)
         | StoreError::Meta(_)
         | StoreError::StorageFull
         | StoreError::DriveInUse
@@ -145,6 +149,13 @@ pub(crate) fn from_store(err: StoreError) -> S3Error {
             S3Error::with_source(S3ErrorCode::InternalError, Box::new(err))
         }
     }
+}
+
+/// Too few of a drive set's drives are up for this: retryable once they're back, as
+/// MinIO answers it (`503`, which AWS SDKs retry).
+fn too_few_drives(err: StoreError) -> S3Error {
+    tracing::error!(error = %err, "too few drives");
+    S3Error::with_source(S3ErrorCode::ServiceUnavailable, Box::new(err))
 }
 
 /// A read of a delete marker, as AWS answers it: `404 NoSuchKey` when the marker is the
@@ -253,6 +264,21 @@ mod tests {
         }
         let other = from_store(StoreError::Io(std::io::Error::other("broken")));
         assert_eq!(other.code().as_str(), "InternalError");
+    }
+
+    #[test]
+    fn too_few_drives_is_a_retryable_503() {
+        let s3 = from_store(StoreError::Quorum {
+            found: 2,
+            needed: 3,
+        });
+        assert_eq!(s3.code().as_str(), "ServiceUnavailable");
+        assert_eq!(
+            s3.status_code(),
+            Some(http::StatusCode::SERVICE_UNAVAILABLE)
+        );
+        let refused = from_store(StoreError::Meta(teifs_store::MetaError::TooFewCopies));
+        assert_eq!(refused.code().as_str(), "ServiceUnavailable");
     }
 
     #[test]

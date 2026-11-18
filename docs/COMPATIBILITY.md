@@ -256,6 +256,10 @@ bucket create --layout`, or the server's `--default-layout`. The differences bel
 buckets only; object buckets have none of them. Folder buckets also can't be encrypted:
 their objects are plain files by design.
 
+On a [drive set](OPERATIONS.md#drive-sets) every bucket is an object bucket. A request
+that needs more of the set's disks than are up answers `503 ServiceUnavailable`, as
+MinIO does when it lacks write quorum; AWS SDKs retry it.
+
 ## Differences from AWS in folder buckets, by design
 
 Storing objects as plain files means some keys can't exist, the same way other S3 servers

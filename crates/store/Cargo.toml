@@ -13,6 +13,7 @@ publish.workspace = true
 prometheus-client.workspace = true
 teifs-types.workspace = true
 teifs-meta.workspace = true
+teifs-erasure.workspace = true
 teifs-crypto.workspace = true
 base64.workspace = true
 tokio.workspace = true
