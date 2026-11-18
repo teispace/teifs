@@ -29,7 +29,10 @@ crates/types    teifs-types    Bucket names and object keys with their rules, ob
                                attributes, file stamps, ETags, and the admin API's
                                messages (`admin`). No I/O.
 crates/meta     teifs-meta     SQLite: the object index (index.db) and the system
-                               database (system.db). All SQL lives here.
+                               database (system.db). All SQL lives here. On a drive set
+                               (`src/mirror.rs`) each database has a copy per drive:
+                               TEMP triggers note the rows a commit changed, and
+                               `ship` copies their state to the other copies.
 crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): data keys,
                                sealing, 64 KiB authenticated packages, SSE-C keys, the
                                KMS trait, the local keyring and the external KMS
