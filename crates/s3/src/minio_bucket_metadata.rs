@@ -225,7 +225,13 @@ async fn read(
                     continue;
                 }
             };
-            let path = entry.name().to_owned();
+            let path = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(e) => {
+                    report.set(&format!("#{index}"), "", e.to_string());
+                    continue;
+                }
+            };
             let mut bytes = Vec::new();
             if let Err(e) = entry.take(MAX_FILE_BYTES).read_to_end(&mut bytes) {
                 report.set(&path, "", e.to_string());
