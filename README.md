@@ -17,9 +17,10 @@ that is also a bucket for the AWS CLI, rclone, restic, boto3 and every other S3 
 ## Why
 
 MinIO, the usual self-hosted S3, dropped its admin console and binaries and was archived
-in 2026; it had already removed the mode that served plain folders. The alternatives need
-a cluster, leave out large parts of S3, or keep objects in formats you can't open. TeiFS
-aims to be:
+in 2026; it had already removed the mode that served plain folders. The alternatives
+need a cluster, leave out large parts of S3, or keep objects in formats you can't open.
+[Moving from MinIO](docs/MOVING_FROM_MINIO.md) covers the switch: the data, `mc` and
+MinIO's settings. TeiFS aims to be:
 
 - **AWS-compatible by default.** S3's behaviour and defaults, proven by tests, not
   claimed: encryption at rest on, SSE-C blocked until you allow it, AWS's error codes.

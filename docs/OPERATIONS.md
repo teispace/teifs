@@ -1543,6 +1543,9 @@ message, as AWS writes them. A report the role can't write fails the job with
 
 ## Migrating from MinIO or another S3 service
 
+Coming from MinIO, [Moving from MinIO](MOVING_FROM_MINIO.md) is the whole switch: the
+data, users, `mc` and MinIO's settings.
+
 `teifs migrate SOURCE DEST` moves buckets from any S3 service to another, through the S3
 API with the keys of two aliases: from MinIO, AWS, RustFS or another TeiFS into TeiFS,
 say. `SOURCE` is an alias (every bucket, each keeping its name) or

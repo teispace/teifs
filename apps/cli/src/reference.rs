@@ -159,3 +159,82 @@ fn the_command_line_reference_is_current() {
         "docs/CLI.md is out of date: run this test with UPDATE_DOCS=1"
     );
 }
+
+/// The words of a shell command line, as `sh` splits them: quotes kept together, a `#`
+/// starting a word ends the line.
+fn shell_words(line: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut started) = (Vec::new(), String::new(), None, false);
+    for c in line.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => (quote, started) = (Some(c), true),
+            (None, '#') if !started => break,
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            (None, c) => (word.push(c), started = true).1,
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
+}
+
+/// Every `teifs` command in a Markdown file's `sh` blocks, as words, with continued lines
+/// joined and pipes and `&&` splitting commands.
+fn teifs_commands(markdown: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for block in markdown.split("```sh\n").skip(1) {
+        let block = block.split("\n```").next().unwrap_or_default();
+        for line in block.replace("\\\n", " ").lines() {
+            let words = shell_words(line);
+            for command in words.split(|w| matches!(w.as_str(), "|" | "&&" | ";")) {
+                if command.first().is_some_and(|w| w == "teifs") {
+                    out.push(command.to_vec());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn shell_lines_split_as_sh_splits_them() {
+    assert_eq!(
+        shell_words(r#"teifs cp 'a b' "c d" e # a comment"#),
+        ["teifs", "cp", "a b", "c d", "e"]
+    );
+    let commands = teifs_commands(
+        "```sh\nteifs ls a | teifs cp - b \\\n  --part-size 8MiB\nmc ls x\n```\n```yaml\nteifs: no\n```\n",
+    );
+    assert_eq!(
+        commands,
+        [
+            vec!["teifs", "ls", "a"],
+            vec!["teifs", "cp", "-", "b", "--part-size", "8MiB"]
+        ]
+    );
+}
+
+/// The guides people follow command by command: each `teifs` command they show must be
+/// one the command line takes.
+#[test]
+fn the_guides_commands_are_ones_teifs_takes() {
+    use clap::Parser as _;
+    for guide in ["docs/MOVING_FROM_MINIO.md"] {
+        let path = format!("{}/../../{guide}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(path).unwrap();
+        let commands = teifs_commands(&text);
+        assert!(commands.len() > 5, "{guide}: {commands:?}");
+        for words in commands {
+            if let Err(err) = Cli::try_parse_from(&words) {
+                panic!("{guide}: `{}` doesn't parse: {err}", words.join(" "));
+            }
+        }
+    }
+}

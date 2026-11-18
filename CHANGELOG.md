@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- A guide to moving from MinIO, [docs/MOVING_FROM_MINIO.md](docs/MOVING_FROM_MINIO.md):
+  copying buckets with `teifs migrate` or a batch job that keeps version ids, users with
+  `mc admin cluster iam`, `mc` against TeiFS, MinIO's settings and what's different. A
+  test checks that each `teifs` and `mc` admin command it shows is one TeiFS takes.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet
