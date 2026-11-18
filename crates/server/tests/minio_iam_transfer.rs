@@ -74,7 +74,10 @@ fn unzip(bytes: &[u8]) -> Vec<(String, Value)> {
             let mut file = archive.by_index(i).unwrap();
             let mut text = String::new();
             file.read_to_string(&mut text).unwrap();
-            (file.name().to_owned(), serde_json::from_str(&text).unwrap())
+            (
+                file.name().unwrap().into_owned(),
+                serde_json::from_str(&text).unwrap(),
+            )
         })
         .collect()
 }
