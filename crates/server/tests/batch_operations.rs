@@ -2565,6 +2565,17 @@ async fn put_bytes(root: &Client, bucket: &str, key: &str, body: Vec<u8>) -> Str
 /// An inventory report at `manifests/{name}/manifest.json` whose data files hold
 /// `files`; the job's manifest for it. `wrong` gives the first file another checksum.
 async fn inventory(root: &Client, name: &str, files: &[&str], wrong: bool) -> JobManifest {
+    inventory_of(root, name, "Bucket, Key, IsLatest", files, wrong).await
+}
+
+/// An inventory report of `files` with the columns `schema` names.
+async fn inventory_of(
+    root: &Client,
+    name: &str,
+    schema: &str,
+    files: &[&str],
+    wrong: bool,
+) -> JobManifest {
     let mut listed = Vec::new();
     for (n, lines) in files.iter().enumerate() {
         let data = gzip(lines);
@@ -2587,7 +2598,7 @@ async fn inventory(root: &Client, name: &str, files: &[&str], wrong: bool) -> Jo
         "version": "2016-11-30",
         "creationTimestamp": "1767323045000",
         "fileFormat": "CSV",
-        "fileSchema": "Bucket, Key, IsLatest",
+        "fileSchema": schema,
         "files": listed,
     });
     let key = format!("{name}/manifest.json");
@@ -2841,4 +2852,223 @@ async fn a_job_that_keeps_its_list_runs_on_what_the_filter_takes() {
     let both = (generator(by_key("p/", ".jpg"), None), Some(manifest));
     let refused = create_generated(&s3control, &account, both, &role, "both").await;
     assert_eq!(refused, Err("BadRequestException".to_owned()));
+}
+
+/// What a role running Batch Replication on generated lists of `photos` may do.
+const REPLICATING_LISTER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":"s3:InitiateReplication","Resource":"arn:aws:s3:::photos/*"},
+  {"Effect":"Allow","Action":"s3:ListBucketVersions","Resource":"arn:aws:s3:::photos"},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":["s3:PutObjectTagging","s3:PutObjectVersionTagging"],"Resource":"arn:aws:s3:::photos/*"},
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::reports/*"}]}"#;
+
+/// Replicates `photos`' keys under `o/` to `copy`, delete markers too.
+async fn replicate_o_with_markers(root: &Client) {
+    use aws_sdk_s3::types::{
+        DeleteMarkerReplication, DeleteMarkerReplicationStatus, Destination,
+        ReplicationConfiguration, ReplicationRule, ReplicationRuleFilter, ReplicationRuleStatus,
+    };
+    let rule = ReplicationRule::builder()
+        .id("o")
+        .priority(1)
+        .status(ReplicationRuleStatus::Enabled)
+        .filter(ReplicationRuleFilter::builder().prefix("o/").build())
+        .delete_marker_replication(
+            DeleteMarkerReplication::builder()
+                .status(DeleteMarkerReplicationStatus::Enabled)
+                .build(),
+        )
+        .destination(
+            Destination::builder()
+                .bucket("arn:aws:s3:::copy")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    root.put_bucket_replication()
+        .bucket("photos")
+        .replication_configuration(
+            ReplicationConfiguration::builder()
+                .role("arn:aws:iam::123456789012:role/replication")
+                .rules(rule)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+/// `bucket`'s versions and delete markers: `(key, version id, is a marker)`, sorted.
+async fn versions_of(root: &Client, bucket: &str) -> Vec<(String, String, bool)> {
+    let listed = root
+        .list_object_versions()
+        .bucket(bucket)
+        .send()
+        .await
+        .unwrap();
+    let mut all: Vec<_> = listed
+        .versions()
+        .iter()
+        .map(|v| {
+            (
+                v.key().unwrap().to_owned(),
+                v.version_id().unwrap().to_owned(),
+                false,
+            )
+        })
+        .chain(listed.delete_markers().iter().map(|m| {
+            (
+                m.key().unwrap().to_owned(),
+                m.version_id().unwrap().to_owned(),
+                true,
+            )
+        }))
+        .collect();
+    all.sort();
+    all
+}
+
+/// Makes a Batch Replication job on the list of `photos` it makes itself; its id.
+async fn replicate_generated(
+    s3control: &aws_sdk_s3control::Client,
+    account: &str,
+    role: &str,
+) -> String {
+    let operation = JobOperation::builder()
+        .s3_replicate_object(
+            aws_sdk_s3control::types::S3ReplicateObjectOperation::builder().build(),
+        )
+        .build();
+    let filter = aws_sdk_s3control::types::JobManifestGeneratorFilter::builder().build();
+    Box::pin(
+        s3control
+            .create_job()
+            .account_id(account)
+            .operation(operation)
+            .manifest_generator(generator(filter, None))
+            .report(report(Some("gen"), JobReportScope::AllTasks))
+            .client_request_token("generated-replication")
+            .priority(1)
+            .role_arn(role)
+            .confirmation_required(false)
+            .send(),
+    )
+    .await
+    .unwrap()
+    .job_id
+    .unwrap()
+}
+
+#[tokio::test]
+async fn batch_replication_lists_every_version_and_delete_marker_its_rules_take() {
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &[]).await;
+    for bucket in ["copy", "reports"] {
+        root.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    for bucket in ["photos", "copy"] {
+        versioned(&root, bucket).await;
+    }
+    // Written before the bucket replicated: two versions of one key, a version and a
+    // delete marker of another, and a key no rule takes.
+    for (key, body) in [("o/a.jpg", "one"), ("o/a.jpg", "two"), ("o/b.jpg", "b")] {
+        put(&root, "photos", key, body).await;
+    }
+    put(&root, "photos", "p/d.jpg", "d").await;
+    root.delete_object()
+        .bucket("photos")
+        .key("o/b.jpg")
+        .send()
+        .await
+        .unwrap();
+    replicate_o_with_markers(&root).await;
+    let source: Vec<_> = versions_of(&root, "photos")
+        .await
+        .into_iter()
+        .filter(|(key, ..)| key.starts_with("o/"))
+        .collect();
+    assert_eq!(source.len(), 4);
+    assert!(versions_of(&root, "copy").await.is_empty());
+
+    let role = role(&server, "replicator", TRUST, REPLICATING_LISTER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let id = replicate_generated(&s3control, &account, &role).await;
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.total_number_of_tasks, Some(4));
+    assert_eq!(progress.number_of_tasks_succeeded, Some(4));
+    // Every version and the marker went as themselves; the key no rule takes didn't.
+    assert_eq!(versions_of(&root, "copy").await, source);
+    let reported = report_of(&root, &format!("gen/job-{id}")).await;
+    let lines: Vec<String> = reported.into_iter().flat_map(|(_, lines)| lines).collect();
+    assert_eq!(lines.len(), 4);
+    assert!(
+        lines.iter().all(|l| l.contains(",succeeded,200,")),
+        "{lines:?}"
+    );
+
+    // An inventory report's delete marker is a task like any version: replicated by
+    // Batch Replication, and failing as its API fails on a marker otherwise.
+    let marker = &source.iter().find(|(_, _, m)| *m).unwrap().1;
+    let newest_a = root
+        .head_object()
+        .bucket("photos")
+        .key("o/a.jpg")
+        .send()
+        .await
+        .unwrap()
+        .version_id
+        .unwrap();
+    let rows = format!(
+        "\"photos\",\"o/b.jpg\",\"{marker}\",\"true\",\"true\"\n\
+         \"photos\",\"o/a.jpg\",\"{newest_a}\",\"true\",\"false\"\n"
+    );
+    let schema = "Bucket, Key, VersionId, IsLatest, IsDeleteMarker";
+    let replicating = inventory_of(&root, "inv-r", schema, &[&rows], false).await;
+    let operation = JobOperation::builder()
+        .s3_replicate_object(
+            aws_sdk_s3control::types::S3ReplicateObjectOperation::builder().build(),
+        )
+        .build();
+    let id = create(
+        &s3control,
+        &account,
+        (operation, replicating, &role),
+        ("inv-r", 1, false),
+    )
+    .await
+    .unwrap();
+    let done = wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let progress = done.job.unwrap().progress_summary.unwrap();
+    assert_eq!(progress.number_of_tasks_succeeded, Some(2));
+
+    let tagging_job = inventory_of(&root, "inv-t", schema, &[&rows], false).await;
+    let id = create_reported(
+        &s3control,
+        &account,
+        (tagging("seen", "yes"), tagging_job, &role),
+        ("inv-t", 1, false),
+        report(Some("tags"), JobReportScope::FailedTasksOnly),
+    )
+    .await
+    .unwrap();
+    wait_for(&s3control, &account, &id, &JobStatus::Complete).await;
+    let failed: Vec<String> = report_of(&root, &format!("tags/job-{id}"))
+        .await
+        .into_iter()
+        .flat_map(|(_, lines)| lines)
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].starts_with(&format!(
+            "photos,o/b.jpg,{marker},failed,405,MethodNotAllowed,"
+        )),
+        "{}",
+        failed[0]
+    );
+    assert_eq!(tags_of(&root, "o/a.jpg").await.len(), 1);
 }

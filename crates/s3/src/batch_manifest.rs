@@ -803,6 +803,42 @@ fn takes(
         && (!replicating || eligible())
 }
 
+/// Whether Batch Replication's generator takes a delete marker: the bucket's rules
+/// replicate it (a rule that replicates markers, by its prefix: AWS doesn't replicate
+/// markers by tag-filtered rules), and the filters that a marker can meet hold. A marker
+/// has no size, storage class or encryption, so a filter on any of those leaves it out.
+fn takes_marker(
+    generator: &ManifestGenerator,
+    rules: Option<&ReplicationConfig>,
+    info: &ObjectInfo,
+) -> bool {
+    let f = &generator.filter;
+    let key = info.key.as_str();
+    let modified = crate::admin::millis(info.modified);
+    let any = |values: &[String], test: &dyn Fn(&str) -> bool| {
+        values.is_empty() || values.iter().any(|v| test(v))
+    };
+    let status = info
+        .attrs
+        .replication
+        .as_ref()
+        .map_or("NONE", |r| r.status.as_str());
+    let eligible = rules.is_some_and(|rules| !rules.marker_destinations(key).is_empty());
+    f.created_after_ms.is_none_or(|after| modified > after)
+        && f.created_before_ms.is_none_or(|before| modified < before)
+        && f.size_greater_than.is_none()
+        && f.size_less_than.is_none()
+        && f.storage_classes.is_empty()
+        && f.encryption.is_none()
+        && any(&f.prefixes, &|p| key.starts_with(p))
+        && any(&f.substrings, &|s| key.contains(s))
+        && any(&f.suffixes, &|s| key.ends_with(s))
+        && any(&f.replication_statuses, &|wanted| wanted == status)
+        && f.eligible_for_replication
+            .is_none_or(|wanted| eligible == wanted)
+        && eligible
+}
+
 /// Whether an object is encrypted as `filter` says.
 fn encrypted(filter: &EncryptionFilter, info: &ObjectInfo) -> bool {
     let sse = info.sse.as_ref();
@@ -889,7 +925,12 @@ async fn list_page(
             .versions
             .iter()
             .filter(|v| {
-                !v.delete_marker && listed(&v.info) && takes(generator, true, rules, &v.info)
+                listed(&v.info)
+                    && if v.delete_marker {
+                        takes_marker(generator, rules, &v.info)
+                    } else {
+                        takes(generator, true, rules, &v.info)
+                    }
             })
             .map(|v| {
                 let at = (v.info.key.clone(), v.info.version_id.clone());
@@ -1439,6 +1480,59 @@ mod tests {
         assert!(takes_(&generator, &photo));
         // Batch Replication takes only what the rules take.
         assert!(!takes(&ManifestGenerator::default(), true, None, &photo));
+    }
+
+    #[test]
+    fn batch_replication_takes_delete_markers_its_rules_replicate() {
+        let rules = |markers: &str| {
+            crate::replication::from_xml(
+                format!(
+                    "<ReplicationConfiguration><Role>arn:aws:iam::1:role/r</Role><Rule>\
+                     <ID>a</ID><Priority>1</Priority><Status>Enabled</Status><Filter>\
+                     <Prefix>2026/</Prefix></Filter><DeleteMarkerReplication><Status>{markers}\
+                     </Status></DeleteMarkerReplication><Destination><Bucket>\
+                     arn:aws:s3:::copy</Bucket></Destination></Rule>\
+                     </ReplicationConfiguration>"
+                )
+                .as_bytes(),
+            )
+            .unwrap()
+        };
+        let (on, off) = (rules("Enabled"), rules("Disabled"));
+        let mut generator = ManifestGenerator::default();
+        let marker = object("2026/a.jpg", 0, None);
+        assert!(takes_marker(&generator, Some(&on), &marker));
+        assert!(!takes_marker(&generator, Some(&off), &marker));
+        assert!(!takes_marker(&generator, None, &marker));
+        assert!(!takes_marker(
+            &generator,
+            Some(&on),
+            &object("2025/a.jpg", 0, None)
+        ));
+        generator.filter.suffixes = vec![".jpg".to_owned()];
+        generator.filter.replication_statuses = vec!["NONE".to_owned()];
+        generator.filter.created_before_ms = Some(1_000_001);
+        assert!(takes_marker(&generator, Some(&on), &marker));
+        generator.filter.eligible_for_replication = Some(false);
+        assert!(!takes_marker(&generator, Some(&on), &marker));
+        // A marker has no size, storage class or encryption to match.
+        for filter in [
+            GeneratorFilter {
+                size_less_than: Some(10),
+                ..GeneratorFilter::default()
+            },
+            GeneratorFilter {
+                storage_classes: vec!["STANDARD".to_owned()],
+                ..GeneratorFilter::default()
+            },
+            GeneratorFilter {
+                encryption: Some(EncryptionFilter::NotSse),
+                ..GeneratorFilter::default()
+            },
+        ] {
+            generator.filter = filter;
+            assert!(!takes_marker(&generator, Some(&on), &marker));
+        }
     }
 
     #[test]
