@@ -427,3 +427,134 @@ async fn the_console_is_off_unless_asked_for() {
     let server = common::start().await;
     assert!(server.console.is_none());
 }
+
+#[tokio::test]
+async fn multipart_uploads_go_through_as_the_page_sends_them() {
+    let (server, console) = start().await;
+    let mut page = Page::new(&console);
+    page.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    page.call(Method::PUT, "/api/s3/big").send().await.unwrap();
+    let key_path = "/api/s3/big/movie%20%C3%A9.bin";
+    let created = page
+        .call(Method::POST, &format!("{key_path}?uploads"))
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let xml = created.text().await.unwrap();
+    let upload_id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|rest| rest.split("</UploadId>").next())
+        .unwrap()
+        .to_owned();
+    // A part over the console's read limit is streamed; the last one is read.
+    let first: Vec<u8> = vec![7; 5 * 1024 * 1024];
+    let last: Vec<u8> = vec![9; 1000];
+    let mut etags = Vec::new();
+    for (number, part) in [(1, &first), (2, &last)] {
+        let sent = page
+            .call(
+                Method::PUT,
+                &format!("{key_path}?partNumber={number}&uploadId={upload_id}"),
+            )
+            .body(part.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sent.status(), StatusCode::OK);
+        etags.push(sent.headers()[header::ETAG].to_str().unwrap().to_owned());
+    }
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part>\
+         <Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let done = page
+        .call(Method::POST, &format!("{key_path}?uploadId={upload_id}"))
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(complete)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(done.status(), StatusCode::OK);
+    let s3 = common::client(&server, common::SECRET_KEY);
+    let got = s3
+        .head_object()
+        .bucket("big")
+        .key("movie é.bin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.content_length(),
+        Some(i64::try_from(first.len() + last.len()).unwrap())
+    );
+    assert_eq!(got.content_type(), Some("video/mp4"));
+    assert!(got.e_tag().unwrap().ends_with("-2\""));
+}
+
+#[tokio::test]
+async fn versions_are_listed_and_deleted_through_the_console() {
+    let (server, console) = start().await;
+    let mut page = Page::new(&console);
+    page.sign_in(common::ACCESS_KEY, common::SECRET_KEY).await;
+    page.call(Method::PUT, "/api/s3/kept").send().await.unwrap();
+    let versioning = page
+        .call(Method::PUT, "/api/s3/kept?versioning")
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versioning.status(), StatusCode::OK);
+    for body in ["one", "two"] {
+        page.call(Method::PUT, "/api/s3/kept/doc.txt")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+    }
+    let listed = page
+        .call(Method::GET, "/api/s3/kept?versions&prefix=&delimiter=%2F")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(listed.matches("<Version>").count(), 2, "{listed}");
+    let older = listed
+        .split("<VersionId>")
+        .nth(2)
+        .and_then(|rest| rest.split("</VersionId>").next())
+        .unwrap()
+        .to_owned();
+    let old = page
+        .call(
+            Method::GET,
+            &format!("/api/download/kept/doc.txt?versionId={older}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.text().await.unwrap(), "one");
+    let deleted = page
+        .call(
+            Method::DELETE,
+            &format!("/api/s3/kept/doc.txt?versionId={older}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let s3 = common::client(&server, common::SECRET_KEY);
+    let versions = s3
+        .list_object_versions()
+        .bucket("kept")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 1);
+}
