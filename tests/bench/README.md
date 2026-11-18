@@ -11,11 +11,11 @@ as an outside tool). TeiFS is built from this checkout in Docker
 | `teifs` | This checkout, object buckets, `--durability strict` | The default: objects encrypted (SSE-S3) and every write synced before it's acknowledged |
 | `teifs-relaxed` | The same, `--durability relaxed` | File data synced; the last moments' writes may be lost on a power cut |
 | `teifs-folder` | The same, folder buckets | Plain files, not encrypted |
-| `rustfs` | RustFS 1.0.0, one drive | |
+| `rustfs` | RustFS 1.0.6, one drive | |
 | `minio` | MinIO (the pgsty community build), one drive | |
-| `garage` | Garage v2.4.1, `--single-node`, LMDB | |
-| `versity` | Versity Gateway v1.8.0, POSIX backend | |
-| `seaweedfs` | SeaweedFS 4.48, `weed server -s3` | |
+| `garage` | Garage v2.5.0, `--single-node`, LMDB | |
+| `versity` | Versity Gateway v1.11.0, POSIX backend | |
+| `seaweedfs` | SeaweedFS 4.54, `weed server -s3` | |
 
 Every image is pinned in `run.sh`, and each run records the digests it used.
 
@@ -49,6 +49,13 @@ commit), each cell's warp output (`<server>/<op>-<size>-c<concurrency>-r<round>.
 its data (`.json.zst`, for `warp analyze` or `warp cmp`) and analysis (`.json`), and
 `summary.md` / `summary.csv` made by `summarize.py`: per operation and size, each server's
 median throughput over the rounds and its median and 99th percentile request time.
+
+`publish.py <run> <page>` turns a run into the published page, `docs/BENCHMARKS.md`:
+what ran (versions, digests, machine, command), the caveats, and the tables. The
+Benchmarks workflow (`.github/workflows/bench.yml`, weekly and by hand: Actions →
+Benchmarks → Run workflow) runs the quick cells on a GitHub runner with 2 CPUs per server
+and uploads the raw results and the page as the `benchmarks` artifact; publishing is
+committing that page.
 
 Numbers depend on the machine more than on anything here. On macOS and Windows, Docker
 runs in a virtual machine, so its disks and network aren't the host's: compare servers
