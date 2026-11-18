@@ -30,6 +30,12 @@ behaviour; the on-disk format is always upgraded automatically.
 - S3 Batch Operations run `S3ComputeObjectChecksum` jobs: each object's full-object or
   composite checksum, in any of S3's algorithms, is worked out from its bytes and written
   to the job's completion report as AWS writes it.
+- Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
+  bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
+  `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet
+  stay on 59, the version orc-rust 0.9 builds on. `mc admin health` leaves out the CPU,
+  OS, memory, process and error parts when the host's details can't be read, instead of
+  failing.
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
