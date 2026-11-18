@@ -42,7 +42,11 @@ pub use versions::{NULL_VERSION, VersionRow, VersionsFrom, other_form, same_vers
 pub enum MetaError {
     /// SQLite failed.
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(rusqlite::Error),
+    /// On a drive set, too few copies of the database are current for a change to be
+    /// kept safely: it was refused, and nothing changed.
+    #[error("too few of the drive set's copies of the database are current to change it")]
+    TooFewCopies,
     /// The database was written by a newer TeiFS.
     #[error("the database has schema version {found}, newer than this TeiFS knows ({known})")]
     NewerSchema {
@@ -73,6 +77,17 @@ pub enum MetaError {
     /// A file operation on a copy failed.
     #[error(transparent)]
     Io(std::io::Error),
+}
+
+impl From<rusqlite::Error> for MetaError {
+    fn from(err: rusqlite::Error) -> Self {
+        match &err {
+            rusqlite::Error::SqliteFailure(_, Some(message)) if message == mirror::BLOCKED => {
+                Self::TooFewCopies
+            }
+            _ => Self::Sqlite(err),
+        }
+    }
 }
 
 impl MetaError {

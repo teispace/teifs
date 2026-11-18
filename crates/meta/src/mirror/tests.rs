@@ -254,6 +254,16 @@ fn a_failed_copy_is_set_aside_below_quorum_fails_and_heal_rebuilds_it() {
     }
     let states = index.copies().unwrap().states();
     assert!(matches!(states[1].1, CopyState::Failed(_)));
+    // Below quorum, changes are refused before they're made.
+    assert!(index.copies().unwrap().below_quorum());
+    let refused = index.conn.execute(
+        "UPDATE object_versions SET size = 9 WHERE key = ?1",
+        params![b"a".to_vec()],
+    );
+    assert!(matches!(
+        refused.map_err(MetaError::from),
+        Err(MetaError::TooFewCopies)
+    ));
     drop(conn);
     let healed = index.heal_copies().unwrap();
     assert!(healed.iter().all(|(_, s)| *s == CopyState::Current));

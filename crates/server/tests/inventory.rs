@@ -341,7 +341,7 @@ async fn a_restart_neither_repeats_nor_skips_a_report() {
         .await;
     }
 
-    let (endpoint, account, stop, running) = run().await;
+    let (endpoint, account, stop, running) = Box::pin(run()).await;
     let root = common::client_at(&endpoint, common::ACCESS_KEY, SECRET_KEY);
     for bucket in ["data", "reports"] {
         root.create_bucket().bucket(bucket).send().await.unwrap();
@@ -371,7 +371,7 @@ async fn a_restart_neither_repeats_nor_skips_a_report() {
     running.await.unwrap();
 
     // The week's report was made: the next start doesn't make it again.
-    let (endpoint, _, _stop, _running) = run().await;
+    let (endpoint, _, _stop, _running) = Box::pin(run()).await;
     let root = common::client_at(&endpoint, common::ACCESS_KEY, SECRET_KEY);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let data = keys(&root, "reports", "inventory/data/weekly/data/").await;

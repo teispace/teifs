@@ -166,6 +166,22 @@ pub(crate) struct ServeArgs {
     /// The drive's folder (created if missing).
     #[arg(default_value = ".", env = "TEIFS_DIR")]
     dir: PathBuf,
+    /// Make the drive one of a drive set with this one (repeatable, 2 to 16 drives in
+    /// all): every object is erasure-coded across the set's drives, so it survives
+    /// losing up to `--parity` of them. Each must be its own disk, mounted at a folder
+    /// that exists; a new set needs new, empty drives. Only object buckets.
+    #[arg(
+        long = "set-drive",
+        value_name = "DIR",
+        env = "TEIFS_SET_DRIVES",
+        value_delimiter = ','
+    )]
+    set_drives: Vec<PathBuf>,
+    /// A new drive set's parity: how many of its drives it can lose (1 to half of
+    /// them; 1 for 2–3 drives, 2 for 4–5, 3 for 6–7, 4 for 8 or more). Fixed once
+    /// the set is made.
+    #[arg(long, requires = "set_drives", env = "TEIFS_PARITY")]
+    parity: Option<usize>,
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
     listen: SocketAddr,
@@ -1713,6 +1729,8 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
     };
     let server = Server::bind(Config {
         dir: args.dir,
+        set_drives: args.set_drives,
+        parity: args.parity,
         listen: args.listen,
         domains: args.domains,
         website_domains: args.website_domains,

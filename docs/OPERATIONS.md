@@ -910,6 +910,37 @@ are never included. The zip is encrypted: `mc` prints the key to give support wi
 with `--public-key FILE` (an RSA public key in PKCS #1 form), only the matching private key
 opens it. It needs `admin:InspectData`.
 
+## Drive sets
+
+Several disks can serve as one drive set: every object is erasure-coded across them,
+and the set keeps serving with up to its parity of them lost. Mount each disk at its
+own folder, then give the first as the drive and the others with `--set-drive`:
+
+```sh
+teifs serve /mnt/disk1 --set-drive /mnt/disk2 --set-drive /mnt/disk3 --set-drive /mnt/disk4
+```
+
+The first start makes the set; the disks must be new and empty. `--parity` sets how many
+disks it can lose (1 to half of them; by default 1 for 2–3 disks, 2 for 4–5, 3 for 6–7
+and 4 for 8 to 16); it can't be changed later. Afterwards the disks can be given in any
+order, and a disk that's missing (not mounted) is down:
+
+| Disks up | What works |
+|---|---|
+| All, or all but up to `parity`, with at least the write quorum | Everything |
+| At least `data` (`disks - parity`), below the write quorum | Reads and listings; writes are refused with `503 ServiceUnavailable`, which S3 clients retry |
+| Fewer than `data` | The set doesn't open |
+
+The write quorum is `data`, plus one when `data` equals `parity`: 3 of 4 disks with
+parity 2. Only object buckets live on a set (a folder bucket can't be split across
+disks), so `--default-layout folder` and `x-teifs-bucket-layout: folder` make object
+buckets there. While the set is served, other `teifs` commands that open a drive
+directly (`backup`, `repair`, `scrub`) refuse a set's disks; use the S3 API.
+
+Objects written while a disk was down have no shard on it, and a disk that comes back
+takes the metadata it missed when the set next starts. Until objects are healed, each
+written meanwhile can lose fewer disks than the set's parity.
+
 ## Pools
 
 `mc admin decommission status ALIAS` lists the drive as the server's only pool, named by

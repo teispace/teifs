@@ -177,6 +177,7 @@ impl Inner {
                     dir: self.system_dir.join(BUCKETS_DIR).join(&record.id),
                     id: record.id.clone(),
                     versioning: record.versioning,
+                    set: self.set.clone(),
                 };
                 let stored = Stored {
                     name: record.name,
@@ -239,7 +240,7 @@ impl Inner {
                 let Some(object_id) = row.object_id.clone() else {
                     continue;
                 };
-                if bucket.store.data_path(&object_id).exists() {
+                if bucket.store.has_data(&object_id) {
                     continue;
                 }
                 let fixed = options.apply

@@ -749,6 +749,22 @@ a test that checks the counters against a recount after thousands of random writ
 reads and writes (`crates/store/src/stages.rs`: histograms the server's metrics register
 as `teifs_store_stage_seconds`).
 
+### Drive sets
+
+`Store::open_set` opens several drives as one (`crates/store/src/set.rs`). Each member's
+`format.json` says its place; drives that are missing are down, and the set opens while
+enough are up for its metadata. Its databases are opened through `teifs_meta`'s copies
+(`Index::open_copies`, `System::open_copies`): the most recent copy becomes the primary,
+whose drive is the store's home (`root`, `.teifs/tmp`, uploads), and the store's id is
+the set's. The rest of the store is the same code as on one drive: only where an object
+bucket's data file is written, read, copied or removed does it ask whether there's a
+set, and then `DriveSet::publish` encodes the staged file into shard files (one per
+drive, staged in each drive's `.teifs/tmp`, synced and renamed in parallel) and
+`DriveSet::open_file` reads them back through `teifs_erasure::Reader`, rebuilding what's
+missing or damaged on the fly. The commit lock's guard (`Shipping`) ships each change to
+the databases' other copies when it's let go, so before the write is acknowledged; once
+too few copies are current, the copies' triggers refuse every change.
+
 ## Background jobs
 
 A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), started by

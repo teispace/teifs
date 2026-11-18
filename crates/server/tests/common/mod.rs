@@ -39,6 +39,8 @@ pub async fn start() -> Server {
 pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
     Config {
         dir: dir.to_owned(),
+        set_drives: Vec::new(),
+        parity: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         domains: Vec::new(),
         website_domains: Vec::new(),

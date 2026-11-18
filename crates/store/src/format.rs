@@ -6,6 +6,8 @@
 //! - **1**: `format.json`, the index in `index.db`, bucket settings in `system.db`.
 //! - **2**: object buckets: bucket ids, object versions in `index.db`, data files under
 //!   `.teifs/buckets/`.
+//! - **3**: a member of a drive set (`set` in `format.json`): data files as shard files,
+//!   a copy of each database on every drive. A single drive stays format 2.
 
 use std::{
     fs, io,
@@ -19,8 +21,10 @@ use crate::{
     staged::sync_dir,
 };
 
-/// The format this build writes.
+/// The format this build writes for a single drive.
 pub const FORMAT: u32 = 2;
+/// The format of a drive that's a member of a drive set.
+pub const SET_FORMAT: u32 = 3;
 
 pub(crate) const FORMAT_FILE: &str = "format.json";
 const LEGACY_DB: &str = "meta.db";
@@ -45,6 +49,27 @@ pub struct DriveFormat {
     pub drive: String,
     /// When the drive was first formatted (RFC 3339).
     pub created: String,
+    /// For a member of a drive set, the set and the drive's place in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<SetFormat>,
+}
+
+/// What a drive set's member records about the set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFormat {
+    /// The set's id, random and permanent.
+    pub id: String,
+    /// This drive's place in the set, from 0.
+    pub index: usize,
+    /// The drives' ids, by place.
+    pub drives: Vec<String>,
+    /// Shards holding each object's bytes.
+    pub data: usize,
+    /// Shards of redundancy: drives the set can lose.
+    pub parity: usize,
+    /// Bytes coded at a time.
+    pub block_size: usize,
 }
 
 /// Reads the drive's format as recorded, without changing anything.
@@ -60,6 +85,9 @@ pub(crate) fn prepare(system: &Path) -> Result<DriveFormat> {
         Ok(bytes) => {
             let format: DriveFormat = serde_json::from_slice(&bytes)
                 .map_err(|e| StoreError::CorruptFormat(e.to_string()))?;
+            if format.format == SET_FORMAT && format.set.is_some() {
+                return Err(StoreError::SetMember);
+            }
             if format.format > FORMAT {
                 return Err(StoreError::NewerFormat {
                     found: format.format,
@@ -82,6 +110,7 @@ pub(crate) fn prepare(system: &Path) -> Result<DriveFormat> {
                 format: FORMAT,
                 drive: uuid::Uuid::new_v4().to_string(),
                 created: now_rfc3339(),
+                set: None,
             };
             write_atomic(
                 &path,
@@ -141,7 +170,7 @@ fn remove_legacy(system: &Path) {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use io::Write;
     let tmp: PathBuf = path.with_extension("json.tmp");
     let mut file = fs::File::create(&tmp)?;
@@ -154,7 +183,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

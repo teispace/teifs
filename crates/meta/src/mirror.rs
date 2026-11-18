@@ -34,6 +34,10 @@ const MAX_KEY: usize = 4;
 /// The table recording a copy's change count. Never copied as a row.
 const SEQ_TABLE: &str = "teifs_copy";
 
+/// What a change is refused with while too few copies are current (raised by the
+/// TEMP triggers, recognised by [`MetaError`]'s conversion).
+pub(crate) const BLOCKED: &str = "teifs: too few copies of the database are current";
+
 /// One table: its columns, and what identifies a row.
 #[derive(Debug, Clone)]
 struct Table {
@@ -279,8 +283,15 @@ impl Copies {
     pub fn attach(&self, conn: &Connection) -> Result<()> {
         let state = self.lock();
         conn.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS teifs_changes (tbl INTEGER NOT NULL, k0, k1, k2, k3)",
+            "CREATE TEMP TABLE IF NOT EXISTS teifs_changes (tbl INTEGER NOT NULL, k0, k1, k2, k3);
+             CREATE TEMP TABLE IF NOT EXISTS teifs_blocked (id INTEGER PRIMARY KEY CHECK (id = 0));",
         )?;
+        // While too few copies are current, every change is refused before it's made:
+        // one acknowledged on fewer than the quorum could be lost with the drives
+        // holding it.
+        let refuse = format!(
+            "SELECT RAISE(ABORT, '{BLOCKED}') WHERE EXISTS (SELECT 1 FROM temp.teifs_blocked);"
+        );
         for (t, table) in state.tables.iter().enumerate() {
             let keys = |row: &str| {
                 (0..MAX_KEY)
@@ -303,18 +314,37 @@ impl Copies {
             let on = format!("main.{}", quote(&table.name));
             conn.execute_batch(&format!(
                 "CREATE TEMP TRIGGER IF NOT EXISTS \"teifs_copy_i{t}\" AFTER INSERT ON {on}
-                 BEGIN {} {bump} END;
+                 BEGIN {refuse} {} {bump} END;
                  CREATE TEMP TRIGGER IF NOT EXISTS \"teifs_copy_u{t}\" AFTER UPDATE ON {on}
-                 BEGIN {} {} {bump} END;
+                 BEGIN {refuse} {} {} {bump} END;
                  CREATE TEMP TRIGGER IF NOT EXISTS \"teifs_copy_d{t}\" AFTER DELETE ON {on}
-                 BEGIN {} {bump} END;",
+                 BEGIN {refuse} {} {bump} END;",
                 note("NEW"),
                 note("OLD"),
                 note("NEW"),
                 note("OLD"),
             ))?;
         }
+        Self::refuse_changes(conn, state.current() < self.quorum)
+    }
+
+    /// Makes `conn` refuse changes, or take them again.
+    fn refuse_changes(conn: &Connection, refuse: bool) -> Result<()> {
+        conn.execute(
+            if refuse {
+                "INSERT OR IGNORE INTO temp.teifs_blocked VALUES (0)"
+            } else {
+                "DELETE FROM temp.teifs_blocked"
+            },
+            [],
+        )?;
         Ok(())
+    }
+
+    /// Whether fewer than the quorum of copies are current, so changes are refused.
+    #[must_use]
+    pub fn below_quorum(&self) -> bool {
+        self.lock().current() < self.quorum
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -326,7 +356,8 @@ impl Copies {
     /// Ships what `conn` changed since its last ship to every current copy. Does
     /// nothing inside a transaction (call it again once it's committed). Fails when
     /// fewer than the quorum of copies (the primary included) now hold the change: the
-    /// change is committed on those that do.
+    /// change is committed on those that do, and later ones are refused
+    /// ([`MetaError::TooFewCopies`]) until [`Copies::heal`] brings enough back.
     pub fn ship(&self, conn: &Connection) -> Result<()> {
         if !conn.is_autocommit() {
             return Ok(());
@@ -345,7 +376,8 @@ impl Copies {
             .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut state = self.lock();
-        if !changes.is_empty() {
+        let shipped = !changes.is_empty();
+        if shipped {
             let seq = seq(conn)?;
             let mut rows: Vec<Change> = Vec::with_capacity(changes.len());
             for (t, mut key) in changes {
@@ -383,12 +415,11 @@ impl Copies {
             });
             conn.execute_batch("DELETE FROM temp.teifs_changes")?;
         }
-        let current = 1 + state
-            .copies
-            .iter()
-            .filter(|c| c.state == CopyState::Current)
-            .count();
-        if current < self.quorum {
+        let current = state.current();
+        Self::refuse_changes(conn, current < self.quorum)?;
+        // Only a change shipped now can have reached too few (once below the quorum,
+        // the next is refused before it's made).
+        if shipped && current < self.quorum {
             return Err(MetaError::Quorum {
                 current,
                 needed: self.quorum,
@@ -411,6 +442,7 @@ impl Copies {
             }
         }
         state.copies = copies;
+        Self::refuse_changes(conn, state.current() < self.quorum)?;
         Ok(state.report())
     }
 
@@ -440,6 +472,15 @@ impl Copies {
 }
 
 impl State {
+    /// Copies holding every change, the primary included.
+    fn current(&self) -> usize {
+        1 + self
+            .copies
+            .iter()
+            .filter(|c| c.state == CopyState::Current)
+            .count()
+    }
+
     fn report(&self) -> Vec<(PathBuf, CopyState)> {
         self.copies
             .iter()

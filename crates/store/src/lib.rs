@@ -37,6 +37,7 @@ mod replicating;
 mod replication_targets;
 mod resync;
 mod rewrap;
+mod set;
 mod settings;
 mod snapshots;
 mod space;
@@ -63,7 +64,7 @@ pub use config_kv::{ConfigChange, ConfigFiles};
 pub use diagnose::{Database, Diagnosis, diagnose};
 pub use error::{Result, StoreError};
 pub use filesystem::remote_file_system;
-pub use format::{DriveFormat, FORMAT};
+pub use format::{DriveFormat, FORMAT, SET_FORMAT, SetFormat};
 pub use jobs::{Expirations, JobOptions, JobStatus, Jobs};
 pub use lifecycle::{
     And, Condition, DAY_MS, Expiration, Expiry, Lifecycle, LifecycleRule, MAX_LIFECYCLE_RULES,
@@ -78,6 +79,7 @@ pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
 pub use replicating::{ReplicaMetadata, Waiting};
 pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
+pub use set::{MAX_DRIVES, default_parity, write_quorum};
 pub use settings::{
     BucketAccess, BucketEncryption, BucketSettings, CorsRule, DefaultEncryption, NewBucket,
     ObjectOwnership, PublicAccessBlock,
@@ -91,7 +93,9 @@ pub use teifs_crypto::{
     AwsKms, CryptoError, CustomerKey, DEFAULT_KEY, DefaultKeyNamed, KesAuth, KesKms, Kms, LocalKms,
     TransitKms, create_private, replace_private,
 };
-pub use teifs_meta::{Layout, Part, QueuedDelete, Upload, Usage, Versioning, same_version};
+pub use teifs_meta::{
+    Layout, MetaError, Part, QueuedDelete, Upload, Usage, Versioning, same_version,
+};
 pub use teifs_types::admin::Snapshot;
 pub use teifs_types::{
     Acl, AclGrant, ChecksumType, Grantee, LockMode, OWNER_ID, PartInfo, Permission, Retention,
@@ -256,6 +260,17 @@ impl Precondition {
     }
 }
 
+/// A drive set's shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveSetInfo {
+    /// Its drives by place; `None` where one is down.
+    pub drives: Vec<Option<PathBuf>>,
+    /// Shards holding each object's bytes.
+    pub data: usize,
+    /// Drives it can lose.
+    pub parity: usize,
+}
+
 /// A drive.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -273,8 +288,10 @@ struct Inner {
     inline_max: u64,
     /// Which names folder buckets may create.
     key_rules: KeyRules,
-    /// The drive's lock: one process at a time.
-    _lock: fs::File,
+    /// The drive's lock: one process at a time (a drive set's are in `set`).
+    _lock: Option<fs::File>,
+    /// On a drive set, the set; `root` and `system_dir` are its home drive's.
+    set: Option<Arc<set::DriveSet>>,
     /// Large folders' sorted contents, for folder-bucket listings.
     folders: folders::FolderCache,
     uploads: PathBuf,
@@ -392,23 +409,84 @@ impl Store {
         fs::create_dir_all(&system_dir)?;
         // One process per drive, before touching anything another might be using.
         let lock = lock_drive(&system_dir)?;
-        let tmp = system_dir.join("tmp");
-        let uploads = system_dir.join("uploads");
-        fs::create_dir_all(&uploads)?;
-        fs::create_dir_all(system_dir.join(BUCKETS_DIR))?;
-        // Whatever was being written when the last run stopped is gone for good.
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp)?;
+        prepare_system_dir(&system_dir)?;
         sweep_bucket_staging(&root);
         let format = format::prepare(&system_dir)?;
-        let index_path = system_dir.join(format::INDEX_DB);
-        let db = Index::open(&index_path)?;
+        let db = Index::open(&system_dir.join(format::INDEX_DB))?;
+        let system_db = System::open(&system_dir.join(format::SYSTEM_DB))?;
+        Self::assemble(root, Some(lock), None, format, (db, system_db), options)
+    }
+
+    /// Opens (or, when every drive is new and empty, creates) the drive set made of
+    /// `drives`: several drives serving as one, objects erasure-coded across them so
+    /// up to its parity of them can be lost (`docs/ON_DISK_FORMAT.md`, format 3). A new
+    /// set gets `parity` ([`default_parity`] when `None`); an existing one keeps its own.
+    /// Drives can be given in any order. Only object buckets live on a set.
+    pub fn open_set(
+        drives: &[PathBuf],
+        parity: Option<usize>,
+        options: StoreOptions,
+    ) -> Result<Self> {
+        let set::Opened { mut set, format } =
+            set::DriveSet::open(drives, parity, options.durability != Durability::None)?;
+        for system in set.systems() {
+            prepare_system_dir(&system)?;
+        }
+        let (db, opened) = Index::open_copies(
+            &set.database_paths(format::INDEX_DB),
+            set.readable(),
+            set.quorum(),
+        )?;
+        for (place, why) in &opened.failed {
+            tracing::warn!(copy = place, error = %why, "a copy of the index can't be used");
+        }
+        if let Some(copies) = db.copies() {
+            set.set_home(&copies.primary());
+        }
+        let (system_db, _) = System::open_copies(
+            &set.database_paths(format::SYSTEM_DB),
+            set.readable(),
+            set.quorum(),
+        )?;
+        let root = set.home().to_owned();
+        // A set is known by its own id, whichever drive is home: keys and IAM's
+        // contexts are bound to it.
+        let member = format.set.clone().ok_or(StoreError::SetMember)?;
+        let format = DriveFormat {
+            drive: member.id.clone(),
+            set: Some(member),
+            ..format
+        };
+        Self::assemble(
+            root,
+            None,
+            Some(Arc::new(set)),
+            format,
+            (db, system_db),
+            options,
+        )
+    }
+
+    fn assemble(
+        root: PathBuf,
+        lock: Option<fs::File>,
+        set: Option<Arc<set::DriveSet>>,
+        format: DriveFormat,
+        (db, system_db): (Index, System),
+        options: StoreOptions,
+    ) -> Result<Self> {
+        let system_dir = root.join(SYSTEM_DIR);
+        let tmp = system_dir.join("tmp");
+        let uploads = system_dir.join("uploads");
+        let index_path = db.copies().map_or_else(
+            || system_dir.join(format::INDEX_DB),
+            teifs_meta::Copies::primary,
+        );
         db.set_synchronous(match options.durability {
             Durability::Strict => "FULL",
             Durability::Relaxed => "NORMAL",
             Durability::None => "OFF",
         })?;
-        let system_db = System::open(&system_dir.join(format::SYSTEM_DB))?;
         let inner = Inner {
             root,
             system_dir,
@@ -417,6 +495,7 @@ impl Store {
             inline_max: options.inline_max.unwrap_or(objects::INLINE_MAX),
             key_rules: options.key_rules,
             _lock: lock,
+            set,
             folders: folders::FolderCache::default(),
             uploads,
             db: Mutex::new(db),
@@ -455,6 +534,28 @@ impl Store {
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// On a drive set, its drives by place (`None` for one that's down) and its
+    /// geometry; `None` for a single drive.
+    #[must_use]
+    pub fn drive_set(&self) -> Option<DriveSetInfo> {
+        let set = self.inner.set.as_ref()?;
+        Some(DriveSetInfo {
+            drives: set.drives().to_vec(),
+            data: set.geometry().data(),
+            parity: set.geometry().parity(),
+        })
+    }
+
+    /// A writing connection to the system database for IAM: on a drive set, one whose
+    /// changes reach every copy.
+    pub fn open_system(&self) -> Result<System> {
+        let copies = self.inner.system().copies().cloned();
+        match copies {
+            Some(copies) => Ok(System::attach(&copies)?),
+            None => Ok(System::open(&self.system_db())?),
+        }
     }
 
     /// The drive's format record: its format version and permanent id.
@@ -559,6 +660,12 @@ impl Store {
         layout: Layout,
         options: NewBucket,
     ) -> Result<()> {
+        // A drive set stores objects only as shards: every bucket is an object bucket.
+        let layout = if self.inner.set.is_some() {
+            Layout::Object
+        } else {
+            layout
+        };
         match layout {
             Layout::Object => check_bucket(name)?,
             Layout::Folder => {
@@ -592,8 +699,12 @@ impl Store {
                 },
                 Layout::Object => {
                     let dir = inner.system_dir.join(BUCKETS_DIR).join(&id);
-                    fs::create_dir_all(&dir)?;
-                    sync_dir(&inner.system_dir.join(BUCKETS_DIR))?;
+                    if let Some(set) = &inner.set {
+                        set.create_dirs(&dir)?;
+                    } else {
+                        fs::create_dir_all(&dir)?;
+                        sync_dir(&inner.system_dir.join(BUCKETS_DIR))?;
+                    }
                 }
             }
             inner.system().record_bucket(
@@ -650,7 +761,12 @@ impl Store {
                     if conn.bucket_has_versions(&bucket.id)? {
                         return Err(StoreError::BucketNotEmpty);
                     }
-                    let _ = fs::remove_dir_all(&bucket.dir);
+                    match &bucket.set {
+                        Some(set) => set.remove_dirs(&bucket.dir),
+                        None => {
+                            let _ = fs::remove_dir_all(&bucket.dir);
+                        }
+                    }
                 }
             }
             let unfinished = conn.list_uploads(&name, "", None, usize::MAX)?;
@@ -1548,8 +1664,13 @@ impl Inner {
                 created: from_ms(r.created_ms),
             })
             .collect();
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
+        // A drive set has object buckets only; folders on its drives aren't buckets.
+        let folders = if self.set.is_some() {
+            Vec::new()
+        } else {
+            fs::read_dir(&self.root)?.collect::<io::Result<Vec<_>>>()?
+        };
+        for entry in folders {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -1582,18 +1703,22 @@ impl Inner {
         Ok(buckets)
     }
 
-    fn system(&self) -> MutexGuard<'_, System> {
-        self.system
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn system(&self) -> Shipping<'_, System> {
+        Shipping(
+            self.system
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
-    fn lock(&self) -> MutexGuard<'_, Index> {
+    fn lock(&self) -> Shipping<'_, Index> {
         // A panic while holding it can't leave a half-applied change: every change is one
         // transaction or one rename.
-        self.db
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        Shipping(
+            self.db
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     fn system_dir(&self) -> &Path {
@@ -1613,11 +1738,13 @@ impl Inner {
                 dir: self.system_dir.join(BUCKETS_DIR).join(&record.id),
                 id: record.id,
                 versioning: record.versioning,
+                set: self.set.clone(),
             };
             (layout, store)
         });
         match store {
             Some((Layout::Object, bucket)) => Ok(Bucket::Object(bucket)),
+            _ if self.set.is_some() => Err(StoreError::NoSuchBucket),
             store => Ok(Bucket::Folder(FolderBucket {
                 name: name.to_owned(),
                 dir: self.bucket_dir(name)?,
@@ -1730,7 +1857,7 @@ impl Inner {
                 let conn = self.lock();
                 let row = Inner::version_row(&conn, bucket, src_key, src_version)?;
                 match (&row.object_id, &row.inline) {
-                    (Some(id), _) => fs::copy(bucket.data_path(id), &tmp.path).map(drop)?,
+                    (Some(id), _) => bucket.copy_data(id, &tmp.path)?,
                     (None, Some(bytes)) => fs::write(&tmp.path, bytes)?,
                     (None, None) => fs::File::create(&tmp.path).map(drop)?,
                 }
@@ -1761,6 +1888,61 @@ impl Inner {
 /// A time in milliseconds since the Unix epoch.
 fn from_ms(ms: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+}
+
+/// A database held under its lock. On a drive set, what was changed while it was held
+/// is shipped to the database's other copies when it's let go, before anything changed
+/// is acknowledged; a change that reaches too few copies is logged.
+pub(crate) struct Shipping<'a, T: Ship>(MutexGuard<'a, T>);
+
+/// A database whose changes can be shipped to its copies.
+pub(crate) trait Ship {
+    fn ship(&self) -> teifs_meta::Result<()>;
+}
+
+impl Ship for Index {
+    fn ship(&self) -> teifs_meta::Result<()> {
+        Index::ship(self)
+    }
+}
+
+impl Ship for System {
+    fn ship(&self) -> teifs_meta::Result<()> {
+        System::ship(self)
+    }
+}
+
+impl<T: Ship> std::ops::Deref for Shipping<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Ship> std::ops::DerefMut for Shipping<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl<T: Ship> Drop for Shipping<'_, T> {
+    fn drop(&mut self) {
+        if let Err(err) = self.0.ship() {
+            tracing::error!(error = %err, "a change didn't reach enough copies of the metadata");
+        }
+    }
+}
+
+/// Clears what the last run left staged in a drive's `.teifs` and makes its folders.
+fn prepare_system_dir(system_dir: &Path) -> Result<()> {
+    let tmp = system_dir.join("tmp");
+    fs::create_dir_all(system_dir.join("uploads"))?;
+    fs::create_dir_all(system_dir.join(BUCKETS_DIR))?;
+    // Whatever was being written when the last run stopped is gone for good.
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp)?;
+    Ok(())
 }
 
 /// Takes the drive's lock, held until the store is dropped (or the process ends).
@@ -1826,6 +2008,8 @@ mod lock_tests;
 mod property_tests;
 #[cfg(test)]
 mod replica_tests;
+#[cfg(test)]
+mod set_tests;
 #[cfg(test)]
 mod sse_tests;
 #[cfg(test)]

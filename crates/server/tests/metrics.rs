@@ -519,14 +519,14 @@ async fn request_metrics_are_watched_from_the_start_after_a_restart() {
             (endpoint, stop, running)
         }
     };
-    let (endpoint, stop, running) = run().await;
+    let (endpoint, stop, running) = Box::pin(run()).await;
     let s3 = common::client_at(&endpoint, ACCESS_KEY, SECRET_KEY);
     s3.create_bucket().bucket("measured").send().await.unwrap();
     measure(&s3, "measured", "all", None).await;
     drop(stop);
     running.await.unwrap();
 
-    let (endpoint, _stop, _running) = run().await;
+    let (endpoint, _stop, _running) = Box::pin(run()).await;
     let s3 = common::client_at(&endpoint, ACCESS_KEY, SECRET_KEY);
     s3.head_bucket().bucket("measured").send().await.unwrap();
     let token = teifs_iam::metrics_token(ACCESS_KEY, SECRET_KEY, None);

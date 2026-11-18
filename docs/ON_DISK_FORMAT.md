@@ -6,7 +6,7 @@ wrote. `crates/store/src/format.rs` enforces it and `crates/store/tests/format.r
 `crates/server/tests/format_fixtures.rs` prove it against a drive written by each released
 format.
 
-## Current format: 2
+## Current format: 2 (3 for drive set members)
 
 ```
 <drive>/
@@ -194,7 +194,9 @@ one more table, `teifs_copy` (`id` 0, `seq`: how many row changes it has seen). 
 every commit the rows it changed are copied, as they now are on the primary (or their
 removal), to each other copy in one transaction with the primary's `seq`, before the
 write is acknowledged. A copy that fails is set aside and rebuilt whole from the
-primary later (`VACUUM INTO` beside it, synced, renamed over it). When the drives are
+primary later (`VACUUM INTO` beside it, synced, renamed over it); while fewer copies
+than the set's write quorum are current, every change is refused before it's made
+(TEMP triggers on each table check a flag the connection holds). When the drives are
 opened, the copy with the highest `seq` is the primary and copies behind it are
 rebuilt. A single drive's databases have no `teifs_copy` table.
 
@@ -247,6 +249,58 @@ When the disk is nearly full, writes whose size is known are refused up front wi
 A disk that fills up during a write gives the same answer, and the staged bytes are
 removed.
 
+## Drive sets: format 3
+
+A **drive set** is 2 to 16 drives (each its own disk) serving as one: every object is
+erasure-coded across them, so the set survives losing any `parity` of them. Each member
+is a drive in format 3, whose `format.json` also records the set:
+
+```json
+{
+  "format": 3,
+  "drive": "5d1c…",
+  "created": "2026-11-18T12:00:00Z",
+  "set": {
+    "id": "9a0e…",
+    "index": 2,
+    "drives": ["4f2b…", "77c0…", "5d1c…", "e81a…"],
+    "data": 2,
+    "parity": 2,
+    "blockSize": 1048576
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `set.id` | The set's random id, the same on every member: the store is known by it (KMS keyrings, IAM), whichever drive is up |
+| `set.index` | This drive's place in the set, from 0; shards are placed by it |
+| `set.drives` | Every member's `drive` id, by place |
+| `set.data`, `set.parity` | The code: `data + parity` is the number of drives; any `data` of them give every object back. Fixed when the set is made |
+| `set.blockSize` | The bytes coded at a time ([Shard files](#shard-files)) |
+
+A single drive never has a `set`, and is never in format 3 (it stays in format 2);
+releases before drive sets refuse format 3, so no older TeiFS opens a member alone. A
+member opened as a single drive is refused too. A new set is made only of new, empty
+drives.
+
+Each member has the usual `.teifs/` folders. Object buckets' folders
+(`.teifs/buckets/<bucket id>/`) are on every member, and each object's data file is a
+shard file at the same path on each: the object's shard `i` is on the drive at place
+`(i + XXH3-64(object id)) mod drives`, so that no drive holds only parity. Only object
+buckets exist on a set; small objects (32 KiB or less) stay in the index, like on a
+single drive. Each member also has its copy of `index.db` and `system.db`
+([Copies of the databases](#copies-of-the-databases-drive-sets)) and of
+`credentials.json`. Parts of multipart uploads in progress are kept on one drive (the
+one holding the primary databases) until the upload completes; a lost drive loses
+uploads in progress on it, never completed objects.
+
+A write is acknowledged once its shard files and its metadata are on at least the
+**write quorum** of drives: `data` drives, plus one when `data` equals `parity` (so that
+two halves of a split set can never both accept writes). Below it, writes are refused
+(`503`) and nothing is changed. The set opens, and reads, with any `data` drives; its
+metadata needs `drives - quorum + 1` of them.
+
 ## Shard files
 
 Drive sets (several drives serving as one, each holding a share of every object) store
@@ -289,6 +343,9 @@ remove.
 |---|---|---|
 | 0 | 1 | `meta.db` (format 0's only database) becomes `index.db`; `system.db` and `format.json` are created |
 | 1 | 2 | Both databases are copied to `backups/pre-format-2/`; buckets get ids; `index.db` gets `object_versions` and `garbage`; every existing bucket stays a folder bucket |
+
+Format 3 isn't reached by upgrading: it's only for members of a [drive set](#drive-sets-format-3),
+which are made new.
 
 Format 0 is what TeiFS wrote before formats were recorded: a `.teifs/meta.db` and no
 `format.json`.

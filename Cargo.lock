@@ -4983,6 +4983,7 @@ dependencies = [
  "sha2",
  "tar",
  "teifs-crypto",
+ "teifs-erasure",
  "teifs-meta",
  "teifs-types",
  "tempfile",

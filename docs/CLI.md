@@ -54,6 +54,8 @@ teifs serve [OPTIONS] [DIR]
 |---|---|
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
+| `--set-drive <DIR>` | Make the drive one of a drive set with this one (repeatable, 2 to 16 drives in all): every object is erasure-coded across the set's drives, so it survives losing up to `--parity` of them. Each must be its own disk, mounted at a folder that exists; a new set needs new, empty drives. Only object buckets. Environment: `TEIFS_SET_DRIVES`. |
+| `--parity <PARITY>` | A new drive set's parity: how many of its drives it can lose (1 to half of them; 1 for 2–3 drives, 2 for 4–5, 3 for 6–7, 4 for 8 or more). Fixed once the set is made. Environment: `TEIFS_PARITY`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |
@@ -153,6 +155,8 @@ teifs config show [OPTIONS] [DIR]
 |---|---|
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
+| `--set-drive <DIR>` | Make the drive one of a drive set with this one (repeatable, 2 to 16 drives in all): every object is erasure-coded across the set's drives, so it survives losing up to `--parity` of them. Each must be its own disk, mounted at a folder that exists; a new set needs new, empty drives. Only object buckets. Environment: `TEIFS_SET_DRIVES`. |
+| `--parity <PARITY>` | A new drive set's parity: how many of its drives it can lose (1 to half of them; 1 for 2–3 drives, 2 for 4–5, 3 for 6–7, 4 for 8 or more). Fixed once the set is made. Environment: `TEIFS_PARITY`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |
@@ -2718,6 +2722,8 @@ teifs doctor [OPTIONS] [DIR]
 |---|---|
 | `--config <CONFIG>` | A TOML file of settings, under the flags' names (`listen = "0.0.0.0:9000"`). Environment: `TEIFS_CONFIG`. |
 | `<DIR>` | The drive's folder (created if missing). Default: `.`. Environment: `TEIFS_DIR`. |
+| `--set-drive <DIR>` | Make the drive one of a drive set with this one (repeatable, 2 to 16 drives in all): every object is erasure-coded across the set's drives, so it survives losing up to `--parity` of them. Each must be its own disk, mounted at a folder that exists; a new set needs new, empty drives. Only object buckets. Environment: `TEIFS_SET_DRIVES`. |
+| `--parity <PARITY>` | A new drive set's parity: how many of its drives it can lose (1 to half of them; 1 for 2–3 drives, 2 for 4–5, 3 for 6–7, 4 for 8 or more). Fixed once the set is made. Environment: `TEIFS_PARITY`. |
 | `--listen <LISTEN>` | Address to listen on. Default: `127.0.0.1:9000`. Environment: `TEIFS_LISTEN`. |
 | `--certs-dir <CERTS_DIR>` | Serve HTTPS with the certificates in this folder: `public.crt` and `private.key` (or `tls.crt` and `tls.key`), and a subfolder with the same files for each further certificate, chosen by the name clients ask for. They're reloaded when they change, and on SIGHUP. Environment: `TEIFS_CERTS_DIR`. |
 | `--tls-cert <TLS_CERT>` | Serve HTTPS with this certificate (PEM, its chain after it), reloaded when it changes; needs `--tls-key`. Environment: `TEIFS_TLS_CERT`. |

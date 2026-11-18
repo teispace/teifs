@@ -7,6 +7,14 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Drive sets: `teifs serve DIR --set-drive DIR2 --set-drive DIR3 …` serves 2 to 16 disks
+  as one, every object erasure-coded across them (Reed-Solomon, with a hash on every
+  piece), so the set keeps serving with up to `--parity` disks lost and reads around
+  damaged shards. The databases and credentials are kept on every disk. Writes need a
+  quorum of disks and are refused with `503 ServiceUnavailable` below it. Set members
+  are a new on-disk format (3) that earlier releases refuse; single drives are
+  unchanged.
+
 - S3 Batch Operations run `S3PutObjectAcl` jobs: each object's ACL is replaced, as the
   job's role, by a canned ACL or by the grants and owner the job gives.
 - `CopyObject` takes `x-amz-checksum-algorithm`, as S3 does: the copy gets the checksum
