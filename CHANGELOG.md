@@ -13,7 +13,9 @@ behaviour; the on-disk format is always upgraded automatically.
   cancelled), download, delete one or many, and see, download and delete versions; set
   a bucket's layout when creating it, and its versioning, default encryption, tags,
   policy and lifecycle rules; manage IAM users, their access keys (the secret shown
-  once), groups and their members, and managed and inline policies; in light or dark.
+  once), groups and their members, and managed and inline policies; and see the
+  server's status: version, uptime, what the drive and each bucket hold, its disks'
+  room, the background jobs and what the scrubs found; in light or dark.
   It does only what the key's policies allow: every action is an S3, IAM or STS
   request signed with that key and answered by the S3 service. The key stays in the
   server's memory for the session; the browser holds an `HttpOnly` cookie. Plain HTTP is

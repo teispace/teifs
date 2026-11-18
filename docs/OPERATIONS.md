@@ -202,7 +202,11 @@ with them, and IAM (users and their access keys, groups, managed and inline poli
 Each setting loads and saves on its own, so a key allowed only some of them can still
 use those. A new access key's secret is shown once, as IAM returns it. Deleting a user
 or a group first removes what IAM asks to be removed (keys, policies, memberships);
-deleting a managed policy needs it detached everywhere first. It's
+deleting a managed policy needs it detached everywhere first. The status page reads
+`GET /.teifs/admin/v1/info` and `GET /minio/admin/v3/datausageinfo`, so it needs a key
+that may `teifs:GetServerInfo` and `admin:DataUsageInfo`; it flags failed jobs, damage
+a scrub found and disks over 90% full. Prometheus metrics stay at `/.teifs/metrics`
+for a scraper. It's
 off unless asked for. Open the address in a browser and sign in with an access key and
 its secret: the root user's, an IAM user's, or temporary credentials with their session
 token. The console can do exactly what that key could with the AWS CLI, no more: every

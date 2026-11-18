@@ -43,6 +43,7 @@ files! {
     "lib/iam.js" => JS,
     "lib/s3.js" => JS,
     "lib/settings.js" => JS,
+    "lib/status.js" => JS,
     "lib/upload.js" => JS,
     "lib/xml.js" => JS,
     "views/buckets.js" => JS,
@@ -50,6 +51,7 @@ files! {
     "views/objects.js" => JS,
     "views/settings.js" => JS,
     "views/signin.js" => JS,
+    "views/status.js" => JS,
 }
 
 /// Whether `path` (under `web/`) is one of [`FILES`].

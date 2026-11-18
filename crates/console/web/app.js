@@ -6,6 +6,7 @@ import { announce, h, mount } from "./lib/dom.js";
 import { buckets } from "./views/buckets.js";
 import { group, groups, policies, policy, user, users } from "./views/iam.js";
 import { objects } from "./views/objects.js";
+import { statusPage } from "./views/status.js";
 import { settings } from "./views/settings.js";
 import { signIn } from "./views/signin.js";
 
@@ -50,6 +51,7 @@ function shell() {
       { "aria-label": "Main" },
       h("a", { href: "#/buckets", "data-route": "buckets" }, "Buckets"),
       h("a", { href: "#/users", "data-route": "iam" }, "Identity and access"),
+      h("a", { href: "#/status", "data-route": "status" }, "Status"),
     ),
     h(
       "div",
@@ -129,6 +131,9 @@ function route() {
       break;
     case "policy":
       policy(main, parts.join("/"));
+      break;
+    case "status":
+      statusPage(main);
       break;
     default:
       mount(main, h("h1", {}, "Not found"), h("p", {}, "There's no such page."), h("a", { href: "#/buckets" }, "Back to buckets"));
