@@ -66,6 +66,9 @@ async fn serve(drive: &Path, keys: &Path) -> Server {
     start_with(move |config| {
         config.dir = drive;
         config.kms_keyring = Some(keys);
+        // The drives' uploads in progress are as old as the fixture: kept, not expired
+        // as stale a week after they were made.
+        config.jobs.upload_expiry = None;
     })
     .await
 }
