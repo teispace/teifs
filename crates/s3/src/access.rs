@@ -1094,6 +1094,7 @@ const HEADER_KEYS: &[(&str, S3Key)] = &[
     ("x-amz-object-lock-mode", S3Key::ObjectLockMode),
     ("x-amz-object-lock-legal-hold", S3Key::ObjectLockLegalHold),
     ("x-amz-object-ownership", S3Key::ObjectOwnership),
+    ("x-amz-bucket-namespace", S3Key::BucketNamespace),
     ("if-match", S3Key::IfMatch),
     ("if-none-match", S3Key::IfNoneMatch),
 ];

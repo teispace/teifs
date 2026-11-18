@@ -7,6 +7,10 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- Account regional namespaces for buckets, as on AWS since March 2026: `CreateBucket`
+  with `x-amz-bucket-namespace: account-regional` creates
+  `<name>-<account id>-us-east-1-an`, a name ending in `-an` needs that header, and
+  policies can require it with `s3:x-amz-bucket-namespace`.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet
