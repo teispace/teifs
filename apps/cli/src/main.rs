@@ -685,6 +685,20 @@ impl From<LayoutArg> for Layout {
 }
 
 fn main() -> ExitCode {
+    // Everything runs on a thread with a roomy stack, parsing the command line included:
+    // Windows gives the main thread only 1 MiB, and a debug build's parse and setup
+    // come close to it.
+    let started = std::thread::Builder::new()
+        .name("teifs".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(start)
+        .expect("a thread to run on");
+    started
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn start() -> ExitCode {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     tracing_subscriber::registry()
@@ -751,7 +765,7 @@ fn main() -> ExitCode {
 /// How long a restart waits for what's still running to end.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The stack of the threads commands run on.
+/// The stack of the threads the command line is read and commands run on.
 const STACK_SIZE: usize = 8 * 1024 * 1024;
 
 pub(crate) fn open(dir: &Path) -> Result<Store, error::Error> {
