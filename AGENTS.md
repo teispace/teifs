@@ -41,7 +41,7 @@ crates/crypto   encryption at rest: keys, sealing, packages, SSE-C, KMS (aws-lc-
 crates/store    the storage engine: drive format, buckets, writes, reads, listing, multipart
 crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
-crates/gateway  file-protocol gateways (SFTP) as clients of the S3 service
+crates/gateway  file-protocol gateways (SFTP, WebDAV) as clients of the S3 service
 apps/cli        the `teifs` command
 tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
 tests/bench     benchmarks: TeiFS and other S3 servers in Docker, driven by warp

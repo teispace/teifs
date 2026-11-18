@@ -28,6 +28,8 @@ pub struct Server {
     pub tls: Option<std::sync::Arc<teifs_server::Tls>>,
     /// Where the SFTP gateway listens, when it's served.
     pub sftp: Option<std::net::SocketAddr>,
+    /// Where the WebDAV gateway listens, when it's served.
+    pub webdav: Option<std::net::SocketAddr>,
     _stop: oneshot::Sender<()>,
     /// The running server: what the admin API asked, once it has stopped.
     pub running: tokio::task::JoinHandle<Option<teifs_server::Stop>>,
@@ -122,6 +124,7 @@ async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
     let iam = server.iam().clone();
     let tls = server.tls().cloned();
     let sftp = server.sftp_addr().map(Result::unwrap);
+    let webdav = server.webdav_addr().map(Result::unwrap);
     let (stop, stopped) = oneshot::channel::<()>();
     let running = tokio::spawn(server.run(async {
         let _ = stopped.await;
@@ -133,6 +136,7 @@ async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
         endpoint,
         tls,
         sftp,
+        webdav,
         _stop: stop,
         running,
     }

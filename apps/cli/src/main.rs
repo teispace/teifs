@@ -41,7 +41,7 @@ use teifs_server::{
     Durability, Elasticsearch, EventBridge, Exchange, Format, Gateways, JobOptions, Kafka,
     KafkaSasl, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres,
     ProxyHeader, Redis, SaslMechanism, Server, ServerKey, SftpConfig, Sns, Sqs, TargetConfig,
-    TargetKind, TlsSource, TrustedProxies, UserKey, Webhook, credentials, tls_config,
+    TargetKind, TlsSource, TrustedProxies, UserKey, WebDavConfig, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -184,6 +184,12 @@ pub(crate) struct ServeArgs {
         requires = "sftp_address"
     )]
     sftp_host_key: Option<PathBuf>,
+    /// Serve the drive's buckets over WebDAV on this address too, such as
+    /// `0.0.0.0:9443` (off unless given). People sign in with an access key as the user
+    /// name and its secret as the password. It's HTTPS with the server's certificates;
+    /// plain HTTP only on a loopback address.
+    #[arg(long, value_name = "ADDR", env = "TEIFS_WEBDAV_ADDRESS")]
+    webdav_address: Option<SocketAddr>,
     /// Serve HTTPS with the certificates in this folder: `public.crt` and `private.key`
     /// (or `tls.crt` and `tls.key`), and a subfolder with the same files for each
     /// further certificate, chosen by the name clients ask for. They're reloaded when
@@ -1785,6 +1791,7 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
             sftp: args
                 .sftp_address
                 .map(|address| SftpConfig::new(address, args.sftp_host_key)),
+            webdav: args.webdav_address.map(WebDavConfig::new),
         },
     })
     .await
@@ -1850,6 +1857,10 @@ fn announce(
         .sftp_addr()
         .and_then(Result::ok)
         .map(|sftp| format!("sftp://{}", announce_address(sftp)));
+    let webdav = server
+        .webdav_addr()
+        .and_then(Result::ok)
+        .map(|webdav| format!("{}://{}", server.scheme(), announce_address(webdav)));
     let durability_name = match durability {
         Durability::Strict => "strict",
         Durability::Relaxed => "relaxed",
@@ -1866,6 +1877,7 @@ fn announce(
             "durability": durability_name,
             "sftp": sftp,
             "sftpHostKey": server.sftp_fingerprint(),
+            "webdav": webdav,
         }));
         return;
     }
@@ -1898,6 +1910,7 @@ fn announce(
         .into_iter()
         .chain(sftp.map(|sftp| ("SFTP", sftp)))
         .chain(server.sftp_fingerprint().map(|key| ("SFTP host key", key)))
+        .chain(webdav.map(|webdav| ("WebDAV", webdav)))
         .collect::<Vec<_>>(),
         &[
             alias,

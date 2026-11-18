@@ -35,7 +35,7 @@ pub use kms::{
     with_default_key,
 };
 pub use serve::{DRAIN, Limits, serve};
-pub use teifs_gateway::{Gateways, SftpConfig};
+pub use teifs_gateway::{Gateways, SftpConfig, WebDavConfig};
 pub use teifs_iam::{
     ConfiguredOidcProvider, Directory, LdapSettings, SrvRecord, Transport,
     plugin::{IdentityPlugin, PluginSettings},
@@ -288,8 +288,16 @@ pub struct Server {
     audit_writers: Vec<audit::Writer>,
     /// Sends bucket notifications.
     notifier: Arc<Notifier>,
-    /// The SFTP gateway, listening, when it's served.
+    /// The file-protocol gateways, listening.
+    gateways: Listening,
+}
+
+/// The gateways a server serves, listening (boxed in [`bind`](Server::bind), whose
+/// callers await it inline).
+#[derive(Debug, Default)]
+struct Listening {
     sftp: Option<teifs_gateway::Sftp>,
+    webdav: Option<teifs_gateway::WebDav>,
 }
 
 impl std::fmt::Debug for Server {
@@ -727,8 +735,7 @@ impl Server {
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
-        // Boxed: `bind`'s callers await it inline.
-        let sftp = Box::pin(bind_sftp(config.gateways.sftp, &store, &service)).await?;
+        let gateways = Box::pin(gateways(config.gateways, &store, &service, tls.as_ref())).await?;
         Ok(Self {
             store,
             jobs: config.jobs,
@@ -742,19 +749,31 @@ impl Server {
             tls,
             audit_writers,
             notifier,
-            sftp,
+            gateways,
         })
     }
 
     /// The address the SFTP gateway listens on, when it's served.
     pub fn sftp_addr(&self) -> Option<io::Result<SocketAddr>> {
-        self.sftp.as_ref().map(teifs_gateway::Sftp::local_addr)
+        self.gateways
+            .sftp
+            .as_ref()
+            .map(teifs_gateway::Sftp::local_addr)
+    }
+
+    /// The address the WebDAV gateway listens on, when it's served.
+    pub fn webdav_addr(&self) -> Option<io::Result<SocketAddr>> {
+        self.gateways
+            .webdav
+            .as_ref()
+            .map(teifs_gateway::WebDav::local_addr)
     }
 
     /// The SFTP gateway's host key fingerprint (`SHA256:…`), when it's served.
     #[must_use]
     pub fn sftp_fingerprint(&self) -> Option<String> {
-        self.sftp
+        self.gateways
+            .sftp
             .as_ref()
             .map(teifs_gateway::Sftp::host_key_fingerprint)
     }
@@ -862,13 +881,18 @@ impl Server {
             stop.cancel();
         };
         let sftp = async {
-            if let Some(sftp) = self.sftp {
+            if let Some(sftp) = self.gateways.sftp {
                 // Boxed: the server's own future stays the size it was without it.
                 Box::pin(sftp.run(stop.cancelled())).await;
             }
         };
         // Boxed: with the gateways beside it, the S3 listener's future would make `run`'s
         // too big to hold inline.
+        let webdav = async {
+            if let Some(webdav) = self.gateways.webdav {
+                Box::pin(webdav.run(stop.cancelled())).await;
+            }
+        };
         tokio::join!(
             Box::pin(serve(
                 self.listener,
@@ -877,7 +901,8 @@ impl Server {
                 self.tls,
                 shutdown
             )),
-            sftp
+            sftp,
+            webdav
         );
         if let Some(reloads) = reloads {
             reloads.abort();
@@ -904,6 +929,28 @@ impl Server {
         }
         asked.into_inner()
     }
+}
+
+/// The gateways `gateways` asks for, listening: SFTP and WebDAV (over HTTPS with `tls`).
+async fn gateways(
+    gateways: Gateways,
+    store: &Store,
+    service: &teifs_s3::Service,
+    tls: Option<&Arc<Tls>>,
+) -> Result<Listening, ServerError> {
+    let sftp = bind_sftp(gateways.sftp, store, service).await?;
+    let webdav = match &gateways.webdav {
+        Some(webdav) => Some(
+            teifs_gateway::WebDav::bind(
+                webdav,
+                tls.map(|tls| tls.config()),
+                teifs_gateway::Backend::new(service.clone()),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    Ok(Listening { sftp, webdav })
 }
 
 /// The SFTP gateway, when `sftp` asks for it: its host key by default in
