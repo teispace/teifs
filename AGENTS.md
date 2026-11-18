@@ -56,7 +56,8 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRY
   before every commit.** Needs `cargo install cargo-nextest cargo-deny --locked`.
 - `cargo test --workspace`: every test, including the AWS SDK end-to-end suite
   (`crates/server/tests/sdk.rs`) and the format fixtures (`crates/store/tests/format.rs`).
-- `cargo xtask docs`: only the docs checks (paths exist, no planning ids).
+- `cargo xtask docs`: only the docs checks (paths exist, no planning ids, the s3-tests
+  results in COMPATIBILITY match the lists; `UPDATE_DOCS=1` writes them again).
 - `tests/s3-tests/run.sh [--update]`: the S3 conformance suite against a fresh server
   (needs Python 3); `S3TESTS_K='<pattern>'` runs a subset. Nightly CI runs it in full.
 - `tests/bench/run.sh [server…]`: benchmarks against RustFS, MinIO, Garage, Versity and

@@ -32,7 +32,8 @@ an empty drive on port 9312 (`S3TESTS_PORT` to change it), and writes the pytest
 
 Run the tests for it, then `--update`: tests that now pass move from `unimplemented.txt`
 to `implemented.txt`. Commit the lists with the feature, and update
-`docs/COMPATIBILITY.md`. A test never moves back out of `implemented.txt` without a
+`docs/COMPATIBILITY.md`: `UPDATE_DOCS=1 cargo xtask docs` writes its s3-tests results
+again from the lists. A test never moves back out of `implemented.txt` without a
 reason in the pull request.
 
 ## The suite's bucket defaults

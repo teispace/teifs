@@ -1,7 +1,8 @@
 //! Project tasks, run with `cargo xtask <task>`.
 //!
 //! - `verify`: everything CI checks. Must pass before every commit.
-//! - `docs`: only the documentation check.
+//! - `docs`: only the documentation checks; `UPDATE_DOCS=1` writes the generated s3-tests
+//!   results again.
 //! - `release VERSION`: prepares a release (version, changelog, lock file).
 //! - `release-notes VERSION`: prints a release's notes, checking they're in place.
 //! - `manifests VERSION SHA256SUMS OUT`: a release's Homebrew formula and winget manifests.
@@ -10,6 +11,7 @@
 
 mod manifests;
 mod release;
+mod s3_tests;
 
 use std::{
     env, fs,
@@ -29,7 +31,9 @@ fn main() -> ExitCode {
         }
         _ if !rest.is_empty() => Err("too many arguments".into()),
         ("verify", None) => verify(&root),
-        ("docs", None) => check_docs(&root).and_then(|()| check_planning_ids(&root)),
+        ("docs", None) => check_docs(&root)
+            .and_then(|()| check_planning_ids(&root))
+            .and_then(|()| s3_tests::check(&root, env::var_os("UPDATE_DOCS").is_some())),
         ("release", Some(version)) => release::prepare(&root, version),
         ("release-notes", Some(version)) => release::notes(&root, version),
         _ => {
@@ -84,6 +88,7 @@ fn verify(root: &Path) -> Result<(), String> {
     }
     check_docs(root)?;
     check_planning_ids(root)?;
+    s3_tests::check(root, false)?;
     println!("verify: all checks passed");
     Ok(())
 }

@@ -10,6 +10,9 @@ use std::{
 };
 
 const UNRELEASED: &str = "## Unreleased";
+/// The longest body GitHub takes for a release, in characters: `gh release create`
+/// fails on longer notes, after every build has run.
+const NOTES_LIMIT: usize = 125_000;
 /// The Helm chart, whose version and appVersion are TeiFS's.
 const CHART: &str = "packaging/helm/teifs/Chart.yaml";
 
@@ -60,6 +63,7 @@ pub fn notes(root: &Path, version: &str) -> Result<(), String> {
     let changelog = read(&root.join("CHANGELOG.md"))?;
     let section = section(&changelog, version)
         .ok_or_else(|| format!("CHANGELOG.md has no notes under `## {version} - …`"))?;
+    fits(&section)?;
     print!("{section}");
     Ok(())
 }
@@ -181,6 +185,18 @@ fn section<'a>(changelog: &'a str, name: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| format!("{text}\n"))
 }
 
+/// Notes GitHub takes as a release's body.
+fn fits(notes: &str) -> Result<(), String> {
+    let length = notes.chars().count();
+    if length <= NOTES_LIMIT {
+        Ok(())
+    } else {
+        Err(format!(
+            "the notes are {length} characters, more than the {NOTES_LIMIT} GitHub takes for a release: shorten them"
+        ))
+    }
+}
+
 /// Today's date in UTC, `YYYY-MM-DD`.
 fn today() -> String {
     let days = SystemTime::now()
@@ -276,6 +292,23 @@ mod tests {
         // Twice, or with nothing to release, is refused.
         assert!(date_unreleased(&dated, "0.2.0", "2026-11-02").is_err());
         assert!(date_unreleased(&dated, "0.3.0", "2026-11-02").is_err());
+    }
+
+    #[test]
+    fn notes_fit_in_a_github_release() {
+        assert!(fits(&"a".repeat(NOTES_LIMIT)).is_ok());
+        assert!(
+            fits(&"é".repeat(NOTES_LIMIT)).is_ok(),
+            "characters, not bytes"
+        );
+        assert!(fits(&"a".repeat(NOTES_LIMIT + 1)).is_err());
+        // What would be released next fits too, so a tag never fails at the last step.
+        let ours = include_str!("../../CHANGELOG.md");
+        let next = section(ours, "Unreleased").unwrap_or_default();
+        assert!(
+            fits(&next).is_ok(),
+            "CHANGELOG.md's Unreleased notes are too long"
+        );
     }
 
     #[test]
