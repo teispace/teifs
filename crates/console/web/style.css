@@ -270,6 +270,16 @@ td.version code { font-family: var(--mono); font-size: 13px; }
 .browser.dropping { outline: 3px dashed var(--accent); outline-offset: 4px; }
 .more { margin-top: 12px; }
 
+.settings { display: grid; gap: 16px; }
+.setting h2 { margin-bottom: 8px; }
+.actions.left { justify-content: flex-start; margin-top: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 10px 0; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { margin: 0; }
+table.compact th, table.compact td { padding: 6px 8px; }
+details summary { cursor: pointer; margin: 8px 0; }
+.setting textarea { margin-top: 6px; }
+
 .noscript { text-align: center; margin-top: 20vh; }
 
 @media (max-width: 640px) {

@@ -53,6 +53,8 @@ const FORWARDED: &[&str] = &[
     "if-none-match",
     "if-modified-since",
     "if-unmodified-since",
+    // TeiFS's own: the layout of a bucket being created.
+    teifs_s3::LAYOUT_HEADER,
 ];
 /// The `x-amz-` headers the signature sets itself.
 const SIGNATURE_HEADERS: &[&str] = &[
@@ -545,6 +547,7 @@ mod tests {
             ("x-amz-meta-colour", "blue"),
             ("x-amz-checksum-sha256", "abc="),
             ("range", "bytes=0-9"),
+            ("x-teifs-bucket-layout", "object"),
         ] {
             sent.insert(name, HeaderValue::from_static(value));
         }
@@ -557,7 +560,8 @@ mod tests {
                 "content-type",
                 "range",
                 "x-amz-checksum-sha256",
-                "x-amz-meta-colour"
+                "x-amz-meta-colour",
+                "x-teifs-bucket-layout"
             ]
         );
     }

@@ -55,11 +55,15 @@ export async function listBuckets() {
   return all.sort((a, b) => (a.name < b.name ? -1 : 1));
 }
 
-/** `CreateBucket`, optionally with Object Lock (which turns versioning on). */
-export async function createBucket(name, { objectLock = false } = {}) {
-  await request("PUT", path(name), {
-    headers: objectLock ? { "x-amz-bucket-object-lock-enabled": "true" } : {},
-  });
+/**
+ * `CreateBucket`, optionally with Object Lock (which turns versioning on) and a TeiFS
+ * layout (`object` or `folder`; "" for the server's default).
+ */
+export async function createBucket(name, { objectLock = false, layout = "" } = {}) {
+  const headers = {};
+  if (objectLock) headers["x-amz-bucket-object-lock-enabled"] = "true";
+  if (layout) headers["x-teifs-bucket-layout"] = layout;
+  await request("PUT", path(name), { headers });
 }
 
 /** `DeleteBucket`: only an empty bucket goes. */

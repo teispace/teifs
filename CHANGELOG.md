@@ -10,8 +10,9 @@ behaviour; the on-disk format is always upgraded automatically.
 - A web console: `teifs serve --console-address 127.0.0.1:9001` serves it (off unless
   asked for). Sign in with an access key; list, create and delete buckets; browse a
   bucket's folders, upload files and folders (multipart for big files, which can be
-  cancelled), download, delete one or many, and see, download and delete versions; in
-  light or dark. It does only what the key's policies allow: every action is an S3, IAM or STS
+  cancelled), download, delete one or many, and see, download and delete versions; set
+  a bucket's layout when creating it, and its versioning, default encryption, tags,
+  policy and lifecycle rules; in light or dark. It does only what the key's policies allow: every action is an S3, IAM or STS
   request signed with that key and answered by the S3 service. The key stays in the
   server's memory for the session; the browser holds an `HttpOnly` cookie. Plain HTTP is
   served only on loopback or behind trusted proxies.
