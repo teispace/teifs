@@ -15,6 +15,7 @@
 mod db;
 mod iam;
 mod index;
+mod mirror;
 mod replicated_deletes;
 mod replication_resyncs;
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use iam::{
     SamlKeyRow, SamlProviderRow, ServiceAccountRow, UserRow,
 };
 pub use index::{CompletedUpload, Index, Part, Row, Upload};
+pub use mirror::{Copies, CopyState, Opened};
 pub use replicated_deletes::QueuedDelete;
 pub use system::{BucketRecord, Layout, System, Versioning};
 pub use usage::{Usage, Usages};
@@ -49,6 +51,28 @@ pub enum MetaError {
         /// The newest version this build knows.
         known: i64,
     },
+    /// Too few copies of a database (on a drive set) could be opened.
+    #[error("only {found} copies of the database could be opened; {needed} are needed")]
+    Copies {
+        /// Copies opened.
+        found: usize,
+        /// Copies needed.
+        needed: usize,
+    },
+    /// A change reached too few copies of a database: it's kept on those it reached.
+    #[error("a change reached {current} copies of the database; {needed} are needed")]
+    Quorum {
+        /// Copies holding the change, the primary included.
+        current: usize,
+        /// Copies needed.
+        needed: usize,
+    },
+    /// A table whose rows can't be copied (no key, or a key of more than 4 columns).
+    #[error("table {0} can't be copied to other drives")]
+    Unmirrorable(String),
+    /// A file operation on a copy failed.
+    #[error(transparent)]
+    Io(std::io::Error),
 }
 
 impl MetaError {

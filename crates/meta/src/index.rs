@@ -151,6 +151,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 #[derive(Debug)]
 pub struct Index {
     pub(crate) conn: Connection,
+    /// The database's other copies, on a drive set.
+    copies: Option<crate::Copies>,
 }
 
 /// What's stored about an object.
@@ -290,7 +292,47 @@ impl Index {
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
             conn: db::open(path, MIGRATIONS)?,
+            copies: None,
         })
+    }
+
+    /// Opens a drive set's copies of the database at `paths` (one per drive; see
+    /// [`crate::Copies`]): the copy with the most changes is written, the others are
+    /// kept equal to it by [`Self::ship`]. At least `readable` must open, and every
+    /// change must reach `quorum` of them.
+    pub fn open_copies(
+        paths: &[std::path::PathBuf],
+        readable: usize,
+        quorum: usize,
+    ) -> Result<(Self, crate::Opened)> {
+        let (conn, copies, opened) = crate::mirror::open(paths, MIGRATIONS, readable, quorum)?;
+        Ok((
+            Self {
+                conn,
+                copies: Some(copies),
+            },
+            opened,
+        ))
+    }
+
+    /// Ships what was committed since the last call to the database's other copies
+    /// (nothing without copies, or inside a transaction). Fails when the change reached
+    /// fewer copies than the quorum: it's committed on those it reached.
+    pub fn ship(&self) -> Result<()> {
+        self.copies.as_ref().map_or(Ok(()), |c| c.ship(&self.conn))
+    }
+
+    /// The database's other copies, on a drive set.
+    #[must_use]
+    pub fn copies(&self) -> Option<&crate::Copies> {
+        self.copies.as_ref()
+    }
+
+    /// Rebuilds the copies that failed from this one; every copy's state afterwards.
+    pub fn heal_copies(&self) -> Result<Vec<(std::path::PathBuf, crate::CopyState)>> {
+        self.copies
+            .as_ref()
+            .map_or(Ok(Vec::new()), |c| c.heal(&self.conn))
     }
 
     /// Opens another connection to the index at `path` (already opened, so migrated,
@@ -299,6 +341,7 @@ impl Index {
     pub fn open_reader(path: &Path) -> Result<Self> {
         Ok(Self {
             conn: db::open_reader(path)?,
+            copies: None,
         })
     }
 
@@ -308,6 +351,9 @@ impl Index {
     pub fn set_synchronous(&self, level: &str) -> Result<()> {
         debug_assert!(matches!(level, "FULL" | "NORMAL" | "OFF"));
         self.conn.pragma_update(None, "synchronous", level)?;
+        if let Some(copies) = &self.copies {
+            copies.set_synchronous(level)?;
+        }
         Ok(())
     }
 

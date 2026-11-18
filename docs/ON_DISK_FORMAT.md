@@ -186,6 +186,18 @@ What can't be rebuilt from the files.
 
 A bucket folder without a row is a folder bucket with default settings.
 
+### Copies of the databases (drive sets)
+
+On a drive set, every drive holds a copy of `index.db` and `system.db`, kept equal to
+the one being written (the **primary**) by `crates/meta/src/mirror.rs`. Each copy has
+one more table, `teifs_copy` (`id` 0, `seq`: how many row changes it has seen). After
+every commit the rows it changed are copied, as they now are on the primary (or their
+removal), to each other copy in one transaction with the primary's `seq`, before the
+write is acknowledged. A copy that fails is set aside and rebuilt whole from the
+primary later (`VACUUM INTO` beside it, synced, renamed over it). When the drives are
+opened, the copy with the highest `seq` is the primary and copies behind it are
+rebuilt. A single drive's databases have no `teifs_copy` table.
+
 ### `config.kv` and `config-history/`
 
 The settings `mc admin config set` and `teifs admin config set` keep, in MinIO's text

@@ -157,6 +157,8 @@ pub struct BucketRecord {
 #[derive(Debug)]
 pub struct System {
     pub(crate) conn: Connection,
+    /// The database's other copies, on a drive set.
+    copies: Option<crate::Copies>,
 }
 
 impl System {
@@ -164,7 +166,58 @@ impl System {
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
             conn: db::open(path, MIGRATIONS)?,
+            copies: None,
         })
+    }
+
+    /// Opens a drive set's copies of the database at `paths` (one per drive; see
+    /// [`crate::Copies`]): the copy with the most changes is written, the others are
+    /// kept equal to it by [`Self::ship`]. At least `readable` must open, and every
+    /// change must reach `quorum` of them.
+    pub fn open_copies(
+        paths: &[std::path::PathBuf],
+        readable: usize,
+        quorum: usize,
+    ) -> Result<(Self, crate::Opened)> {
+        let (conn, copies, opened) = crate::mirror::open(paths, MIGRATIONS, readable, quorum)?;
+        Ok((
+            Self {
+                conn,
+                copies: Some(copies),
+            },
+            opened,
+        ))
+    }
+
+    /// Ships what was committed since the last call to the database's other copies
+    /// (nothing without copies, or inside a transaction). Fails when the change reached
+    /// fewer copies than the quorum: it's committed on those it reached.
+    pub fn ship(&self) -> Result<()> {
+        self.copies.as_ref().map_or(Ok(()), |c| c.ship(&self.conn))
+    }
+
+    /// The database's other copies, on a drive set.
+    #[must_use]
+    pub fn copies(&self) -> Option<&crate::Copies> {
+        self.copies.as_ref()
+    }
+
+    /// Another writing connection to the primary copy `copies` keep (IAM's), whose
+    /// changes [`Self::ship`] ships to them too.
+    pub fn attach(copies: &crate::Copies) -> Result<Self> {
+        let conn = db::open(&copies.primary(), MIGRATIONS)?;
+        copies.attach(&conn)?;
+        Ok(Self {
+            conn,
+            copies: Some(copies.clone()),
+        })
+    }
+
+    /// Rebuilds the copies that failed from this one; every copy's state afterwards.
+    pub fn heal_copies(&self) -> Result<Vec<(std::path::PathBuf, crate::CopyState)>> {
+        self.copies
+            .as_ref()
+            .map_or(Ok(Vec::new()), |c| c.heal(&self.conn))
     }
 
     /// Records a bucket TeiFS just created, with its first settings (`config`), in one
