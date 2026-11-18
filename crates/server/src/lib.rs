@@ -66,6 +66,9 @@ pub struct Config {
     pub set_drives: Vec<PathBuf>,
     /// A new drive set's parity (drives it can lose); `None` for the default.
     pub parity: Option<usize>,
+    /// Make new, empty drives given to an existing drive set members in lost drives'
+    /// places (and heal them).
+    pub replace_drives: bool,
     /// Where to listen.
     pub listen: SocketAddr,
     /// Domains for virtual-hosted-style requests (`bucket.domain`).
@@ -345,7 +348,11 @@ async fn open_drive(
     } else {
         let mut drives = vec![config.dir.clone()];
         drives.extend(config.set_drives.iter().cloned());
-        Store::open_set(&drives, config.parity, options)
+        let set = teifs_store::SetOptions {
+            parity: config.parity,
+            replace: config.replace_drives,
+        };
+        Store::open_set(&drives, set, options)
     };
     let store = opened.map_err(|source| ServerError::Open {
         path: config.dir.clone(),
@@ -364,6 +371,16 @@ async fn open_drive(
             path: config.dir.clone(),
             source,
         })?;
+    // A drive that missed writes (it was down, or is new) gets its shards back while
+    // the set serves.
+    if store.drive_set().is_some_and(|set| set.needs_heal) {
+        let healing = store.clone();
+        tokio::spawn(async move {
+            if let Err(err) = healing.heal_set().await {
+                tracing::error!(error = %err, "the drive set couldn't be healed");
+            }
+        });
+    }
     Ok((store, kms, location))
 }
 

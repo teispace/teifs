@@ -182,6 +182,11 @@ pub(crate) struct ServeArgs {
     /// the set is made.
     #[arg(long, requires = "set_drives", env = "TEIFS_PARITY")]
     parity: Option<usize>,
+    /// Make new, empty drives given to an existing drive set members in the places of
+    /// lost ones; their shards are rebuilt while the set serves. Off by default: an
+    /// empty folder may be a disk that didn't mount.
+    #[arg(long, requires = "set_drives", env = "TEIFS_REPLACE_DRIVES")]
+    replace_drives: bool,
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
     listen: SocketAddr,
@@ -1745,6 +1750,7 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
         dir: args.dir,
         set_drives: args.set_drives,
         parity: args.parity,
+        replace_drives: args.replace_drives,
         listen: args.listen,
         domains: args.domains,
         website_domains: args.website_domains,

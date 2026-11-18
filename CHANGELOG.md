@@ -13,7 +13,8 @@ behaviour; the on-disk format is always upgraded automatically.
   damaged shards. The databases and credentials are kept on every disk. Writes need a
   quorum of disks and are refused with `503 ServiceUnavailable` below it. Set members
   are a new on-disk format (3) that earlier releases refuse; single drives are
-  unchanged.
+  unchanged. A disk that missed writes is healed in the background when the set
+  starts, and `--replace-drives` puts new, empty disks in lost ones' places.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet

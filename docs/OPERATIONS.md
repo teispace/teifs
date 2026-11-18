@@ -937,9 +937,27 @@ disks), so `--default-layout folder` and `x-teifs-bucket-layout: folder` make ob
 buckets there. While the set is served, other `teifs` commands that open a drive
 directly (`backup`, `repair`, `scrub`) refuse a set's disks; use the S3 API.
 
-Objects written while a disk was down have no shard on it, and a disk that comes back
-takes the metadata it missed when the set next starts. Until objects are healed, each
-written meanwhile can lose fewer disks than the set's parity.
+Objects written while a disk was down have no shard on it. When the set starts with a
+disk that missed writes (it was down, or is new), the disk takes the metadata it missed
+at once, and the set heals in the background while it serves: every object's shards
+are checked on each disk, and those missing or damaged are rebuilt from the others.
+Until then, an object written meanwhile can lose fewer disks than the set's parity.
+The server log says what a heal did.
+
+### Replacing a disk
+
+Mount a new, empty disk where the lost one was (or anywhere, giving its folder in the
+lost one's stead) and start once with `--replace-drives`:
+
+```sh
+teifs serve /mnt/disk1 --set-drive /mnt/disk2 --set-drive /mnt/disk3 --set-drive /mnt/disk4 --replace-drives
+```
+
+Each new, empty disk given takes a lost disk's place (its id and place in the set),
+gets the databases and credentials, and is healed in the background. Without the flag,
+an empty folder given to an existing set is left alone and the server log says so: an
+empty mount point may be a disk that didn't mount, and TeiFS never fills the disk under
+it.
 
 ## Pools
 

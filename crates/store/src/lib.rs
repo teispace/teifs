@@ -23,6 +23,7 @@ mod folder_versions;
 mod folders;
 mod format;
 mod group;
+mod heal;
 mod inspect;
 mod jobs;
 mod lifecycle;
@@ -65,6 +66,7 @@ pub use diagnose::{Database, Diagnosis, diagnose};
 pub use error::{Result, StoreError};
 pub use filesystem::remote_file_system;
 pub use format::{DriveFormat, FORMAT, SET_FORMAT, SetFormat};
+pub use heal::HealReport;
 pub use jobs::{Expirations, JobOptions, JobStatus, Jobs};
 pub use lifecycle::{
     And, Condition, DAY_MS, Expiration, Expiry, Lifecycle, LifecycleRule, MAX_LIFECYCLE_RULES,
@@ -79,7 +81,7 @@ pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
 pub use replicating::{ReplicaMetadata, Waiting};
 pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
-pub use set::{MAX_DRIVES, default_parity, write_quorum};
+pub use set::{MAX_DRIVES, SetOptions, default_parity, write_quorum};
 pub use settings::{
     BucketAccess, BucketEncryption, BucketSettings, CorsRule, DefaultEncryption, NewBucket,
     ObjectOwnership, PublicAccessBlock,
@@ -269,6 +271,11 @@ pub struct DriveSetInfo {
     pub data: usize,
     /// Drives it can lose.
     pub parity: usize,
+    /// Places given a new drive, in place of a lost one, when the set was opened.
+    pub replaced: Vec<usize>,
+    /// Whether a drive missed writes (it was down, or is new), so objects need healing:
+    /// [`Store::heal_set`].
+    pub needs_heal: bool,
 }
 
 /// A drive.
@@ -420,15 +427,11 @@ impl Store {
     /// Opens (or, when every drive is new and empty, creates) the drive set made of
     /// `drives`: several drives serving as one, objects erasure-coded across them so
     /// up to its parity of them can be lost (`docs/ON_DISK_FORMAT.md`, format 3). A new
-    /// set gets `parity` ([`default_parity`] when `None`); an existing one keeps its own.
-    /// Drives can be given in any order. Only object buckets live on a set.
-    pub fn open_set(
-        drives: &[PathBuf],
-        parity: Option<usize>,
-        options: StoreOptions,
-    ) -> Result<Self> {
+    /// set gets `set.parity` ([`default_parity`] when `None`); an existing one keeps its
+    /// own. Drives can be given in any order. Only object buckets live on a set.
+    pub fn open_set(drives: &[PathBuf], set: SetOptions, options: StoreOptions) -> Result<Self> {
         let set::Opened { mut set, format } =
-            set::DriveSet::open(drives, parity, options.durability != Durability::None)?;
+            set::DriveSet::open(drives, set, options.durability != Durability::None)?;
         for system in set.systems() {
             prepare_system_dir(&system)?;
         }
@@ -439,6 +442,10 @@ impl Store {
         )?;
         for (place, why) in &opened.failed {
             tracing::warn!(copy = place, error = %why, "a copy of the index can't be used");
+        }
+        // A drive that was behind (or is new) missed shards as well as metadata.
+        if !opened.rebuilt.is_empty() || !set.replaced().is_empty() {
+            set.needs_heal();
         }
         if let Some(copies) = db.copies() {
             set.set_home(&copies.primary());
@@ -545,6 +552,8 @@ impl Store {
             drives: set.drives().to_vec(),
             data: set.geometry().data(),
             parity: set.geometry().parity(),
+            replaced: set.replaced().to_vec(),
+            needs_heal: set.heal_needed(),
         })
     }
 

@@ -301,6 +301,11 @@ two halves of a split set can never both accept writes). Below it, writes are re
 (`503`) and nothing is changed. The set opens, and reads, with any `data` drives; its
 metadata needs `drives - quorum + 1` of them.
 
+A new drive replacing a lost one (`--replace-drives`) gets a `format.json` with the
+lost drive's `drive` id and `set.index`; the other members' records don't change. Its
+databases are copied from the primary, and its shards are rebuilt by healing: each one
+staged in the drive's `.teifs/tmp`, synced and renamed into place.
+
 ## Shard files
 
 Drive sets (several drives serving as one, each holding a share of every object) store
