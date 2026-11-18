@@ -44,6 +44,8 @@ fake-ldap = ["dep:ldap3_proto", "dep:tokio-util", "dep:futures"]
 fake-plugin = []
 # Signed SAML responses (`saml_fake`), for other crates' tests.
 fake-saml = []
+# `fuzzing`: the parsers' entry points the fuzz targets in `fuzz/` call (not an API).
+fuzzing = []
 
 [dev-dependencies]
 ldap3_proto.workspace = true

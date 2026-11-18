@@ -58,6 +58,10 @@ sysinfo.workspace = true
 x509-parser.workspace = true
 xxhash-rust.workspace = true
 
+[features]
+# `fuzzing`: the parsers' entry points the fuzz targets in `fuzz/` call (not an API).
+fuzzing = []
+
 [target.'cfg(unix)'.dependencies]
 pprof.workspace = true
 

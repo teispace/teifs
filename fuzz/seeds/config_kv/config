@@ -1,0 +1,4 @@
+# comment
+region name=eu-west-1
+notify_webhook:1 endpoint="http://127.0.0.1:8080/x y" queue_limit=10
+api requests_max=100

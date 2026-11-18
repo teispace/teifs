@@ -122,11 +122,12 @@ const DOCS: &[&str] = &[
     "docs/COMPATIBILITY.md",
     "docs/CLI.md",
     "tests/s3-tests/README.md",
+    "fuzz/README.md",
 ];
 
 /// Top-level folders a path in the docs can start with.
 const TRACKED_ROOTS: &[&str] = &[
-    "crates/", "apps/", "docs/", "xtask/", ".claude/", ".github/",
+    "crates/", "apps/", "docs/", "xtask/", ".claude/", ".github/", "fuzz/",
 ];
 
 /// Where skills live.

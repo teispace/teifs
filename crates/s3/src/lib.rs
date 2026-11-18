@@ -28,6 +28,9 @@ mod drive;
 mod encode;
 mod errors;
 mod events;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod health;
 mod iam_api;
 mod inventory;

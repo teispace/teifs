@@ -1,0 +1,72 @@
+name: Fuzz
+
+# The fuzz targets in fuzz/ (cargo-fuzz, libFuzzer): every night for ten minutes each,
+# keeping the corpus between runs; for a minute in total on a pull request that touches
+# them or a parser they call. An input that crashes a target is uploaded as an artifact:
+# fuzz/README.md says how to reproduce it.
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds each target runs
+        default: "600"
+  pull_request:
+    paths:
+      - fuzz/**
+      - .github/workflows/fuzz.yml
+      - crates/s3/src/fuzzing.rs
+      - crates/s3/src/batch_operations.rs
+      - crates/s3/src/control_jobs.rs
+      - crates/s3/src/lifecycle.rs
+      - crates/s3/src/cors.rs
+      - crates/s3/src/replication.rs
+      - crates/s3/src/tagging.rs
+      - crates/iam/src/fuzzing.rs
+      - crates/iam/src/saml/**
+      - crates/policy/src/**
+      - crates/types/src/names.rs
+      - crates/types/src/config_kv.rs
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz
+          key: fuzz
+      - run: cargo +nightly install cargo-fuzz --locked --version 0.13.2
+      - name: The corpus from earlier runs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Run every target
+        run: fuzz/run.sh "$SECONDS_EACH"
+        env:
+          # Eight targets: about 80 minutes a night, a minute and a half on a pull request.
+          SECONDS_EACH: ${{ github.event_name == 'pull_request' && '10' || inputs.seconds || '600' }}
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts
+          if-no-files-found: ignore

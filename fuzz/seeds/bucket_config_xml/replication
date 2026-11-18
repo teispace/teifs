@@ -1,0 +1,1 @@
+<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/r</Role><Rule><ID>r</ID><Priority>1</Priority><Status>Enabled</Status><Filter><Prefix>a/</Prefix></Filter><DeleteMarkerReplication><Status>Enabled</Status></DeleteMarkerReplication><Destination><Bucket>arn:aws:s3:::backup</Bucket><StorageClass>STANDARD</StorageClass></Destination></Rule></ReplicationConfiguration>
