@@ -591,6 +591,25 @@ admin clients all use it, and check with it the same way (webpki, the system's
 authorities as `rustls-native-certs` finds them), so a server passes or fails alike. A CA file that is missing or isn't PEM stops the command
 before anything is sent, rather than falling back to the system's authorities alone.
 
+### 18. File-protocol gateways are S3 clients, never a way around S3
+The SFTP gateway (`crates/gateway`) has no authority of its own and no access to the
+store: a person signs in with an access key and its secret, which STS's
+`GetCallerIdentity` checks through the S3 service, and each file operation is an S3
+request signed with that key and sent to the same service the S3 listener serves, over
+an in-memory connection, with the client's address (`aws:SourceIp`) and
+`aws:SecureTransport` true. Policies, Block Public Access, the audit log and metrics
+therefore apply as they do to any S3 client, and a deleted or deactivated key stops
+working at the next request. The secret stays in the server's memory (`Zeroizing`) for
+the session and is never logged. Guessing is bounded: 10 failed sign-ins per address in
+10 minutes, then refusal (a success doesn't reset the count), a constant one-second
+rejection, 3 attempts and 60 s per connection. The gateway is off unless
+`--sftp-address` is given. Its host key is made with the system's random numbers, kept
+owner-only (`0600`, in a `0700` folder) off the drive, and refused at start when others
+can read it, as `sshd` refuses it. Only the `sftp` subsystem is served: shells, commands,
+port forwarding and agents are refused. SSH uses russh with aws-lc-rs; the `rsa` crate
+(RUSTSEC-2023-0071) isn't built in, so RSA keys aren't offered. Tested end to end with a
+real SSH client in `crates/server/tests/sftp.rs`.
+
 ## Data safety
 
 - Writes are atomic (stage, sync, rename, sync the folder), so a crash never leaves a

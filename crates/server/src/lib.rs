@@ -35,6 +35,7 @@ pub use kms::{
     with_default_key,
 };
 pub use serve::{DRAIN, Limits, serve};
+pub use teifs_gateway::{Gateways, SftpConfig};
 pub use teifs_iam::{
     ConfiguredOidcProvider, Directory, LdapSettings, SrvRecord, Transport,
     plugin::{IdentityPlugin, PluginSettings},
@@ -138,6 +139,8 @@ pub struct Config {
     /// Whether the root key, the service accounts it made and the sessions it started
     /// sign in (MinIO's `root_access`); off, only IAM's users and roles do.
     pub root_access: bool,
+    /// The file-protocol gateways to serve (SFTP), each off unless set.
+    pub gateways: Gateways,
 }
 
 /// Checks a change to the drive's key-value configuration as the next start would read
@@ -200,6 +203,12 @@ pub enum ServerError {
     /// A domain for virtual-hosted-style requests or websites is invalid.
     #[error("invalid domain: {0}")]
     Domain(String),
+    /// A file-protocol gateway can't be served.
+    #[error("{0}")]
+    Gateway(#[from] teifs_gateway::GatewayError),
+    /// There's no default place for the SFTP host key (no home folder).
+    #[error("there's no config folder for the SFTP host key; give one with --sftp-host-key")]
+    NoHostKeyHome,
     /// The TLS certificates couldn't be loaded.
     #[error("can't load the TLS certificates: {0}")]
     Tls(TlsError),
@@ -279,6 +288,8 @@ pub struct Server {
     audit_writers: Vec<audit::Writer>,
     /// Sends bucket notifications.
     notifier: Arc<Notifier>,
+    /// The SFTP gateway, listening, when it's served.
+    sftp: Option<teifs_gateway::Sftp>,
 }
 
 impl std::fmt::Debug for Server {
@@ -645,7 +656,8 @@ impl Server {
             .map_err(ServerError::Tls)?
             .map(Arc::new);
         let sign_ins = SignIns::new(&config)?;
-        let (store, kms, location) = open_drive(&config).await?;
+        // Boxed: opening a drive is a big future, and `bind`'s callers await it inline.
+        let (store, kms, location) = Box::pin(open_drive(&config)).await?;
         let (listener, listen) = listen(config.listen).await?;
         let mut admin_config = admin_config(&config, &location, listen);
         sign_ins.show(&mut admin_config);
@@ -715,6 +727,8 @@ impl Server {
             },
         )
         .map_err(|e| ServerError::Domain(e.to_string()))?;
+        // Boxed: `bind`'s callers await it inline.
+        let sftp = Box::pin(bind_sftp(config.gateways.sftp, &store, &service)).await?;
         Ok(Self {
             store,
             jobs: config.jobs,
@@ -728,7 +742,21 @@ impl Server {
             tls,
             audit_writers,
             notifier,
+            sftp,
         })
+    }
+
+    /// The address the SFTP gateway listens on, when it's served.
+    pub fn sftp_addr(&self) -> Option<io::Result<SocketAddr>> {
+        self.sftp.as_ref().map(teifs_gateway::Sftp::local_addr)
+    }
+
+    /// The SFTP gateway's host key fingerprint (`SHA256:…`), when it's served.
+    #[must_use]
+    pub fn sftp_fingerprint(&self) -> Option<String> {
+        self.sftp
+            .as_ref()
+            .map(teifs_gateway::Sftp::host_key_fingerprint)
     }
 
     /// The address it listens on (useful with port 0).
@@ -821,6 +849,7 @@ impl Server {
         let stopping = self.service.stopping();
         let control = self.service.control();
         let asked = std::sync::OnceLock::new();
+        let stop = tokio_util::sync::CancellationToken::new();
         let shutdown = async {
             tokio::select! {
                 () = shutdown => {}
@@ -830,8 +859,26 @@ impl Server {
             }
             stopping.cancel();
             control.thaw();
+            stop.cancel();
         };
-        serve(self.listener, self.service, self.limits, self.tls, shutdown).await;
+        let sftp = async {
+            if let Some(sftp) = self.sftp {
+                // Boxed: the server's own future stays the size it was without it.
+                Box::pin(sftp.run(stop.cancelled())).await;
+            }
+        };
+        // Boxed: with the gateways beside it, the S3 listener's future would make `run`'s
+        // too big to hold inline.
+        tokio::join!(
+            Box::pin(serve(
+                self.listener,
+                self.service,
+                self.limits,
+                self.tls,
+                shutdown
+            )),
+            sftp
+        );
         if let Some(reloads) = reloads {
             reloads.abort();
         }
@@ -857,6 +904,28 @@ impl Server {
         }
         asked.into_inner()
     }
+}
+
+/// The SFTP gateway, when `sftp` asks for it: its host key by default in
+/// `<config dir>/teifs/ssh/<drive id>_ed25519`, off the drive as the KMS keyring is.
+async fn bind_sftp(
+    sftp: Option<SftpConfig>,
+    store: &Store,
+    service: &teifs_s3::Service,
+) -> Result<Option<teifs_gateway::Sftp>, ServerError> {
+    let Some(mut sftp) = sftp else {
+        return Ok(None);
+    };
+    if sftp.host_key.is_none() {
+        let dir = dirs::config_dir().ok_or(ServerError::NoHostKeyHome)?;
+        sftp.host_key = Some(
+            dir.join("teifs")
+                .join("ssh")
+                .join(format!("{}_ed25519", store.format().drive)),
+        );
+    }
+    let backend = teifs_gateway::Backend::new(service.clone());
+    Ok(Some(teifs_gateway::Sftp::bind(&sftp, backend).await?))
 }
 
 /// Refuses a domain that's both for S3 requests and for websites: its hosts couldn't

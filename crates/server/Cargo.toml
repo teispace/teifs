@@ -15,6 +15,8 @@ teifs-s3.workspace = true
 teifs-types.workspace = true
 teifs-iam.workspace = true
 teifs-notify.workspace = true
+teifs-gateway.workspace = true
+tokio-util.workspace = true
 zeroize.workspace = true
 reqwest.workspace = true
 s3s.workspace = true
@@ -58,7 +60,10 @@ tempfile.workspace = true
 rcgen.workspace = true
 proptest.workspace = true
 aws-smithy-http-client.workspace = true
+russh = { version = "0.65.2", default-features = false, features = ["aws-lc-rs"] }
+russh-sftp = "3.0.1"
 teifs-notify = { workspace = true, features = ["testing"] }
+teifs-gateway.workspace = true
 teifs-iam = { workspace = true, features = ["fake-ldap", "fake-plugin", "fake-saml"] }
 
 [lints]

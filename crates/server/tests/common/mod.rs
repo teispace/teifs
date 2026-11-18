@@ -26,6 +26,8 @@ pub struct Server {
     pub endpoint: String,
     /// The listener's TLS, when it serves HTTPS.
     pub tls: Option<std::sync::Arc<teifs_server::Tls>>,
+    /// Where the SFTP gateway listens, when it's served.
+    pub sftp: Option<std::net::SocketAddr>,
     _stop: oneshot::Sender<()>,
     /// The running server: what the admin API asked, once it has stopped.
     pub running: tokio::task::JoinHandle<Option<teifs_server::Stop>>,
@@ -72,6 +74,7 @@ pub fn config(dir: &std::path::Path, keys: &std::path::Path) -> Config {
         openid: Vec::new(),
         config_check: teifs_server::ConfigCheck::default(),
         root_access: true,
+        gateways: teifs_server::Gateways::default(),
     }
 }
 
@@ -118,6 +121,7 @@ async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
     let endpoint = format!("{}://{}", server.scheme(), server.local_addr().unwrap());
     let iam = server.iam().clone();
     let tls = server.tls().cloned();
+    let sftp = server.sftp_addr().map(Result::unwrap);
     let (stop, stopped) = oneshot::channel::<()>();
     let running = tokio::spawn(server.run(async {
         let _ = stopped.await;
@@ -128,6 +132,7 @@ async fn serve(dir: TempDir, keys: TempDir, config: Config) -> Server {
         _keys: keys,
         endpoint,
         tls,
+        sftp,
         _stop: stop,
         running,
     }

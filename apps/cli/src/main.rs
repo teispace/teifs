@@ -38,10 +38,10 @@ mod verify;
 use clap::{Parser, Subcommand};
 use teifs_server::{
     Acks, Amqp, AuditTarget, AwsCredentials, ClientCertificates, Compression, Config, Credentials,
-    Durability, Elasticsearch, EventBridge, Exchange, Format, JobOptions, Kafka, KafkaSasl,
-    KeyRules, KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres, ProxyHeader, Redis,
-    SaslMechanism, Server, ServerKey, Sns, Sqs, TargetConfig, TargetKind, TlsSource,
-    TrustedProxies, UserKey, Webhook, credentials, tls_config,
+    Durability, Elasticsearch, EventBridge, Exchange, Format, Gateways, JobOptions, Kafka,
+    KafkaSasl, KeyRules, KmsLocation, Lambda, Limits, Mqtt, Mysql, Nats, Nsq, Postgres,
+    ProxyHeader, Redis, SaslMechanism, Server, ServerKey, SftpConfig, Sns, Sqs, TargetConfig,
+    TargetKind, TlsSource, TrustedProxies, UserKey, Webhook, credentials, tls_config,
 };
 use teifs_store::{Layout, Store};
 use units::{date, from_ms, parse_count, parse_duration, rfc3339};
@@ -169,6 +169,21 @@ pub(crate) struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9000", env = "TEIFS_LISTEN")]
     listen: SocketAddr,
+    /// Serve the drive's buckets over SFTP on this address too, such as `0.0.0.0:2222`
+    /// (off unless given). People sign in with an access key as the user name and its
+    /// secret as the password, and can do what its policies allow.
+    #[arg(long, value_name = "ADDR", env = "TEIFS_SFTP_ADDRESS")]
+    sftp_address: Option<SocketAddr>,
+    /// The SFTP server's host key (OpenSSH format, readable by its owner only), made
+    /// when missing (default: `<config dir>/teifs/ssh/<drive id>_ed25519`). Keep it: a
+    /// new one makes clients warn of an impostor.
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "TEIFS_SFTP_HOST_KEY",
+        requires = "sftp_address"
+    )]
+    sftp_host_key: Option<PathBuf>,
     /// Serve HTTPS with the certificates in this folder: `public.crt` and `private.key`
     /// (or `tls.crt` and `tls.key`), and a subfolder with the same files for each
     /// further certificate, chosen by the name clients ask for. They're reloaded when
@@ -1766,6 +1781,11 @@ async fn serve(mut args: ServeArgs, sources: &config::Sources) -> Result<(), Str
         client_certificates,
         openid: identity.openid,
         config_check,
+        gateways: Gateways {
+            sftp: args
+                .sftp_address
+                .map(|address| SftpConfig::new(address, args.sftp_host_key)),
+        },
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1826,6 +1846,10 @@ fn announce(
     };
     let keyring = server.kms().describe();
     let created = matches!(server.kms(), KmsLocation::Keyring { created: true, .. });
+    let sftp = server
+        .sftp_addr()
+        .and_then(Result::ok)
+        .map(|sftp| format!("sftp://{}", announce_address(sftp)));
     let durability_name = match durability {
         Durability::Strict => "strict",
         Durability::Relaxed => "relaxed",
@@ -1840,6 +1864,8 @@ fn announce(
             "accessKey": server.access_key(),
             "keyring": keyring,
             "durability": durability_name,
+            "sftp": sftp,
+            "sftpHostKey": server.sftp_fingerprint(),
         }));
         return;
     }
@@ -1868,7 +1894,11 @@ fn announce(
                 keyring.clone(),
             ),
             ("Durability", durability_name.to_owned()),
-        ],
+        ]
+        .into_iter()
+        .chain(sftp.map(|sftp| ("SFTP", sftp)))
+        .chain(server.sftp_fingerprint().map(|key| ("SFTP host key", key)))
+        .collect::<Vec<_>>(),
         &[
             alias,
             "teifs ls local".to_owned(),

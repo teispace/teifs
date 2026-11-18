@@ -7,6 +7,13 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- An SFTP gateway: `teifs serve --sftp-address 0.0.0.0:2222` serves the buckets over
+  SFTP to tools that don't speak S3. People sign in with an access key and its secret;
+  every operation is an S3 request signed with that key, so policies, the audit log and
+  metrics apply as they do over S3. `/` is the buckets, folders are prefixes, uploads go
+  in parts as they fill, renames are `RenameObject`. The host key is made on the first
+  start (`--sftp-host-key`), owner-only and off the drive. Failed sign-ins are limited
+  per address. Off by default.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet
