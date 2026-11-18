@@ -192,6 +192,31 @@ folder that isn't a drive yet stays one, and while a server runs the drive, the 
 address isn't tried. `--json` prints one `{"type":"check","name","state","detail","drive"}`
 record per check.
 
+## Web console
+
+`teifs serve --console-address 127.0.0.1:9001` (or `TEIFS_CONSOLE_ADDRESS`) also serves
+a web console on that address: buckets, and what the signed-in key may do with them. It's
+off unless asked for. Open the address in a browser and sign in with an access key and
+its secret: the root user's, an IAM user's, or temporary credentials with their session
+token. The console can do exactly what that key could with the AWS CLI, no more: every
+action is an S3, IAM or STS request signed with the key and answered by the S3 service,
+with its policies, errors, audit log entries and metrics.
+
+- **HTTPS.** With certificates (`--certs-dir`, `--tls-cert`), the console is served over
+  HTTPS with the same certificates as S3. Over plain HTTP it listens only on a loopback
+  address, or behind `--trusted-proxies` (a reverse proxy that serves HTTPS); anywhere
+  else `teifs serve` refuses to start, since sign-ins would cross the network in the
+  clear. A proxy must keep the `Host` header the browser sent: the console compares it
+  with the page's origin.
+- **Sessions.** The key stays in the server's memory for the session, never in the
+  browser, which holds only an `HttpOnly`, `SameSite=Strict` cookie. A session ends when
+  its person signs out, after an hour unused, after 12 hours at most, and when the
+  server restarts. A disabled or deleted key stops working in open sessions at once.
+- **Failed sign-ins** are limited to 10 per client address in 10 minutes.
+
+To reach a console on a remote server's loopback address, forward its port:
+`ssh -L 9001:127.0.0.1:9001 server`, then open `http://127.0.0.1:9001`.
+
 ## Encryption keys
 
 Objects are encrypted with a key of their own, which a KMS key seals (see

@@ -24,6 +24,7 @@ teifs-policy = { path = "crates/policy" }
 teifs-iam = { path = "crates/iam" }
 teifs-client = { path = "crates/client" }
 teifs-notify = { path = "crates/notify" }
+teifs-console = { path = "crates/console" }
 
 # `minio`: MinIO's extensions of S3's XML (`DeleteReplication`, lifecycle and versioning
 # extras), which `mc` sends.

@@ -54,7 +54,14 @@ crates/server   teifs-server   Credentials, the HTTP listener (HTTP/1.1 and HTTP
                                plain or TLS: `src/tls.rs` loads certificates, picks one
                                per SNI name, reloads them), graceful shutdown, and
                                `Server::bind` / `run`, which the command and embedders
-                               use.
+                               use; `serve` serves anything `Serves` (S3, the console).
+crates/console  teifs-console  The web console: its page (`web/`, plain HTML, CSS and
+                               JavaScript modules, built in by `src/assets.rs`), sign-in
+                               sessions (`src/sessions.rs`), the checks that a call
+                               comes from the page and the headers every answer
+                               carries (`src/guard.rs`), and the proxy that signs each
+                               call with the session's key and sends it to the S3
+                               service over an in-memory connection (`src/proxy.rs`).
 crates/notify   teifs-notify   Bucket notifications' delivery: the server's targets
                                (webhooks, Elasticsearch, Redis, NSQ, NATS, MQTT,
                                Kafka (`kafka/`, its wire format in `wire.rs`, SASL
@@ -99,7 +106,8 @@ xtask           —              `cargo xtask`: verify, releases, and a release'
                                formula and winget manifests (`manifests.rs`).
 ```
 
-Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`.
+Dependencies point one way: `types` ← `meta` ← `store` ← `s3` ← `server` ← `cli`, and
+`s3` ← `console` ← `server`.
 `policy` depends on no other TeiFS crate; `iam` depends on `meta`, `crypto` and `policy`.
 Library crates never depend on the command line, and nothing depends on a user
 interface, so the server can be embedded (Teitunnel will run it this way).
@@ -620,6 +628,27 @@ declared length and `stage` cuts off a body past it. A multipart upload's cap is
 with the upload (`uploads.max_size`): each part is admitted against the room its other
 parts leave (`Store::part_room`), and `put_part` checks the total again under the
 store's lock, which also covers copied parts, before the part replaces any other.
+
+## The web console
+
+The console (`crates/console`, served by `teifs serve --console-address`) is a client of
+the APIs the S3 endpoint serves, not a second way in. Its backend does three things
+itself: serve the page's files, sign people in (checking the key with STS
+`GetCallerIdentity`) and out. Every other call from the page (`/api/s3/PATH`,
+`/api/iam`, `/api/sts`, `/api/download/BUCKET/KEY`) is rebuilt from an allow-list of
+headers, signed with Signature V4 by the session's key (small bodies hashed and given a
+`Content-MD5`, big uploads streamed as `UNSIGNED-PAYLOAD`), and sent to the same
+`teifs_s3::Service` over a `tokio::io::duplex` HTTP/1.1 connection, as the browser's
+client (its address, HTTPS or not). Authentication, policies, the audit log, metrics and
+limits are the S3 endpoint's; the console can't do anything the key couldn't with the
+AWS CLI.
+
+The page has no build step: `crates/console/web/` is ES modules and CSS that
+`src/assets.rs` builds into the binary (a test fails when a file there isn't listed).
+`lib/` holds the pure parts (`xml.js` reads and writes S3's XML, `s3.js` S3's calls,
+`api.js` the calls to the backend), unit-tested with `node --test
+crates/console/web/test/*.test.js` (CI's "Console (web)" job); `views/` draws each screen with
+`lib/dom.js`'s `h()`, which only ever makes text nodes from strings.
 
 ## Two layouts, one API
 

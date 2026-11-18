@@ -4616,6 +4616,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "teifs-console"
+version = "0.1.0"
+dependencies = [
+ "aws-credential-types",
+ "aws-lc-rs",
+ "aws-sigv4",
+ "base64 0.23.1",
+ "bytes",
+ "form_urlencoded",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "md-5",
+ "percent-encoding",
+ "s3s",
+ "serde",
+ "serde_json",
+ "teifs-s3",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "teifs-crypto"
 version = "0.1.0"
 dependencies = [
@@ -4814,6 +4839,8 @@ dependencies = [
  "dirs",
  "filetime",
  "flate2",
+ "http",
+ "hyper",
  "hyper-util",
  "md-5",
  "orc-rust",
@@ -4828,6 +4855,7 @@ dependencies = [
  "serde_json",
  "tar",
  "teifs-client",
+ "teifs-console",
  "teifs-crypto",
  "teifs-iam",
  "teifs-meta",
@@ -4840,6 +4868,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

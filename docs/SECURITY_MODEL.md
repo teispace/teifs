@@ -484,8 +484,30 @@ own connection. A proxy never reports a TLS version, so once it names a client o
 scheme, `s3:TlsVersion` is absent rather than the proxy's own hop's. With a proxy trusted, a server listening on loopback no longer counts
 plain HTTP as secure, since the proxy may be passing on plain HTTP from anywhere.
 
-### 9. Untrusted content is never rendered in a privileged page (*planned*)
-Any web interface that previews files renders them from a separate, sandboxed origin.
+### 9. Untrusted content is never rendered in a privileged page (*built for the web console*)
+The web console (`crates/console`) never shows an object's bytes as a document on its
+own origin: every answer from `/api/` carries `Content-Security-Policy: sandbox;
+default-src 'none'` and `X-Content-Type-Options: nosniff`, and downloads are
+`Content-Disposition: attachment`. Any preview it adds renders from a separate,
+sandboxed origin. Its page draws keys, names and messages only as text nodes (`h()` in
+`web/lib/dom.js`; a test refuses `innerHTML`, `eval` and the like in its scripts) under
+a Content Security Policy that allows only its own scripts and styles, nothing inline,
+and no framing.
+
+### 9a. The web console has no authority of its own
+The console's backend passes every call on to the S3 service signed with the
+signed-in key, so what it can do is what that key's policies allow
+(`crates/server/tests/console.rs`). Sign-in checks the key with STS; the key then stays
+in the server's memory (`Zeroizing`), never in the browser, whose `HttpOnly`,
+`SameSite=Strict` session cookie (`__Host-` over HTTPS) names a session by a 256-bit
+random token kept only as its SHA-256. Sessions end after an hour unused or 12 hours,
+and failed sign-ins are limited per address. Every `/api/` call needs the
+`X-TeiFS-Console` header, which a cross-site form can't send and CORS is never granted
+for, and is refused when `Sec-Fetch-Site` or `Origin` say another site sent it. Only an
+allow-list of headers is passed on (never cookies, `Authorization` or
+`X-Forwarded-*`), and the console's own signature parameters can't be supplied by the
+page. It's off by default, and over plain HTTP it listens only on loopback or behind
+trusted proxies.
 
 ### 10. CORS never reflects arbitrary origins
 CORS headers come only from a bucket's CORS rules; an origin is echoed with credentials
