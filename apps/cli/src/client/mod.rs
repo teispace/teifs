@@ -4,6 +4,7 @@
 pub(crate) mod alias;
 mod analytics;
 mod attributes;
+mod batch;
 mod commands;
 mod copy;
 mod encrypt;
@@ -222,6 +223,13 @@ pub enum Command {
     Replicate {
         #[command(subcommand)]
         action: replicate::ReplicateAction,
+    },
+    /// Run one operation on every object a manifest lists, as an IAM role (S3 Batch
+    /// Operations): make jobs, list and show them, confirm, cancel or reprioritize them,
+    /// and read their reports.
+    Batch {
+        #[command(subcommand)]
+        action: batch::BatchAction,
     },
     /// Make a link that gets (or, with `--put`, uploads) an object without keys.
     Presign {

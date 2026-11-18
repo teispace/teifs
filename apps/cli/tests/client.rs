@@ -2668,3 +2668,169 @@ async fn a_first_version_rule_is_written_back_in_the_later_shape() {
     assert_eq!(rules[0]["rule"]["priority"], 0);
     assert_eq!(rules[0]["rule"]["enabled"], false);
 }
+
+#[tokio::test]
+async fn batch_jobs_are_made_listed_confirmed_and_reported() {
+    use teifs_iam::{NewRole, Owner};
+    let server = start().await;
+    let cli = Client::new(&server);
+    for bucket in ["t/photos", "t/manifests", "t/reports"] {
+        cli.ok(&["mb", bucket]).await;
+    }
+    let s3 = client(&server, SECRET_KEY);
+    for key in ["a.jpg", "b c.jpg"] {
+        s3.put_object()
+            .bucket("photos")
+            .key(key)
+            .body(ByteStream::from_static(b"photo"))
+            .send()
+            .await
+            .unwrap();
+    }
+    s3.put_object()
+        .bucket("manifests")
+        .key("m.csv")
+        .body(ByteStream::from_static(
+            b"photos,a.jpg\nphotos,b+c.jpg\nphotos,gone.jpg\n",
+        ))
+        .send()
+        .await
+        .unwrap();
+    server
+        .iam
+        .create_role(
+            "batch",
+            &NewRole {
+                trust: r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"sts:AssumeRole",
+                  "Principal":{"Service":"batchoperations.s3.amazonaws.com"}}]}"#,
+                ..NewRole::default()
+            },
+        )
+        .unwrap();
+    server
+        .iam
+        .put_inline(
+            Owner::Role("batch"),
+            "tag",
+            r#"{"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::manifests/*"},
+              {"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::photos/*"},
+              {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::reports/*"}]}"#,
+        )
+        .unwrap();
+
+    let made = cli
+        .ok(&[
+            "--json",
+            "batch",
+            "create",
+            "t/manifests/m.csv",
+            "--role",
+            "batch",
+            "--tag",
+            "team=blue",
+            "--report",
+            "reports/batch",
+            "--confirm",
+            "--description",
+            "tag them",
+        ])
+        .await;
+    let id = records(&made).remove(0)["id"].as_str().unwrap().to_owned();
+    let describe =
+        async || records(&cli.ok(&["--json", "batch", "describe", "t", &id]).await).remove(0);
+    // It waits to be confirmed.
+    let mut job = describe().await;
+    for _ in 0..200 {
+        if job["status"] == "Suspended" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        job = describe().await;
+    }
+    assert_eq!(job["status"], "Suspended", "{job}");
+    assert_eq!(job["operation"], "S3PutObjectTagging");
+    assert_eq!(job["description"], "tag them");
+    let listed = records(
+        &cli.ok(&["--json", "batch", "ls", "t", "--status", "Suspended"])
+            .await,
+    );
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], id.as_str());
+
+    let text = cli.ok(&["batch", "priority", "t", &id, "42"]).await;
+    assert!(text.contains("has priority 42"), "{text}");
+    let text = cli.ok(&["batch", "confirm", "t", &id]).await;
+    assert!(text.contains(&format!("job {id} is Ready")), "{text}");
+    for _ in 0..400 {
+        job = describe().await;
+        if job["status"] == "Complete" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(job["status"], "Complete", "{job}");
+    assert_eq!(job["priority"], 42);
+    assert_eq!(
+        (job["succeeded"].as_i64(), job["failed"].as_i64()),
+        (Some(2), Some(1))
+    );
+    assert_eq!(
+        job["report"],
+        format!("t/reports/batch/job-{id}/manifest.json").as_str()
+    );
+    let tags = s3
+        .get_object_tagging()
+        .bucket("photos")
+        .key("b c.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tag_set()[0].value(), "blue");
+
+    let report = cli.ok(&["batch", "report", "t", &id]).await;
+    assert!(
+        report.contains("photos,a.jpg,,succeeded,200,,Successful"),
+        "{report}"
+    );
+    assert!(
+        report.contains("photos,gone.jpg,,failed,404,NoSuchKey"),
+        "{report}"
+    );
+    // An ended job can't be cancelled; a missing one isn't there.
+    cli.fails(&["batch", "cancel", "t", &id], 6).await;
+    cli.fails(&["batch", "describe", "t", "nope"], 5).await;
+    // One operation, and a checksum needs a report.
+    cli.fails(
+        &["batch", "create", "t/manifests/m.csv", "--role", "batch"],
+        2,
+    )
+    .await;
+    cli.fails(
+        &[
+            "batch",
+            "create",
+            "t/manifests/m.csv",
+            "--role",
+            "batch",
+            "--untag",
+            "--replicate",
+        ],
+        2,
+    )
+    .await;
+    cli.fails(
+        &[
+            "batch",
+            "create",
+            "t/manifests/m.csv",
+            "--role",
+            "batch",
+            "--checksum",
+            "SHA256",
+        ],
+        2,
+    )
+    .await;
+}

@@ -1491,6 +1491,17 @@ aws s3control describe-job --account-id "$ACCOUNT" --job-id …
 aws s3control list-jobs --account-id "$ACCOUNT" --job-statuses Active Complete
 ```
 
+`teifs batch` does the same from the command line, reading the manifest's ETag and the
+account for you:
+
+```sh
+teifs batch create home/manifests/manifest.csv --role batch --tag team=blue \
+  --report reports/batch
+teifs batch ls home
+teifs batch describe home JOB-ID
+teifs batch report home JOB-ID
+```
+
 The manifest is read, counted and checked first, at the ETag given: a changed manifest,
 or a line that names no bucket or key, fails the job. With `--confirmation-required` the
 job then waits as `Suspended` until `aws s3control update-job-status

@@ -1584,6 +1584,125 @@ teifs replicate resync cancel [OPTIONS] <BUCKET>
 | `<BUCKET>` | `ALIAS/BUCKET`. |
 | `--remote-bucket <REMOTE_BUCKET>` | The destination: `ALIAS/BUCKET` (needed when there are several). |
 
+## teifs batch
+
+Run one operation on every object a manifest lists, as an IAM role (S3 Batch Operations): make jobs, list and show them, confirm, cancel or reprioritize them, and read their reports.
+
+```
+teifs batch [OPTIONS] <COMMAND>
+```
+
+## teifs batch create
+
+Make a job that runs one operation on every object a CSV manifest lists, as an IAM role (S3 Batch Operations).
+
+```
+teifs batch create [OPTIONS] --role <ROLE> <--tag <KEY=VALUE>|--untag|--legal-hold <on|off>|--retention <GOVERNANCE|COMPLIANCE|off>|--copy-to <BUCKET[/PREFIX]>|--acl <ACL>|--checksum <ALGORITHM>|--encrypt-kms <KMS_KEY_ARN>|--replicate> <MANIFEST>
+```
+
+| Argument | |
+|---|---|
+| `<MANIFEST>` | `ALIAS/BUCKET/KEY` of the CSV manifest: one object a line, `bucket,key` with the key URL-encoded (and `,version` with `--versions`). |
+| `--role <ROLE>` | The IAM role the tasks run as: its name, or its ARN. It must trust `batchoperations.s3.amazonaws.com`. |
+| `--versions` | The manifest's lines name each object's version in a third column. |
+| `--tag <KEY=VALUE>` | Replace each object's tags with these. |
+| `--untag` | Remove each object's tags. |
+| `--legal-hold <on|off>` | Put a legal hold on each object, or take it off. One of `on`, `off`. |
+| `--retention <GOVERNANCE|COMPLIANCE|off>` | Set each object's retention (with `--retain-until`), or take it off (`off`). One of `GOVERNANCE`, `COMPLIANCE`, `off`. |
+| `--retain-until <DATE>` | The day the retention ends, `YYYY-MM-DD`. |
+| `--bypass-governance` | Shorten or remove governance-mode retention too. |
+| `--copy-to <BUCKET[/PREFIX]>` | Copy each object into this bucket of the same server, under the prefix if given. |
+| `--acl <ACL>` | Give each object this canned ACL (`private`, `public-read`, …). |
+| `--checksum <ALGORITHM>` | Work out each object's checksum into the report (`CRC32`, `SHA256`, …): needs `--report`. |
+| `--checksum-type <TYPE>` | The checksum's type: of the full object (the default) or its parts. One of `FULL_OBJECT`, `COMPOSITE`. |
+| `--encrypt-kms <KMS_KEY_ARN>` | Move each SSE-S3 or SSE-KMS object to this KMS key in place (its full ARN). |
+| `--bucket-key` | With `--encrypt-kms`: use an S3 Bucket Key. |
+| `--replicate` | Replicate each object now by its bucket's replication rules (Batch Replication). |
+| `--report <BUCKET[/PREFIX]>` | Write a completion report into this bucket of the same server, under the prefix if given. |
+| `--failed-only` | Report only the tasks that failed. |
+| `--priority <PRIORITY>` | The job's priority: higher runs first. Default: `10`. |
+| `--confirm` | Wait to be confirmed (`teifs batch confirm`) before running. |
+| `--description <DESCRIPTION>` | What the job is for. |
+
+## teifs batch ls
+
+List the alias's jobs, newest first.
+
+```
+teifs batch ls [OPTIONS] <ALIAS>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `--status <STATUS>` | Only jobs in these statuses (`Active`, `Complete`, `Suspended`, …). |
+
+## teifs batch describe
+
+Show a job: its operation, status, progress, and why it failed.
+
+```
+teifs batch describe [OPTIONS] <ALIAS> <ID>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `<ID>` | The job's id. |
+
+## teifs batch confirm
+
+Let a job that waits to be confirmed run.
+
+```
+teifs batch confirm [OPTIONS] <ALIAS> <ID>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `<ID>` | The job's id. |
+
+## teifs batch cancel
+
+Cancel a job that hasn't ended.
+
+```
+teifs batch cancel [OPTIONS] <ALIAS> <ID>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `<ID>` | The job's id. |
+
+## teifs batch priority
+
+Change a job's priority: higher runs first.
+
+```
+teifs batch priority [OPTIONS] <ALIAS> <ID> <PRIORITY>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `<ID>` | The job's id. |
+| `<PRIORITY>` | Its new priority. |
+
+## teifs batch report
+
+Print a finished job's completion report, one task a line.
+
+```
+teifs batch report [OPTIONS] <ALIAS> <ID>
+```
+
+| Argument | |
+|---|---|
+| `<ALIAS>` | `ALIAS`. |
+| `<ID>` | The job's id. |
+
 ## teifs presign
 
 Make a link that gets (or, with `--put`, uploads) an object without keys.
