@@ -363,13 +363,18 @@ fn remove_data_file(set: Option<&crate::set::DriveSet>, path: &Path) -> bool {
     }
 }
 
+/// Where data file `object_id` of the object bucket whose folder is `dir` is.
+pub(crate) fn data_file(dir: &Path, object_id: &str) -> PathBuf {
+    let tail = &object_id[object_id.len().saturating_sub(4)..];
+    let (aa, bb) = tail.split_at(tail.len().min(2));
+    dir.join(aa).join(bb).join(object_id)
+}
+
 impl ObjectBucket {
     /// Where the data file `object_id` lives. The fan-out folders come from the id's
     /// random tail (a UUIDv7 starts with the time).
     pub(crate) fn data_path(&self, object_id: &str) -> PathBuf {
-        let tail = &object_id[object_id.len().saturating_sub(4)..];
-        let (aa, bb) = tail.split_at(tail.len().min(2));
-        self.dir.join(aa).join(bb).join(object_id)
+        data_file(&self.dir, object_id)
     }
 
     /// Opens data file `object_id` for reading.

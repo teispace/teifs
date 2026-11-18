@@ -48,7 +48,7 @@ impl Set {
     }
 
     fn open(&self, drives: &[PathBuf]) -> Result<Store> {
-        Store::open_set(drives, None, self.options())
+        Store::open_set(drives, SetOptions::default(), self.options())
     }
 
     fn open_all(&self) -> Store {
@@ -368,7 +368,14 @@ async fn sets_are_made_of_new_drives_and_their_members_only_open_together() {
     drop(store);
     // A set's parity can't be changed, nor a drive given twice.
     assert!(matches!(
-        Store::open_set(&set.drives, Some(1), set.options()),
+        Store::open_set(
+            &set.drives,
+            SetOptions {
+                parity: Some(1),
+                ..SetOptions::default()
+            },
+            set.options()
+        ),
         Err(StoreError::DriveSet(_))
     ));
     let twice = vec![
@@ -394,7 +401,14 @@ async fn sets_are_made_of_new_drives_and_their_members_only_open_together() {
     // Too much parity is refused.
     let wide = Set::new(4);
     assert!(matches!(
-        Store::open_set(&wide.drives, Some(3), wide.options()),
+        Store::open_set(
+            &wide.drives,
+            SetOptions {
+                parity: Some(3),
+                ..SetOptions::default()
+            },
+            wide.options()
+        ),
         Err(StoreError::DriveSet(_))
     ));
 }
@@ -424,4 +438,85 @@ fn default_parity_and_quorum_follow_minio() {
     assert_eq!(write_quorum(2, 2), 3);
     assert_eq!(write_quorum(12, 4), 12);
     assert_eq!(write_quorum(2, 1), 2);
+}
+
+/// Shards of `drive`'s data files.
+fn shard_count(drive: &Path) -> usize {
+    files(&drive.join(SYSTEM_DIR).join(BUCKETS_DIR)).len()
+}
+
+#[tokio::test]
+async fn heal_rebuilds_missing_and_damaged_shards() {
+    let set = Set::new(4);
+    let bytes = pattern((2 << 20) + 3, 9);
+    let store = set.open_all();
+    store.create_bucket("docs", Layout::Object).await.unwrap();
+    for key in ["a", "b", "c"] {
+        put_encrypted(&store, key, &bytes).await;
+    }
+    store.delete("docs", "c").await.unwrap();
+    assert_eq!(store.heal_set().await.unwrap().healed, 0);
+    // One drive's shards damaged, another's lost.
+    set.damage_shards(1);
+    for shard in files(&set.drives[2].join(SYSTEM_DIR).join(BUCKETS_DIR)) {
+        std::fs::remove_file(shard).unwrap();
+    }
+    let report = store.heal_set().await.unwrap();
+    assert_eq!((report.objects, report.healed, report.shards), (2, 2, 4));
+    assert_eq!(report.unreadable, 0);
+    assert_eq!(shard_count(&set.drives[2]), 2);
+    // Now any two drives can go again.
+    drop(store);
+    set.lose(0);
+    set.lose(3);
+    let store = set.open(&set.drives).unwrap();
+    assert_eq!(read(&store, "a").await.unwrap(), bytes);
+    assert_eq!(read(&store, "b").await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn a_new_drive_replaces_a_lost_one_and_is_healed() {
+    let set = Set::new(4);
+    let bytes = pattern(700_000, 4);
+    {
+        let store = set.open_all();
+        store.create_bucket("docs", Layout::Object).await.unwrap();
+        put_encrypted(&store, "a", &bytes).await;
+        store
+            .put_bytes("docs", "small", b"a small one", ObjectAttrs::default())
+            .await
+            .unwrap();
+    }
+    // Drive 1 dies; a new, empty disk is mounted in its place.
+    set.lose(1);
+    std::fs::create_dir(&set.drives[1]).unwrap();
+    // Without being asked, the new drive is left alone.
+    let store = set.open(&set.drives).unwrap();
+    let info = store.drive_set().unwrap();
+    assert!(info.drives[1].is_none() && info.replaced.is_empty());
+    drop(store);
+    assert!(std::fs::read_dir(&set.drives[1]).unwrap().next().is_none());
+    // Asked, it takes the lost drive's place, gets the metadata, and is healed.
+    let store = Store::open_set(
+        &set.drives,
+        SetOptions {
+            replace: true,
+            ..SetOptions::default()
+        },
+        set.options(),
+    )
+    .unwrap();
+    let info = store.drive_set().unwrap();
+    assert_eq!(info.replaced, [1]);
+    assert!(info.needs_heal && info.drives.iter().all(Option::is_some));
+    let report = store.heal_set().await.unwrap();
+    // Both objects (the tests keep even small ones in files) get their shard back.
+    assert_eq!((report.healed, report.shards), (2, 2));
+    drop(store);
+    // The new drive is a member like any other: with two others lost, it serves.
+    set.lose(0);
+    set.lose(2);
+    let store = set.open(&set.drives).unwrap();
+    assert_eq!(read(&store, "a").await.unwrap(), bytes);
+    assert_eq!(read(&store, "small").await.unwrap(), b"a small one");
 }

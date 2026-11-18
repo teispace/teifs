@@ -763,7 +763,10 @@ drive, staged in each drive's `.teifs/tmp`, synced and renamed in parallel) and
 `DriveSet::open_file` reads them back through `teifs_erasure::Reader`, rebuilding what's
 missing or damaged on the fly. The commit lock's guard (`Shipping`) ships each change to
 the databases' other copies when it's let go, so before the write is acknowledged; once
-too few copies are current, the copies' triggers refuse every change.
+too few copies are current, the copies' triggers refuse every change. `Store::heal_set`
+(`crates/store/src/heal.rs`) rebuilds failed copies, then pages through the index's
+data files and asks `DriveSet::heal_file` to verify each shard and rebuild the missing
+or damaged ones; the server runs it at start when a drive missed writes.
 
 ## Background jobs
 

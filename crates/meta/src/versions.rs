@@ -599,6 +599,21 @@ impl Index {
             .is_some())
     }
 
+    /// Object buckets' data files after `after`, in object id order, at most `limit`:
+    /// each as its bucket's id and its object id (what a drive set heals).
+    pub fn data_files_after(&self, after: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT bucket_id, object_id FROM object_versions
+             WHERE object_id > ?1 AND data IS NULL
+             GROUP BY object_id ORDER BY object_id LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![after, limit], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     /// Whether some version still uses the data file `object_id`.
     pub fn object_in_use(&self, object_id: &str) -> Result<bool> {
         Ok(self

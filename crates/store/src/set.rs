@@ -52,8 +52,23 @@ pub(crate) struct DriveSet {
     geometry: Geometry,
     quorum: usize,
     sync: bool,
+    /// Places a new, empty drive was given for at this open, replacing a lost one.
+    replaced: Vec<usize>,
+    /// Whether a drive missed writes, so objects need healing.
+    heal: bool,
     /// Each up drive's lock, held while the set is open.
     _locks: Vec<fs::File>,
+}
+
+/// How a set is opened.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SetOptions {
+    /// A new set's parity; `None` for [`default_parity`].
+    pub parity: Option<usize>,
+    /// Make new, empty drives given members in the places of lost ones (each takes a
+    /// lost drive's place, and is healed). Off, a new drive given to an existing set
+    /// is left alone: an empty folder may be a disk that isn't mounted.
+    pub replace: bool,
 }
 
 /// What opening a set's drives found.
@@ -69,7 +84,8 @@ impl DriveSet {
     /// any order: each member's `format.json` says its place. A new set gets `parity`
     /// (or [`default_parity`]). Drives that are missing or unreadable are down; the set
     /// opens while enough are up for its metadata (more than `drives - quorum`).
-    pub(crate) fn open(drives: &[PathBuf], parity: Option<usize>, sync: bool) -> Result<Opened> {
+    pub(crate) fn open(drives: &[PathBuf], options: SetOptions, sync: bool) -> Result<Opened> {
+        let SetOptions { parity, replace } = options;
         let n = drives.len();
         if !(2..=MAX_DRIVES).contains(&n) {
             return Err(StoreError::DriveSet(format!(
@@ -113,35 +129,18 @@ impl DriveSet {
         }
         let geometry = Geometry::new(set.data, set.parity, set.block_size)
             .map_err(|e| StoreError::DriveSet(e.to_string()))?;
-        // Each drive in its recorded place; a new (empty) drive, or one that's down,
-        // leaves its place empty for now.
-        let mut places: Vec<Option<(PathBuf, DriveFormat)>> = vec![None; n];
-        let mut roots: Vec<Option<PathBuf>> = vec![None; n];
-        for (path, format) in found.into_iter().flatten() {
-            let Some(format) = format else {
-                continue;
-            };
-            let Some(member) = &format.set else {
-                return Err(StoreError::DriveSet(format!(
-                    "{} is a single drive, not a member of this set",
-                    path.display()
-                )));
-            };
-            if member.id != set.id {
-                return Err(StoreError::DriveSet(format!(
-                    "{} belongs to another set",
-                    path.display()
-                )));
-            }
-            let index = member.index;
-            if index >= n || places[index].is_some() {
-                return Err(StoreError::DriveSet(format!(
-                    "{} claims a place another drive has",
-                    path.display()
-                )));
-            }
-            roots[index] = Some(path.clone());
-            places[index] = Some((path, format));
+        let (mut places, mut roots, mut fresh) = place(found, &set)?;
+        let replaced = if replace {
+            adopt(&set, &mut fresh, &mut roots, &mut places)?
+        } else {
+            Vec::new()
+        };
+        for path in &fresh {
+            tracing::warn!(
+                drive = %path.display(),
+                "a new, empty drive was given to the set and left alone: start with \
+                 `--replace-drives` to make it a member in a lost drive's place"
+            );
         }
         let quorum = write_quorum(set.data, set.parity);
         let up_count = places.iter().flatten().count();
@@ -167,6 +166,8 @@ impl DriveSet {
                 geometry,
                 quorum,
                 sync,
+                replaced,
+                heal: false,
                 _locks: locks,
             },
             format,
@@ -223,6 +224,8 @@ impl DriveSet {
                 geometry,
                 quorum: write_quorum(n - parity, parity),
                 sync,
+                replaced: Vec::new(),
+                heal: false,
                 _locks: locks,
             },
             format: home_format.expect("a set has drives"),
@@ -279,6 +282,21 @@ impl DriveSet {
     /// The drives by place (`None` where one is down).
     pub(crate) fn drives(&self) -> &[Option<PathBuf>] {
         &self.roots
+    }
+
+    /// Notes that a drive missed writes.
+    pub(crate) fn needs_heal(&mut self) {
+        self.heal = true;
+    }
+
+    /// Whether a drive missed writes when the set was opened.
+    pub(crate) fn heal_needed(&self) -> bool {
+        self.heal
+    }
+
+    /// Places whose drive was replaced by a new one at this open.
+    pub(crate) fn replaced(&self) -> &[usize] {
+        &self.replaced
     }
 
     /// `path` (under the home drive) on every drive, by place (`None` where the drive
@@ -443,6 +461,69 @@ impl DriveSet {
         }
     }
 
+    /// Checks each shard of object `id`'s data file at `path`'s place on the drives that
+    /// are up, and rebuilds those that are missing or damaged from the others: each
+    /// staged in its drive's `.teifs/tmp`, synced and renamed into place. The places of
+    /// the drives given a new shard.
+    pub(crate) fn heal_file(&self, path: &Path, id: &str) -> Result<Vec<usize>> {
+        let id16 = object_id(id)?;
+        let paths = self
+            .on_drives(path)
+            .ok_or(StoreError::InvalidRequest("a data file outside the drive"))?;
+        let mut reader = self.open_file(path, id)?;
+        let len = reader.len();
+        let mut bad = Vec::new();
+        for shard in 0..self.roots.len() {
+            let drive = self.drive_of(&id16, shard);
+            let Some(at) = &paths[drive] else {
+                continue;
+            };
+            let sound = fs::File::open(at)
+                .ok()
+                .and_then(|file| {
+                    teifs_erasure::verify(id16, self.geometry, &mut BufReader::new(file)).ok()
+                })
+                .is_some_and(|header| header.index == shard && header.len == len);
+            if !sound {
+                bad.push((shard, drive, at));
+            }
+        }
+        let mut healed = Vec::new();
+        for (shard, drive, at) in bad {
+            let root = self.roots[drive].as_ref().expect("the drive is up");
+            let staged = root
+                .join(SYSTEM_DIR)
+                .join("tmp")
+                .join(format!("{}.shard", uuid::Uuid::new_v4().simple()));
+            let written = (|| -> Result<()> {
+                let mut sink = BufWriter::with_capacity(1 << 20, fs::File::create(&staged)?);
+                reader
+                    .write_shard(shard, &mut sink)
+                    .map_err(io::Error::from)?;
+                let file = sink.into_inner().map_err(io::IntoInnerError::into_error)?;
+                if self.sync {
+                    file.sync_all()?;
+                }
+                drop(file);
+                let parent = at.parent().ok_or_else(|| io::Error::other("no folder"))?;
+                create_parents(parent, at)?;
+                fs::rename(&staged, at)?;
+                if self.sync {
+                    sync_dir(parent)?;
+                }
+                Ok(())
+            })();
+            let _ = fs::remove_file(&staged);
+            match written {
+                Ok(()) => healed.push(drive),
+                Err(err) => {
+                    tracing::warn!(drive = %root.display(), error = %err, "a shard couldn't be healed");
+                }
+            }
+        }
+        Ok(healed)
+    }
+
     /// Removes the shards at `path`'s place; whether none is left on the drives that
     /// are up (one on a drive that's down is removed when it's healed).
     pub(crate) fn remove(&self, path: &Path) -> bool {
@@ -460,6 +541,84 @@ impl DriveSet {
         self.on_drives(path)
             .is_some_and(|paths| paths.iter().flatten().any(|p| p.exists()))
     }
+}
+
+/// The drives found in their recorded places (and their roots), and the new, empty
+/// drives found, which have none yet. A drive that's down leaves its place empty.
+type Placed = (
+    Vec<Option<(PathBuf, DriveFormat)>>,
+    Vec<Option<PathBuf>>,
+    Vec<PathBuf>,
+);
+
+/// Puts each drive found in the place its record gives in `set`.
+fn place(found: Vec<Option<(PathBuf, Option<DriveFormat>)>>, set: &SetFormat) -> Result<Placed> {
+    let mut places: Vec<Option<(PathBuf, DriveFormat)>> = vec![None; set.drives.len()];
+    let mut roots: Vec<Option<PathBuf>> = vec![None; set.drives.len()];
+    let mut fresh = Vec::new();
+    for (path, format) in found.into_iter().flatten() {
+        let Some(format) = format else {
+            fresh.push(path);
+            continue;
+        };
+        let Some(member) = &format.set else {
+            return Err(StoreError::DriveSet(format!(
+                "{} is a single drive, not a member of this set",
+                path.display()
+            )));
+        };
+        if member.id != set.id {
+            return Err(StoreError::DriveSet(format!(
+                "{} belongs to another set",
+                path.display()
+            )));
+        }
+        let index = member.index;
+        if index >= set.drives.len() || places[index].is_some() {
+            return Err(StoreError::DriveSet(format!(
+                "{} claims a place another drive has",
+                path.display()
+            )));
+        }
+        roots[index] = Some(path.clone());
+        places[index] = Some((path, format));
+    }
+    Ok((places, roots, fresh))
+}
+
+/// Makes the new, empty drives in `fresh` members in the places of lost ones (as many
+/// as there are such places), each with the lost drive's id. The places filled.
+fn adopt(
+    set: &SetFormat,
+    fresh: &mut Vec<PathBuf>,
+    roots: &mut [Option<PathBuf>],
+    places: &mut [Option<(PathBuf, DriveFormat)>],
+) -> Result<Vec<usize>> {
+    let mut replaced = Vec::new();
+    let empty: Vec<usize> = (0..places.len()).filter(|i| places[*i].is_none()).collect();
+    for (place, path) in empty.into_iter().zip(fresh.drain(..)) {
+        let record = DriveFormat {
+            format: SET_FORMAT,
+            // The lost drive's id: the other members' records stay as they are.
+            drive: set.drives[place].clone(),
+            created: format::now_rfc3339(),
+            set: Some(SetFormat {
+                index: place,
+                ..set.clone()
+            }),
+        };
+        let system = path.join(SYSTEM_DIR);
+        fs::create_dir_all(&system)?;
+        format::write_atomic(
+            &system.join(format::FORMAT_FILE),
+            &serde_json::to_vec_pretty(&record).expect("the format serializes"),
+        )?;
+        tracing::warn!(drive = %path.display(), place, "a new drive replaces a lost one");
+        roots[place] = Some(path.clone());
+        places[place] = Some((path, record));
+        replaced.push(place);
+    }
+    Ok(replaced)
 }
 
 /// Fails when a drive is given twice (by two paths to it, say).
