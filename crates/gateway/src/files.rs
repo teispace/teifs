@@ -563,6 +563,39 @@ impl Files {
             .map_err(|err| s3_error(&err))
     }
 
+    /// Copies the file `from` to `to` (5 GiB at most, S3's `CopyObject`), replacing a
+    /// file there only when `replace`.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::Exists`] when `to` is there and not to be replaced.
+    pub async fn copy(&self, from: &Location, to: &Location, replace: bool) -> Result<(), FsError> {
+        let (Some((from_bucket, from_key)), Some((to_bucket, to_key))) =
+            (from.object(), to.object())
+        else {
+            return Err(FsError::Unsupported("copying buckets"));
+        };
+        let source = self.stat(from).await?;
+        if source.kind == Kind::Folder {
+            return Err(FsError::Unsupported("copying folders"));
+        }
+        if source.size > MAX_COPY {
+            return Err(FsError::Unsupported("copying a file over 5 GiB"));
+        }
+        self.s3
+            .copy_object()
+            .bucket(to_bucket)
+            .key(to_key)
+            .copy_source(
+                utf8_percent_encode(&format!("{from_bucket}/{from_key}"), SOURCE).to_string(),
+            )
+            .set_if_none_match((!replace).then(|| "*".to_owned()))
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|err| s3_error(&err))
+    }
+
     /// Opens the file `at` to read.
     ///
     /// # Errors

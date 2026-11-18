@@ -8,18 +8,22 @@ mod attempts;
 mod backend;
 pub mod files;
 pub mod sftp;
+pub mod webdav;
 
 use std::{net::SocketAddr, path::PathBuf};
 
 pub use attempts::{Attempts, MAX_FAILURES, WINDOW};
 pub use backend::{Backend, Key, SignInError};
 pub use sftp::{Sftp, SftpConfig};
+pub use webdav::{WebDav, WebDavConfig};
 
 /// The gateways a server serves, each off unless configured.
 #[derive(Debug, Clone, Default)]
 pub struct Gateways {
     /// The SFTP gateway.
     pub sftp: Option<SftpConfig>,
+    /// The WebDAV gateway.
+    pub webdav: Option<WebDavConfig>,
 }
 
 /// Why a gateway couldn't start.
@@ -32,6 +36,17 @@ pub enum GatewayError {
         address: SocketAddr,
         /// Why.
         source: std::io::Error,
+    },
+    /// A gateway that would carry secrets in the clear, off a loopback address.
+    #[error(
+        "{protocol} on {address} would send secrets in the clear: give the server \
+         certificates (--certs-dir) or listen on a loopback address such as 127.0.0.1"
+    )]
+    Plaintext {
+        /// The address.
+        address: SocketAddr,
+        /// Which gateway.
+        protocol: &'static str,
     },
     /// The SFTP host key can't be read or made.
     #[error("the SFTP host key {path} can't be used: {why}")]

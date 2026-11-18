@@ -651,6 +651,46 @@ connections close after 10 minutes, 256 connections are served at once, and a se
 holds at most 64 open files and 4 uploads. SSH runs with aws-lc-rs's cryptography and
 offers Ed25519 and ECDSA keys; RSA isn't offered.
 
+## WebDAV
+
+The buckets can also be a WebDAV share, for Finder (Go › Connect to Server), Windows
+Explorer and `net use`, GNOME Files, Cyberduck, `rclone`'s `webdav` backend and the like.
+It's off until you give it an address:
+
+```sh
+teifs serve /srv/drive --certs-dir /etc/teifs/certs --webdav-address 0.0.0.0:9443
+# then connect to https://s3.example.com:9443/ with the access key and its secret
+```
+
+| Setting | What it is |
+|---|---|
+| `--webdav-address ADDR` | Where WebDAV is served (`TEIFS_WEBDAV_ADDRESS`); off without it |
+
+It's HTTPS with the server's certificates (`--certs-dir` or `--tls-cert`, reloaded with
+them). Without certificates it's plain HTTP, and only on a loopback address: the server
+refuses to start otherwise, since Basic authentication would carry the secret in the
+clear.
+
+People sign in with HTTP Basic authentication, the **access key as the user name and its
+secret as the password**, and get what the key's policies allow, as over SFTP: every
+operation is an S3 request signed with the key, in the audit log under the user agent
+`app/teifs-webdav`. A key STS has checked is taken for five minutes without asking again,
+but each S3 request is still checked, so a removed key stops working at once.
+
+The same view as over SFTP: `/` is the buckets (`MKCOL` there creates one), folders are
+prefixes, `PUT` uploads the file whole (in parts as it arrives), `GET` and `HEAD` read
+it, ranges included, `MOVE` and `COPY` move and copy files (`Overwrite: F` honoured),
+`DELETE` removes files and empty folders, and `PROPFIND` lists a page of 1,000 at a time
+as it's read. Putting a file into a folder that isn't there yet makes the folder, as S3
+prefixes do. Locks are accepted and not enforced (dav-server's fake lock system, which
+macOS and Windows need before they write), dead properties aren't stored, and folders
+and buckets can't be moved or copied. Partial `PUT`s (`Content-Range`) and appends
+aren't possible.
+
+An address that fails to sign in 10 times in 10 minutes gets `429` until then. 1,024
+connections are served at once, and a client has 30 seconds to send a request's
+headers.
+
 ## Metrics
 
 `GET /.teifs/metrics` serves Prometheus metrics in the OpenMetrics text format, which

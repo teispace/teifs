@@ -273,6 +273,29 @@ folders and buckets, links. Errors map to `SSH_FX_NO_SUCH_FILE` (`404`),
 `SSH_FX_PERMISSION_DENIED` (`403`) and `SSH_FX_FAILURE` with S3's code and message.
 Only current versions are shown. A file being uploaded appears when it's closed.
 
+## WebDAV gateway
+
+`teifs serve --webdav-address` serves the buckets over WebDAV (RFC 4918 class 1, with
+class 2's locks accepted and not enforced), as RustFS's WebDAV gateway does, through the
+same file view as SFTP:
+
+| WebDAV | S3 |
+|---|---|
+| Basic authentication | `sts:GetCallerIdentity` with the key, at most every five minutes |
+| `PROPFIND` (`Depth: 0` or `1`) | `ListBuckets`, `HeadBucket`, `HeadObject`, `ListObjectsV2` (paged) |
+| `MKCOL` | `CreateBucket` at the top, else `PutObject dir/` |
+| `PUT` | `PutObject`, or a multipart upload in parts as the body arrives; `If-None-Match: *` sends `If-None-Match: *` |
+| `GET`, `HEAD` (with `Range`) | `GetObject` with `Range` and `If-Match` |
+| `MOVE` | `RenameObject`, or `CopyObject` and `DeleteObject` |
+| `COPY` | `CopyObject` (5 GiB at most) |
+| `DELETE` | `DeleteObject`, `DeleteObject dir/` or `DeleteBucket` (empty folders and buckets only) |
+| `LOCK`, `UNLOCK` | Nothing: accepted, not enforced |
+| `PROPPATCH` | Nothing stored |
+
+Not supported: `PUT` with `Content-Range`, moving or copying folders and buckets, and
+`PROPFIND` with `Depth: infinity` (`501`). A `PUT` into a folder
+not made yet makes it, as S3 prefixes do, where RFC 4918 answers `409`.
+
 ## Bucket layouts
 
 A bucket is either an **object bucket** (the default: objects stored by id, every key S3

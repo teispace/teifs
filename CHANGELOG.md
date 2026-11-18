@@ -7,6 +7,11 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- A WebDAV gateway: `teifs serve --webdav-address 0.0.0.0:9443` serves the buckets as a
+  WebDAV share (Finder, Windows Explorer, Cyberduck, `rclone`), over HTTPS with the
+  server's certificates (plain HTTP only on loopback). People sign in with Basic
+  authentication, an access key and its secret, and every operation is an S3 request
+  signed with that key, as over SFTP. Off by default.
 - An SFTP gateway: `teifs serve --sftp-address 0.0.0.0:2222` serves the buckets over
   SFTP to tools that don't speak S3. People sign in with an access key and its secret;
   every operation is an S3 request signed with that key, so policies, the audit log and

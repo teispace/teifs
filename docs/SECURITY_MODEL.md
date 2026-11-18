@@ -592,7 +592,7 @@ authorities as `rustls-native-certs` finds them), so a server passes or fails al
 before anything is sent, rather than falling back to the system's authorities alone.
 
 ### 18. File-protocol gateways are S3 clients, never a way around S3
-The SFTP gateway (`crates/gateway`) has no authority of its own and no access to the
+The SFTP and WebDAV gateways (`crates/gateway`) has no authority of its own and no access to the
 store: a person signs in with an access key and its secret, which STS's
 `GetCallerIdentity` checks through the S3 service, and each file operation is an S3
 request signed with that key and sent to the same service the S3 listener serves, over
@@ -608,7 +608,12 @@ owner-only (`0600`, in a `0700` folder) off the drive, and refused at start when
 can read it, as `sshd` refuses it. Only the `sftp` subsystem is served: shells, commands,
 port forwarding and agents are refused. SSH uses russh with aws-lc-rs; the `rsa` crate
 (RUSTSEC-2023-0071) isn't built in, so RSA keys aren't offered. Tested end to end with a
-real SSH client in `crates/server/tests/sftp.rs`.
+real SSH client in `crates/server/tests/sftp.rs`. WebDAV signs in with HTTP Basic
+authentication and is served only over HTTPS with the server's certificates, or plain on
+a loopback address (anything else is refused at start); an address over its failures
+gets `429`; a checked key is remembered for five minutes as its id and the SHA-256 of its
+secret, never the secret, and its S3 requests are still each checked; answers carry
+`X-Content-Type-Options: nosniff` (`crates/server/tests/webdav.rs`).
 
 ## Data safety
 
