@@ -1,0 +1,21 @@
+[package]
+name = "teifs-erasure"
+description = "TeiFS's erasure coding: Reed-Solomon shards of a drive set, with a hash per block"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+reed-solomon-simd.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -34,6 +34,12 @@ crates/crypto   teifs-crypto   Encryption at rest (docs/ENCRYPTION_FORMAT.md): d
                                sealing, 64 KiB authenticated packages, SSE-C keys, the
                                KMS trait, the local keyring and the external KMS
                                backends (transit, KES, AWS KMS).
+crates/erasure  teifs-erasure  Erasure coding for drive sets (ON_DISK_FORMAT.md, "Shard
+                               files"): a file in 1 MiB blocks, each Reed-Solomon coded
+                               (reed-solomon-simd, GF(2^16)) into data and parity pieces,
+                               one shard file per piece index, a hash in front of every
+                               piece; reading back from any `data` good shards, verifying
+                               a shard, rebuilding a lost one. Bytes only: no paths.
 crates/policy   teifs-policy   The IAM policy language: parsing, conditions, policy
                                variables, the allow/deny decision, and which S3
                                actions each S3 operation needs. Pure: no I/O.

@@ -38,6 +38,7 @@ before speed.
 crates/types    shared types with no I/O: names, keys, attributes, stamps, ETags
 crates/meta     SQLite: the object index and the system database (all SQL lives here)
 crates/crypto   encryption at rest: keys, sealing, packages, SSE-C, KMS (aws-lc-rs)
+crates/erasure  erasure coding: Reed-Solomon shard files with a hash per block (drive sets)
 crates/store    the storage engine: drive format, buckets, writes, reads, listing, multipart
 crates/s3       the S3 operations over a store (s3s's `S3` trait)
 crates/server   credentials, the HTTP listener, Server::bind / run
@@ -63,7 +64,7 @@ docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRY
   SeaweedFS, all in Docker with the same limits (needs Docker and Python 3); measure a
   performance change with it before and after.
 - `cargo test -p <crate> <name>`: a subset. Crates: `teifs-types`, `teifs-meta`,
-  `teifs-crypto`, `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
+  `teifs-crypto`, `teifs-erasure`, `teifs-store`, `teifs-s3`, `teifs-server`, `teifs`.
 - `cargo run -p teifs -- serve <dir>`: run a server; drive it with the AWS CLI
   (`AWS_ENDPOINT_URL=http://127.0.0.1:9000`) to check a change end to end.
 
