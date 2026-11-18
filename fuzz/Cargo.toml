@@ -1,0 +1,83 @@
+# Fuzz targets for the parsers that read what clients send (cargo-fuzz, nightly Rust).
+# Its own workspace, so the main one's checks, lock file and cargo-deny don't cover it:
+# see fuzz/README.md.
+[package]
+name = "teifs-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+s3s = { version = "0.17", features = ["minio"] }
+teifs-iam = { path = "../crates/iam", features = ["fuzzing"] }
+teifs-policy = { path = "../crates/policy" }
+teifs-s3 = { path = "../crates/s3", features = ["fuzzing"] }
+teifs-types = { path = "../crates/types" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "object_key"
+path = "fuzz_targets/object_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_json"
+path = "fuzz_targets/policy_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bucket_config_xml"
+path = "fuzz_targets/bucket_config_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "create_job_xml"
+path = "fuzz_targets/create_job_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_csv"
+path = "fuzz_targets/manifest_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_chunked"
+path = "fuzz_targets/aws_chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "saml_xml"
+path = "fuzz_targets/saml_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_kv"
+path = "fuzz_targets/config_kv.rs"
+test = false
+doc = false
+bench = false

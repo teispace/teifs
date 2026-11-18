@@ -312,6 +312,12 @@ async fn create(
     xml("CreateJobResult", &Created { job_id: id })
 }
 
+/// A `CreateJobRequest` body read and checked as `CreateJob` does, for the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn job_of_body(body: &[u8]) -> bool {
+    read_xml(body, "CreateJobRequest").and_then(job_of).is_ok()
+}
+
 /// A job from a `CreateJobRequest`, with its priority.
 fn job_of(request: CreateJob) -> S3Result<(OperationJob, i32)> {
     let token = request

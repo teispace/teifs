@@ -391,6 +391,15 @@ fn lines(bytes: &[u8]) -> impl Iterator<Item = (Result<Option<&str>, String>, us
     })
 }
 
+/// A piece's tasks, as a job reads them, for the fuzz targets: how many lines named one.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn tasks_of(piece: &[u8], fields: &[ManifestField]) -> usize {
+    lines(piece)
+        .filter_map(|(line, _)| line.ok().flatten())
+        .filter(|line| task(line, fields).is_ok())
+        .count()
+}
+
 /// The object a manifest's line names.
 pub(crate) fn task(line: &str, fields: &[ManifestField]) -> Result<Task, String> {
     let columns = columns(line)?;

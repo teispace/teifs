@@ -1,0 +1,1 @@
+{"Version":"2012-10-17","Statement":[{"Sid":"Read","Effect":"Allow","Principal":{"AWS":["arn:aws:iam::123456789012:user/alice"]},"Action":["s3:GetObject","s3:List*"],"Resource":["arn:aws:s3:::photos/*","arn:aws:s3:::photos"],"Condition":{"StringLike":{"s3:prefix":["2026/*"]},"IpAddress":{"aws:SourceIp":"10.0.0.0/8"},"DateLessThan":{"aws:CurrentTime":"2030-01-01T00:00:00Z"}}}]}

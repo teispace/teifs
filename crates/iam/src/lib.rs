@@ -12,6 +12,9 @@ mod api;
 mod bearer;
 mod builtin;
 pub mod certificate;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod ids;
 pub mod ldap;
 mod oidc;

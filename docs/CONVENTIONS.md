@@ -74,6 +74,9 @@ test -p teifs-meta schemas`) and upgrades a database of every version with rows 
   `/`, the names of what lies beside it), checked to catch a broken guard before it's
   kept. Examples: `crates/store/src/property_tests.rs`, `crates/types/src/names.rs`.
   A failing case proptest saves under `proptest-regressions/` is committed with its fix.
+- A parser of what a client sends that's reachable from a request also gets a fuzz
+  target in `fuzz/` (see `fuzz/README.md`): CI runs each every night, and an input that
+  crashes one is fixed with a unit test and added to its seeds.
 - A change to how a write reaches the disk keeps `crates/store/tests/crash.rs` passing:
   a child process writes until it's killed, and every acknowledged write must be there
   after. The nightly run kills it 200 times (`TEIFS_CRASH_ROUNDS`), and 200 more on a

@@ -44,6 +44,7 @@ crates/server   credentials, the HTTP listener, Server::bind / run
 apps/cli        the `teifs` command
 tests/s3-tests  the ceph/s3-tests runner and its three lists (implemented, not yet, excluded)
 tests/bench     benchmarks: TeiFS and other S3 servers in Docker, driven by warp
+fuzz            cargo-fuzz targets for the parsers (own workspace, nightly Rust)
 xtask           project tasks (`cargo xtask verify`)
 docs/           ARCHITECTURE, CONVENTIONS, SECURITY_MODEL, ON_DISK_FORMAT, ENCRYPTION_FORMAT,
                 COMPATIBILITY, ADMIN_API (its endpoint tables generated from the route table)
