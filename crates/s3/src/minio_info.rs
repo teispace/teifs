@@ -83,7 +83,7 @@ pub(crate) struct Disk {
     path: String,
     state: &'static str,
     #[serde(skip_serializing_if = "String::is_empty")]
-    uuid: String,
+    pub(crate) uuid: String,
     major: u32,
     minor: u32,
     #[serde(rename = "totalspace")]
@@ -279,6 +279,9 @@ struct DataUsageInfo {
 /// The disks the drive uses, as `madmin` describes drives; none (logged) when they
 /// can't be read.
 pub(crate) async fn disks(routes: &Routes) -> Vec<Disk> {
+    if let Some(set) = routes.store.drive_set() {
+        return set_disks(routes, &set).await;
+    }
     let disks = routes
         .store
         .disks()
@@ -306,6 +309,52 @@ pub(crate) async fn disks(routes: &Routes) -> Vec<Disk> {
                 total_space: disk.total,
                 used_space: disk.total.saturating_sub(disk.available),
                 available_space: disk.available,
+                used_inodes: 0,
+                local: true,
+                pool_index: 0,
+                set_index: 0,
+                index,
+            }
+        })
+        .collect()
+}
+
+/// A drive set's drives, by place, as `madmin` describes drives: a drive that's down is
+/// `offline`, one whose copy of the metadata failed `faulty`.
+async fn set_disks(routes: &Routes, set: &teifs_store::DriveSetInfo) -> Vec<Disk> {
+    let disks = routes.store.disks().await.unwrap_or_default();
+    let health = routes
+        .store
+        .heal_status()
+        .await
+        .inspect_err(|err| tracing::error!(error = %err, "can't read how the drive set heals"))
+        .ok()
+        .flatten();
+    set.paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let disk = set.drives[index]
+                .as_ref()
+                .and_then(|root| disks.iter().find(|d| &d.path == root));
+            let state = match health.as_ref().map(|h| h.drives[index].state) {
+                Some(teifs_store::DriveState::Offline) => "offline",
+                Some(teifs_store::DriveState::Failing) => "faulty",
+                _ if disk.is_none() => "offline",
+                _ => "ok",
+            };
+            let (total, available) = disk.map_or((0, 0), |d| (d.total, d.available));
+            let path = path.display().to_string();
+            Disk {
+                endpoint: path.clone(),
+                path,
+                state,
+                uuid: set.ids.get(index).cloned().unwrap_or_default(),
+                major: 0,
+                minor: 0,
+                total_space: total,
+                used_space: total.saturating_sub(available),
+                available_space: available,
                 used_inodes: 0,
                 local: true,
                 pool_index: 0,

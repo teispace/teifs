@@ -192,6 +192,9 @@ fn server(info: &ServerInfo) -> Vec<Check> {
         let found = checks::disk(&disk.path, disk.total, disk.free, disk.reserved);
         checks.push(Check::named("Disk", found));
     }
+    if let Some(set) = &info.drive_set {
+        checks.push(drive_set(set));
+    }
     for (name, job) in &info.jobs {
         if let Some(error) = &job.last_error {
             checks.push(Check::new(
@@ -216,6 +219,42 @@ fn server(info: &ServerInfo) -> Vec<Check> {
         checks.push(Check::new("Scrub", State::Ok, "found no damage"));
     }
     checks
+}
+
+/// How a drive set's drives are: a warning while one is down, failing or being healed,
+/// failed once it has lost more than its parity.
+fn drive_set(set: &teifs_types::admin::DriveSetStatus) -> Check {
+    let not_ok: Vec<String> = set
+        .drives
+        .iter()
+        .filter(|d| d.state != "ok")
+        .map(|d| format!("{} {}", d.path, d.state))
+        .collect();
+    let lost = set.drives.iter().filter(|d| d.state == "offline").count();
+    let shape = format!(
+        "{} drives, {} data + {} parity",
+        set.drives.len(),
+        set.data,
+        set.parity
+    );
+    let queued = if set.heal_queued > 0 {
+        format!("; {} objects waiting to be healed", set.heal_queued)
+    } else {
+        String::new()
+    };
+    let state = if lost > set.parity {
+        State::Failed
+    } else if !not_ok.is_empty() || set.heal_queued > 0 {
+        State::Warning
+    } else {
+        State::Ok
+    };
+    let detail = if not_ok.is_empty() {
+        format!("{shape}, all ok{queued}")
+    } else {
+        format!("{shape}: {}{queued}", not_ok.join(", "))
+    };
+    Check::new("Drive set", state, detail)
 }
 
 #[cfg(test)]
@@ -278,6 +317,7 @@ mod tests {
             jobs: std::collections::BTreeMap::new(),
             scrub: teifs_types::verify::ScrubReport::default(),
             usage: None,
+            drive_set: None,
             disks: vec![
                 DiskInfo {
                     path: "/ok".into(),
@@ -334,5 +374,38 @@ mod tests {
         );
         info.scrub.last = Some(teifs_types::verify::ScrubPass::default());
         assert_eq!(server(&info).last().unwrap().state, State::Ok);
+    }
+
+    #[test]
+    fn a_drive_set_warns_while_a_drive_is_down_and_fails_past_its_parity() {
+        use teifs_types::admin::{DriveSetStatus, SetDrive};
+        let drive = |place: usize, state: &str| SetDrive {
+            place,
+            path: format!("/d{place}"),
+            state: state.into(),
+        };
+        let mut set = DriveSetStatus {
+            data: 2,
+            parity: 1,
+            drives: vec![drive(0, "ok"), drive(1, "ok"), drive(2, "ok")],
+            ..DriveSetStatus::default()
+        };
+        let found = drive_set(&set);
+        assert_eq!(
+            (found.state, found.detail.as_str()),
+            (State::Ok, "3 drives, 2 data + 1 parity, all ok")
+        );
+        set.drives[1].state = "offline".into();
+        set.heal_queued = 4;
+        let found = drive_set(&set);
+        assert_eq!(
+            (found.state, found.detail.as_str()),
+            (
+                State::Warning,
+                "3 drives, 2 data + 1 parity: /d1 offline; 4 objects waiting to be healed"
+            )
+        );
+        set.drives[2].state = "offline".into();
+        assert_eq!(drive_set(&set).state, State::Failed);
     }
 }

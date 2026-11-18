@@ -3,12 +3,18 @@
 //!
 //! A heal sequence goes through the buckets, or one bucket's objects under a prefix,
 //! and reports each as a `madmin.HealResultItem`, which the caller collects by polling
-//! with the sequence's token, as `MinIO`'s do. A drive keeps one copy, so there's no
-//! other to heal from: a sequence checks and reports, and changes nothing. A normal scan
-//! reads each version's metadata; a deep one (`--scan deep`) reads its bytes and
+//! with the sequence's token, as `MinIO`'s do. A single drive keeps one copy, so there's
+//! no other to heal from: a sequence checks and reports, and changes nothing. A normal
+//! scan reads each version's metadata; a deep one (`--scan deep`) reads its bytes and
 //! compares them with what was recorded, as `teifs verify` does.
 //!
-//! The background heal is the drive's scrub: its status counts what the scrub checked.
+//! On a drive set, a sequence rebuilds the metadata's failed copies, then checks each
+//! version's shard on every drive (a normal scan its header and length, a deep one every
+//! piece's hash) and rebuilds those missing or damaged, unless it's a dry run; each
+//! result lists every drive's state before and after.
+//!
+//! The background heal is the drive's scrub (and on a drive set, its heal queue): its
+//! status counts what the scrub checked and what the queue healed.
 
 use std::{
     collections::HashMap,
@@ -20,7 +26,7 @@ use std::{
 use http::StatusCode;
 use s3s::{Body, S3Error, S3Request, S3Response, S3Result};
 use serde::{Deserialize, Serialize};
-use teifs_store::{Store, StoreError, Verdict, VersionsQuery};
+use teifs_store::{HealOptions, ObjectHeal, ShardState, Store, StoreError, Verdict, VersionsQuery};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio_util::sync::CancellationToken;
 
@@ -442,16 +448,22 @@ async fn heal(routes: &Routes, mut req: S3Request<Body>) -> S3Result<S3Response<
         }),
     });
     heals.launch(&path, &sequence)?;
-    let drive = minio_info::disks(routes)
+    let mut drives: Vec<(String, String)> = minio_info::disks(routes)
         .await
         .into_iter()
-        .next()
-        .map(|disk| disk.endpoint)
-        .unwrap_or_default();
+        .map(|disk| (disk.uuid, disk.endpoint))
+        .collect();
+    // A single drive: its own disk, which carries its id.
+    if routes.store.drive_set().is_none() {
+        drives.truncate(1);
+        if let Some(drive) = drives.first_mut() {
+            drive.0.clone_from(&routes.store.format().drive);
+        }
+    }
     let walk = Walk {
         store: routes.store.clone(),
         sequence: Arc::clone(&sequence),
-        drive: (routes.store.format().drive.clone(), drive),
+        drives,
     };
     tokio::spawn(async move {
         let ended = walk.run(&asked.bucket, &asked.prefix).await;
@@ -482,12 +494,34 @@ fn answer(body: Vec<u8>) -> S3Response<Body> {
 struct Walk {
     store: Store,
     sequence: Arc<Sequence>,
-    /// The drive's id and where it is.
-    drive: (String, String),
+    /// Each drive's id and where it is: the drive, or a drive set's drives by place.
+    drives: Vec<(String, String)>,
+}
+
+/// What checking a version found: each drive's state before and after, and what's wrong.
+struct Checked {
+    before: Vec<&'static str>,
+    after: Vec<&'static str>,
+    detail: String,
+}
+
+impl Checked {
+    /// One drive's state, the same after (nothing is changed).
+    fn one(state: &'static str, detail: String) -> Self {
+        Self {
+            before: vec![state],
+            after: vec![state],
+            detail,
+        }
+    }
 }
 
 impl Walk {
     async fn run(&self, bucket: &str, prefix: &str) -> Result<(), Ended> {
+        // On a drive set, the metadata's copies first: what every object's heal relies on.
+        if self.store.drive_set().is_some() && !self.sequence.settings.dry_run {
+            self.store.heal_copies().await.map_err(|err| failed(&err))?;
+        }
         let buckets = if bucket.is_empty() {
             let mut buckets = self
                 .store
@@ -504,8 +538,13 @@ impl Walk {
             if self.sequence.stop.is_cancelled() {
                 return Err(Ended::Stopped);
             }
+            let ok = Checked {
+                before: vec!["ok"; self.drives.len()],
+                after: vec!["ok"; self.drives.len()],
+                detail: String::new(),
+            };
             self.sequence
-                .report(self.item("bucket", &bucket, ("", ""), ("ok", String::new()), 0))
+                .report(self.item("bucket", &bucket, ("", ""), ok, 0))
                 .await?;
             self.objects(&bucket, prefix).await?;
         }
@@ -540,7 +579,7 @@ impl Walk {
                 }
                 let info = version.info;
                 let version_id = info.version_id.unwrap_or_default();
-                let Some(state) = self.check(bucket, &info.key, &version_id).await? else {
+                let Some(checked) = self.check(bucket, &info.key, &version_id).await? else {
                     continue;
                 };
                 let shown = if version_id == "null" {
@@ -548,7 +587,7 @@ impl Walk {
                 } else {
                     &version_id
                 };
-                let item = self.item("object", bucket, (&info.key, shown), state, info.size);
+                let item = self.item("object", bucket, (&info.key, shown), checked, info.size);
                 self.sequence.report(item).await?;
             }
             if !listing.truncated {
@@ -561,33 +600,63 @@ impl Walk {
         }
     }
 
-    /// A version's state on the drive and what's wrong with it; none when it's gone.
+    /// A version's state on each drive and what's wrong with it; none when it's gone.
+    /// On a drive set, shards missing or damaged are rebuilt (unless it's a dry run).
     async fn check(
         &self,
         bucket: &str,
         key: &str,
         version_id: &str,
-    ) -> Result<Option<(&'static str, String)>, Ended> {
-        if self.sequence.settings.scan_mode == DEEP_SCAN {
+    ) -> Result<Option<Checked>, Ended> {
+        let deep = self.sequence.settings.scan_mode == DEEP_SCAN;
+        if self.store.drive_set().is_some() {
+            let options = HealOptions {
+                deep,
+                dry_run: self.sequence.settings.dry_run,
+            };
+            return match self
+                .store
+                .heal_object(bucket, key, Some(version_id), options)
+                .await
+            {
+                Ok(Some(healed)) => Ok(Some(set_checked(&healed))),
+                Ok(None) => Ok(Some(Checked::one("ok", String::new()))),
+                Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(None),
+                Err(StoreError::Quorum { found, needed }) => Ok(Some(Checked {
+                    before: vec!["corrupt"; self.drives.len()],
+                    after: vec!["corrupt"; self.drives.len()],
+                    detail: format!(
+                        "only {found} of the {needed} sound shards needed are left: it can't \
+                         be read or healed"
+                    ),
+                })),
+                Err(err) => Err(failed(&err)),
+            };
+        }
+        if deep {
             return match self
                 .store
                 .verify_version(bucket, key, Some(version_id))
                 .await
             {
-                Ok(verdict) => Ok(Some(verdict_state(&verdict))),
+                Ok(verdict) => {
+                    let (state, detail) = verdict_state(&verdict);
+                    Ok(Some(Checked::one(state, detail)))
+                }
                 Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(None),
                 Err(err) => Err(failed(&err)),
             };
         }
         match self.store.head_version(bucket, key, Some(version_id)).await {
-            Ok(_) => Ok(Some(("ok", String::new()))),
+            Ok(_) => Ok(Some(Checked::one("ok", String::new()))),
             Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => Ok(None),
-            Err(StoreError::CorruptMetadata | StoreError::Crypto(_)) => {
-                Ok(Some(("corrupt", "its metadata can't be read".to_owned())))
-            }
-            Err(StoreError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
-                Ok(Some(("missing", "its metadata is missing".to_owned())))
-            }
+            Err(StoreError::CorruptMetadata | StoreError::Crypto(_)) => Ok(Some(Checked::one(
+                "corrupt",
+                "its metadata can't be read".to_owned(),
+            ))),
+            Err(StoreError::Io(err)) if err.kind() == io::ErrorKind::NotFound => Ok(Some(
+                Checked::one("missing", "its metadata is missing".to_owned()),
+            )),
             Err(err) => Err(failed(&err)),
         }
     }
@@ -597,15 +666,20 @@ impl Walk {
         kind: &'static str,
         bucket: &str,
         (object, version_id): (&str, &str),
-        (state, detail): (&'static str, String),
+        checked: Checked,
         size: u64,
     ) -> Item {
-        let drives = Drives {
-            drives: vec![DriveInfo {
-                uuid: self.drive.0.clone(),
-                endpoint: self.drive.1.clone(),
-                state,
-            }],
+        let drives = |states: &[&'static str]| Drives {
+            drives: self
+                .drives
+                .iter()
+                .zip(states)
+                .map(|((uuid, endpoint), state)| DriveInfo {
+                    uuid: uuid.clone(),
+                    endpoint: endpoint.clone(),
+                    state,
+                })
+                .collect(),
         };
         Item {
             result_index: 0,
@@ -613,14 +687,38 @@ impl Walk {
             bucket: bucket.to_owned(),
             object: object.to_owned(),
             version_id: version_id.to_owned(),
-            detail,
-            disk_count: 1,
+            detail: checked.detail,
+            disk_count: u32::try_from(self.drives.len()).unwrap_or(u32::MAX),
             set_count: 1,
-            // Nothing is changed: there's no other copy to heal from.
-            after: drives.clone(),
-            before: drives,
+            before: drives(&checked.before),
+            after: drives(&checked.after),
             object_size: size,
         }
+    }
+}
+
+/// A drive set's shard states as `madmin`'s drive states, and what was done.
+fn set_checked(healed: &ObjectHeal) -> Checked {
+    let state = |s: &ShardState| match s {
+        ShardState::Ok => "ok",
+        ShardState::Missing => "missing",
+        ShardState::Corrupt => "corrupt",
+        ShardState::Offline => "offline",
+    };
+    let rebuilt = healed
+        .before
+        .iter()
+        .zip(&healed.after)
+        .filter(|(b, a)| b != a)
+        .count();
+    Checked {
+        before: healed.before.iter().map(state).collect(),
+        after: healed.after.iter().map(state).collect(),
+        detail: if rebuilt > 0 {
+            format!("{rebuilt} shards rebuilt")
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -652,7 +750,7 @@ struct BackgroundHeal {
     #[serde(rename = "ScannedItemsCount")]
     scanned: u64,
     #[serde(rename = "HealDisks")]
-    heal_disks: [&'static str; 0],
+    heal_disks: Vec<String>,
     sets: [SetStatus; 1],
     mrf: HashMap<String, Mrf>,
     sc_parity: HashMap<&'static str, u32>,
@@ -686,31 +784,42 @@ async fn background_status(routes: &Routes, req: &S3Request<Body>) -> S3Result<S
         .or(report.last.as_ref())
         .map_or(0, |pass| pass.versions);
     let node = minio_info::endpoint(routes, req);
+    let heal = routes.store.heal_status().await.s3()?;
+    let disks = minio_info::disks(routes).await;
+    // Drives a full heal is filling (new in a lost one's place).
+    let heal_disks = heal.as_ref().map_or_else(Vec::new, |heal| {
+        heal.drives
+            .iter()
+            .filter(|d| d.state == teifs_store::DriveState::Healing)
+            .filter_map(|d| disks.get(d.place).map(|disk| disk.endpoint.clone()))
+            .collect()
+    });
+    let healing = report.current.is_some()
+        || heal
+            .as_ref()
+            .is_some_and(|h| h.running || h.queued > h.waiting);
+    let parity = routes.store.drive_set().map_or(0, |set| set.parity);
     Ok(json(&BackgroundHeal {
         offline_nodes: [],
         scanned,
-        heal_disks: [],
+        heal_disks,
         sets: [SetStatus {
             id: "0",
             pool_index: 0,
             set_index: 0,
-            heal_status: if report.current.is_some() {
-                "healing"
-            } else {
-                ""
-            },
+            heal_status: if healing { "healing" } else { "" },
             heal_priority: "",
             total_objects: scanned,
-            disks: minio_info::disks(routes).await,
+            disks,
         }],
         mrf: HashMap::from([(
             node,
             Mrf {
-                bytes_healed: 0,
-                items_healed: 0,
+                bytes_healed: heal.as_ref().map_or(0, |h| h.bytes),
+                items_healed: heal.as_ref().map_or(0, |h| h.objects),
             },
         )]),
-        sc_parity: HashMap::from([("STANDARD", 0)]),
+        sc_parity: HashMap::from([("STANDARD", u32::try_from(parity).unwrap_or(0))]),
     }))
 }
 

@@ -677,6 +677,10 @@ client leaves. `api` is the operation (`PutObject`, `ListObjectsV2`, the admin A
 | `teifs_scrub_damaged_versions` | gauge | `pass` | Versions it found damaged |
 | `teifs_scrub_unverifiable_versions` | gauge | `pass` | Versions it couldn't check (SSE-C, whose keys it doesn't have) |
 | `teifs_scrub_last_finished_seconds` | gauge | | When the last pass finished (Unix time) |
+| `teifs_drive_set_drives` | gauge | `state` | A [drive set](#drive-sets)'s disks `up` and `down` |
+| `teifs_heal_queued`, `teifs_heal_waiting` | gauge | | Objects in a drive set's heal queue, and of them those waiting for a disk that's down |
+| `teifs_heal_running` | gauge | | 1 while a full heal of the drive set is under way |
+| `teifs_heal_objects_total`, `teifs_heal_shards_total`, `teifs_heal_written_bytes_total` | counter | | Objects healed, shards written or removed, and bytes of shards written since the server started |
 | `teifs_notify_sent_total` | counter | `target` | Events each notification target took |
 | `teifs_notify_failed_total` | counter | `target` | Tries it didn't take (each is tried again) |
 | `teifs_notify_dropped_total` | counter | `target` | Events dropped because too many waited for it |
@@ -713,6 +717,7 @@ histogram_quantile(0.99, sum by (le, api) (rate(teifs_s3_ttfb_seconds_bucket[5m]
 teifs_drive_free_bytes / teifs_drive_total_bytes < 0.1              # disk nearly full
 max(teifs_job_failing) > 0                                          # a job keeps failing
 max(teifs_scrub_damaged_versions) > 0                               # damage on the disk
+teifs_drive_set_drives{state="down"} > 0                            # a drive set's disk is down
 max(teifs_notify_queued) > 1000                                     # a target is falling behind
 min(teifs_replication_target_online) == 0                           # a replication target is down
 histogram_quantile(0.99, sum by (le, stage) (rate(teifs_store_stage_seconds_bucket{op="write"}[5m])))
@@ -937,12 +942,35 @@ disks), so `--default-layout folder` and `x-teifs-bucket-layout: folder` make ob
 buckets there. While the set is served, other `teifs` commands that open a drive
 directly (`backup`, `repair`, `scrub`) refuse a set's disks; use the S3 API.
 
-Objects written while a disk was down have no shard on it. When the set starts with a
-disk that missed writes (it was down, or is new), the disk takes the metadata it missed
-at once, and the set heals in the background while it serves: every object's shards
-are checked on each disk, and those missing or damaged are rebuilt from the others.
-Until then, an object written meanwhile can lose fewer disks than the set's parity.
-The server log says what a heal did.
+Objects written while a disk was down have no shard on it. Healing puts that right, in
+the background, while the set serves:
+
+- **The heal queue.** A disk that stops answering while the set serves (a cable, a
+  controller, a disk going bad) misses the shards written and removed meanwhile. Each
+  such object is queued in the index, in the same commit as the change that missed the
+  disk, so a restart doesn't forget it, and so is each object a read finds a missing or
+  damaged shard of. The `heal` job heals what's queued at once, and while the disk still
+  fails, tries again later (30 seconds, doubling up to an hour). It rebuilds the
+  metadata's copy on the disk now and then (30 seconds, doubling up to 10 minutes); once
+  that works, the disk is back and everything queued is tried again at once. Shards left
+  by deletes on a disk that was down when the set started wait for it: they're removed
+  once the set starts with it again.
+- **A full heal.** When the set starts with a disk that missed writes (it was down, or
+  is new), the disk takes the metadata it missed at once, and every object's shards are
+  checked on each disk, those missing or damaged rebuilt from the others.
+- **The scrub** ([`--scrub-every`](#background-jobs)) reads every shard of each object
+  on a set, parity shards too, checks each piece's hash and rebuilds those damaged.
+- **`mc admin heal`** heals on request: `mc admin heal -r ALIAS/BUCKET` checks each
+  object's shard on every disk (its header and length; with `--scan deep`, every
+  piece's hash) and rebuilds those missing or damaged, listing each disk's state before
+  and after; `--dry-run` only looks. `mc admin heal ALIAS` alone shows the background
+  heal: each disk's state, the set's parity and what the heal queue healed.
+
+Until an object is healed, it can lose fewer disks than the set's parity. `teifs status`
+warns while a disk is down or failing, or objects wait to be healed, and fails once more
+disks are down than the parity; `teifs admin info` lists each disk's state and the heal
+queue; the metrics `teifs_drive_set_drives`, `teifs_heal_queued` and
+`teifs_heal_objects_total` follow them. The server log says what each heal did.
 
 ### Replacing a disk
 

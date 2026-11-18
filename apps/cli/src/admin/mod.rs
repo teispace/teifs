@@ -342,6 +342,38 @@ async fn info(client: &Client) -> Result<(), Error> {
     for disk in &info.disks {
         fields.push(("Disk", disk_line(disk)));
     }
+    if let Some(set) = &info.drive_set {
+        fields.push((
+            "Drive set",
+            format!(
+                "{} drives, {} data + {} parity",
+                set.drives.len(),
+                set.data,
+                set.parity
+            ),
+        ));
+        for drive in &set.drives {
+            fields.push((
+                "Set drive",
+                format!("{}: {} ({})", drive.place, drive.path, drive.state),
+            ));
+        }
+        fields.push((
+            "Healing",
+            format!(
+                "{} objects queued ({} waiting for a drive that's down), {} healed ({}){}",
+                set.heal_queued,
+                set.heal_waiting,
+                set.healed_objects,
+                crate::units::size(set.healed_bytes),
+                if set.healing {
+                    "; a full heal is under way"
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
     fields.extend(scrub_details(&info.scrub));
     ui::details(&fields, || Value::Null);
     let mut table = ui::Table::new(&["JOB", "STEPS", "ITEMS", "LAST PROGRESS", "LAST ERROR"]);

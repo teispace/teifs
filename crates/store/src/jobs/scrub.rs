@@ -116,6 +116,13 @@ impl Scrub {
             if found.is_empty() {
                 break true;
             }
+            // On a drive set, every shard of each, parity too (a read uses the data
+            // shards only), its pieces checked, and those damaged rebuilt.
+            if self.store.drive_set().is_some() {
+                for item in &found {
+                    self.heal_shards(item).await;
+                }
+            }
             for item in found {
                 bytes += item.size;
                 record(&mut current.pass, item);
@@ -142,6 +149,37 @@ impl Scrub {
         self.store.set_scrub_state(&state).await?;
         // A pass over an empty drive still did its work.
         Ok(checked.max(usize::from(finished)))
+    }
+}
+
+impl Scrub {
+    /// Checks every shard of the version `item` is and rebuilds those damaged.
+    async fn heal_shards(&self, item: &teifs_types::verify::Checked) {
+        let options = crate::HealOptions {
+            deep: true,
+            dry_run: false,
+        };
+        match self
+            .store
+            .heal_object(&item.bucket, &item.key, Some(&item.version_id), options)
+            .await
+        {
+            Ok(Some(healed)) if healed.before != healed.after => tracing::warn!(
+                bucket = item.bucket,
+                key = item.key,
+                version = item.version_id,
+                "the scrub found damaged shards and rebuilt them"
+            ),
+            // Removed meanwhile, or too damaged to rebuild (the read found it too).
+            Ok(_) | Err(StoreError::NoSuchKey | StoreError::NoSuchVersion) => {}
+            Err(err) => tracing::error!(
+                bucket = item.bucket,
+                key = item.key,
+                version = item.version_id,
+                error = %err,
+                "the scrub couldn't check a version's shards"
+            ),
+        }
     }
 }
 

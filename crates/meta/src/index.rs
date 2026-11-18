@@ -145,6 +145,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "ALTER TABLE uploads ADD COLUMN replica_version TEXT;",
     // 13: resyncs of replication destinations.
     crate::replication_resyncs::MIGRATION,
+    // 14: a drive set's data files waiting to be healed.
+    crate::heal_queue::MIGRATION,
 ];
 
 /// The index of one drive. Not `Sync`: the store keeps it behind its commit lock.

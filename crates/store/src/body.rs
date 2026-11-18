@@ -31,14 +31,14 @@ pub(crate) enum Data {
     /// The bytes, kept in the index with its row.
     Inline(Bytes),
     /// Its shard files, on a drive set.
-    Shards(Box<teifs_erasure::Reader<std::fs::File>>),
+    Shards(Box<crate::set::ShardFile>),
 }
 
 /// A blocking reader of stored bytes, for decrypting on the blocking pool.
 enum Source {
     File(std::fs::File),
     Inline(io::Cursor<Bytes>),
-    Shards(Box<teifs_erasure::Reader<std::fs::File>>),
+    Shards(Box<crate::set::ShardFile>),
 }
 
 impl Read for Source {
@@ -190,8 +190,8 @@ const SHARD_CHUNK: u64 = 1 << 20;
 /// Reads (and on a damaged or missing shard, rebuilds) the next bytes of a shards'
 /// file, on the blocking pool.
 async fn next_shard_chunk(
-    (mut shards, remaining): (Box<teifs_erasure::Reader<std::fs::File>>, u64),
-) -> io::Result<Option<(Bytes, (Box<teifs_erasure::Reader<std::fs::File>>, u64))>> {
+    (mut shards, remaining): (Box<crate::set::ShardFile>, u64),
+) -> io::Result<Option<(Bytes, (Box<crate::set::ShardFile>, u64))>> {
     if remaining == 0 {
         return Ok(None);
     }

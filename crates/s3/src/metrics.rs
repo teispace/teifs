@@ -32,7 +32,7 @@ use prometheus_client::{
 use s3s::{HttpResponse, S3Error, S3ErrorCode};
 use teifs_iam::{AuthError, Iam};
 use teifs_notify::{Notifier, TargetStats};
-use teifs_store::{BucketUsage, Store, Usage};
+use teifs_store::{BucketUsage, HealProgress, Store, Usage};
 use teifs_types::{
     admin::METRICS_PATH,
     verify::{ScrubPass, ScrubReport},
@@ -546,6 +546,81 @@ impl Server {
     }
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct DriveSetState {
+    state: &'static str,
+}
+
+impl Server {
+    /// A drive set's drives and what healing it has done.
+    fn drive_set(encoder: &mut DescriptorEncoder, heal: &HealProgress) -> std::fmt::Result {
+        let mut drives = encoder.encode_descriptor(
+            "drive_set_drives",
+            "A drive set's drives, up and down",
+            None,
+            MetricType::Gauge,
+        )?;
+        for (state, count) in [("up", heal.up), ("down", heal.down)] {
+            ConstGauge::new(i64::try_from(count).unwrap_or(i64::MAX))
+                .encode(drives.encode_family(&DriveSetState { state })?)?;
+        }
+        let gauges = [
+            (
+                "heal_queued",
+                "Data files waiting in the heal queue",
+                heal.queued,
+            ),
+            (
+                "heal_waiting",
+                "Of them, those waiting for a drive that's down",
+                heal.waiting,
+            ),
+            (
+                "heal_running",
+                "Whether a full heal of the drive set is under way",
+                u64::from(heal.running),
+            ),
+        ];
+        for (name, help, value) in gauges {
+            ConstGauge::new(gauge(value)).encode(encoder.encode_descriptor(
+                name,
+                help,
+                None,
+                MetricType::Gauge,
+            )?)?;
+        }
+        let counters = [
+            (
+                "heal_objects",
+                "Data files healed since the server started",
+                None,
+                heal.objects,
+            ),
+            (
+                "heal_shards",
+                "Shards written or removed by healing since the server started",
+                None,
+                heal.shards,
+            ),
+            (
+                "heal_written",
+                "Bytes of shards written by healing since the server started",
+                Some(&Unit::Bytes),
+                heal.bytes,
+            ),
+        ];
+        for (name, help, unit, value) in counters {
+            ConstCounter::new(value).encode(encoder.encode_descriptor(
+                name,
+                help,
+                unit,
+                MetricType::Counter,
+            )?)?;
+        }
+        Ok(())
+    }
+}
+
 impl Collector for Server {
     fn encode(&self, mut encoder: DescriptorEncoder) -> std::fmt::Result {
         let info = [("version", Cow::Borrowed(env!("CARGO_PKG_VERSION")))];
@@ -583,6 +658,9 @@ impl Collector for Server {
                 Some(&Unit::Bytes),
                 free,
             )?;
+        }
+        if let Some(heal) = self.store.heal_progress() {
+            Self::drive_set(&mut encoder, &heal)?;
         }
         let jobs = self.store.job_status();
         let mut steps = encoder.encode_descriptor(

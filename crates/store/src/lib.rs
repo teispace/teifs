@@ -66,7 +66,9 @@ pub use diagnose::{Database, Diagnosis, diagnose};
 pub use error::{Result, StoreError};
 pub use filesystem::remote_file_system;
 pub use format::{DriveFormat, FORMAT, SET_FORMAT, SetFormat};
-pub use heal::HealReport;
+pub use heal::{
+    DriveHealth, DriveState, HealOptions, HealProgress, HealReport, HealStatus, ObjectHeal,
+};
 pub use jobs::{Expirations, JobOptions, JobStatus, Jobs};
 pub use lifecycle::{
     And, Condition, DAY_MS, Expiration, Expiry, Lifecycle, LifecycleRule, MAX_LIFECYCLE_RULES,
@@ -81,7 +83,7 @@ pub use repair::{Finding, Repair, RepairOptions, RepairReport, Stray};
 pub use replicating::{ReplicaMetadata, Waiting};
 pub use replication_targets::{NewTarget, TargetSecrets};
 pub use rewrap::Rewrapped;
-pub use set::{MAX_DRIVES, SetOptions, default_parity, write_quorum};
+pub use set::{MAX_DRIVES, SetOptions, ShardState, default_parity, write_quorum};
 pub use settings::{
     BucketAccess, BucketEncryption, BucketSettings, CorsRule, DefaultEncryption, NewBucket,
     ObjectOwnership, PublicAccessBlock,
@@ -267,6 +269,11 @@ impl Precondition {
 pub struct DriveSetInfo {
     /// Its drives by place; `None` where one is down.
     pub drives: Vec<Option<PathBuf>>,
+    /// Each place's folder as given; for a drive that's down, one of the folders given
+    /// that wasn't there (in the order given).
+    pub paths: Vec<PathBuf>,
+    /// Each place's drive id.
+    pub ids: Vec<String>,
     /// Shards holding each object's bytes.
     pub data: usize,
     /// Drives it can lose.
@@ -447,6 +454,11 @@ impl Store {
         if !opened.rebuilt.is_empty() || !set.replaced().is_empty() {
             set.needs_heal();
         }
+        // Every drive is here: heals that waited for one that was down are due.
+        if set.all_up() {
+            db.wake_heals(jobs::millis(SystemTime::now()))?;
+            db.ship()?;
+        }
         if let Some(copies) = db.copies() {
             set.set_home(&copies.primary());
         }
@@ -550,6 +562,14 @@ impl Store {
         let set = self.inner.set.as_ref()?;
         Some(DriveSetInfo {
             drives: set.drives().to_vec(),
+            paths: set.given().to_vec(),
+            ids: self
+                .inner
+                .format
+                .set
+                .as_ref()
+                .map(|s| s.drives.clone())
+                .unwrap_or_default(),
             data: set.geometry().data(),
             parity: set.geometry().parity(),
             replaced: set.replaced().to_vec(),

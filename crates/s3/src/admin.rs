@@ -11,11 +11,12 @@ use std::{
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result};
 use teifs_iam::{Iam, IamError, LdapEntity, RootKey};
-use teifs_store::{JobStatus, Store};
+use teifs_store::{DriveState, JobStatus, Store};
 use teifs_types::{
     admin::{
-        AdminError, DiskInfo, IamExport, JobInfo, LdapPolicyChanged, LdapPolicyMapping,
-        LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, UsageInfo,
+        AdminError, DiskInfo, DriveSetStatus, IamExport, JobInfo, LdapPolicyChanged,
+        LdapPolicyMapping, LdapPolicyRequest, RootKeyRotated, ServerConfig, ServerInfo, SetDrive,
+        UsageInfo,
     },
     audit::TraceFilter,
 };
@@ -226,7 +227,48 @@ pub(crate) async fn info(
         scrub,
         usage: usage_info(store).await,
         disks: disks_info(store).await,
+        drive_set: drive_set_info(store).await,
     }))
+}
+
+/// A drive set's drives and healing; none on a single drive (or, logged, when it can't
+/// be read).
+async fn drive_set_info(store: &Store) -> Option<DriveSetStatus> {
+    let set = store.drive_set()?;
+    let heal = store
+        .heal_status()
+        .await
+        .inspect_err(|err| tracing::error!(error = %err, "can't read how the drive set heals"))
+        .ok()
+        .flatten()?;
+    Some(DriveSetStatus {
+        data: set.data,
+        parity: set.parity,
+        drives: heal
+            .drives
+            .iter()
+            .map(|drive| SetDrive {
+                place: drive.place,
+                path: set
+                    .paths
+                    .get(drive.place)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                state: match drive.state {
+                    DriveState::Ok => "ok",
+                    DriveState::Offline => "offline",
+                    DriveState::Failing => "failing",
+                    DriveState::Healing => "healing",
+                }
+                .to_owned(),
+            })
+            .collect(),
+        heal_queued: heal.queued,
+        heal_waiting: heal.waiting,
+        healed_objects: heal.objects,
+        healed_bytes: heal.bytes,
+        healing: heal.running,
+    })
 }
 
 /// The disks the drive uses, or none (logged) when they can't be read.

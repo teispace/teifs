@@ -15,6 +15,13 @@ behaviour; the on-disk format is always upgraded automatically.
   are a new on-disk format (3) that earlier releases refuse; single drives are
   unchanged. A disk that missed writes is healed in the background when the set
   starts, and `--replace-drives` puts new, empty disks in lost ones' places.
+- Drive sets heal while they serve: an object a disk missed (it stopped answering, or a
+  read found its shard damaged) is queued with the write that missed it and healed as
+  soon as the disk answers again; shards a delete couldn't remove go the same way. The
+  scrub checks every shard, parity too, and rebuilds damaged ones. `mc admin heal`
+  repairs a set's objects (each disk's state before and after, `--dry-run` to only
+  look), and its background status, `teifs status`, `teifs admin info` and new metrics
+  (`teifs_drive_set_drives`, `teifs_heal_*`) show each disk and the heal queue.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet

@@ -768,6 +768,19 @@ too few copies are current, the copies' triggers refuse every change. `Store::he
 data files and asks `DriveSet::heal_file` to verify each shard and rebuild the missing
 or damaged ones; the server runs it at start when a drive missed writes.
 
+A drive that fails while the set serves is caught by the heal queue (`heal_queue` in
+`index.db`, `crates/meta/src/heal_queue.rs`): `DriveSet::publish` says when an up drive
+missed its shard, and `Inner::record_row` queues the object in the version's own
+transaction; `Inner::remove_data_files` queues an object whose shards couldn't all be
+removed instead of keeping it as garbage; a `ShardFile` (what `DriveSet::open_data`
+reads through) notes, when it's dropped, the objects a read found a bad shard of on an
+up drive, and the `heal` job takes those into the queue. The job (`HealQueue`) heals
+what's due, backs off what fails, parks what waits only for a drive that's down
+(`teifs_meta::PARKED`; woken when the set opens with every drive), and rebuilds failed
+copies of the metadata now and then, waking the queue once that works. `Store::heal_object`
+heals one version for `mc admin heal` (`crates/s3/src/minio_heal.rs`) and the scrub,
+which on a set checks every shard of what it read.
+
 ## Background jobs
 
 A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), started by
@@ -781,6 +794,7 @@ A running server keeps the drive tidy with jobs (`crates/store/src/jobs.rs`), st
 | `index-folders` | Walks folder buckets page by page: hashes files added or changed outside TeiFS, re-adopts rows of restored files, forgets rows of deleted ones; rests 30 minutes after a full pass |
 | `snapshot` | Copies `index.db` and `system.db` into `.teifs/backups/auto/<UTC time>/` once a day (`crates/store/src/snapshots.rs`, `VACUUM INTO`, checked, then renamed into place), the first when a server first starts the drive; keeps the newest `--snapshots` (3); `POST snapshots` takes one on request |
 | `scrub` | Reads every stored version back and checks it (`crates/store/src/jobs/scrub.rs`, with `crates/store/src/verify.rs`): a pass starts `--scrub-every` (30 days by default) after the last one started, the first a full interval after the drive is first served; steps of up to 256 versions or 64 MiB, stopped mid-object at shutdown; where it is and what it found (the first 100 damaged versions) are kept in the system database's `scrub` setting, so a restart carries on; damage is logged as an error and shown by `GET info` |
+| `heal` | On a drive set: heals the objects in the heal queue (`crates/store/src/heal.rs`), every 5 seconds while it has nothing to do |
 | `lifecycle` | Applies buckets' lifecycle rules (`crates/store/src/jobs/lifecycle.rs`): walks each bucket with enabled rules a page of versions at a time (a key's versions always together), expires, removes and aborts through the store's own delete and abort operations, with the listed object's ETag, size and modification time as the delete's conditions; rests an hour after a full pass |
 
 Lifecycle configurations are part of a bucket's settings (`crates/store/src/lifecycle.rs`
