@@ -7,6 +7,9 @@ behaviour; the on-disk format is always upgraded automatically.
 
 ## Unreleased
 
+- S3 Batch Operations run `S3ComputeObjectChecksum` jobs: each object's full-object or
+  composite checksum, in any of S3's algorithms, is worked out from its bytes and written
+  to the job's completion report as AWS writes it.
 - Dependencies updated, among them rustls, rustls-webpki, tokio, zip, zstd and the
   bundled SQLite (libsqlite3-sys 0.40), which closes the security advisories
   `cargo deny check advisories` reported against the earlier versions. Arrow and Parquet

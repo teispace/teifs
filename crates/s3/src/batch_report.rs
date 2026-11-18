@@ -19,7 +19,7 @@ use teifs_store::Store;
 use teifs_types::batch::{BatchJob, JobReport};
 
 use crate::{
-    batch_operations::{Failure, Stop, Task, stop},
+    batch_operations::{Outcome, Stop, Task, stop},
     replicator::said,
 };
 
@@ -36,9 +36,14 @@ const ROWS: usize = 10_000;
 const PART: usize = 16 * 1024 * 1024;
 
 /// A task's result, as a line of its report.
-pub(crate) fn line(task: &Task, result: &Result<(), Failure>) -> String {
+pub(crate) fn line(task: &Task, result: &Outcome) -> String {
     let (status, http, code, message) = match result {
-        Ok(()) => ("succeeded", "200".to_owned(), "", "Successful"),
+        Ok(said) => (
+            "succeeded",
+            "200".to_owned(),
+            "",
+            said.as_deref().unwrap_or("Successful"),
+        ),
         Err(failure) => (
             "failed",
             failure.status.map(|s| s.to_string()).unwrap_or_default(),
@@ -296,6 +301,7 @@ struct ResultsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch_operations::Failure;
 
     fn task(key: &str, version: Option<&str>) -> Task {
         Task {
@@ -308,7 +314,7 @@ mod tests {
     #[test]
     fn results_are_lines_as_aws_writes_them() {
         assert_eq!(
-            line(&task("a b/ü.jpg", Some("v1")), &Ok(())),
+            line(&task("a b/ü.jpg", Some("v1")), &Ok(None)),
             "photos,a%20b/%C3%BC.jpg,v1,succeeded,200,,Successful"
         );
         let failure = Failure {
@@ -328,6 +334,10 @@ mod tests {
         assert_eq!(
             line(&task("k", None), &Err(unanswered)),
             "photos,k,,failed,,InternalError,\"no answer\nat all\""
+        );
+        assert_eq!(
+            line(&task("k", None), &Ok(Some(r#"{"a":"b"}"#.to_owned()))),
+            r#"photos,k,,succeeded,200,,"{""a"":""b""}""#
         );
         assert_eq!(csv("a\rb"), "\"a\rb\"");
         assert_eq!(csv("plain text"), "plain text");

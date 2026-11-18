@@ -2039,3 +2039,187 @@ async fn jobs_replace_acls_with_canned_ones_or_grants() {
             .contains(&(ALL_USERS.to_owned(), "READ".to_owned()))
     );
 }
+
+/// What the checksum job's role may do: read manifests and photos, write reports.
+const SUMMER: &str = r#"{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::manifests/*"},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::photos/*"},
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::reports/*"}]}"#;
+
+fn computing(algorithm: &str, kind: &str) -> JobOperation {
+    JobOperation::builder()
+        .s3_compute_object_checksum(
+            aws_sdk_s3control::types::S3ComputeObjectChecksumOperation::builder()
+                .checksum_algorithm(algorithm.into())
+                .checksum_type(kind.into())
+                .build(),
+        )
+        .build()
+}
+
+/// `photos/big.bin`, uploaded in two parts with SHA-256 checksums; its checksum.
+async fn two_parts(root: &Client) -> String {
+    use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
+    let upload = root
+        .create_multipart_upload()
+        .bucket("photos")
+        .key("big.bin")
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .send()
+        .await
+        .unwrap();
+    let id = upload.upload_id.unwrap();
+    let mut parts = Vec::new();
+    for (number, body) in [(1, vec![b'a'; 5 << 20]), (2, b"end".to_vec())] {
+        let part = root
+            .upload_part()
+            .bucket("photos")
+            .key("big.bin")
+            .upload_id(&id)
+            .part_number(number)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .unwrap();
+        parts.push(
+            aws_sdk_s3::types::CompletedPart::builder()
+                .part_number(number)
+                .set_e_tag(part.e_tag)
+                .set_checksum_sha256(part.checksum_sha256)
+                .build(),
+        );
+    }
+    root.complete_multipart_upload()
+        .bucket("photos")
+        .key("big.bin")
+        .upload_id(&id)
+        .multipart_upload(
+            aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .set_parts(Some(parts))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let head = root
+        .head_object()
+        .bucket("photos")
+        .key("big.bin")
+        .checksum_mode(ChecksumMode::Enabled)
+        .send()
+        .await
+        .unwrap();
+    head.checksum_sha256.unwrap()
+}
+
+/// The JSON a report line's result message holds.
+fn said(line: &str) -> serde_json::Value {
+    let start = line.find("\"{").unwrap();
+    let quoted = &line[start + 1..line.len() - 1];
+    serde_json::from_str(&quoted.replace("\"\"", "\"")).unwrap()
+}
+
+#[tokio::test]
+async fn jobs_compute_checksums_into_their_reports() {
+    use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
+    let server = start().await;
+    let account = server.iam.account();
+    let root = client(&server, SECRET_KEY);
+    buckets(&root, &[]).await;
+    root.create_bucket().bucket("reports").send().await.unwrap();
+    let put = root
+        .put_object()
+        .bucket("photos")
+        .key("a.jpg")
+        .body(ByteStream::from_static(b"photo"))
+        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+        .send()
+        .await
+        .unwrap();
+    let whole = put.checksum_sha256.unwrap();
+    let composite = two_parts(&root).await;
+    assert!(composite.ends_with("-2"), "{composite}");
+    let role = role(&server, "summer", TRUST, SUMMER);
+    let s3control = control(&server, common::ACCESS_KEY, SECRET_KEY);
+    let run = |operation: JobOperation, token: &'static str| {
+        let (root, s3control, account, role) = (&root, &s3control, &account, &role);
+        async move {
+            let manifest = manifest(root, token, &["photos,a.jpg", "photos,big.bin"]).await;
+            let every = report(None, JobReportScope::AllTasks);
+            let id = create_reported(
+                s3control,
+                account,
+                (operation.clone(), manifest, role),
+                (token, 1, false),
+                every,
+            )
+            .await
+            .unwrap();
+            let done = wait_for(s3control, account, &id, &JobStatus::Complete).await;
+            // The job says what it computes, as it was asked.
+            let asked = operation.s3_compute_object_checksum.as_ref().unwrap();
+            let described = done.job.unwrap().operation.unwrap();
+            let described = described.s3_compute_object_checksum.unwrap();
+            assert_eq!(described.checksum_algorithm, asked.checksum_algorithm);
+            assert_eq!(described.checksum_type, asked.checksum_type);
+            let files = report_of(root, &format!("job-{id}")).await;
+            assert_eq!(files.len(), 1, "{files:?}");
+            assert_eq!(files[0].0, "succeeded");
+            files[0].1.iter().map(|line| said(line)).collect::<Vec<_>>()
+        }
+    };
+
+    let full = run(computing("SHA256", "FULL_OBJECT"), "full").await;
+    assert_eq!(full[0]["checksum_base64"], whole.as_str());
+    assert_eq!(full[0]["checksumAlgorithm"], "SHA256");
+    assert_eq!(full[0]["checksumType"], "FULL_OBJECT");
+    assert_eq!(full[0]["etag"], put.e_tag.unwrap().trim_matches('"'));
+    let hex = full[0]["checksum_hex"].as_str().unwrap();
+    assert_eq!(hex.len(), 64);
+    assert_eq!(hex, hex.to_ascii_uppercase());
+    // The whole of a multipart object: not its parts'.
+    assert!(!full[1]["checksum_base64"].as_str().unwrap().contains('-'));
+
+    let parts = run(computing("SHA256", "COMPOSITE"), "parts").await;
+    assert_eq!(parts[1]["checksum_base64"], composite.as_str());
+    assert_eq!(parts[1]["checksumType"], "COMPOSITE");
+    assert!(
+        parts[0]["checksum_base64"]
+            .as_str()
+            .unwrap()
+            .ends_with("-1")
+    );
+
+    // The objects are as they were.
+    let head = root
+        .head_object()
+        .bucket("photos")
+        .key("a.jpg")
+        .checksum_mode(ChecksumMode::Enabled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.checksum_sha256.as_deref(), Some(whole.as_str()));
+
+    // Such a job writes a report, and CRC64NVME is of the full object only.
+    let manifest = manifest(&root, "m.csv", &["photos,a.jpg"]).await;
+    for (operation, report, token) in [
+        (computing("CRC32", "FULL_OBJECT"), no_report(), "r1"),
+        (
+            computing("CRC64NVME", "COMPOSITE"),
+            report(None, JobReportScope::AllTasks),
+            "r2",
+        ),
+    ] {
+        let refused = create_reported(
+            &s3control,
+            &account,
+            (operation, manifest.clone(), &role),
+            (token, 1, false),
+            report,
+        )
+        .await;
+        assert_eq!(refused, Err("BadRequestException".to_owned()), "{token}");
+    }
+}

@@ -351,6 +351,11 @@ fn job_of(request: CreateJob) -> S3Result<(OperationJob, i32)> {
             .operation
             .ok_or_else(|| bad_request("A job needs an Operation."))?,
     )?;
+    if matches!(operation, Operation::ComputeObjectChecksum { .. }) && report.is_none() {
+        return Err(bad_request(
+            "A job that computes checksums writes them to its completion report: enable it.",
+        ));
+    }
     let tags = tags_of(request.tags.unwrap_or_default())?;
     Ok((
         OperationJob {
@@ -531,11 +536,16 @@ fn operation_of_xml(given: OperationXml) -> S3Result<Operation> {
             acl,
         )?)));
     }
+    if let Some(compute) = given.compute {
+        let (algorithm, kind) = crate::batch_checksum::parse(compute)?;
+        operations.push(Operation::ComputeObjectChecksum { algorithm, kind });
+    }
     match operations.len() {
         1 => Ok(operations.remove(0)),
         0 => Err(not_implemented(
             "TeiFS runs these operations: S3PutObjectTagging, S3DeleteObjectTagging, \
-             S3PutObjectLegalHold, S3PutObjectRetention, S3PutObjectCopy and S3PutObjectAcl.",
+             S3PutObjectLegalHold, S3PutObjectRetention, S3PutObjectCopy, S3PutObjectAcl \
+             and S3ComputeObjectChecksum.",
         )),
         _ => Err(bad_request("A job has exactly one Operation.")),
     }
@@ -761,6 +771,9 @@ fn operation_xml(operation: &Operation) -> OperationXml {
             xml.copy = Some(Box::new(crate::batch_copy::xml(copy)));
         }
         Operation::PutObjectAcl(acl) => xml.acl = Some(crate::batch_acl::xml(acl)),
+        Operation::ComputeObjectChecksum { algorithm, kind } => {
+            xml.compute = Some(crate::batch_checksum::xml(algorithm, kind));
+        }
     }
     xml
 }
@@ -996,6 +1009,11 @@ struct OperationXml {
     copy: Option<Box<crate::batch_copy::CopyXml>>,
     #[serde(rename = "S3PutObjectAcl", skip_serializing_if = "Option::is_none")]
     acl: Option<crate::batch_acl::AclXml>,
+    #[serde(
+        rename = "S3ComputeObjectChecksum",
+        skip_serializing_if = "Option::is_none"
+    )]
+    compute: Option<crate::batch_checksum::ComputeXml>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

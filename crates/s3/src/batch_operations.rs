@@ -255,8 +255,7 @@ async fn run(
         .iter()
         .map(|task| run_task(client, &spec.operation, task))
         .collect();
-    let results: Vec<Result<(), Failure>> =
-        stream::iter(running).buffered(PARALLEL).collect().await;
+    let results: Vec<Outcome> = stream::iter(running).buffered(PARALLEL).collect().await;
     let first = job.progress.objects + job.progress.objects_failed;
     let mut lines = Vec::new();
     for ((n, task), result) in (first..).zip(&tasks).zip(results) {
@@ -460,8 +459,12 @@ fn decode_key(encoded: &str) -> Result<String, String> {
         .map_err(|_| "its key isn't URL-encoded UTF-8".to_owned())
 }
 
-/// Runs one task; why it failed.
-async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result<(), Failure> {
+/// A task's result: what its report says it did (`Successful` when `None`), or why it
+/// failed.
+pub(crate) type Outcome = Result<Option<String>, Failure>;
+
+/// Runs one task: what its report says it did, else why it failed.
+async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Outcome {
     let (bucket, key, version) = (&task.bucket, &task.key, task.version.clone());
     match operation {
         Operation::PutObjectTagging { tags } => {
@@ -482,7 +485,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .tagging(tagging)
                 .send()
                 .await
-                .map(drop)
+                .map(|_| None)
                 .map_err(|err| Failure::of(&err))
         }
         Operation::DeleteObjectTagging => client
@@ -492,7 +495,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
             .set_version_id(version)
             .send()
             .await
-            .map(drop)
+            .map(|_| None)
             .map_err(|err| Failure::of(&err)),
         Operation::PutObjectLegalHold { on } => {
             let status = if *on {
@@ -508,7 +511,7 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .legal_hold(ObjectLockLegalHold::builder().status(status).build())
                 .send()
                 .await
-                .map(drop)
+                .map(|_| None)
                 .map_err(|err| Failure::of(&err))
         }
         Operation::PutObjectRetention {
@@ -529,11 +532,20 @@ async fn run_task(client: &Client, operation: &Operation, task: &Task) -> Result
                 .bypass_governance_retention(*bypass_governance)
                 .send()
                 .await
-                .map(drop)
+                .map(|_| None)
                 .map_err(|err| Failure::of(&err))
         }
-        Operation::PutObjectCopy(copy) => crate::batch_copy::run(client, copy, task).await,
-        Operation::PutObjectAcl(acl) => crate::batch_acl::run(client, acl, task).await,
+        Operation::PutObjectCopy(copy) => crate::batch_copy::run(client, copy, task)
+            .await
+            .map(|()| None),
+        Operation::PutObjectAcl(acl) => crate::batch_acl::run(client, acl, task)
+            .await
+            .map(|()| None),
+        Operation::ComputeObjectChecksum { algorithm, kind } => {
+            crate::batch_checksum::run(client, (algorithm, kind), task)
+                .await
+                .map(Some)
+        }
     }
 }
 

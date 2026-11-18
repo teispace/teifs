@@ -8,6 +8,7 @@ mod admin;
 mod analytics;
 mod audit;
 mod batch_acl;
+mod batch_checksum;
 mod batch_copy;
 mod batch_jobs;
 mod batch_operations;

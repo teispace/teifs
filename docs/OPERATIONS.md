@@ -1464,7 +1464,7 @@ for a week. Starting a job takes `admin:StartBatchJob`; listing and its status
 AWS's S3 Batch Operations run through S3 Control, as `aws s3control` and the SDKs call
 it: a job runs one operation on every object a CSV manifest lists, as an IAM role. TeiFS
 runs `S3PutObjectTagging`, `S3DeleteObjectTagging`, `S3PutObjectLegalHold`,
-`S3PutObjectRetention`, `S3PutObjectCopy` and `S3PutObjectAcl`. Make the role first; it must trust the service, and its policies
+`S3PutObjectRetention`, `S3PutObjectCopy`, `S3PutObjectAcl` and `S3ComputeObjectChecksum`. Make the role first; it must trust the service, and its policies
 decide what each task may do (reading the manifest included):
 
 ```sh
@@ -1524,6 +1524,17 @@ buckets need ACLs enabled:
 ```sh
   --operation '{"S3PutObjectAcl":{"AccessControlPolicy":{"CannedAccessControlList":"private"}}}'
 ```
+
+A checksum job works out each object's checksum from its bytes without changing it, and
+writes it to the completion report it must have; the role needs `s3:GetObject` on the
+objects:
+
+```sh
+  --operation '{"S3ComputeObjectChecksum":{"ChecksumAlgorithm":"SHA256","ChecksumType":"FULL_OBJECT"}}'
+```
+
+Each line's result message is JSON, as AWS writes it:
+`{"checksum_base64":"…","etag":"…","checksumAlgorithm":"SHA256","checksumType":"FULL_OBJECT","checksum_hex":"…"}`.
 
 A completion report lists each task's result once the job has run at least one and
 ends: complete, failed or cancelled (it's `Cancelling` until the report is written).
