@@ -1,0 +1,73 @@
+name: Benchmarks
+
+# tests/bench/run.sh on a GitHub runner: TeiFS and the servers it's compared with, one
+# after another on the same machine, driven by warp. Uploads the raw results and the page
+# docs/BENCHMARKS.md is made from (tests/bench/publish.py); a maintainer publishes it by
+# committing that page. Weekly, and when started by hand.
+on:
+  schedule:
+    - cron: "23 5 * * 0"
+  workflow_dispatch:
+    inputs:
+      servers:
+        description: Servers, separated by spaces (empty for all)
+        default: ""
+      profile:
+        description: quick (about two hours here) or full (too long for one runner)
+        default: quick
+      cpus:
+        description: CPUs each server may use (the runner has 4; warp uses the rest)
+        default: "2"
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Room on the disk
+        # A 10 MiB PUT cell at high concurrency writes several GiB before warp clears it.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force > /dev/null
+          df -h /
+      - name: Run the benchmarks
+        env:
+          BENCH_PROFILE: ${{ inputs.profile || 'quick' }}
+          BENCH_CPUS: ${{ inputs.cpus || '2' }}
+          BENCH_MEMORY: 4g
+          BENCH_WORK: ${{ runner.temp }}/bench
+          SERVERS: ${{ inputs.servers }}
+        run: |
+          # shellcheck disable=SC2086 # the servers are words; run.sh refuses unknown ones
+          tests/bench/run.sh $SERVERS
+      - name: The page
+        if: always()
+        env:
+          BENCH_COMMAND: >-
+            BENCH_PROFILE=${{ inputs.profile || 'quick' }} BENCH_CPUS=${{ inputs.cpus || '2' }}
+            BENCH_MEMORY=4g tests/bench/run.sh ${{ inputs.servers }}
+        run: |
+          python3 tests/bench/publish.py "$RUNNER_TEMP/bench" "$RUNNER_TEMP/bench/BENCHMARKS.md"
+          cat "$RUNNER_TEMP/bench/BENCHMARKS.md" >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmarks
+          path: |
+            ${{ runner.temp }}/bench/BENCHMARKS.md
+            ${{ runner.temp }}/bench/environment.txt
+            ${{ runner.temp }}/bench/summary.*
+            ${{ runner.temp }}/bench/*/*.txt
+            ${{ runner.temp }}/bench/*/*.json
+            ${{ runner.temp }}/bench/*/*.log
+          if-no-files-found: warn

@@ -16,11 +16,11 @@ ALL=(teifs teifs-relaxed teifs-folder rustfs minio garage versity seaweedfs)
 
 # The images compared, pinned. TeiFS is built from this checkout.
 WARP=quay.io/minio/aistor/warp:v1.8.2
-RUSTFS=rustfs/rustfs:1.0.0
+RUSTFS=rustfs/rustfs:1.0.6
 MINIO=pgsty/minio:RELEASE.2026-08-04T00-00-00Z
-GARAGE=dxflrs/garage:v2.4.1
-VERSITY=versity/versitygw:v1.8.0
-SEAWEEDFS=chrislusf/seaweedfs:4.48
+GARAGE=dxflrs/garage:v2.5.0
+VERSITY=versity/versitygw:v1.11.0
+SEAWEEDFS=chrislusf/seaweedfs:4.54
 BUSYBOX=busybox:1.37
 
 if [ "${BENCH_PROFILE:-quick}" = full ]; then
@@ -143,6 +143,14 @@ warp() {
   echo "time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "teifs: $(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet || echo ' (changed)')"
   echo "host: $(uname -srm)"
+  if command -v lscpu > /dev/null; then
+    echo "cpu: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) CPUs"
+    echo "memory: $(free -h | awk '/^Mem:/ {print $2}')"
+    echo "disk: $(df -h "$WORK" | awk 'NR == 2 {print $1 ", " $2 " (" $4 " free)"}')"
+  fi
+  if [ -n "${ImageOS:-}" ]; then
+    echo "runner: GitHub Actions $ImageOS image ${ImageVersion:-}"
+  fi
   docker info --format 'docker: {{.ServerVersion}}, {{.NCPU}} CPUs, {{.MemTotal}} bytes, kernel {{.KernelVersion}}, {{.Driver}}'
   echo "limits: --cpus $CPUS --memory $MEMORY per server; warp unlimited"
   echo "cells: ops [$OPS] sizes [$BENCH_SIZES] concurrency [$BENCH_CONCURRENCY] $BENCH_DURATION x $BENCH_ROUNDS"
