@@ -235,6 +235,36 @@ When the disk is nearly full, writes whose size is known are refused up front wi
 A disk that fills up during a write gives the same answer, and the staged bytes are
 removed.
 
+## Shard files
+
+Drive sets (several drives serving as one, each holding a share of every object) store
+a file erasure-coded: as one **shard file** per drive. `crates/erasure` reads and writes
+them; this is their format, version 1.
+
+The file is cut into blocks of `block` bytes (the last may be shorter). Each block is cut
+into `data` pieces of equal length (its length divided by `data`, rounded up to an even
+number of bytes; the last piece zero-padded), and Reed-Solomon coded over GF(2^16) (the
+[reed-solomon-simd](https://github.com/AndersTrier/reed-solomon-simd) code, 3.x) into
+`parity` more. Shard `i` holds piece `i` of every block, so the first `data` shards hold
+the file's bytes in order and any `data` of the `data + parity` shards give it back.
+
+| Part | Bytes |
+|---|---|
+| Magic `TFSS` | 4 |
+| Version (1) | 1 |
+| Shard index (from 0) | 1 |
+| `data`, `parity` (1 to 255, at most 256 together) | 1 each |
+| `block`, big-endian | 4 |
+| The file's length, big-endian | 8 |
+| The file's id (the object id) | 16 |
+| XXH3-128 of the 36 bytes above, big-endian | 16 |
+| Then, for each block: the XXH3-128 of its piece, seeded with `XXH3-64(id) xor (block number << 8 \| shard index)`, big-endian; then the piece | 16 + piece length |
+
+A shard file's length is therefore fixed by its header. A piece is used only after its
+hash matches; a shard with a damaged header, another id or geometry, a length most other
+shards disagree with, or a damaged piece is treated as missing and rebuilt from the
+others.
+
 ## Upgrades
 
 Opening a drive in an older format upgrades it: first a copy of the old metadata goes to
